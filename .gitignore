@@ -1,0 +1,51 @@
+# API Keys & Secrets
+.env
+keys.json
+
+# Local Databases (Now in Pinecone Cloud)
+databases/
+chroma.sqlite3
+
+# Python & System
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+env/
+venv/
+.env/
+
+# Logs
+*.log
+watchdog_out.log
+server_out.log
+server_err.log
+
+# Temporary Migration & Audit Scripts
+mini_audit.py
+ruthless_audit.py
+fifty_audit.py
+final_audit.py
+precision_audit.py
+auto_audit.py
+slow_audit.py
+universal_stress_test.py
+migrate_to_pinecone.py
+cloud_ingest.py
+cloud_ingest_pro.py
+
+# Raw Data (Already in Cloud)
+data_crawl_agentfactory/
+bm25_cache.pkl
+
+# Extra data and backups
+data_crawl_agentfactory2/
+db_backup_20260303_015419/
+data/
+db/
+schemas/
+tasks/
+*.log
+*.json
+

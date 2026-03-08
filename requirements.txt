@@ -1,0 +1,9 @@
+fastapi
+uvicorn
+python-dotenv
+langchain-groq
+langchain-pinecone
+pinecone-client
+pinecone-plugin-inference
+requests
+aiohttp
