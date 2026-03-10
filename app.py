@@ -37,6 +37,7 @@ PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
 INDEX_NAME = "databases"
 KEYS_FILE = Path("keys.json")
 CONFIG_FILE = Path("config.json")
+FEEDBACK_FILE = Path("feedback.json")
 ACTIVE_DB_FILE = Path("active_db.txt")
 DATABASES_DIR = Path("databases")
 
@@ -113,7 +114,7 @@ async def chat_stream_generator(q: str, history: List[dict]) -> AsyncGenerator[s
         results = local_db.similarity_search(q, k=8)
         context = "\n\n".join([res.page_content for res in results])
 
-    sys_msg = f"You are {bot_name} for {biz_name}. Use the knowledge base below. Answer direct and professional. Knowledge base: {context}"
+    sys_msg = f"You are {bot_name} for {biz_name}. Knowledge: {context}"
     messages = [SystemMessage(content=sys_msg)]
     for m in history[-2:]: messages.append(HumanMessage(content=m['content']) if m['role']=='user' else AIMessage(content=m['content']))
     messages.append(HumanMessage(content=q))
@@ -125,40 +126,38 @@ async def chat_stream_generator(q: str, history: List[dict]) -> AsyncGenerator[s
         
     async for chunk in llm.astream(messages):
         yield f"data: {json.dumps({'type': 'chunk', 'content': chunk.content})}\n\n"
-    
-    is_lead = any(kw in q.lower() for kw in ["price", "buy", "contact", "hire"])
-    yield f"data: {json.dumps({'type': 'metadata', 'capture_lead': is_lead})}\n\n"
+    yield f"data: {json.dumps({'type': 'metadata', 'capture_lead': True})}\n\n"
 
 @app.post("/chat")
 async def chat(request: Request):
-    data = await request.json()
-    q = data.get("question")
-    history = data.get("history", [])
-    stream_requested = data.get("stream", True) # Default to true for browser
+    try:
+        body = await request.json()
+        q = body.get("question")
+        history = body.get("history", [])
+        stream_requested = body.get("stream", True)
 
-    if stream_requested:
-        return StreamingResponse(chat_stream_generator(q, history), media_type="text/event-stream")
-    else:
-        # NON-STREAMING MODE FOR STRESS TESTS
-        llm = get_fresh_llm()
-        if not llm: return {"answer": "No keys."}
-        
-        cfg = get_config()
-        bot_name = cfg.get("bot_name", "Agni")
-        biz_name = cfg.get("business_name", "AgentFactory")
-        
-        context = ""
-        if local_db:
-            results = local_db.similarity_search(q, k=8)
-            context = "\n\n".join([res.page_content for res in results])
+        if stream_requested:
+            return StreamingResponse(chat_stream_generator(q, history), media_type="text/event-stream")
+        else:
+            # FIXED NON-STREAMING LOGIC
+            llm = get_fresh_llm()
+            if not llm: return JSONResponse({"answer": "No keys."}, status_code=500)
             
-        sys_msg = f"You are {bot_name} for {biz_name}. Answer direct. Knowledge: {context}"
-        messages = [SystemMessage(content=sys_msg)]
-        for m in history[-2:]: messages.append(HumanMessage(content=m['content']) if m['role']=='user' else AIMessage(content=m['content']))
-        messages.append(HumanMessage(content=q))
-        
-        res = await llm.ainvoke(messages)
-        return {"answer": res.content}
+            context = ""
+            if local_db:
+                results = local_db.similarity_search(q, k=8)
+                context = "\n\n".join([res.page_content for res in results])
+                
+            cfg = get_config()
+            sys_msg = f"You are {cfg.get('bot_name','Agni')} for {cfg.get('business_name','AgentFactory')}. Knowledge: {context}"
+            messages = [SystemMessage(content=sys_msg)]
+            for m in history[-2:]: messages.append(HumanMessage(content=m['content']) if m['role']=='user' else AIMessage(content=m['content']))
+            messages.append(HumanMessage(content=q))
+            
+            res = await llm.ainvoke(messages)
+            return JSONResponse({"answer": res.content})
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
 
 if __name__ == "__main__":
     import uvicorn
