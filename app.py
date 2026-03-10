@@ -54,13 +54,34 @@ def get_config():
 def save_config(config):
     CONFIG_FILE.write_text(json.dumps(config, indent=2))
 
+@app.post("/admin/keys/set-active")
+async def set_active_key(data: dict):
+    cfg = get_config()
+    if data.get("password") != cfg.get("admin_password"): raise HTTPException(401, "Unauthorized")
+    
+    if not KEYS_FILE.exists(): return {"success": False}
+    keys = json.loads(KEYS_FILE.read_text())
+    target_key = data.get("key")
+    
+    for k in keys:
+        k["is_current"] = (k["key"] == target_key)
+    
+    KEYS_FILE.write_text(json.dumps(keys, indent=2))
+    return {"success": True}
+
 def get_fresh_llm():
     try:
         if KEYS_FILE.exists():
             keys = json.loads(KEYS_FILE.read_text())
-            active_keys = [k for k in keys if k.get('status') == 'active']
+            # Priority 1: Manually Selected Current Key (if active)
+            current_key = next((k for k in keys if k.get("is_current") and k.get("status") == "active"), None)
+            if current_key:
+                return ChatGroq(api_key=current_key["key"], model="llama-3.1-8b-instant", temperature=0)
+            
+            # Priority 2: Auto-rotate to first available active key
+            active_keys = [k for k in keys if k.get("status") == "active"]
             if active_keys:
-                return ChatGroq(api_key=active_keys[0]['key'], model="llama-3.1-8b-instant", temperature=0)
+                return ChatGroq(api_key=active_keys[0]["key"], model="llama-3.1-8b-instant", temperature=0)
         
         env_key = os.getenv("GROQ_API_KEY")
         if env_key:
@@ -117,11 +138,11 @@ async def get_admin(): return FileResponse(Path(__file__).parent / "admin.html")
 @app.get("/config")
 def read_config():
     cfg = get_config()
-    contact = cfg.get("contact_email") or cfg.get("whatsapp_number") or "support@agentfactory.com"
     return {
         "widget_key": cfg.get("widget_key", ""),
         "branding": cfg.get("branding", {}),
-        "contact_info": contact
+        "contact_email": cfg.get("contact_email") or "support@agentfactory.com",
+        "whatsapp_number": cfg.get("whatsapp_number") or ""
     }
 
 @app.get("/health")
