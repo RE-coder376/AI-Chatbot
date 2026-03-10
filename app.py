@@ -72,34 +72,38 @@ def get_fresh_llm():
         return None
     except: return None
 
+def mark_key_burned(failed_key: str):
+    try:
+        if not KEYS_FILE.exists(): return
+        keys = json.loads(KEYS_FILE.read_text())
+        for k in keys:
+            if k['key'] == failed_key:
+                k['status'] = 'burned'
+                k['burned_at'] = time.time()
+        KEYS_FILE.write_text(json.dumps(keys, indent=2))
+    except: pass
+
 def init_systems():
     global pc, index, local_db, embeddings_model, _status
     _status = "loading"
     
-    # 1. Pre-load Embeddings (Mandatory)
-    logger.info("📡 Loading Embedding Engine (BAAI/bge-base-en-v1.5)...")
-    try:
+    if embeddings_model is None:
+        logger.info("📡 Loading Embedding Engine...")
         embeddings_model = HuggingFaceEmbeddings(
             model_name="BAAI/bge-base-en-v1.5",
             model_kwargs={"device": "cpu"},
             encode_kwargs={"normalize_embeddings": True}
         )
-    except Exception as e:
-        logger.error(f"Failed to load embeddings: {e}")
-        _status = "error"
-        return
 
-    # 2. FORCE LOCAL BRAIN
     try:
         active_db = ACTIVE_DB_FILE.read_text().strip() if ACTIVE_DB_FILE.exists() else "agentfactory"
         db_path = DATABASES_DIR / active_db
         if db_path.exists():
             local_db = Chroma(persist_directory=str(db_path), embedding_function=embeddings_model)
             _status = "ready_local"
-            logger.info(f"✅ BRAIN FULLY LOADED ({active_db})")
+            logger.info(f"✅ BRAIN READY ({active_db})")
         else:
             _status = "error"
-            logger.error("❌ DATABASE NOT FOUND")
     except Exception as e:
         logger.error(f"Init Error: {e}")
         _status = "error"
@@ -122,91 +126,93 @@ async def get_admin(): return FileResponse(Path(__file__).parent / "admin.html")
 def health():
     return {"status": _status, "engine": "local_chroma", "db": ACTIVE_DB_FILE.read_text().strip() if ACTIVE_DB_FILE.exists() else "default"}
 
-# ... (rest of admin endpoints kept exactly as they were) ...
-
-@app.get("/admin/branding")
-def get_branding(password: str):
-    cfg = get_config()
-    if password != cfg.get("admin_password"): raise HTTPException(401, "Unauthorized")
-    return {
-        "bot_name": cfg.get("bot_name"),
-        "business_name": cfg.get("business_name"),
-        "branding": cfg.get("branding"),
-        "editing_db": ACTIVE_DB_FILE.read_text().strip() if ACTIVE_DB_FILE.exists() else "default",
-        "business_hours": cfg.get("business_hours", {})
-    }
-
-@app.get("/admin/databases")
-def get_databases(password: str):
-    cfg = get_config()
-    if password != cfg.get("admin_password"): raise HTTPException(401, "Unauthorized")
-    dbs = []
-    active = ACTIVE_DB_FILE.read_text().strip() if ACTIVE_DB_FILE.exists() else "default"
-    if DATABASES_DIR.exists():
-        for d in DATABASES_DIR.iterdir():
-            if d.is_dir():
-                total_size = sum(f.stat().st_size for f in d.glob('**/*') if f.is_file())
-                size_str = f"{total_size / 1024:.1f} KB" if total_size < 1024*1024 else f"{total_size / (1024*1024):.1f} MB"
-                dbs.append({"name": d.name, "active": d.name == active, "size": size_str, "chunks": 14204 if d.name == 'agentfactory' else 0})
-    return {"databases": dbs}
-
-# --- CHAT ENGINE (Production Hardened) ---
+# --- CHAT ENGINE (Identity Fixed) ---
 
 async def chat_stream_generator(q: str, history: List[dict]) -> AsyncGenerator[str, None]:
     if _status not in ["ready", "ready_local"]:
-        yield f"data: {json.dumps({'type': 'chunk', 'content': 'System is warming up. Please wait 5 seconds...'})}\n\n"
+        yield f"data: {json.dumps({'type': 'chunk', 'content': 'System warming up...'})}\n\n"
         return
     try:
         cfg = get_config()
         bot_name = cfg.get("bot_name", "Agni")
         biz_name = cfg.get("business_name", "AgentFactory")
         
+        # Hardcoded Identity (Zero-Trust Fail-safe)
+        identity_context = f"You are {bot_name}, the lead Digital FTE for {biz_name}. Your purpose is to help users scale operations using AI employees. You specialize in the AgentFactory framework, including Strategic Procurement and Custom Manufacturing."
+        
         context = ""
         if local_db:
-            # Increased k to 10 for better accuracy
-            results = local_db.similarity_search(q, k=10)
+            results = local_db.similarity_search(q, k=8)
             context = "\n\n".join([res.page_content for res in results])
 
         sys_msg = f"""
-        You are {bot_name}, the Lead AI Representative for {biz_name}. 
+        {identity_context}
+        
         MANDATES:
-        1. AUTHORITATIVE: Answer directly using the provided knowledge. Never say "according to context".
-        2. KNOWLEDGE ONLY: If the info is not in the knowledge base, say: "I apologize, but I don't have that specific data. Would you like to connect with our team?"
-        3. PRESENTATION: Use Markdown lists.
+        1. Answer directly and confidently. Never mention "context".
+        2. If the user asks who you are, use the identity above.
+        3. If info is missing from the Knowledge Base below, apologize and offer human help.
         
         KNOWLEDGE BASE:
         {context}
         """
+        
         messages = [SystemMessage(content=sys_msg)]
         for m in history[-4:]: messages.append(HumanMessage(content=m['content']) if m['role']=='user' else AIMessage(content=m['content']))
         messages.append(HumanMessage(content=q))
         
         llm = get_fresh_llm()
         if not llm:
-            yield f"data: {json.dumps({'type': 'chunk', 'content': 'Provider key unavailable.'})}\n\n"
+            yield f"data: {json.dumps({'type': 'chunk', 'content': 'Key Error.'})}\n\n"
             return
             
         async for chunk in llm.astream(messages):
             yield f"data: {json.dumps({'type': 'chunk', 'content': chunk.content})}\n\n"
             
-        is_lead = any(kw in q.lower() for kw in ["price", "buy", "contact", "hire", "license"])
+        is_lead = any(kw in q.lower() for kw in ["price", "buy", "contact", "hire"])
         yield f"data: {json.dumps({'type': 'metadata', 'capture_lead': is_lead})}\n\n"
     except Exception as e:
-        logger.error(f"Stream Error: {e}")
-        yield f"data: {json.dumps({'type': 'error', 'content': 'System Busy.'})}\n\n"
+        yield f"data: {json.dumps({'type': 'error', 'content': 'Busy.'})}\n\n"
 
 @app.post("/chat")
 async def chat(q: dict):
     return StreamingResponse(chat_stream_generator(q['question'], q.get('history', [])), media_type="text/event-stream")
 
-# Keep existing ingestion endpoints
-@app.post("/admin/update-text")
-async def update_text(password: str = Form(...), content: str = Form(...), filename: str = Form(...)):
+# ... (admin endpoints) ...
+@app.get("/admin/branding")
+def get_branding(password: str):
     cfg = get_config()
     if password != cfg.get("admin_password"): raise HTTPException(401, "Unauthorized")
-    return {"success": True, "message": "Ingested."}
+    return {"bot_name": cfg.get("bot_name"), "business_name": cfg.get("business_name"), "branding": cfg.get("branding")}
+
+@app.post("/admin/branding")
+async def update_branding(data: dict):
+    cfg = get_config()
+    if data.get("password") != cfg.get("admin_password"): raise HTTPException(401, "Unauthorized")
+    for k, v in data.items():
+        if k != "password": cfg[k] = v
+    save_config(cfg)
+    return {"success": True, "message": "Updated"}
+
+@app.get("/admin/databases")
+def get_databases(password: str):
+    cfg = get_config()
+    if password != cfg.get("admin_password"): raise HTTPException(401, "Unauthorized")
+    dbs = []
+    if DATABASES_DIR.exists():
+        for d in DATABASES_DIR.iterdir():
+            if d.is_dir():
+                dbs.append({"name": d.name, "active": d.name == (ACTIVE_DB_FILE.read_text().strip() if ACTIVE_DB_FILE.exists() else "default"), "chunks": 14204 if d.name=='agentfactory' else 0})
+    return {"databases": dbs}
+
+@app.post("/admin/databases/set-active")
+async def set_active_db(password: str = Form(...), name: str = Form(...)):
+    cfg = get_config()
+    if password != cfg.get("admin_password"): raise HTTPException(401, "Unauthorized")
+    ACTIVE_DB_FILE.write_text(name)
+    init_systems()
+    return {"success": True}
 
 if __name__ == "__main__":
     import uvicorn
-    port = int(os.environ.get("PORT", 8000))
-    uvicorn.run(app, host="0.0.0.0", port=port, log_level="error")
+    uvicorn.run(app, host="0.0.0.0", port=8000, log_level="error")
