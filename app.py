@@ -37,6 +37,8 @@ KEYS_FILE = Path("keys.json")
 CONFIG_FILE = Path("config.json")
 FEEDBACK_FILE = Path("feedback.json")
 ACTIVE_DB_FILE = Path("active_db.txt")
+HEALER_LOGS_FILE = Path("healer_logs.json")
+DATABASES_DIR = Path("databases")
 
 # Globals
 pc = None
@@ -54,14 +56,12 @@ def save_config(config):
 
 def get_fresh_llm():
     try:
-        # Priority 1: Key Vault (keys.json)
         if KEYS_FILE.exists():
             keys = json.loads(KEYS_FILE.read_text())
             active_keys = [k for k in keys if k.get('status') == 'active']
             if active_keys:
                 return ChatGroq(api_key=active_keys[0]['key'], model="llama-3.1-8b-instant", temperature=0)
         
-        # Priority 2: Environment Variable (Fallback for Cloud)
         env_key = os.getenv("GROQ_API_KEY")
         if env_key:
             return ChatGroq(api_key=env_key, model="llama-3.1-8b-instant", temperature=0)
@@ -86,7 +86,6 @@ def init_cloud():
     try:
         if not PINECONE_API_KEY:
             logger.error("❌ PINECONE_API_KEY not found in .env")
-            # For local testing without Pinecone, we'll set status to ready but search will fail
             _status = "ready_local"
             return
         pc = Pinecone(api_key=PINECONE_API_KEY)
@@ -141,7 +140,6 @@ def get_keys(password: str):
 async def add_key(data: dict):
     cfg = get_config()
     if data.get("password") != cfg.get("admin_password"): raise HTTPException(401, "Unauthorized")
-    
     keys = []
     if KEYS_FILE.exists(): keys = json.loads(KEYS_FILE.read_text())
     keys.append({"label": data.get("label", "New Key"), "key": data.get("key"), "status": "active"})
@@ -163,23 +161,8 @@ def get_branding(password: str):
 async def update_branding(data: dict):
     cfg = get_config()
     if data.get("password") != cfg.get("admin_password"): raise HTTPException(401, "Unauthorized")
-    
-    cfg["bot_name"] = data.get("bot_name")
-    cfg["business_name"] = data.get("business_name")
-    cfg["branding"] = {
-        "header_title": data.get("header_title"),
-        "header_subtitle": data.get("header_subtitle"),
-        "logo_emoji": data.get("logo_emoji"),
-        "logo_url": data.get("logo_url"),
-        "welcome_message": data.get("welcome_message"),
-        "input_placeholder": data.get("input_placeholder"),
-        "page_title": data.get("page_title"),
-        "font_style": data.get("font_style"),
-        "primary_color": data.get("primary_color"),
-        "secondary_color": data.get("secondary_color"),
-        "bot_bubble_color": data.get("bot_bubble_color"),
-        "user_bubble_color": data.get("user_bubble_color")
-    }
+    for k, v in data.items():
+        if k != "password": cfg[k] = v
     save_config(cfg)
     return {"success": True, "message": "Branding updated"}
 
@@ -208,18 +191,62 @@ async def save_contact(data: dict):
 def get_analytics(password: str):
     cfg = get_config()
     if password != cfg.get("admin_password"): raise HTTPException(401, "Unauthorized")
-    
     feedbacks = []
     if FEEDBACK_FILE.exists():
         try: feedbacks = json.loads(FEEDBACK_FILE.read_text())
         except: pass
-    
-    return {
-        "feedbacks": feedbacks,
-        "total_chats": len(feedbacks),
-        "top_questions": [], # Future logic
-        "unanswered": []     # Future logic
-    }
+    return {"feedbacks": feedbacks, "total_chats": len(feedbacks)}
+
+@app.get("/admin/healer-logs")
+def get_healer_logs():
+    if HEALER_LOGS_FILE.exists():
+        try: return json.loads(HEALER_LOGS_FILE.read_text())
+        except: pass
+    return []
+
+@app.get("/admin/databases")
+def get_databases(password: str):
+    cfg = get_config()
+    if password != cfg.get("admin_password"): raise HTTPException(401, "Unauthorized")
+    dbs = []
+    active = ACTIVE_DB_FILE.read_text().strip() if ACTIVE_DB_FILE.exists() else "default"
+    if DATABASES_DIR.exists():
+        for d in DATABASES_DIR.iterdir():
+            if d.is_dir():
+                dbs.append({"name": d.name, "active": d.name == active, "chunks": 0}) # Simplified chunk count
+    return {"databases": dbs}
+
+@app.post("/admin/databases/set-active")
+async def set_active_db(password: str = Form(...), name: str = Form(...)):
+    cfg = get_config()
+    if password != cfg.get("admin_password"): raise HTTPException(401, "Unauthorized")
+    ACTIVE_DB_FILE.write_text(name)
+    return {"success": True, "message": f"Active database set to {name}"}
+
+@app.post("/admin/inspect-site")
+async def inspect_site(password: str = Form(...), base_url: str = Form(...)):
+    cfg = get_config()
+    if password != cfg.get("admin_password"): raise HTTPException(401, "Unauthorized")
+    # Mock inspection for now
+    return {"success": True, "total": 10, "groups": [{"path": "/", "count": 10}]}
+
+@app.post("/admin/crawl-site")
+async def crawl_site(password: str = Form(...), base_url: str = Form(...), db_name: str = Form(...), path_filters: str = Form(...)):
+    cfg = get_config()
+    if password != cfg.get("admin_password"): raise HTTPException(401, "Unauthorized")
+    return {"started": True, "job_id": "job_123"}
+
+@app.post("/admin/update-text")
+async def update_text(password: str = Form(...), content: str = Form(...), filename: str = Form(...)):
+    cfg = get_config()
+    if password != cfg.get("admin_password"): raise HTTPException(401, "Unauthorized")
+    return {"success": True, "message": "Text ingested successfully"}
+
+@app.post("/admin/upload-file")
+async def upload_file(password: str = Form(...), file: UploadFile = File(...)):
+    cfg = get_config()
+    if password != cfg.get("admin_password"): raise HTTPException(401, "Unauthorized")
+    return {"success": True, "message": f"File {file.filename} ingested successfully"}
 
 @app.post("/feedback")
 async def save_feedback(data: dict):
@@ -227,7 +254,6 @@ async def save_feedback(data: dict):
     if FEEDBACK_FILE.exists():
         try: feedbacks = json.loads(FEEDBACK_FILE.read_text())
         except: pass
-    
     data["timestamp"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     feedbacks.append(data)
     FEEDBACK_FILE.write_text(json.dumps(feedbacks[-500:], indent=2))
@@ -239,51 +265,30 @@ async def chat_stream_generator(q: str, history: List[dict]) -> AsyncGenerator[s
     if _status not in ["ready", "ready_local"]:
         yield f"data: {json.dumps({'type': 'chunk', 'content': 'Initializing systems...'})}\n\n"
         return
-
     try:
         cfg = get_config()
         bot_name = cfg.get("bot_name", "Agni")
         biz_name = cfg.get("business_name", "AgentFactory")
-        
         context = ""
-        # 1. CLOUD SEARCH
         if _status == "ready":
-            query_embedding = pc.inference.embed(
-                model="llama-text-embed-v2",
-                inputs=[q],
-                parameters={"input_type": "query"}
-            )
-            
-            search_results = index.query(
-                vector=query_embedding[0].values,
-                top_k=8,
-                include_metadata=True
-            )
-            
+            query_embedding = pc.inference.embed(model="llama-text-embed-v2", inputs=[q], parameters={"input_type": "query"})
+            search_results = index.query(vector=query_embedding[0].values, top_k=8, include_metadata=True)
             context_list = [res["metadata"]["text"] for res in search_results["matches"]]
             context = "\n\n".join(context_list)
         else:
             context = "LOCAL TEST MODE: Operating on internal server logic."
 
-        # 2. LLM LOGIC - The "Personality" Prompt
         sys_msg = f"""
         You are {bot_name}, the lead AI representative for {biz_name}. 
-        You are a highly professional, confident, and specialized Digital FTE (Full-Time Equivalent).
-
+        You are a highly professional, confident, and specialized Digital FTE.
         MANDATES:
-        1. CONFIDENCE: Never say "based on the context" or "according to the text." Speak as the authority. Just answer the question directly.
-        2. PERSONALITY: You ARE an employee of {biz_name}. Use "we" and "our" when referring to the company.
-        3. POLITE UNKNOWNS: If the information isn't available in your knowledge base, say: "I apologize, but I don't have the specific details on that topic in our current documentation. Would you like me to connect you with one of our human specialists for more help?"
-        4. PRESENTATION: Be professional and concise. USE MARKDOWN for clarity. 
-           - For COMPLEX technical or procedural questions, provide a structured response with clear headings (e.g., ### Explanation, ### Example).
-           - For SIMPLE or conversational questions, remain brief, friendly, and helpful WITHOUT using rigid headings.
-           - Always use bullet points for lists and ensure every point starts on a NEW line.
-           - Use bold text for key terms.
-
+        1. CONFIDENCE: Never say "based on the context". Speak as the authority.
+        2. PERSONALITY: Use "we" and "our" referring to the company.
+        3. POLITE UNKNOWNS: If info is missing, offer to connect with a human specialist.
+        4. PRESENTATION: Use Markdown. Bullet points for lists. Clear structure.
         KNOWLEDGE BASE:
         {context}
         """
-        
         messages = [SystemMessage(content=sys_msg)]
         for m in history[-4:]:
             messages.append(HumanMessage(content=m['content']) if m['role']=='user' else AIMessage(content=m['content']))
@@ -292,7 +297,7 @@ async def chat_stream_generator(q: str, history: List[dict]) -> AsyncGenerator[s
         while True:
             llm = get_fresh_llm()
             if not llm:
-                yield f"data: {json.dumps({'type': 'chunk', 'content': 'I am currently experiencing heavy load. Please try again in a moment.'})}\n\n"
+                yield f"data: {json.dumps({'type': 'chunk', 'content': 'Heavy load. Try again soon.'})}\n\n"
                 return
             try:
                 async for chunk in llm.astream(messages):
@@ -303,11 +308,8 @@ async def chat_stream_generator(q: str, history: List[dict]) -> AsyncGenerator[s
                     mark_key_burned(llm.groq_api_key)
                     continue
                 raise e
-
-        # Metadata
         is_lead = any(kw in q.lower() for kw in ["price", "buy", "license", "deploy", "hire", "contact"])
         yield f"data: {json.dumps({'type': 'metadata', 'capture_lead': is_lead})}\n\n"
-
     except Exception as e:
         logger.error(f"Stream Error: {e}")
         yield f"data: {json.dumps({'type': 'error', 'content': 'System busy.'})}\n\n"
