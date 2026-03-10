@@ -4,6 +4,7 @@
   <meta charset="UTF-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
   <title>Chatbot Admin</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body {
@@ -13,11 +14,11 @@
       padding: 40px 20px;
     }
     .container {
-      max-width: 700px;
+      max-width: 800px;
       margin: 0 auto;
     }
     h1 {
-      font-size: 22px;
+      font-size: 24px;
       font-weight: 700;
       color: #1e293b;
       margin-bottom: 6px;
@@ -47,7 +48,10 @@
       justify-content:space-between;
       user-select:none;
     }
-    .card h2:hover { color:#6b21a8; }
+    .card h2:hover { color:#6366f1; }
+    .card-arrow { font-size:11px; color:#94a3b8; transition:transform 0.2s; }
+    .card-body { display:none; margin-top:16px; }
+    
     label {
       display: block;
       font-size: 13px;
@@ -67,11 +71,8 @@
       font-family: inherit;
     }
     input:focus, textarea:focus, select:focus { border-color: #6366f1; }
-    textarea {
-      height: 120px;
-      resize: vertical;
-      line-height: 1.6;
-    }
+    textarea { height: 100px; resize: vertical; }
+    
     button {
       margin-top: 18px;
       width: 100%;
@@ -87,6 +88,7 @@
     }
     button:hover { opacity: 0.88; }
     button:disabled { opacity: 0.5; cursor: not-allowed; }
+    
     .alert {
       margin-top: 14px;
       padding: 12px 16px;
@@ -97,126 +99,104 @@
     .alert.success { background: #dcfce7; color: #166534; display: block; }
     .alert.error   { background: #fee2e2; color: #991b1b; display: block; }
     .alert.info    { background: #e0f2fe; color: #0c4a6e; display: block; }
-    .card-arrow { font-size:11px; color:#94a3b8; transition:transform 0.2s; }
-    .card-body { display:none; margin-top:16px; }
-    .color-picker-wrap { position:relative; display:inline-block; }
-    .color-swatch { width:40px;height:40px;border-radius:8px;border:2px solid #e2e8f0;cursor:pointer;display:block; }
-    .color-popup { display:none;position:absolute;top:48px;left:0;z-index:999;background:#fff;border-radius:12px;box-shadow:0 8px 32px rgba(0,0,0,0.18);padding:14px;width:240px; }
-    .color-popup.open { display:block; }
-    .spectrum-canvas { width:210px;height:150px;border-radius:6px;cursor:crosshair;display:block; }
-    .hue-canvas { width:210px;height:16px;border-radius:4px;cursor:crosshair;display:block;margin-top:8px; }
+
+    /* Stats Grid */
+    .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 16px; margin-bottom: 24px; }
+    .stat-card { background:#f8fafc; padding:20px; border-radius:12px; border:1.5px solid #e2e8f0; text-align:center; }
+    .stat-card h3 { font-size:11px; color:#64748b; text-transform:uppercase; margin-bottom:8px; letter-spacing:0.05em; }
+    .stat-card p { font-size:28px; font-weight:700; color:#1e293b; margin:0; }
+
+    /* Live Preview */
+    #brand-preview { border:1px solid #e2e8f0; border-radius:12px; overflow:hidden; max-width:320px; margin-top:8px; box-shadow:0 2px 8px rgba(0,0,0,0.08); font-family: sans-serif; }
+    #prev-header { padding:14px 16px; display:flex; align-items:center; gap:10px; }
+    #prev-title { font-weight:700; color:#fff; font-size:14px; }
+    #prev-subtitle { color:rgba(255,255,255,0.8); font-size:11px; }
+    #prev-bubble { padding:8px 12px; border-radius:12px; font-size:12px; max-width:80%; color:#1e293b; background:#f1f5f9; }
+    #prev-user-bubble { padding:8px 12px; border-radius:12px; font-size:12px; background:#6366f1; color:#fff; }
   </style>
 </head>
 <body>
 <div class="container">
-  <h1>Chatbot Admin Panel</h1>
-  <p class="subtitle">Configuration persists automatically across refreshes.</p>
+  <h1>Enterprise Chatbot Admin</h1>
+  <p class="subtitle">Complete system control and visual analytics.</p>
+
+  <!-- Visual Analytics -->
+  <div class="card">
+    <h2 onclick="toggle('s-visual-stats')">Visual Analytics <span class="card-arrow" id="arr-visual-stats">▼</span></h2>
+    <div class="card-body" id="s-visual-stats" style="display:block;">
+      <div class="stats-grid">
+        <div class="stat-card"><h3>Interactions</h3><p id="stat-total">0</p></div>
+        <div class="stat-card"><h3>Success Rate</h3><p id="stat-rate" style="color:#6366f1;">0%</p></div>
+        <div class="stat-card"><h3>Positive</h3><p id="stat-happy" style="color:#16a34a;">0</p></div>
+      </div>
+      <canvas id="feedbackChart" height="120"></canvas>
+      <button onclick="loadAnalytics()" style="background:#64748b; margin-top:20px;">Refresh Analytics</button>
+    </div>
+  </div>
 
   <!-- Branding & Visual Customization -->
   <div class="card">
-    <h2 onclick="toggle('s-brand')">Branding &amp; Visual Customization <span class="card-arrow" id="arr-brand">▼</span></h2>
-    <div class="card-body" id="s-brand" style="display:block;">
-    <label>Admin Password (Not cached for security)</label>
-    <input type="password" id="brand-pass" placeholder="Enter admin password"/>
-
-    <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:12px;">
-      <div>
-        <label>Bot Name</label>
-        <input type="text" id="b-bot-name" placeholder="e.g. Agni"/>
+    <h2 onclick="toggle('s-brand')">Branding &amp; UI Customization <span class="card-arrow" id="arr-brand">▼</span></h2>
+    <div class="card-body" id="s-brand">
+      <label>Admin Password</label>
+      <input type="password" id="brand-pass" placeholder="Enter password"/>
+      
+      <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px; margin-top:12px;">
+        <input type="text" id="b-bot-name" placeholder="Bot Name"/>
+        <input type="text" id="b-biz-name" placeholder="Business Name"/>
+        <input type="text" id="b-header-title" placeholder="Header Title"/>
+        <input type="text" id="b-header-subtitle" placeholder="Header Subtitle"/>
+        <input type="text" id="b-logo-emoji" placeholder="Emoji 🤖"/>
+        <input type="text" id="b-page-title" placeholder="Page Title"/>
       </div>
-      <div>
-        <label>Business Name</label>
-        <input type="text" id="b-biz-name" placeholder="e.g. AgentFactory"/>
-      </div>
-      <div>
-        <label>Header Title</label>
-        <input type="text" id="b-header-title" placeholder="e.g. AgentFactory Support"/>
-      </div>
-      <div>
-        <label>Header Subtitle</label>
-        <input type="text" id="b-header-subtitle" placeholder="e.g. Online — here to help"/>
-      </div>
-      <div>
-        <label>Logo Emoji</label>
-        <input type="text" id="b-logo-emoji" placeholder="e.g. 🤖" maxlength="4"/>
-      </div>
-      <div>
-        <label>Logo URL (optional)</label>
-        <input type="text" id="b-logo-url" placeholder="https://..."/>
-      </div>
-    </div>
-
-    <div style="margin-top:12px;">
+      
       <label>Welcome Message</label>
-      <input type="text" id="b-welcome" placeholder="Hi! I'm Agni, your AI specialist..."/>
-    </div>
-    <div style="margin-top:12px;">
-      <label>Input Placeholder</label>
-      <input type="text" id="b-placeholder" placeholder="Ask about our Digital FTEs..."/>
-    </div>
-    <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:12px;">
-      <div>
-        <label>Page Title</label>
-        <input type="text" id="b-page-title" placeholder="AgentFactory — Chat Support"/>
+      <input type="text" id="b-welcome" placeholder="Hi! How can I help?"/>
+      
+      <div style="display:grid; grid-template-columns:1fr 1fr; gap:16px; margin-top:16px;">
+        <div><label>Primary Color</label><input type="color" id="b-primary-hex" value="#6366f1"/></div>
+        <div><label>Bot Bubble</label><input type="color" id="b-bot-bubble-hex" value="#f1f5f9"/></div>
       </div>
-      <div>
-        <label>Font Style</label>
-        <select id="b-font-style" onchange="updatePreview()">
-          <option value="Modern Sans">Modern Sans</option>
-          <option value="Elegant Serif">Elegant Serif</option>
-          <option value="Tech Mono">Tech Mono</option>
-          <option value="Friendly Rounded">Friendly Rounded</option>
-        </select>
-      </div>
-    </div>
 
-    <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:16px;">
-      <div>
-        <label>Primary Color</label>
-        <input type="color" id="b-primary-hex" value="#6366f1" style="height:44px; padding:4px; cursor:pointer;"/>
-      </div>
-      <div>
-        <label>Secondary Color</label>
-        <input type="color" id="b-secondary-hex" value="#4f46e5" style="height:44px; padding:4px; cursor:pointer;"/>
-      </div>
-      <div>
-        <label>Bot Bubble Color</label>
-        <input type="color" id="b-bot-bubble-hex" value="#f1f5f9" style="height:44px; padding:4px; cursor:pointer;"/>
-      </div>
-      <div>
-        <label>User Bubble Color</label>
-        <input type="color" id="b-user-bubble-hex" value="#6366f1" style="height:44px; padding:4px; cursor:pointer;"/>
-      </div>
-    </div>
-
-    <!-- Live preview -->
-    <div style="margin-top:20px;">
-      <label>Live Preview</label>
-      <div id="brand-preview" style="border:1px solid #e2e8f0;border-radius:12px;overflow:hidden;max-width:320px;margin-top:8px;box-shadow:0 2px 8px rgba(0,0,0,0.08);">
-        <div id="prev-header" style="padding:14px 16px;display:flex;align-items:center;gap:10px; background:#6366f1;">
+      <div id="brand-preview" style="margin-top:20px;">
+        <div id="prev-header" style="background:#6366f1;">
           <span id="prev-emoji" style="font-size:20px;">🤖</span>
-          <div>
-            <div id="prev-title" style="font-weight:700;color:#fff;font-size:14px;">Support</div>
-            <div id="prev-subtitle" style="color:rgba(255,255,255,0.8);font-size:11px;">Online — here to help</div>
-          </div>
+          <div><div id="prev-title">Support</div><div id="prev-subtitle">Online</div></div>
         </div>
-        <div style="padding:12px;background:#f8fafc;">
-          <div style="display:flex;gap:8px;margin-bottom:8px;">
-            <div id="prev-bubble" style="padding:8px 12px;border-radius:12px;font-size:12px;max-width:80%;color:#1e293b; background:#f1f5f9;">Hi! I'm your assistant. How can I help?</div>
-          </div>
-          <div style="display:flex;gap:8px;justify-content:flex-end;">
-            <div id="prev-user-bubble" style="padding:8px 12px;border-radius:12px;font-size:12px;background:#6366f1;color:#fff;">Tell me about your services.</div>
-          </div>
+        <div style="padding:12px; background:#f8fafc;">
+          <div id="prev-bubble">Hi! How can I help?</div>
+          <div style="display:flex; justify-content:flex-end; margin-top:8px;"><div id="prev-user-bubble">Hello!</div></div>
         </div>
       </div>
-    </div>
 
-    <div style="display:flex;gap:10px;margin-top:24px;">
-      <button onclick="loadBranding()">Load from Server</button>
-      <button onclick="saveBranding()" style="background:#16a34a;">Save to Cloud</button>
-      <button onclick="clearLocalCache()" style="background:#ef4444; width:auto;">Reset Form</button>
+      <div style="display:flex; gap:10px; margin-top:20px;">
+        <button onclick="loadBranding()">Load from Server</button>
+        <button onclick="saveBranding()" style="background:#16a34a;">Save to Cloud</button>
+      </div>
+      <div class="alert" id="brand-alert"></div>
     </div>
-    <div class="alert" id="brand-alert"></div>
+  </div>
+
+  <!-- Database Manager -->
+  <div class="card">
+    <h2 onclick="toggle('s-db')">Database Manager <span class="card-arrow" id="arr-db">▼</span></h2>
+    <div class="card-body" id="s-db">
+      <label>Admin Password</label>
+      <input type="password" id="pass-db" placeholder="Enter password"/>
+      <button onclick="loadDatabases()">Refresh Databases</button>
+      <div id="db-list" style="margin-top:16px;"></div>
+      <div class="alert" id="db-alert"></div>
+    </div>
+  </div>
+
+  <!-- Sync & Crawl -->
+  <div class="card">
+    <h2 onclick="toggle('s-sync')">Sync Knowledge Base <span class="card-arrow" id="arr-sync">▼</span></h2>
+    <div class="card-body" id="s-sync">
+      <label>Website URL</label>
+      <input type="text" id="sync-url" placeholder="https://example.com/faq"/>
+      <button onclick="syncUrl()">Sync from URL</button>
+      <div class="alert" id="sync-alert"></div>
     </div>
   </div>
 
@@ -224,26 +204,21 @@
   <div class="card">
     <h2 onclick="toggle('s-contact')">Contact Settings <span class="card-arrow" id="arr-contact">▼</span></h2>
     <div class="card-body" id="s-contact">
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
-        <div>
-          <label>WhatsApp number</label>
-          <input type="text" id="cs-whatsapp" placeholder="+923001234567"/>
-        </div>
-        <div>
-          <label>Contact email</label>
-          <input type="email" id="cs-email" placeholder="support@agentfactory.com"/>
-        </div>
-      </div>
+      <input type="text" id="cs-whatsapp" placeholder="WhatsApp Number" style="margin-bottom:10px;"/>
+      <input type="email" id="cs-email" placeholder="Contact Email"/>
       <button onclick="saveContactSettings()" style="background:#16a34a;">Save Contact Info</button>
       <div class="alert" id="contact-alert"></div>
     </div>
   </div>
+
+  <button onclick="clearLocalCache()" style="background:#ef4444; margin-top:40px;">Reset Admin Form Cache</button>
 </div>
 
 <script>
   const API = window.location.origin;
+  let feedbackChart = null;
 
-  // ── AUTO-SAVE LOGIC (The "No Data Loss" Magic) ────────────────────────
+  // ── Persistence Logic ──────────────────────────────────────────────────
   function saveToLocal() {
     const fields = {};
     document.querySelectorAll("input, select, textarea").forEach(el => {
@@ -266,43 +241,14 @@
           else el.value = fields[id];
         }
       });
-    } catch(e) { console.error("Cache load error", e); }
+      updatePreview();
+    } catch(e) {}
   }
 
   function clearLocalCache() {
-    if (confirm("Reset all fields? This cannot be undone.")) {
-      localStorage.removeItem("admin_draft");
-      window.location.reload();
-    }
+    if (confirm("Reset form?")) { localStorage.removeItem("admin_draft"); window.location.reload(); }
   }
 
-  function updatePreview() {
-    const primary   = document.getElementById("b-primary-hex").value;
-    const botBubble = document.getElementById("b-bot-bubble-hex").value;
-    const userBubble= document.getElementById("b-user-bubble-hex").value;
-    const title     = document.getElementById("b-header-title").value || "Support";
-    const subtitle  = document.getElementById("b-header-subtitle").value || "Online";
-    const emoji     = document.getElementById("b-logo-emoji").value || "🤖";
-    const welcome   = document.getElementById("b-welcome").value || "Hi! How can I help?";
-
-    document.getElementById("prev-header").style.background = primary;
-    document.getElementById("prev-user-bubble").style.background = primary;
-    document.getElementById("prev-bubble").style.background = botBubble;
-    document.getElementById("prev-title").textContent = title;
-    document.getElementById("prev-subtitle").textContent = subtitle;
-    document.getElementById("prev-emoji").textContent = emoji;
-    document.getElementById("prev-bubble").textContent = welcome.substring(0, 60) + "...";
-  }
-
-  // Attach auto-save and preview to all inputs
-  document.addEventListener("input", (e) => {
-    if (e.target.id && e.target.type !== "password") {
-      saveToLocal();
-      updatePreview();
-    }
-  });
-
-  // ── UI HELPERS ─────────────────────────────────────────────────────────
   function toggle(id) {
     const body = document.getElementById(id);
     const arrow = document.getElementById('arr-' + id.replace('s-',''));
@@ -311,44 +257,72 @@
     if (arrow) arrow.style.transform = open ? "rotate(180deg)" : "rotate(0deg)";
   }
 
-  function showAlert(id, type, msg) {
-    const el = document.getElementById(id);
-    el.className = `alert ${type}`;
-    el.innerHTML = msg;
-    setTimeout(() => { el.style.display = 'none'; }, 5000);
+  function updatePreview() {
+    const primary = document.getElementById("b-primary-hex").value;
+    const botBubble = document.getElementById("b-bot-bubble-hex").value;
+    document.getElementById("prev-header").style.background = primary;
+    document.getElementById("prev-user-bubble").style.background = primary;
+    document.getElementById("prev-bubble").style.background = botBubble;
+    document.getElementById("prev-title").textContent = document.getElementById("b-header-title").value || "Support";
+    document.getElementById("prev-subtitle").textContent = document.getElementById("b-header-subtitle").value || "Online";
+    document.getElementById("prev-emoji").textContent = document.getElementById("b-logo-emoji").value || "🤖";
+    document.getElementById("prev-bubble").textContent = (document.getElementById("b-welcome").value || "Hi!").substring(0, 50);
   }
 
-  // ── SERVER SYNC ────────────────────────────────────────────────────────
+  document.addEventListener("input", (e) => {
+    if (e.target.id && e.target.type !== "password") { saveToLocal(); updatePreview(); }
+  });
+
+  // ── API Functions ───────────────────────────────────────────────────────
+  async function loadAnalytics() {
+    const pass = document.getElementById("brand-pass").value;
+    if (!pass) { alert("Enter password in branding section."); return; }
+    try {
+      const res = await fetch(`${API}/admin/analytics-data?password=${encodeURIComponent(pass)}`);
+      const data = await res.json();
+      const feeds = data.feedbacks || [];
+      document.getElementById("stat-total").textContent = feeds.length;
+      document.getElementById("stat-happy").textContent = feeds.filter(f => f.score > 0).length;
+      document.getElementById("stat-rate").textContent = feeds.length ? Math.round((feeds.filter(f => f.score > 0).length / feeds.length) * 100) + "%" : "0%";
+      renderChart(feeds);
+    } catch(e) { alert("Failed to load analytics."); }
+  }
+
+  function renderChart(feeds) {
+    const ctx = document.getElementById('feedbackChart').getContext('2d');
+    if (feedbackChart) feedbackChart.destroy();
+    const counts = {};
+    feeds.forEach(f => { const d = f.timestamp ? f.timestamp.split(' ')[0] : 'N/A'; counts[d] = (counts[d] || 0) + 1; });
+    feedbackChart = new Chart(ctx, {
+      type: 'line',
+      data: { labels: Object.keys(counts), datasets: [{ label: 'Chats', data: Object.values(counts), borderColor: '#6366f1', fill: true, tension: 0.4 }] },
+      options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } } }
+    });
+  }
+
   async function loadBranding() {
     const pass = document.getElementById("brand-pass").value;
-    if (!pass) { alert("Enter password to load from server."); return; }
+    if (!pass) { alert("Enter password."); return; }
     try {
       const res = await fetch(`${API}/admin/branding?password=${encodeURIComponent(pass)}`);
       const data = await res.json();
-      if (data.error) { alert(data.error); return; }
       const b = data.branding || {};
       document.getElementById("b-bot-name").value = data.bot_name || "";
       document.getElementById("b-biz-name").value = data.business_name || "";
       document.getElementById("b-header-title").value = b.header_title || "";
       document.getElementById("b-header-subtitle").value = b.header_subtitle || "";
       document.getElementById("b-logo-emoji").value = b.logo_emoji || "";
-      document.getElementById("b-logo-url").value = b.logo_url || "";
       document.getElementById("b-welcome").value = b.welcome_message || "";
-      document.getElementById("b-placeholder").value = b.input_placeholder || "";
       document.getElementById("b-page-title").value = b.page_title || "";
-      document.getElementById("b-font-style").value = b.font_style || "Modern Sans";
-      document.getElementById("b-primary-hex").value = b.primary_color || "";
-      document.getElementById("b-secondary-hex").value = b.secondary_color || "";
-      document.getElementById("b-bot-bubble-hex").value = b.bot_bubble_color || "";
-      document.getElementById("b-user-bubble-hex").value = b.user_bubble_color || "";
-      saveToLocal(); // Update cache with server data
-      showAlert("brand-alert", "success", "Loaded from server.");
-    } catch(e) { alert("Sync failed."); }
+      document.getElementById("b-primary-hex").value = b.primary_color || "#6366f1";
+      document.getElementById("b-bot-bubble-hex").value = b.bot_bubble_color || "#f1f5f9";
+      updatePreview();
+      saveToLocal();
+    } catch(e) { alert("Load failed."); }
   }
 
   async function saveBranding() {
     const pass = document.getElementById("brand-pass").value;
-    if (!pass) { alert("Enter password to save."); return; }
     const payload = {
       password: pass,
       bot_name: document.getElementById("b-bot-name").value,
@@ -356,47 +330,48 @@
       header_title: document.getElementById("b-header-title").value,
       header_subtitle: document.getElementById("b-header-subtitle").value,
       logo_emoji: document.getElementById("b-logo-emoji").value,
-      logo_url: document.getElementById("b-logo-url").value,
       welcome_message: document.getElementById("b-welcome").value,
-      input_placeholder: document.getElementById("b-placeholder").value,
       page_title: document.getElementById("b-page-title").value,
-      font_style: document.getElementById("b-font-style").value,
       primary_color: document.getElementById("b-primary-hex").value,
-      secondary_color: document.getElementById("b-secondary-hex").value,
       bot_bubble_color: document.getElementById("b-bot-bubble-hex").value,
-      user_bubble_color: document.getElementById("b-user-bubble-hex").value,
     };
     try {
-      const res = await fetch(`${API}/admin/branding`, { 
-        method: "POST", 
-        headers: {"Content-Type": "application/json"}, 
-        body: JSON.stringify(payload) 
-      });
+      const res = await fetch(`${API}/admin/branding`, { method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(payload) });
       const data = await res.json();
-      showAlert("brand-alert", data.success ? "success" : "error", data.message || data.error);
+      alert(data.message || data.error);
     } catch(e) { alert("Save failed."); }
+  }
+
+  async function loadDatabases() {
+    const pass = document.getElementById("pass-db").value;
+    try {
+      const res = await fetch(`${API}/admin/databases?password=${encodeURIComponent(pass)}`);
+      const data = await res.json();
+      const list = document.getElementById("db-list");
+      list.innerHTML = (data.databases || []).map(db => `
+        <div style="padding:10px; border:1px solid #e2e8f0; margin-bottom:5px; border-radius:8px; display:flex; justify-content:space-between; align-items:center; background:${db.active?'#f5f3ff':'white'}">
+          <span>${db.name} (${db.chunks} chunks) ${db.active?'<b>(Active)</b>':''}</span>
+          ${!db.active ? `<button onclick="setActiveDb('${db.name}')" style="width:auto; margin:0; padding:5px 10px; font-size:12px;">Set Active</button>` : ''}
+        </div>
+      `).join("");
+    } catch(e) { alert("Failed to load databases."); }
+  }
+
+  async function setActiveDb(name) {
+    const pass = document.getElementById("pass-db").value;
+    const form = new FormData(); form.append("password", pass); form.append("name", name);
+    await fetch(`${API}/admin/databases/set-active`, { method:"POST", body:form });
+    loadDatabases();
   }
 
   async function saveContactSettings() {
-    const pass = document.getElementById("brand-pass").value; // Reuse password field
-    if (!pass) { alert("Enter admin password in the branding section first."); return; }
-    const payload = {
-      password: pass,
-      whatsapp_number: document.getElementById("cs-whatsapp").value,
-      contact_email: document.getElementById("cs-email").value
-    };
-    try {
-      const res = await fetch(`${API}/admin/contact-settings`, { 
-        method: "POST", 
-        headers: {"Content-Type": "application/json"}, 
-        body: JSON.stringify(payload) 
-      });
-      const data = await res.json();
-      showAlert("contact-alert", data.success ? "success" : "error", data.message || data.error);
-    } catch(e) { alert("Save failed."); }
+    const pass = document.getElementById("brand-pass").value;
+    const payload = { password: pass, whatsapp_number: document.getElementById("cs-whatsapp").value, contact_email: document.getElementById("cs-email").value };
+    const res = await fetch(`${API}/admin/contact-settings`, { method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(payload) });
+    const data = await res.json();
+    alert(data.message || data.error);
   }
 
-  // Init
   window.addEventListener("DOMContentLoaded", loadFromLocal);
 </script>
 </body>
