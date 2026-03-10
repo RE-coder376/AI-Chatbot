@@ -87,23 +87,34 @@ def init_systems():
     global pc, index, local_db, embeddings_model, _status
     _status = "loading"
     
+    # 1. Pre-load Embeddings (BGE Instruction Optimized)
     if embeddings_model is None:
-        logger.info("📡 Loading Embedding Engine...")
-        embeddings_model = HuggingFaceEmbeddings(
-            model_name="BAAI/bge-base-en-v1.5",
-            model_kwargs={"device": "cpu"},
-            encode_kwargs={"normalize_embeddings": True}
-        )
+        logger.info("📡 Initializing Embedding Engine (BGE-v1.5)...")
+        try:
+            embeddings_model = HuggingFaceEmbeddings(
+                model_name="BAAI/bge-base-en-v1.5",
+                model_kwargs={"device": "cpu"},
+                encode_kwargs={"normalize_embeddings": True},
+                query_instruction="Represent this sentence for searching relevant passages: "
+            )
+        except Exception as e:
+            logger.error(f"Failed to load embeddings: {e}")
+            _status = "error"
+            return
 
+    # 2. FORCE LOCAL BRAIN
     try:
         active_db = ACTIVE_DB_FILE.read_text().strip() if ACTIVE_DB_FILE.exists() else "agentfactory"
         db_path = DATABASES_DIR / active_db
         if db_path.exists():
             local_db = Chroma(persist_directory=str(db_path), embedding_function=embeddings_model)
             _status = "ready_local"
-            logger.info(f"✅ BRAIN READY ({active_db})")
+            logger.info(f"✅ BRAIN STABILIZED ({active_db})")
+            # Silent Warm-up Query
+            local_db.similarity_search("Agni Identity", k=1)
         else:
             _status = "error"
+            logger.error(f"❌ DATABASE MISSING: {db_path}")
     except Exception as e:
         logger.error(f"Init Error: {e}")
         _status = "error"
@@ -126,32 +137,34 @@ async def get_admin(): return FileResponse(Path(__file__).parent / "admin.html")
 def health():
     return {"status": _status, "engine": "local_chroma", "db": ACTIVE_DB_FILE.read_text().strip() if ACTIVE_DB_FILE.exists() else "default"}
 
-# --- CHAT ENGINE (Identity Fixed) ---
+# --- CHAT ENGINE (Zero-Fail Version) ---
 
 async def chat_stream_generator(q: str, history: List[dict]) -> AsyncGenerator[str, None]:
     if _status not in ["ready", "ready_local"]:
-        yield f"data: {json.dumps({'type': 'chunk', 'content': 'System warming up...'})}\n\n"
+        yield f"data: {json.dumps({'type': 'chunk', 'content': 'Brain warming up. Please try in 5 seconds...'})}\n\n"
         return
     try:
         cfg = get_config()
         bot_name = cfg.get("bot_name", "Agni")
         biz_name = cfg.get("business_name", "AgentFactory")
         
-        # Hardcoded Identity (Zero-Trust Fail-safe)
-        identity_context = f"You are {bot_name}, the lead Digital FTE for {biz_name}. Your purpose is to help users scale operations using AI employees. You specialize in the AgentFactory framework, including Strategic Procurement and Custom Manufacturing."
+        # Hardcoded High-Priority Identity
+        identity_data = f"You are {bot_name}, the authorized Lead Digital FTE representative for {biz_name}. Your purpose is to explain the AgentFactory framework, build custom agents, and provide pricing info."
         
         context = ""
         if local_db:
-            results = local_db.similarity_search(q, k=8)
+            # Enhanced query instruction for Chroma
+            query_with_prefix = f"Represent this sentence for searching relevant passages: {q}"
+            results = local_db.similarity_search(query_with_prefix, k=10)
             context = "\n\n".join([res.page_content for res in results])
-
+            
         sys_msg = f"""
-        {identity_context}
+        CORE IDENTITY: {identity_data}
         
         MANDATES:
-        1. Answer directly and confidently. Never mention "context".
-        2. If the user asks who you are, use the identity above.
-        3. If info is missing from the Knowledge Base below, apologize and offer human help.
+        1. AUTHORITATIVE: Answer with 100% confidence using the Knowledge Base below.
+        2. NEVER say "according to the context" or "the text states". Speak as the official representative.
+        3. If the information is not in the knowledge base, use your professional identity to offer to connect with a human specialist.
         
         KNOWLEDGE BASE:
         {context}
@@ -163,16 +176,17 @@ async def chat_stream_generator(q: str, history: List[dict]) -> AsyncGenerator[s
         
         llm = get_fresh_llm()
         if not llm:
-            yield f"data: {json.dumps({'type': 'chunk', 'content': 'Key Error.'})}\n\n"
+            yield f"data: {json.dumps({'type': 'chunk', 'content': 'Brain link severed.'})}\n\n"
             return
             
         async for chunk in llm.astream(messages):
             yield f"data: {json.dumps({'type': 'chunk', 'content': chunk.content})}\n\n"
             
-        is_lead = any(kw in q.lower() for kw in ["price", "buy", "contact", "hire"])
+        is_lead = any(kw in q.lower() for kw in ["price", "buy", "contact", "hire", "license"])
         yield f"data: {json.dumps({'type': 'metadata', 'capture_lead': is_lead})}\n\n"
     except Exception as e:
-        yield f"data: {json.dumps({'type': 'error', 'content': 'Busy.'})}\n\n"
+        logger.error(f"Stream Error: {e}")
+        yield f"data: {json.dumps({'type': 'error', 'content': 'System busy.'})}\n\n"
 
 @app.post("/chat")
 async def chat(q: dict):
@@ -202,7 +216,9 @@ def get_databases(password: str):
     if DATABASES_DIR.exists():
         for d in DATABASES_DIR.iterdir():
             if d.is_dir():
-                dbs.append({"name": d.name, "active": d.name == (ACTIVE_DB_FILE.read_text().strip() if ACTIVE_DB_FILE.exists() else "default"), "chunks": 14204 if d.name=='agentfactory' else 0})
+                total_size = sum(f.stat().st_size for f in d.glob('**/*') if f.is_file())
+                size_str = f"{total_size / 1024:.1f} KB" if total_size < 1024*1024 else f"{total_size / (1024*1024):.1f} MB"
+                dbs.append({"name": d.name, "active": d.name == (ACTIVE_DB_FILE.read_text().strip() if ACTIVE_DB_FILE.exists() else "default"), "chunks": 14204 if d.name=='agentfactory' else 0, "size": size_str})
     return {"databases": dbs}
 
 @app.post("/admin/databases/set-active")
@@ -215,4 +231,5 @@ async def set_active_db(password: str = Form(...), name: str = Form(...)):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000, log_level="error")
+    port = int(os.environ.get("PORT", 8000))
+    uvicorn.run(app, host="0.0.0.0", port=port, log_level="error")
