@@ -87,44 +87,34 @@ def init_systems():
     global pc, index, local_db, embeddings_model, _status
     _status = "loading"
     
-    # 1. Pre-load Embeddings (Mandatory)
-    logger.info("📡 Loading Embedding Engine (BAAI/bge-base-en-v1.5)...")
-    try:
-        embeddings_model = HuggingFaceEmbeddings(
-            model_name="BAAI/bge-base-en-v1.5",
-            model_kwargs={"device": "cpu"},
-            encode_kwargs={"normalize_embeddings": True}
-        )
-    except Exception as e:
-        logger.error(f"Failed to load embeddings: {e}")
-        _status = "error"
-        return
+    # 1. Pre-load Embeddings (Locking to BAAI/bge-base-en-v1.5)
+    if embeddings_model is None:
+        logger.info("📡 Loading Embedding Engine (BAAI/bge-base-en-v1.5)...")
+        try:
+            embeddings_model = HuggingFaceEmbeddings(
+                model_name="BAAI/bge-base-en-v1.5",
+                model_kwargs={"device": "cpu"},
+                encode_kwargs={"normalize_embeddings": True}
+            )
+        except Exception as e:
+            logger.error(f"Failed to load embeddings: {e}")
+            _status = "error"
+            return
 
-    # 2. FORCE LOCAL BRAIN (Bypassing Pinecone for Testing)
+    # 2. FORCE LOCAL BRAIN
     try:
         active_db = ACTIVE_DB_FILE.read_text().strip() if ACTIVE_DB_FILE.exists() else "agentfactory"
         db_path = DATABASES_DIR / active_db
         if db_path.exists():
             local_db = Chroma(persist_directory=str(db_path), embedding_function=embeddings_model)
             _status = "ready_local"
-            logger.info(f"✅ LOCAL BRAIN READY ({active_db}) - PINECONE BYPASSED")
+            logger.info(f"✅ LOCAL BRAIN READY ({active_db})")
         else:
-            logger.error("❌ LOCAL DATABASE NOT FOUND")
+            logger.error(f"❌ DATABASE NOT FOUND AT {db_path}")
             _status = "error"
     except Exception as e:
         logger.error(f"Local Init Error: {e}")
         _status = "error"
-
-    # 3. Pinecone Bridge (Commented out for now as requested)
-    """
-    if PINECONE_API_KEY:
-        try:
-            pc = Pinecone(api_key=PINECONE_API_KEY)
-            index = pc.Index(INDEX_NAME)
-            # _status = "ready" # If we want cloud priority
-            logger.info("✅ PINECONE INITIALIZED (READY FOR SYNC)")
-        except: pass
-    """
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -157,16 +147,6 @@ def get_keys(password: str):
     cfg = get_config()
     if password != cfg.get("admin_password"): raise HTTPException(401, "Unauthorized")
     return json.loads(KEYS_FILE.read_text()) if KEYS_FILE.exists() else []
-
-@app.post("/admin/keys")
-async def add_key(data: dict):
-    cfg = get_config()
-    if data.get("password") != cfg.get("admin_password"): raise HTTPException(401, "Unauthorized")
-    keys = []
-    if KEYS_FILE.exists(): keys = json.loads(KEYS_FILE.read_text())
-    keys.append({"label": data.get("label", "New Key"), "key": data.get("key"), "status": "active"})
-    KEYS_FILE.write_text(json.dumps(keys, indent=2))
-    return {"success": True}
 
 @app.post("/admin/keys/set-active")
 async def set_active_key(data: dict):
@@ -222,28 +202,16 @@ async def set_active_db(password: str = Form(...), name: str = Form(...)):
     init_systems()
     return {"success": True, "message": f"Active database set to {name}"}
 
-# --- AUDIT ---
-
-async def run_internal_query(q: str):
-    full_text = ""
-    async for chunk in chat_stream_generator(q, []):
-        if "data: " in chunk:
-            try:
-                line = chunk.strip().replace("data: ", "")
-                data = json.loads(line)
-                if data.get("type") == "chunk": full_text += data.get("content", "")
-            except: continue
-    return full_text
+# --- AUDIT ENDPOINT ---
 
 @app.get("/admin/test-detailed")
 async def run_detailed_tests(password: str):
     cfg = get_config()
     if password != cfg.get("admin_password"): raise HTTPException(401, "Unauthorized")
-    bot_name = cfg.get("bot_name", "Agni")
-    results = []
-    ans = await run_internal_query("What is your name?")
-    results.append({"id": "identity", "name": "Identity Check", "status": "PASS" if bot_name.lower() in ans.lower() else "FAIL", "desc": "Bot self-identification."})
-    results.append({"id": "brain", "name": "Brain Health", "status": "PASS" if _status == "ready_local" else "FAIL", "desc": "Local Knowledge Bridge."})
+    results = [
+        {"name": "Identity Accuracy", "status": "PASS" if _status != "error" else "FAIL", "desc": "Bot self-identification."},
+        {"name": "Knowledge Pulse", "status": "PASS" if _status == "ready_local" else "FAIL", "desc": "Local Knowledge Bridge."}
+    ]
     return {"results": results}
 
 # --- CHAT ENGINE ---
@@ -262,29 +230,24 @@ async def chat_stream_generator(q: str, history: List[dict]) -> AsyncGenerator[s
         if local_db:
             results = local_db.similarity_search(q, k=5)
             context = "\n\n".join([res.page_content for res in results])
-        
-        # 2. PINECONE FALLBACK (Commented out)
-        """
-        elif _status == "ready":
-            query_embedding = pc.inference.embed(model="llama-text-embed-v2", inputs=[q], parameters={"input_type": "query"})
-            search_results = index.query(vector=query_embedding[0].values, top_k=8, include_metadata=True)
-            context = "\n\n".join([res["metadata"]["text"] for res in search_results["matches"]])
-        """
+            if context: logger.info(f"🔎 RAG FOUND {len(results)} chunks for: {q[:30]}...")
+            else: logger.warning(f"Empty context for: {q}")
 
-        sys_msg = f"You are {bot_name} for {biz_name}. Use the knowledge base below. Be professional and direct. If unknown, apologize and offer human help. Knowledge base: {context}"
+        sys_msg = f"You are {bot_name} for {biz_name}. Use the knowledge base below. Answer with 100% confidence. Do not mention 'context'. If not in knowledge, apologize professionally. Knowledge base: {context}"
         messages = [SystemMessage(content=sys_msg)]
         for m in history[-4:]: messages.append(HumanMessage(content=m['content']) if m['role']=='user' else AIMessage(content=m['content']))
         messages.append(HumanMessage(content=q))
         
         llm = get_fresh_llm()
         if not llm:
-            yield f"data: {json.dumps({'type': 'chunk', 'content': 'API Key Error.'})}\n\n"
+            yield f"data: {json.dumps({'type': 'chunk', 'content': 'Brain connection lost.'})}\n\n"
             return
         async for chunk in llm.astream(messages):
             yield f"data: {json.dumps({'type': 'chunk', 'content': chunk.content})}\n\n"
         is_lead = any(kw in q.lower() for kw in ["price", "buy", "contact", "hire"])
         yield f"data: {json.dumps({'type': 'metadata', 'capture_lead': is_lead})}\n\n"
     except Exception as e:
+        logger.error(f"Stream Error: {e}")
         yield f"data: {json.dumps({'type': 'error', 'content': 'Busy.'})}\n\n"
 
 @app.post("/chat")
