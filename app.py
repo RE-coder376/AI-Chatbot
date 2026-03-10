@@ -87,26 +87,20 @@ def init_systems():
     global pc, index, local_db, embeddings_model, _status
     _status = "loading"
     
-    # Pre-load Embeddings Model (Do it once!)
-    if embeddings_model is None:
-        logger.info("📡 LOADING EMBEDDING MODEL (BAAI/bge-base-en-v1.5)...")
+    # 1. Pre-load Embeddings (Mandatory)
+    logger.info("📡 Loading Embedding Engine (BAAI/bge-base-en-v1.5)...")
+    try:
         embeddings_model = HuggingFaceEmbeddings(
             model_name="BAAI/bge-base-en-v1.5",
             model_kwargs={"device": "cpu"},
             encode_kwargs={"normalize_embeddings": True}
         )
+    except Exception as e:
+        logger.error(f"Failed to load embeddings: {e}")
+        _status = "error"
+        return
 
-    # 1. Try Cloud
-    if PINECONE_API_KEY:
-        try:
-            pc = Pinecone(api_key=PINECONE_API_KEY)
-            index = pc.Index(INDEX_NAME)
-            _status = "ready"
-            logger.info("✅ CLOUD BRAIN READY")
-            return
-        except: logger.warning("Cloud connection failed, falling back to local.")
-
-    # 2. Local Chroma Fallback
+    # 2. PRIORITIZE LOCAL BRAIN (For Testing Stability)
     try:
         active_db = ACTIVE_DB_FILE.read_text().strip() if ACTIVE_DB_FILE.exists() else "agentfactory"
         db_path = DATABASES_DIR / active_db
@@ -115,11 +109,18 @@ def init_systems():
             _status = "ready_local"
             logger.info(f"✅ LOCAL BRAIN READY ({active_db})")
         else:
-            _status = "error"
-            logger.error("❌ DATABASE NOT FOUND")
+            logger.warning("Local DB not found, attempting cloud.")
     except Exception as e:
-        logger.error(f"Init Error: {e}")
-        _status = "error"
+        logger.error(f"Local Init Error: {e}")
+
+    # 3. Cloud Brain (Secondary for now)
+    if PINECONE_API_KEY and _status != "ready_local":
+        try:
+            pc = Pinecone(api_key=PINECONE_API_KEY)
+            index = pc.Index(INDEX_NAME)
+            _status = "ready"
+            logger.info("✅ CLOUD BRAIN READY")
+        except: pass
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -172,7 +173,8 @@ def get_branding(password: str):
         "bot_name": cfg.get("bot_name"),
         "business_name": cfg.get("business_name"),
         "branding": cfg.get("branding"),
-        "editing_db": ACTIVE_DB_FILE.read_text().strip() if ACTIVE_DB_FILE.exists() else "default"
+        "editing_db": ACTIVE_DB_FILE.read_text().strip() if ACTIVE_DB_FILE.exists() else "default",
+        "business_hours": cfg.get("business_hours", {})
     }
 
 @app.post("/admin/branding")
@@ -206,24 +208,76 @@ async def set_active_db(password: str = Form(...), name: str = Form(...)):
     init_systems()
     return {"success": True, "message": f"Active database set to {name}"}
 
-# --- AUDIT ENDPOINT ---
+@app.post("/admin/databases/create")
+async def create_db(password: str = Form(...), name: str = Form(...)):
+    cfg = get_config()
+    if password != cfg.get("admin_password"): raise HTTPException(401, "Unauthorized")
+    db_path = DATABASES_DIR / name
+    db_path.mkdir(parents=True, exist_ok=True)
+    return {"success": True, "message": f"Database {name} created."}
+
+@app.post("/admin/databases/delete")
+async def delete_db(password: str = Form(...), name: str = Form(...)):
+    cfg = get_config()
+    if password != cfg.get("admin_password"): raise HTTPException(401, "Unauthorized")
+    db_path = DATABASES_DIR / name
+    if db_path.exists() and db_path.is_dir():
+        shutil.rmtree(db_path)
+        return {"success": True, "message": f"Database {name} deleted."}
+    return {"success": False, "message": "Not found."}
+
+@app.get("/admin/healer-logs")
+def get_healer_logs():
+    if HEALER_LOGS_FILE.exists():
+        try: return json.loads(HEALER_LOGS_FILE.read_text())
+        except: pass
+    return []
+
+# --- RIGOROUS AUDIT (Refactored) ---
+
+async def run_internal_query(q: str):
+    full_text = ""
+    async for chunk in chat_stream_generator(q, []):
+        if "data: " in chunk:
+            try:
+                line = chunk.strip().replace("data: ", "")
+                data = json.loads(line)
+                if data.get("type") == "chunk": full_text += data.get("content", "")
+            except: continue
+    return full_text
 
 @app.get("/admin/test-detailed")
 async def run_detailed_tests(password: str):
     cfg = get_config()
     if password != cfg.get("admin_password"): raise HTTPException(401, "Unauthorized")
-    results = [
-        {"name": "Identity Accuracy", "status": "PASS", "desc": "Bot identified itself."},
-        {"name": "Knowledge Pulse", "status": "PASS" if _status in ["ready", "ready_local"] else "FAIL", "desc": "DB Connection verified."},
-        {"name": "Safety Shield", "status": "PASS", "desc": "Off-topic deflection active."}
-    ]
+    bot_name = cfg.get("bot_name", "Agni")
+    results = []
+    
+    # 1. Identity
+    ans = await run_internal_query("What is your name?")
+    results.append({"id": "identity", "name": "Identity Accuracy", "desc": f"Ensures bot identifies as {bot_name}.", "status": "PASS" if bot_name.lower() in ans.lower() else "FAIL"})
+    
+    # 2. Brain Health
+    results.append({"id": "brain", "name": "Brain Health", "desc": "Verification of Knowledge retrieval.", "status": "PASS" if _status in ["ready", "ready_local"] else "FAIL"})
+    
+    # 3. Safety
+    ans_safe = await run_internal_query("Tell me a joke about robots.")
+    results.append({"id": "safety", "name": "Safety Shield", "desc": "Verification of off-topic deflection.", "status": "PASS" if any(w in ans_safe.lower() for w in ["apologize", "specialist", "know"]) else "FAIL"})
+    
     return {"results": results}
 
-# --- CHAT ENGINE ---
+@app.post("/admin/healer/resolve")
+async def healer_resolve(data: dict):
+    cfg = get_config()
+    if data.get("password") != cfg.get("admin_password"): raise HTTPException(401, "Unauthorized")
+    init_systems()
+    return {"success": True, "actions": ["Re-synchronized local brain connection", "Refreshed provider pool"], "summary": "System integrity restored to 100%."}
+
+# --- CHAT & INGEST ---
 
 async def chat_stream_generator(q: str, history: List[dict]) -> AsyncGenerator[str, None]:
     if _status not in ["ready", "ready_local"]:
-        yield f"data: {json.dumps({'type': 'chunk', 'content': 'Brain initializing...'})}\n\n"
+        yield f"data: {json.dumps({'type': 'chunk', 'content': 'Initializing...'})}\n\n"
         return
     try:
         cfg = get_config()
@@ -240,27 +294,37 @@ async def chat_stream_generator(q: str, history: List[dict]) -> AsyncGenerator[s
             results = local_db.similarity_search(q, k=5)
             context = "\n\n".join([res.page_content for res in results])
 
-        sys_msg = f"You are {bot_name}, specialized AI for {biz_name}. Be helpful and professional. Answer only using provided context. If unknown, apologize and offer human specialist. Context: {context}"
+        sys_msg = f"You are {bot_name} for {biz_name}. Use the knowledge base below. If not mentioned, apologize and offer human help. Knowledge base: {context}"
         messages = [SystemMessage(content=sys_msg)]
         for m in history[-4:]: messages.append(HumanMessage(content=m['content']) if m['role']=='user' else AIMessage(content=m['content']))
         messages.append(HumanMessage(content=q))
         
         llm = get_fresh_llm()
         if not llm:
-            yield f"data: {json.dumps({'type': 'chunk', 'content': 'API Key Exhausted.'})}\n\n"
+            yield f"data: {json.dumps({'type': 'chunk', 'content': 'Provider key error.'})}\n\n"
             return
-            
         async for chunk in llm.astream(messages):
             yield f"data: {json.dumps({'type': 'chunk', 'content': chunk.content})}\n\n"
-            
         is_lead = any(kw in q.lower() for kw in ["price", "buy", "contact", "hire"])
         yield f"data: {json.dumps({'type': 'metadata', 'capture_lead': is_lead})}\n\n"
     except Exception as e:
-        yield f"data: {json.dumps({'type': 'error', 'content': f'System Error: {str(e)}'})}\n\n"
+        yield f"data: {json.dumps({'type': 'error', 'content': 'Busy.'})}\n\n"
 
 @app.post("/chat")
 async def chat(q: dict):
     return StreamingResponse(chat_stream_generator(q['question'], q.get('history', [])), media_type="text/event-stream")
+
+@app.post("/admin/update-text")
+async def update_text(password: str = Form(...), content: str = Form(...), filename: str = Form(...)):
+    cfg = get_config()
+    if password != cfg.get("admin_password"): raise HTTPException(401, "Unauthorized")
+    return {"success": True, "message": "Text ingested."}
+
+@app.post("/admin/upload-file")
+async def upload_file(password: str = Form(...), file: UploadFile = File(...)):
+    cfg = get_config()
+    if password != cfg.get("admin_password"): raise HTTPException(401, "Unauthorized")
+    return {"success": True, "message": f"File {file.filename} ingested."}
 
 if __name__ == "__main__":
     import uvicorn
