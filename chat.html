@@ -4,6 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
   <title>Support Chat</title>
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
   <style>
     :root {
       --primary: #667eea;
@@ -26,8 +27,8 @@
     }
 
     .chat-container {
-      width: min(380px, 95vw);
-      height: min(580px, 90vh);
+      width: min(450px, 95vw);
+      height: min(700px, 90vh);
       background: white;
       border-radius: 16px;
       box-shadow: 0 8px 32px rgba(0,0,0,0.12);
@@ -58,15 +59,9 @@
       flex-shrink: 0;
     }
 
-    .chat-header .avatar img {
-      width: 100%;
-      height: 100%;
-      object-fit: cover;
-      border-radius: 50%;
-    }
-
     .chat-header .info h3 { font-size: 15px; font-weight: 600; }
     .chat-header .info p  { font-size: 12px; opacity: 0.85; margin-top: 2px; }
+    
     .new-chat-btn {
       margin-left: auto;
       background: rgba(255,255,255,0.2);
@@ -76,16 +71,6 @@
       font-size: 12px;
       padding: 5px 10px;
       cursor: pointer;
-      white-space: nowrap;
-    }
-    .new-chat-btn:hover { background: rgba(255,255,255,0.35); }
-
-    .online-dot {
-      width: 8px; height: 8px;
-      background: #4ade80;
-      border-radius: 50%;
-      display: inline-block;
-      margin-right: 5px;
     }
 
     .messages {
@@ -97,26 +82,21 @@
       gap: 12px;
     }
 
-    .messages::-webkit-scrollbar { width: 4px; }
-    .messages::-webkit-scrollbar-thumb { background: #e2e8f0; border-radius: 2px; }
-
     .message {
       display: flex;
       flex-direction: column;
       gap: 4px;
-      max-width: 85%;
+      max-width: 90%;
     }
 
     .message.bot  { align-self: flex-start; }
     .message.user { align-self: flex-end; }
 
     .message .bubble {
-      padding: 10px 14px;
+      padding: 12px 16px;
       border-radius: 18px;
       font-size: 14px;
-      line-height: 1.5;
-      white-space: pre-wrap;
-      word-wrap: break-word;
+      line-height: 1.6;
     }
 
     .message.bot .bubble {
@@ -125,6 +105,14 @@
       border-bottom-left-radius: 4px;
     }
 
+    /* Markdown Styling */
+    .message.bot .bubble h3 { font-size: 16px; margin: 12px 0 8px 0; color: var(--primary); border-bottom: 1px solid #e2e8f0; padding-bottom: 4px; }
+    .message.bot .bubble p { margin-bottom: 8px; }
+    .message.bot .bubble ul, .message.bot .bubble ol { margin-left: 20px; margin-bottom: 10px; }
+    .message.bot .bubble li { margin-bottom: 4px; }
+    .message.bot .bubble code { background: #e2e8f0; padding: 2px 4px; border-radius: 4px; font-family: monospace; font-size: 12px; }
+    .message.bot .bubble pre { background: #1e293b; color: #f8fafc; padding: 12px; border-radius: 8px; overflow-x: auto; margin: 10px 0; }
+
     .message.user .bubble {
       background: var(--bubble-user);
       color: white;
@@ -132,17 +120,7 @@
       align-self: flex-end;
     }
 
-    .typing-status {
-      font-size: 11px;
-      color: #64748b;
-      font-style: italic;
-      margin-bottom: 4px;
-    }
-
-    @keyframes bounce {
-      0%, 60%, 100% { transform: translateY(0); }
-      30%            { transform: translateY(-6px); }
-    }
+    .typing-status { font-size: 11px; color: #64748b; font-style: italic; margin-bottom: 4px; }
 
     .input-area {
       padding: 14px 16px;
@@ -159,10 +137,7 @@
       padding: 10px 16px;
       font-size: 14px;
       outline: none;
-      transition: border-color 0.2s;
     }
-
-    .input-area input:focus { border-color: var(--primary); }
 
     .input-area button {
       width: 40px; height: 40px;
@@ -173,45 +148,22 @@
       display: flex;
       align-items: center;
       justify-content: center;
-      transition: opacity 0.2s;
-      flex-shrink: 0;
     }
-
-    .input-area button:hover   { opacity: 0.85; }
-    .input-area button:disabled { opacity: 0.4; cursor: not-allowed; }
     .input-area button svg { width: 18px; height: 18px; fill: white; }
 
     .lead-form {
-      margin: 4px 0 8px 0;
+      margin: 10px 0;
       background: #f8fafc;
-      border: 1.5px solid #e2e8f0;
+      border: 2px solid var(--primary);
       border-radius: 12px;
-      padding: 14px;
-      display: flex;
-      flex-direction: column;
-      gap: 8px;
+      padding: 16px;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.05);
     }
 
-    .lead-form p {
-      font-size: 13px;
-      color: #475569;
-      margin-bottom: 2px;
-    }
-
-    .lead-form button {
-      padding: 9px;
-      background: var(--gradient);
-      color: white;
-      border: none;
-      border-radius: 8px;
-      font-size: 13px;
-      font-weight: 600;
-      cursor: pointer;
-      margin-top: 2px;
-    }
-
-    .lead-btn-row { display: flex !important; flex-direction: row !important; gap: 8px; flex-wrap: nowrap; }
-    .lead-btn-row button { flex: 1; margin-top: 0 !important; }
+    .lead-btn-row { display: flex; gap: 8px; margin-top: 12px; }
+    .lead-btn-row button { flex: 1; padding: 10px; border-radius: 8px; border: none; font-weight: 600; cursor: pointer; }
+    .btn-primary { background: var(--gradient); color: white; }
+    .btn-secondary { background: #e2e8f0; color: #475569; }
   </style>
 </head>
 <body>
@@ -220,7 +172,7 @@
     <div class="avatar" id="header-avatar">🤖</div>
     <div class="info">
       <h3 id="header-title">Support</h3>
-      <p><span class="online-dot"></span><span id="header-subtitle">Online — here to help</span></p>      
+      <p><span id="header-subtitle">Online — here to help</span></p>      
     </div>
     <button class="new-chat-btn" onclick="newChat()">New Chat</button>
   </div>
@@ -252,40 +204,22 @@
   let lastQuestion = "";
   let widgetKey    = "";
 
-  // 1. Load Config & Key
   fetch(`${API_URL}/config`).then(r => r.json()).then(cfg => {
     widgetKey = cfg.widget_key;
     const b = cfg.branding || {};
-    
-    // Colors
     if (b.primary_color) document.documentElement.style.setProperty("--primary", b.primary_color);
     if (b.secondary_color) document.documentElement.style.setProperty("--secondary", b.secondary_color);
     if (b.bot_bubble_color) document.documentElement.style.setProperty("--bubble-bot", b.bot_bubble_color);
     if (b.user_bubble_color) document.documentElement.style.setProperty("--bubble-user", b.user_bubble_color);
     
-    // Font
-    const fontMap = {
-      "Modern Sans": "'Inter', -apple-system, sans-serif",
-      "Elegant Serif": "'Playfair Display', serif",
-      "Tech Mono": "'JetBrains Mono', monospace",
-      "Friendly Rounded": "'Quicksand', sans-serif"
-    };
-    if (b.font_style) document.documentElement.style.setProperty("--font-family", fontMap[b.font_style] || b.font_style);
-
-    // Text & Content
     document.title = b.page_title || "Support Chat";
     document.getElementById("header-title").textContent = b.header_title || "Support";
     document.getElementById("header-subtitle").textContent = b.header_subtitle || "Online — here to help";
     document.getElementById("welcome-msg").textContent = b.welcome_message || `Hi! How can I help you today?`;
     document.getElementById("user-input").placeholder = b.input_placeholder || "Type a message...";
 
-    // Logo
     const avatar = document.getElementById("header-avatar");
-    if (b.logo_url) {
-      avatar.innerHTML = `<img src="${b.logo_url}" alt="logo">`;
-    } else if (b.logo_emoji) {
-      avatar.textContent = b.logo_emoji;
-    }
+    if (b.logo_emoji) avatar.textContent = b.logo_emoji;
 
     window._contactInfo = cfg.contact_info || "";
   });
@@ -293,7 +227,6 @@
   async function sendMessage() {
     const question = inputEl.value.trim();
     if (!question) return;
-    if (question.length > 1000) { alert("Too long"); return; }
 
     lastQuestion = question;
     addMessage(question, "user");
@@ -325,19 +258,10 @@
         for (const line of lines) {
           if (!line.startsWith("data: ")) continue;
           const data = JSON.parse(line.substring(6));
-          if (data.type === "status") {
-            bubble.querySelector(".typing-status").textContent = data.content;
-          } else if (data.type === "escalate") {
-            bubble.innerHTML = `<div style="color:#ef4444; font-weight:600; margin-bottom:8px;">🔥 ${data.content}</div>
-              <div style="display:flex; flex-direction:column; gap:8px;">
-                <button onclick="window.open('https://wa.me/${data.whatsapp}?text=${encodeURIComponent('Interested in: '+lastQuestion)}', '_blank')" style="background:#25D366; color:white; border:none; padding:10px; border-radius:8px; cursor:pointer; font-weight:600;">WhatsApp</button>
-                <button onclick="window.open('mailto:${data.email}?subject=Urgent Inquiry&body=${encodeURIComponent(lastQuestion)}', '_blank')" style="background:#3b82f6; color:white; border:none; padding:10px; border-radius:8px; cursor:pointer; font-weight:600;">Connect via Email</button>
-                <button onclick="showContactPrompt()" style="background:#64748b; color:white; border:none; padding:10px; border-radius:8px; cursor:pointer; font-weight:600;">Request a Callback</button>
-              </div>`;
-          } else if (data.type === "chunk") {
+          if (data.type === "chunk") {
             if (bubble.querySelector(".typing-status")) bubble.innerHTML = "";
             fullAnswer += data.content;
-            bubble.textContent = fullAnswer;
+            bubble.innerHTML = marked.parse(fullAnswer);
           } else if (data.type === "metadata") {
             if (data.capture_lead) showContactPrompt();
             addFeedbackButtons(botMsgId);
@@ -383,17 +307,19 @@
   function showContactPrompt() {
     const card = document.createElement("div");
     card.className = "lead-form";
+    card.id = "lead-" + Date.now();
     const contact = window._contactInfo || "support@agentfactory.com";
-    
-    // Determine if it's an email or phone
     const isEmail = contact.includes("@");
     const link = isEmail ? `mailto:${contact}` : `https://wa.me/${contact.replace(/\D/g,'')}`;
     const label = isEmail ? "Send Email" : "Message on WhatsApp";
 
     card.innerHTML = `
-      <p style="font-weight:600; margin-bottom:8px;">Ready to take the next step?</p>
-      <p style="font-size:12px; color:#64748b; margin-bottom:12px;">Our team is here to help you scale your operations with AI.</p>
-      <button onclick="window.open('${link}', '_blank')" style="background:var(--gradient); color:white; border:none; padding:10px; border-radius:8px; cursor:pointer; font-weight:600;">${label}</button>
+      <p style="font-weight:700; color:var(--primary); font-size:15px; margin-bottom:4px;">Connect with our specialists</p>
+      <p style="font-size:13px; color:#475569;">Would you like to discuss how our Digital FTEs can scale your specific operations?</p>
+      <div class="lead-btn-row">
+        <button class="btn-primary" onclick="window.open('${link}', '_blank')">${label}</button>
+        <button class="btn-secondary" onclick="document.getElementById('${card.id}').remove()">Not now</button>
+      </div>
     `;
     messagesEl.appendChild(card);
     messagesEl.scrollTop = messagesEl.scrollHeight;
