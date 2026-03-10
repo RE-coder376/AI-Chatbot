@@ -87,12 +87,21 @@
     /* Visual Elements */
     .badge { padding: 3px 8px; border-radius: 6px; font-size: 10px; font-weight: 800; text-transform: uppercase; }
     .badge-current { background: var(--primary); color: white; }
+    .badge-pass { background: #dcfce7; color: #166534; }
+    .badge-fail { background: #fee2e2; color: #991b1b; }
+
     #brand-preview { border: 1px solid var(--border); border-radius: 16px; overflow: hidden; max-width: 300px; margin-top: 12px; }
     #prev-header { padding: 12px; display: flex; align-items: center; gap: 10px; }
     
     table { width: 100%; border-collapse: separate; border-spacing: 0; margin-top: 12px; }
     th { text-align: left; padding: 10px; font-size: 10px; font-weight: 800; color: var(--text-muted); border-bottom: 2px solid var(--border); }
     td { padding: 12px 10px; font-size: 13px; border-bottom: 1px solid var(--border); }
+
+    /* Watchdog Chat */
+    #watchdog-chat { display:none; flex-direction:column; gap:10px; margin-top:20px; padding:20px; background:#f1f5f9; border-radius:16px; border:1px solid var(--border); }
+    .chat-bubble { padding:10px 14px; border-radius:12px; font-size:13px; max-width:85%; }
+    .chat-healer { background:white; color:var(--text-main); align-self:flex-start; }
+    .chat-user { background:var(--primary); color:white; align-self:flex-end; }
 
     .spinner { display: inline-block; width: 12px; height: 12px; border: 2px solid rgba(255,255,255,0.3); border-top-color: #fff; border-radius: 50%; animation: spin 0.8s linear infinite; margin-right: 6px; }
     @keyframes spin { to { transform: rotate(360deg); } }
@@ -174,13 +183,54 @@
         <input type="text" id="new-db-name" placeholder="e.g. documentation"/>
         <button onclick="createDb()" style="width:auto; margin:0; background:#10b981;">Create</button>
       </div>
-      <label style="margin-top:20px;">Active Databases</label>
+      <label style="margin-top:20px;">Available Databases</label>
       <div id="db-list" style="display:flex; flex-direction:column; gap:8px;"></div>
       <div id="db-status" class="status-msg"></div>
     </div>
   </div>
 
-  <!-- 4. Key Vault -->
+  <!-- 4. Behavioral Test Suite -->
+  <div class="card" id="card-tests">
+    <div class="card-header" onclick="toggle('tests')">
+      <h2>🛡️ Go-Live Behavioral Test Suite</h2>
+      <div class="card-arrow">▼</div>
+    </div>
+    <div class="card-body">
+      <p style="font-size:12px; color:var(--text-muted); margin-bottom:15px;">Rigorous behavioral audit of identity, RAG retrieval, and hallucination deflection.</p>
+      <button onclick="runDetailedTests()" id="btn-run-tests">▶ Start Critical Audit</button>
+      
+      <div id="test-list" style="margin-top:20px; display:none;">
+        <table id="test-table">
+          <thead><tr><th>Audit Point</th><th>Status</th><th>Verification</th></tr></thead>
+          <tbody id="test-body"></tbody>
+        </table>
+        
+        <div id="resolve-section" style="display:none; margin-top:20px; border-top:2px solid var(--border); padding-top:20px;">
+          <div style="color:#991b1b; font-weight:700; font-size:14px; margin-bottom:10px;">Critical Failures Detected</div>
+          <button onclick="triggerHealer()" style="background:#dc2626;">🛠️ Trigger System Healer (Watchdog)</button>
+        </div>
+      </div>
+
+      <div id="healer-summary" style="display:none; margin-top:20px; background:#dcfce7; padding:20px; border-radius:16px;">
+        <h4 style="color:#166534; font-size:14px; font-weight:800; margin-bottom:10px;">HEALER ACTIONS SUMMARY</h4>
+        <ul id="healer-actions" style="font-size:13px; color:#166534; margin-left:20px;"></ul>
+        <button onclick="openHealerChat()" style="background:#16a34a; margin-top:15px;">💬 Chat with Watchdog</button>
+      </div>
+
+      <div id="watchdog-chat">
+        <div id="chat-messages" style="display:flex; flex-direction:column; gap:10px; max-height:300px; overflow-y:auto; margin-bottom:15px;"></div>
+        <div style="display:flex; gap:10px;">
+          <input type="text" id="chat-input" placeholder="Discuss the fixes with Watchdog..."/>
+          <button onclick="sendHealerMessage()" style="width:auto; margin:0; padding:0 20px; background:var(--text-main);">Send</button>
+        </div>
+        <button class="secondary" onclick="closeWatchdog()" style="margin-top:15px;">Finish & End Conversation</button>
+      </div>
+
+      <div id="tests-status" class="status-msg"></div>
+    </div>
+  </div>
+
+  <!-- 5. Key Vault -->
   <div class="card" id="card-keys">
     <div class="card-header" onclick="toggle('keys')">
       <h2>🔑 API Key Vault</h2>
@@ -202,7 +252,7 @@
     </div>
   </div>
 
-  <!-- 5. Ingestion -->
+  <!-- 6. Ingestion -->
   <div class="card" id="card-ingest">
     <div class="card-header" onclick="toggle('ingest')">
       <h2>🧠 Knowledge Ingestion</h2>
@@ -233,9 +283,7 @@
   function unlockSystem() {
     const pass = document.getElementById('master-pass').value;
     if (!pass) { showStatus('auth', 'Please enter a password.', 'error'); return; }
-    
     showStatus('auth', 'Verifying...', 'loading');
-    // We verify by trying to load branding
     fetch(`${API}/admin/branding?password=${encodeURIComponent(pass)}`)
       .then(r => r.json())
       .then(data => {
@@ -269,11 +317,94 @@
     updatePreview();
   }
 
+  async function runDetailedTests() {
+    const pass = document.getElementById('master-pass').value;
+    const btn = document.getElementById('btn-run-tests');
+    btn.disabled = true; btn.innerHTML = '<span class="spinner"></span>Auditing...';
+    document.getElementById('test-list').style.display = 'block';
+    
+    try {
+      const res = await fetch(`${API}/admin/test-detailed?password=${encodeURIComponent(pass)}`);
+      const data = await res.json();
+      const body = document.getElementById('test-body');
+      let failures = false;
+      
+      body.innerHTML = data.results.map(t => {
+        if (t.status === 'FAIL') failures = true;
+        return `<tr>
+          <td><div style="font-weight:700;">${t.name}</div><div style="font-size:11px; color:var(--text-muted);">${t.desc}</div></td>
+          <td><span class="badge badge-${t.status.toLowerCase()}">${t.status}</span></td>
+          <td style="font-size:11px; opacity:0.7;">Verified</td>
+        </tr>`;
+      }).join("");
+      
+      if (failures) document.getElementById('resolve-section').style.display = 'block';
+      else showStatus('tests', 'All tests passed perfectly!', 'success');
+      
+    } catch(e) { showStatus('tests', 'Audit failed.', 'error'); }
+    btn.disabled = false; btn.textContent = '▶ Start Critical Audit';
+  }
+
+  async function triggerHealer() {
+    const pass = document.getElementById('master-pass').value;
+    showStatus('tests', 'Watchdog initializing...', 'loading');
+    const res = await fetch(`${API}/admin/healer/resolve`, {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({ password: pass })
+    });
+    const data = await res.json();
+    if (data.success) {
+      document.getElementById('resolve-section').style.display = 'none';
+      document.getElementById('healer-summary').style.display = 'block';
+      document.getElementById('healer-actions').innerHTML = data.actions.map(a => `<li>${a}</li>`).join("");
+      showStatus('tests', 'System Healed', 'success');
+    }
+  }
+
+  function openHealerChat() {
+    document.getElementById('healer-summary').style.display = 'none';
+    document.getElementById('watchdog-chat').style.display = 'flex';
+    addChatMessage('I am the System Watchdog. I have completed the system repair. How can I assist you further?', 'healer');
+  }
+
+  async function sendHealerMessage() {
+    const input = document.getElementById('chat-input');
+    const q = input.value.trim();
+    if (!q) return;
+    const pass = document.getElementById('master-pass').value;
+    
+    addChatMessage(q, 'user');
+    input.value = '';
+    
+    const res = await fetch(`${API}/admin/healer/chat`, {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({ password: pass, question: q })
+    });
+    const data = await res.json();
+    addChatMessage(data.answer, 'healer');
+  }
+
+  function addChatMessage(text, role) {
+    const div = document.createElement('div');
+    div.className = `chat-bubble chat-${role}`;
+    div.textContent = text;
+    const container = document.getElementById('chat-messages');
+    container.appendChild(div);
+    container.scrollTop = container.scrollHeight;
+  }
+
+  function closeWatchdog() {
+    document.getElementById('watchdog-chat').style.display = 'none';
+    document.getElementById('test-list').style.display = 'none';
+    showStatus('tests', 'Conversation ended. System state locked.', 'info');
+  }
+
   async function saveBranding() {
     const pass = document.getElementById('master-pass').value;
     const payload = {
-      password: pass,
-      bot_name: document.getElementById("b-bot-name").value,
+      password: pass, bot_name: document.getElementById("b-bot-name").value,
       business_name: document.getElementById("b-biz-name").value,
       branding: {
         welcome_message: document.getElementById("b-welcome").value,
@@ -308,13 +439,17 @@
     loadDatabases();
   }
 
-  async function updateText() {
+  async function loadKeyVault() {
     const pass = document.getElementById('master-pass').value;
-    const f = new FormData(); f.append("password", pass); f.append("content", document.getElementById("content").value); f.append("filename", "manual.txt");
-    showStatus('ingest', 'Ingesting...', 'loading');
-    const res = await fetch(`${API}/admin/update-text`, { method:"POST", body:f });
-    const d = await res.json();
-    showStatus('ingest', d.message || d.error, d.success ? 'success' : 'error');
+    const res = await fetch(`${API}/admin/keys?password=${encodeURIComponent(pass)}`);
+    const keys = await r.json();
+    document.getElementById("key-vault-body").innerHTML = keys.map(k => `
+      <tr>
+        <td>${k.label}</td>
+        <td><span class="badge badge-${k.status}">${k.status}</span></td>
+        <td><button class="secondary" style="margin:0; padding:4px 10px; font-size:11px;">Use</button></td>
+      </tr>
+    `).join("");
   }
 
   function updatePreview() {
