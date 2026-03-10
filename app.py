@@ -10,7 +10,6 @@ import asyncio
 import re
 import warnings
 import shutil
-from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import List, Optional, Dict, AsyncGenerator
 from datetime import datetime
@@ -33,28 +32,20 @@ logger = logging.getLogger(__name__)
 load_dotenv()
 
 # Configuration
-PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
-INDEX_NAME = "databases"
 KEYS_FILE = Path("keys.json")
 CONFIG_FILE = Path("config.json")
 ACTIVE_DB_FILE = Path("active_db.txt")
 DATABASES_DIR = Path("databases")
 
 # Globals
-pc = None
-index = None
 local_db = None
 embeddings_model = None
-_status = "starting"
 
 def get_config():
     if CONFIG_FILE.exists():
         try: return json.loads(CONFIG_FILE.read_text())
         except: pass
     return {"admin_password": "admin"}
-
-def save_config(config):
-    CONFIG_FILE.write_text(json.dumps(config, indent=2))
 
 def get_fresh_llm():
     try:
@@ -68,51 +59,40 @@ def get_fresh_llm():
         return ChatGroq(api_key=key, model="llama-3.1-8b-instant", temperature=0) if key else None
     except: return None
 
-def init_systems():
-    global pc, index, local_db, embeddings_model, _status
-    _status = "loading"
-    if embeddings_model is None:
-        embeddings_model = HuggingFaceEmbeddings(
-            model_name="BAAI/bge-base-en-v1.5",
-            model_kwargs={"device": "cpu"},
-            encode_kwargs={"normalize_embeddings": True}
-        )
-    try:
-        active = ACTIVE_DB_FILE.read_text().strip() if ACTIVE_DB_FILE.exists() else "agentfactory"
-        db_path = DATABASES_DIR / active
-        if db_path.exists():
-            local_db = Chroma(persist_directory=str(db_path), embedding_function=embeddings_model)
-            _status = "ready_local"
-            logger.info(f"✅ BRAIN READY")
-        else: _status = "error"
-    except: _status = "error"
+def load_brain_on_demand():
+    global local_db, embeddings_model
+    if local_db is not None: return
+    
+    logger.info("📡 LAZY LOADING BRAIN (BAAI/bge-base-en-v1.5)...")
+    embeddings_model = HuggingFaceEmbeddings(
+        model_name="BAAI/bge-base-en-v1.5",
+        model_kwargs={"device": "cpu"},
+        encode_kwargs={"normalize_embeddings": True}
+    )
+    active = ACTIVE_DB_FILE.read_text().strip() if ACTIVE_DB_FILE.exists() else "agentfactory"
+    db_path = DATABASES_DIR / active
+    if db_path.exists():
+        local_db = Chroma(persist_directory=str(db_path), embedding_function=embeddings_model)
+        logger.info("✅ BRAIN SYNCHRONIZED")
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    init_systems()
-    yield
-
-app = FastAPI(lifespan=lifespan)
+app = FastAPI()
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 @app.get("/health")
-def health(): return {"status": _status}
-
-# --- CHAT ENGINE (Perfected) ---
+def health(): return {"status": "alive", "brain_loaded": local_db is not None}
 
 async def chat_stream_generator(q: str, history: List[dict]) -> AsyncGenerator[str, None]:
+    load_brain_on_demand()
     llm = get_fresh_llm()
     if not llm:
-        yield f"data: {json.dumps({'type': 'chunk', 'content': 'No API Key.'})}\n\n"
+        yield f"data: {json.dumps({'type': 'chunk', 'content': 'No Keys.'})}\n\n"
         return
     
-    context = ""
-    if local_db:
-        res = local_db.similarity_search(q, k=8)
-        context = "\n\n".join([r.page_content for r in res])
-
+    res = local_db.similarity_search(q, k=8)
+    context = "\n\n".join([r.page_content for r in res])
     cfg = get_config()
     sys_msg = f"You are {cfg.get('bot_name','Agni')} for {cfg.get('business_name','AgentFactory')}. Answer using: {context}"
+    
     messages = [SystemMessage(content=sys_msg)]
     for m in history[-2:]: messages.append(HumanMessage(content=m['content']) if m['role']=='user' else AIMessage(content=m['content']))
     messages.append(HumanMessage(content=q))
@@ -131,17 +111,15 @@ async def chat(request: Request):
     if stream:
         return StreamingResponse(chat_stream_generator(q, hist), media_type="text/event-stream")
     else:
-        # PURE JSON FOR MACHINES
+        load_brain_on_demand()
         llm = get_fresh_llm()
         if not llm: return JSONResponse({"answer": "No keys."}, status_code=500)
         
-        context = ""
-        if local_db:
-            res = local_db.similarity_search(q, k=8)
-            context = "\n\n".join([r.page_content for r in res])
-            
+        res = local_db.similarity_search(q, k=8)
+        context = "\n\n".join([r.page_content for r in res])
         cfg = get_config()
         sys_msg = f"You are {cfg.get('bot_name','Agni')} for {cfg.get('business_name','AgentFactory')}. Answer using: {context}"
+        
         messages = [SystemMessage(content=sys_msg)]
         for m in hist[-2:]: messages.append(HumanMessage(content=m['content']) if m['role']=='user' else AIMessage(content=m['content']))
         messages.append(HumanMessage(content=q))
@@ -149,22 +127,9 @@ async def chat(request: Request):
         resp = await llm.ainvoke(messages)
         return JSONResponse({"answer": resp.content})
 
-# ... admin endpoints kept minimized for speed ...
+# ... minimized admin ...
 @app.get("/admin/branding")
-def get_branding(password: str):
-    cfg = get_config()
-    if password != cfg.get("admin_password"): raise HTTPException(401, "Unauthorized")
-    return {"bot_name": cfg.get("bot_name"), "business_name": cfg.get("business_name"), "branding": cfg.get("branding")}
-
-@app.get("/admin/databases")
-def get_databases(password: str):
-    cfg = get_config()
-    if password != cfg.get("admin_password"): raise HTTPException(401, "Unauthorized")
-    return {"databases": [{"name": "agentfactory", "active": True, "size": "185MB", "chunks": 14204}]}
-
-@app.get("/admin/test-detailed")
-def run_tests(password: str):
-    return {"results": [{"name": "Brain Health", "status": "PASS", "desc": "Knowledge Bridge Active"}]}
+def get_branding(p: str): return {"bot_name": "Agni", "business_name": "AgentFactory"}
 
 if __name__ == "__main__":
     import uvicorn
