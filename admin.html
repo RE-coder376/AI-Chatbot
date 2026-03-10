@@ -189,6 +189,28 @@
       </div>
     </div>
 
+    <!-- Live preview -->
+    <div style="margin-top:20px;">
+      <label>Live Preview</label>
+      <div id="brand-preview" style="border:1px solid #e2e8f0;border-radius:12px;overflow:hidden;max-width:320px;margin-top:8px;box-shadow:0 2px 8px rgba(0,0,0,0.08);">
+        <div id="prev-header" style="padding:14px 16px;display:flex;align-items:center;gap:10px; background:#6366f1;">
+          <span id="prev-emoji" style="font-size:20px;">🤖</span>
+          <div>
+            <div id="prev-title" style="font-weight:700;color:#fff;font-size:14px;">Support</div>
+            <div id="prev-subtitle" style="color:rgba(255,255,255,0.8);font-size:11px;">Online — here to help</div>
+          </div>
+        </div>
+        <div style="padding:12px;background:#f8fafc;">
+          <div style="display:flex;gap:8px;margin-bottom:8px;">
+            <div id="prev-bubble" style="padding:8px 12px;border-radius:12px;font-size:12px;max-width:80%;color:#1e293b; background:#f1f5f9;">Hi! I'm your assistant. How can I help?</div>
+          </div>
+          <div style="display:flex;gap:8px;justify-content:flex-end;">
+            <div id="prev-user-bubble" style="padding:8px 12px;border-radius:12px;font-size:12px;background:#6366f1;color:#fff;">Tell me about your services.</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
     <div style="display:flex;gap:10px;margin-top:24px;">
       <button onclick="loadBranding()">Load from Server</button>
       <button onclick="saveBranding()" style="background:#16a34a;">Save to Cloud</button>
@@ -254,9 +276,30 @@
     }
   }
 
-  // Attach auto-save to all inputs
+  function updatePreview() {
+    const primary   = document.getElementById("b-primary-hex").value;
+    const botBubble = document.getElementById("b-bot-bubble-hex").value;
+    const userBubble= document.getElementById("b-user-bubble-hex").value;
+    const title     = document.getElementById("b-header-title").value || "Support";
+    const subtitle  = document.getElementById("b-header-subtitle").value || "Online";
+    const emoji     = document.getElementById("b-logo-emoji").value || "🤖";
+    const welcome   = document.getElementById("b-welcome").value || "Hi! How can I help?";
+
+    document.getElementById("prev-header").style.background = primary;
+    document.getElementById("prev-user-bubble").style.background = primary;
+    document.getElementById("prev-bubble").style.background = botBubble;
+    document.getElementById("prev-title").textContent = title;
+    document.getElementById("prev-subtitle").textContent = subtitle;
+    document.getElementById("prev-emoji").textContent = emoji;
+    document.getElementById("prev-bubble").textContent = welcome.substring(0, 60) + "...";
+  }
+
+  // Attach auto-save and preview to all inputs
   document.addEventListener("input", (e) => {
-    if (e.target.id && e.target.type !== "password") saveToLocal();
+    if (e.target.id && e.target.type !== "password") {
+      saveToLocal();
+      updatePreview();
+    }
   });
 
   // ── UI HELPERS ─────────────────────────────────────────────────────────
