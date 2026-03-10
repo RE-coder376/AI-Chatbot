@@ -86,7 +86,8 @@ def init_cloud():
     try:
         if not PINECONE_API_KEY:
             logger.error("❌ PINECONE_API_KEY not found in .env")
-            _status = "error"
+            # For local testing without Pinecone, we'll set status to ready but search will fail
+            _status = "ready_local"
             return
         pc = Pinecone(api_key=PINECONE_API_KEY)
         index = pc.Index(INDEX_NAME)
@@ -117,10 +118,11 @@ async def get_admin(): return FileResponse(Path(__file__).parent / "admin.html")
 @app.get("/config")
 def read_config():
     cfg = get_config()
+    contact = cfg.get("contact_email") or cfg.get("whatsapp_number") or "support@agentfactory.com"
     return {
         "widget_key": cfg.get("widget_key", ""),
         "branding": cfg.get("branding", {}),
-        "contact_info": cfg.get("contact_email", "")
+        "contact_info": contact
     }
 
 @app.get("/health")
@@ -234,29 +236,50 @@ async def save_feedback(data: dict):
 # --- CHAT LOGIC ---
 
 async def chat_stream_generator(q: str, history: List[dict]) -> AsyncGenerator[str, None]:
-    if _status != "ready":
-        yield f"data: {json.dumps({'type': 'chunk', 'content': 'Cloud Brain Initializing...'})}\n\n"
+    if _status not in ["ready", "ready_local"]:
+        yield f"data: {json.dumps({'type': 'chunk', 'content': 'Initializing systems...'})}\n\n"
         return
 
     try:
+        cfg = get_config()
+        bot_name = cfg.get("bot_name", "Agni")
+        biz_name = cfg.get("business_name", "AgentFactory")
+        
+        context = ""
         # 1. CLOUD SEARCH
-        query_embedding = pc.inference.embed(
-            model="llama-text-embed-v2",
-            inputs=[q],
-            parameters={"input_type": "query"}
-        )
-        
-        search_results = index.query(
-            vector=query_embedding[0].values,
-            top_k=8,
-            include_metadata=True
-        )
-        
-        context_list = [res["metadata"]["text"] for res in search_results["matches"]]
-        context = "\n\n".join(context_list)
+        if _status == "ready":
+            query_embedding = pc.inference.embed(
+                model="llama-text-embed-v2",
+                inputs=[q],
+                parameters={"input_type": "query"}
+            )
+            
+            search_results = index.query(
+                vector=query_embedding[0].values,
+                top_k=8,
+                include_metadata=True
+            )
+            
+            context_list = [res["metadata"]["text"] for res in search_results["matches"]]
+            context = "\n\n".join(context_list)
+        else:
+            context = "LOCAL TEST MODE: Operating on internal server logic."
 
-        # 2. LLM LOGIC
-        sys_msg = f"You are a professional technical retrieval assistant. Answer ONLY using the provided Context. If not in context, say you don't know. Context: {context}"
+        # 2. LLM LOGIC - The "Personality" Prompt
+        sys_msg = f"""
+        You are {bot_name}, the lead AI representative for {biz_name}. 
+        You are a highly professional, confident, and specialized Digital FTE (Full-Time Equivalent).
+
+        MANDATES:
+        1. CONFIDENCE: Never say "based on the context" or "according to the text." Speak as the authority. Just answer the question directly.
+        2. PERSONALITY: You ARE an employee of {biz_name}. Use "we" and "our" when referring to the company.
+        3. POLITE UNKNOWNS: If the information isn't available in your knowledge base, say: "I apologize, but I don't have the specific details on that topic in our current documentation. Would you like me to connect you with one of our human specialists for more help?"
+        4. BREVITY: Be professional, helpful, and concise.
+
+        KNOWLEDGE BASE:
+        {context}
+        """
+        
         messages = [SystemMessage(content=sys_msg)]
         for m in history[-4:]:
             messages.append(HumanMessage(content=m['content']) if m['role']=='user' else AIMessage(content=m['content']))
@@ -265,7 +288,7 @@ async def chat_stream_generator(q: str, history: List[dict]) -> AsyncGenerator[s
         while True:
             llm = get_fresh_llm()
             if not llm:
-                yield f"data: {json.dumps({'type': 'chunk', 'content': 'All API keys exhausted. Please contact admin.'})}\n\n"
+                yield f"data: {json.dumps({'type': 'chunk', 'content': 'I am currently experiencing heavy load. Please try again in a moment.'})}\n\n"
                 return
             try:
                 async for chunk in llm.astream(messages):

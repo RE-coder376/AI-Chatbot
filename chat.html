@@ -381,7 +381,18 @@
   function showContactPrompt() {
     const card = document.createElement("div");
     card.className = "lead-form";
-    card.innerHTML = `<p>Would you like to connect with our team?</p><button onclick="alert('Contact: '+window._contactInfo)">Contact Us</button>`;
+    const contact = window._contactInfo || "support@agentfactory.com";
+    
+    // Determine if it's an email or phone
+    const isEmail = contact.includes("@");
+    const link = isEmail ? `mailto:${contact}` : `https://wa.me/${contact.replace(/\D/g,'')}`;
+    const label = isEmail ? "Send Email" : "Message on WhatsApp";
+
+    card.innerHTML = `
+      <p style="font-weight:600; margin-bottom:8px;">Ready to take the next step?</p>
+      <p style="font-size:12px; color:#64748b; margin-bottom:12px;">Our team is here to help you scale your operations with AI.</p>
+      <button onclick="window.open('${link}', '_blank')" style="background:var(--gradient); color:white; border:none; padding:10px; border-radius:8px; cursor:pointer; font-weight:600;">${label}</button>
+    `;
     messagesEl.appendChild(card);
     messagesEl.scrollTop = messagesEl.scrollHeight;
   }
