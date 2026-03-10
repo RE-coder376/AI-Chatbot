@@ -37,7 +37,6 @@ PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
 INDEX_NAME = "databases"
 KEYS_FILE = Path("keys.json")
 CONFIG_FILE = Path("config.json")
-FEEDBACK_FILE = Path("feedback.json")
 ACTIVE_DB_FILE = Path("active_db.txt")
 DATABASES_DIR = Path("databases")
 
@@ -75,26 +74,21 @@ def get_fresh_llm():
 def init_systems():
     global pc, index, local_db, embeddings_model, _status
     _status = "loading"
-    
     if embeddings_model is None:
-        logger.info("📡 LOADING BGE-v1.5 ENGINE...")
         embeddings_model = HuggingFaceEmbeddings(
             model_name="BAAI/bge-base-en-v1.5",
             model_kwargs={"device": "cpu"},
             encode_kwargs={"normalize_embeddings": True}
         )
-
     try:
         active_db = ACTIVE_DB_FILE.read_text().strip() if ACTIVE_DB_FILE.exists() else "agentfactory"
         db_path = DATABASES_DIR / active_db
         if db_path.exists():
             local_db = Chroma(persist_directory=str(db_path), embedding_function=embeddings_model)
             _status = "ready_local"
-            logger.info("✅ BRAIN SYNCHRONIZED")
-        else:
-            _status = "error"
-    except:
-        _status = "error"
+            logger.info(f"✅ BRAIN READY")
+        else: _status = "error"
+    except: _status = "error"
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -104,96 +98,68 @@ async def lifespan(app: FastAPI):
 app = FastAPI(lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
-@app.get("/")
-async def get_index(): return FileResponse(Path(__file__).parent / "chat.html")
-
-@app.get("/admin")
-async def get_admin(): return FileResponse(Path(__file__).parent / "admin.html")
-
 @app.get("/health")
-def health():
-    return {"status": _status, "engine": "local_chroma", "db": ACTIVE_DB_FILE.read_text().strip() if ACTIVE_DB_FILE.exists() else "default"}
+def health(): return {"status": _status}
 
-# --- CHAT ENGINE (Perfected for Stress Tests) ---
+# --- DUAL-MODE CHAT ENGINE ---
 
 async def chat_stream_generator(q: str, history: List[dict]) -> AsyncGenerator[str, None]:
-    if _status not in ["ready", "ready_local"]:
-        yield f"data: {json.dumps({'type': 'chunk', 'content': 'System initializing...'})}\n\n"
+    cfg = get_config()
+    bot_name = cfg.get("bot_name", "Agni")
+    biz_name = cfg.get("business_name", "AgentFactory")
+    
+    context = ""
+    if local_db:
+        results = local_db.similarity_search(q, k=8)
+        context = "\n\n".join([res.page_content for res in results])
+
+    sys_msg = f"You are {bot_name} for {biz_name}. Use the knowledge base below. Answer direct and professional. Knowledge base: {context}"
+    messages = [SystemMessage(content=sys_msg)]
+    for m in history[-2:]: messages.append(HumanMessage(content=m['content']) if m['role']=='user' else AIMessage(content=m['content']))
+    messages.append(HumanMessage(content=q))
+    
+    llm = get_fresh_llm()
+    if not llm:
+        yield f"data: {json.dumps({'type': 'chunk', 'content': 'Error.'})}\n\n"
         return
-    try:
+        
+    async for chunk in llm.astream(messages):
+        yield f"data: {json.dumps({'type': 'chunk', 'content': chunk.content})}\n\n"
+    
+    is_lead = any(kw in q.lower() for kw in ["price", "buy", "contact", "hire"])
+    yield f"data: {json.dumps({'type': 'metadata', 'capture_lead': is_lead})}\n\n"
+
+@app.post("/chat")
+async def chat(request: Request):
+    data = await request.json()
+    q = data.get("question")
+    history = data.get("history", [])
+    stream_requested = data.get("stream", True) # Default to true for browser
+
+    if stream_requested:
+        return StreamingResponse(chat_stream_generator(q, history), media_type="text/event-stream")
+    else:
+        # NON-STREAMING MODE FOR STRESS TESTS
+        llm = get_fresh_llm()
+        if not llm: return {"answer": "No keys."}
+        
         cfg = get_config()
         bot_name = cfg.get("bot_name", "Agni")
         biz_name = cfg.get("business_name", "AgentFactory")
         
         context = ""
         if local_db:
-            # Maximum Search Depth
-            results = local_db.similarity_search(q, k=15)
+            results = local_db.similarity_search(q, k=8)
             context = "\n\n".join([res.page_content for res in results])
-
-        sys_msg = f"You are {bot_name}, Lead Digital FTE for {biz_name}. Answer authoritatively using this knowledge base: {context}"
+            
+        sys_msg = f"You are {bot_name} for {biz_name}. Answer direct. Knowledge: {context}"
         messages = [SystemMessage(content=sys_msg)]
         for m in history[-2:]: messages.append(HumanMessage(content=m['content']) if m['role']=='user' else AIMessage(content=m['content']))
         messages.append(HumanMessage(content=q))
         
-        llm = get_fresh_llm()
-        if not llm:
-            yield f"data: {json.dumps({'type': 'chunk', 'content': 'Provider key error.'})}\n\n"
-            return
-            
-        async for chunk in llm.astream(messages):
-            # MANDATORY SSE FORMAT FOR STRESS TEST SCRIPT
-            yield f"data: {json.dumps({'type': 'chunk', 'content': chunk.content})}\n\n"
-            
-        is_lead = any(kw in q.lower() for kw in ["price", "buy", "contact", "hire"])
-        yield f"data: {json.dumps({'type': 'metadata', 'capture_lead': is_lead})}\n\n"
-    except Exception as e:
-        yield f"data: {json.dumps({'type': 'error', 'content': 'Busy.'})}\n\n"
-
-@app.post("/chat")
-async def chat(q: dict):
-    return StreamingResponse(chat_stream_generator(q['question'], q.get('history', [])), media_type="text/event-stream")
-
-# Admin Endpoints (Minimized for speed)
-@app.get("/admin/branding")
-def get_branding(password: str):
-    cfg = get_config()
-    if password != cfg.get("admin_password"): raise HTTPException(401, "Unauthorized")
-    return {"bot_name": cfg.get("bot_name"), "business_name": cfg.get("business_name"), "branding": cfg.get("branding")}
-
-@app.post("/admin/branding")
-async def update_branding(data: dict):
-    cfg = get_config()
-    if data.get("password") != cfg.get("admin_password"): raise HTTPException(401, "Unauthorized")
-    for k, v in data.items():
-        if k != "password": cfg[k] = v
-    save_config(cfg)
-    return {"success": True, "message": "Updated"}
-
-@app.get("/admin/databases")
-def get_databases(password: str):
-    cfg = get_config()
-    if password != cfg.get("admin_password"): raise HTTPException(401, "Unauthorized")
-    dbs = []
-    if DATABASES_DIR.exists():
-        for d in DATABASES_DIR.iterdir():
-            if d.is_dir():
-                dbs.append({"name": d.name, "active": d.name == (ACTIVE_DB_FILE.read_text().strip() if ACTIVE_DB_FILE.exists() else "default"), "chunks": 14204 if d.name=='agentfactory' else 0})
-    return {"databases": dbs}
-
-@app.post("/admin/databases/set-active")
-async def set_active_db(password: str = Form(...), name: str = Form(...)):
-    cfg = get_config()
-    if password != cfg.get("admin_password"): raise HTTPException(401, "Unauthorized")
-    ACTIVE_DB_FILE.write_text(name)
-    init_systems()
-    return {"success": True}
-
-@app.get("/admin/test-detailed")
-async def run_detailed_tests(password: str):
-    return {"results": [{"name": "Brain Health", "status": "PASS", "desc": "Knowledge Bridge Active"}]}
+        res = await llm.ainvoke(messages)
+        return {"answer": res.content}
 
 if __name__ == "__main__":
     import uvicorn
-    port = int(os.environ.get("PORT", 8000))
-    uvicorn.run(app, host="0.0.0.0", port=port, log_level="error")
+    uvicorn.run(app, host="0.0.0.0", port=8000, log_level="error")
