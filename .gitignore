@@ -1,51 +1,54 @@
 # API Keys & Secrets
 .env
 keys.json
+config.json
 
-# Local Databases (Now in Pinecone Cloud)
+# Local Databases & Cache
 databases/
-chroma.sqlite3
-
-# Python & System
+db/
+schemas/
+*.sqlite3
+*.pkl
 __pycache__/
 *.pyc
 *.pyo
 *.pyd
+
+# Logs & Audit
+*.log
+healer_logs.json
+chat_logs.json
+feedback.json
+leads.json
+app_log.txt
+watchdog_out.log
+server_out.log
+server_err.log
+ingest_log.txt
+ingest_output.txt
+ingest_output_minilm.txt
+full_ingest_out.log
+deep_ingest.log
+
+# Temporary Migration & Audit Scripts
+*_audit.py
+migrate_to_pinecone.py
+cloud_ingest*.py
+universal_test.py
+production_test*.py
+manual_test.py
+verify_security.py
+test_rag.py
+test_case.py
+
+# Raw Data
+data/
+data_crawl_*/
+tasks/
+
+# Environment
 .venv/
 env/
 venv/
 .env/
-
-# Logs
-*.log
-watchdog_out.log
-server_out.log
-server_err.log
-
-# Temporary Migration & Audit Scripts
-mini_audit.py
-ruthless_audit.py
-fifty_audit.py
-final_audit.py
-precision_audit.py
-auto_audit.py
-slow_audit.py
-universal_stress_test.py
-migrate_to_pinecone.py
-cloud_ingest.py
-cloud_ingest_pro.py
-
-# Raw Data (Already in Cloud)
-data_crawl_agentfactory/
-bm25_cache.pkl
-
-# Extra data and backups
-data_crawl_agentfactory2/
-db_backup_20260303_015419/
-data/
-db/
-schemas/
-tasks/
-*.log
-*.json
-
+.gemini/
