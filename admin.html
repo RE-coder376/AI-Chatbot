@@ -156,7 +156,35 @@
     </div>
   </div>
 
-  <!-- 2. Branding -->
+  <!-- 2. Operations & Contact -->
+  <div class="card" id="card-ops">
+    <div class="card-header" onclick="toggle('ops')"><h2>🕒 Operations & Contact Settings</h2><div class="card-arrow">▼</div></div>
+    <div class="card-body">
+      <div class="grid-2">
+        <div><label>Primary Contact Email</label><input type="text" id="ops-email" placeholder="support@company.com"/></div>
+        <div><label>WhatsApp Number</label><input type="text" id="ops-whatsapp" placeholder="+1234567890"/></div>
+      </div>
+      <label>Async Contact URL (Lead Form/Calendar)</label>
+      <input type="text" id="ops-async-url" placeholder="https://calendly.com/your-team"/>
+      
+      <label style="margin-top:24px;">Weekly Business Hours (UTC)</label>
+      <div style="background:#f8fafc; padding:20px; border-radius:16px; border:1.5px solid var(--border);">
+        <div class="grid-2" style="gap:20px; margin-bottom:15px; align-items:center;">
+          <div style="font-size:12px; font-weight:800; color:var(--text-main);">📅 MONDAY - FRIDAY</div>
+          <div style="display:flex; gap:10px;"><input type="text" id="ops-hours-weekday-start" placeholder="09:00" style="padding:8px;"/><input type="text" id="ops-hours-weekday-end" placeholder="17:00" style="padding:8px;"/></div>
+        </div>
+        <div class="grid-2" style="gap:20px; align-items:center;">
+          <div style="font-size:12px; font-weight:800; color:var(--text-main);">🏖️ SATURDAY - SUNDAY</div>
+          <div style="display:flex; gap:10px;"><input type="text" id="ops-hours-weekend-start" placeholder="Closed" style="padding:8px;"/><input type="text" id="ops-hours-weekend-end" placeholder="Closed" style="padding:8px;"/></div>
+        </div>
+      </div>
+
+      <div class="grid-2"><button class="secondary" onclick="loadOps()">🔄 Load Current</button><button onclick="saveOps()">🚀 Save Operational Settings</button></div>
+      <div id="ops-status" class="status-msg"></div>
+    </div>
+  </div>
+
+  <!-- 3. Branding -->
   <div class="card" id="card-brand">
     <div class="card-header" onclick="toggle('brand')"><h2>🎨 Full UI & Branding Suite</h2><div class="card-arrow">▼</div></div>
     <div class="card-body">
@@ -194,8 +222,21 @@
 
       <label>Visual Live Preview</label>
       <div id="brand-preview">
-        <div id="prev-header" style="background:var(--primary); color:white;"><span id="prev-emoji" style="font-size:24px;">🤖</span><div><div id="prev-title" style="font-weight:800; font-size:14px;">Support</div><div id="prev-subtitle" style="font-size:11px; opacity:0.8;">Online</div></div></div>
-        <div style="padding:16px; background:#f8fafc;"><div id="prev-bubble" style="background:#f1f5f9; padding:10px; border-radius:12px; font-size:12px;">Hi!</div></div>
+        <div id="prev-header" style="background:var(--primary); color:white; display:flex; align-items:center; gap:12px; padding:16px;">
+          <span id="prev-logo" style="font-size:24px;">🤖</span>
+          <div>
+            <div id="prev-title" style="font-weight:800; font-size:14px;">Support</div>
+            <div id="prev-subtitle" style="font-size:11px; opacity:0.8;">Online</div>
+          </div>
+        </div>
+        <div style="padding:16px; background:#f8fafc; height:180px; display:flex; flex-direction:column; gap:12px; overflow:hidden;">
+          <div id="prev-bot-bubble" style="background:#f1f5f9; padding:10px 14px; border-radius:12px; font-size:12px; align-self:flex-start; max-width:80%;">Hi! How can I help?</div>
+          <div id="prev-user-bubble" style="background:var(--primary); color:white; padding:10px 14px; border-radius:12px; font-size:12px; align-self:flex-end; max-width:80%;">I have a question.</div>
+        </div>
+        <div style="padding:12px; background:white; border-top:1px solid var(--border); display:flex; gap:10px;">
+          <div id="prev-input" style="flex:1; height:34px; background:#f1f5f9; border-radius:10px; border:1.5px solid var(--border); padding:8px; font-size:11px; color:var(--text-muted);">Type here...</div>
+          <div style="width:34px; height:34px; background:var(--primary); border-radius:10px; display:flex; align-items:center; justify-content:center; color:white; font-size:14px;">🚀</div>
+        </div>
       </div>
       <div class="grid-2"><button class="secondary" onclick="loadBranding()">🔄 Load Current</button><button onclick="saveBranding()">🚀 Push Branding</button></div>
       <div id="brand-status" class="status-msg"></div>
@@ -237,12 +278,16 @@
         <span style="font-size:10px; font-weight:800; color:var(--text-muted); text-transform:uppercase;">Target Destination</span>
         <div style="font-weight:800; color:var(--primary); font-size:14px;" id="active-ingest-db">Loading...</div>
       </div>
+      <div style="background:#fef9c3; border:1.5px solid #fde68a; border-radius:12px; padding:14px; margin-bottom:8px; display:flex; justify-content:space-between; align-items:center; gap:16px;">
+        <div style="font-size:12px; color:#92400e; line-height:1.5;"><strong>Rebuild with BGE (768-dim)</strong><br>Converts this DB from legacy 384-dim to fast BGE. Run once — no data is lost.</div>
+        <button onclick="reindexDb()" style="width:auto; margin:0; padding:10px 20px; background:#d97706; white-space:nowrap;">⚡ Rebuild Index</button>
+      </div>
+      <div id="ingest-status" class="status-msg" style="margin-bottom:16px;"></div>
       <label>Direct Text Addition</label><textarea id="content" placeholder="Paste data here..." style="height:150px;"></textarea>
       <button onclick="updateText()">📥 Ingest Text</button>
       <div style="margin-top:24px; border-top:1px solid var(--border); padding-top:24px;">
         <label>Document Upload (PDF/TXT)</label><input type="file" id="file-input" accept=".txt,.pdf"/><button onclick="uploadFile()" class="secondary">📤 Upload Docs</button>
       </div>
-      <div id="ingest-status" class="status-msg"></div>
     </div>
   </div>
 
@@ -288,31 +333,87 @@
     </div>
   </div>
 
+  <!-- 7. Embed Widget -->
+  <div class="card" id="card-embed">
+    <div class="card-header" onclick="toggle('embed')"><h2>📦 Embed on Your Website</h2><div class="card-arrow">▼</div></div>
+    <div class="card-body">
+      <p style="font-size:13px; color:var(--text-muted); margin-bottom:20px;">Add this bot to <strong>any website</strong> with a single line of code. Paste the snippet before <code style="background:#f1f5f9;padding:2px 6px;border-radius:4px;">&lt;/body&gt;</code> on any page.</p>
+
+      <label>Your Embed Snippet</label>
+      <div style="position:relative;">
+        <textarea id="embed-snippet" readonly style="font-family:monospace; font-size:12px; background:#1e293b; color:#f8fafc; border-radius:12px; padding:16px 60px 16px 16px; height:80px; resize:none; border:none; width:100%; line-height:1.6;"></textarea>
+        <button onclick="copyEmbed()" style="position:absolute; top:10px; right:10px; width:auto; padding:6px 14px; margin:0; font-size:11px; background:var(--primary);">Copy</button>
+      </div>
+
+      <div style="background:#f0fdf4; border:1.5px solid #86efac; border-radius:12px; padding:14px; margin-top:16px; font-size:12px; color:#166534; line-height:1.7;">
+        <strong>How it works:</strong><br>
+        1. Copy the snippet above<br>
+        2. Paste it into any HTML page before &lt;/body&gt;<br>
+        3. A floating chat button appears — customers can click it to chat<br>
+        4. Works on WordPress, Webflow, Shopify, plain HTML — anywhere
+      </div>
+
+      <div style="margin-top:16px; display:flex; gap:10px; flex-wrap:wrap;">
+        <button onclick="loadEmbedCode()" class="secondary" style="margin:0; width:auto;">🔄 Refresh Snippet</button>
+      </div>
+      <div id="embed-status" class="status-msg"></div>
+    </div>
+  </div>
+
   <button class="danger secondary" onclick="clearDraft()" style="margin-top:40px; color:#ef4444;">🗑️ Reset System Draft Cache</button>
 </div>
 
 <script>
-  const API = (window.location.origin.includes('localhost') || window.location.origin.includes('127.0.0.1')) ? 'http://127.0.0.1:8000' : window.location.origin;
+  const API = window.location.origin;
   let feedbackChart = null;
 
-  function showStatus(id, msg, type) { const el = document.getElementById(id + '-status'); if (!el) return; el.textContent = msg; el.className = 'status-msg status-' + type; if (type !== 'loading') setTimeout(() => { el.style.display = 'none'; }, 5000); }
+  function showStatus(id, msg, type, persistent = false) { 
+    const el = document.getElementById(id + '-status'); 
+    if (!el) return; 
+    el.textContent = msg; 
+    el.className = 'status-msg status-' + type; 
+    el.style.display = 'block'; 
+    if (el._timeout) clearTimeout(el._timeout);
+    if (type !== 'loading' && !persistent) {
+      el._timeout = setTimeout(() => { el.style.display = 'none'; }, 8000); 
+    }
+  }
 
   function unlockSystem() {
     const pass = document.getElementById('master-pass').value;
     if (!pass) return showStatus('auth', 'Password required.', 'error');
     showStatus('auth', 'Authenticating...', 'loading');
-    fetch(`${API}/admin/branding?password=${encodeURIComponent(pass)}`).then(r => r.json()).then(data => {
-      if (data.error) showStatus('auth', 'Denied.', 'error');
-      else { document.body.classList.remove('locked'); showStatus('auth', 'System Active', 'success'); loadServerData(data); loadDatabases(); }
+    fetch(`${API}/admin/branding?password=${encodeURIComponent(pass)}`).then(async r => {
+      if (!r.ok) { localStorage.removeItem('adminPass'); showStatus('auth', 'Denied.', 'error'); return; }
+      const data = await r.json();
+      localStorage.setItem('adminPass', pass);
+      document.body.classList.remove('locked');
+      showStatus('auth', 'System Active', 'success');
+      loadServerData(data);
+      loadOpsData(data.config_full || data);
+      loadDatabases();
+      loadEmbedCode();
     }).catch(() => showStatus('auth', 'Failed.', 'error'));
   }
+
+  // Auto-login on page load if password was saved
+  document.addEventListener('DOMContentLoaded', () => {
+    const saved = localStorage.getItem('adminPass');
+    if (saved) {
+      document.getElementById('master-pass').value = saved;
+      unlockSystem();
+    }
+  });
 
   function toggle(id) {
     if (document.body.classList.contains('locked')) return;
     const card = document.getElementById('card-' + id); card.classList.toggle('open');
     if (card.classList.contains('open')) {
-      if (id === 'db') loadDatabases();
+      if (id === 'db')    loadDatabases();
       if (id === 'stats') loadAnalytics();
+      if (id === 'embed') loadEmbedCode();
+      if (id === 'brand') loadBranding();
+      if (id === 'ops')   loadOps();
     }
   }
 
@@ -405,18 +506,111 @@
 
   function expandDb(name) { document.getElementById('db-' + name).classList.toggle('expanded'); }
   async function setActiveDb(name) { const pass = document.getElementById('master-pass').value; const f = new FormData(); f.append("password", pass); f.append("name", name); await fetch(`${API}/admin/databases/set-active`, { method:"POST", body:f }); loadDatabases(); }
-  async function createDb() { const pass = document.getElementById('master-pass').value; const name = document.getElementById('new-db-name').value; const f = new FormData(); f.append("password", pass); f.append("name", name); await fetch(`${API}/admin/databases/create`, { method:"POST", body:f }); loadDatabases(); }
-  async function deleteDb(name) { if (!confirm(`Delete ${name}?`)) return; const pass = document.getElementById('master-pass').value; const f = new FormData(); f.append("password", pass); f.append("name", name); await fetch(`${API}/admin/databases/delete`, { method:"POST", body:f }); loadDatabases(); }
+  async function createDb() { const pass = document.getElementById('master-pass').value; const name = document.getElementById('new-db-name').value; const f = new FormData(); f.append("password", pass); f.append("name", name); await fetch(`${API}/admin/create-db`, { method:"POST", body:f }); loadDatabases(); }
+  async function deleteDb(name) { if (!confirm(`Delete ${name}?`)) return; const pass = document.getElementById('master-pass').value; const f = new FormData(); f.append("password", pass); f.append("name", name); await fetch(`${API}/admin/delete-db`, { method:"POST", body:f }); loadDatabases(); }
+
+  async function loadBranding() {
+    const pass = document.getElementById('master-pass').value;
+    showStatus('brand', 'Fetching current branding...', 'loading');
+    try {
+      const res = await fetch(`${API}/admin/branding?password=${encodeURIComponent(pass)}`);
+      const d = await res.json();
+      loadServerData(d);
+      showStatus('brand', 'Current branding loaded.', 'success');
+    } catch (e) {
+      showStatus('brand', 'Failed to load branding.', 'error');
+    }
+  }
+
+  async function saveOps() {
+    const pass = document.getElementById('master-pass').value;
+    const payload = {
+      password: pass,
+      contact_email: document.getElementById('ops-email').value,
+      whatsapp_number: document.getElementById('ops-whatsapp').value,
+      async_contact_url: document.getElementById('ops-async-url').value,
+      hours: {
+        weekday: { start: document.getElementById('ops-hours-weekday-start').value, end: document.getElementById('ops-hours-weekday-end').value },
+        weekend: { start: document.getElementById('ops-hours-weekend-start').value, end: document.getElementById('ops-hours-weekend-end').value }
+      }
+    };
+    showStatus('ops', 'Saving operations...', 'loading');
+    const res = await fetch(`${API}/admin/ops`, { 
+      method:"POST", 
+      headers:{"Content-Type":"application/json"}, 
+      body:JSON.stringify(payload) 
+    });
+    const d = await res.json();
+    showStatus('ops', d.message || d.error, d.success ? 'success' : 'error');
+  }
+
+  function loadOpsData(cfg) {
+    document.getElementById('ops-email').value = cfg.contact_email || "";
+    document.getElementById('ops-whatsapp').value = cfg.whatsapp_number || "";
+    document.getElementById('ops-async-url').value = cfg.async_contact_url || "";
+    const h = cfg.hours || { weekday:{}, weekend:{} };
+    document.getElementById('ops-hours-weekday-start').value = h.weekday.start || "09:00";
+    document.getElementById('ops-hours-weekday-end').value = h.weekday.end || "17:00";
+    document.getElementById('ops-hours-weekend-start').value = h.weekend.start || "Closed";
+    document.getElementById('ops-hours-weekend-end').value = h.weekend.end || "Closed";
+  }
+
+  async function loadOps() {
+    const pass = document.getElementById('master-pass').value;
+    showStatus('ops', 'Fetching settings...', 'loading');
+    try {
+      const res = await fetch(`${API}/admin/branding?password=${encodeURIComponent(pass)}`);
+      const d = await res.json();
+      loadOpsData(d.config_full || d);
+      showStatus('ops', 'Operations loaded.', 'success');
+    } catch (e) {
+      showStatus('ops', 'Failed to load operations.', 'error');
+    }
+  }
 
   async function saveBranding() {
     const pass = document.getElementById('master-pass').value;
-    const payload = { password: pass, bot_name: document.getElementById("b-bot-name").value, business_name: document.getElementById("b-biz-name").value, branding: { welcome_message: document.getElementById("b-welcome").value, primary_color: document.getElementById("b-primary-hex").value, bot_bubble_color: document.getElementById("b-bot-bubble-hex").value, header_title: document.getElementById("b-header-title").value, header_subtitle: document.getElementById("b-header-subtitle").value, logo_emoji: document.getElementById("b-logo-emoji").value, logo_url: document.getElementById("b-logo-url").value, input_placeholder: document.getElementById("b-placeholder").value, page_title: document.getElementById("b-page-title").value, font_style: document.getElementById("b-font-style").value, secondary_color: document.getElementById("b-secondary-hex").value, user_bubble_color: document.getElementById("b-user-bubble-hex").value } };
+    const payload = { 
+      password: pass, 
+      bot_name: document.getElementById("b-bot-name").value, 
+      business_name: document.getElementById("b-biz-name").value, 
+      branding: { 
+        welcome_message: document.getElementById("b-welcome").value, 
+        primary_color: document.getElementById("b-primary-hex").value, 
+        bot_bubble_color: document.getElementById("b-bot-bubble-hex").value, 
+        header_title: document.getElementById("b-header-title").value, 
+        header_subtitle: document.getElementById("b-header-subtitle").value, 
+        logo_emoji: document.getElementById("b-logo-emoji").value, 
+        logo_url: document.getElementById("b-logo-url").value, 
+        input_placeholder: document.getElementById("b-placeholder").value, 
+        page_title: document.getElementById("b-page-title").value, 
+        font_style: document.getElementById("b-font-style").value, 
+        secondary_color: document.getElementById("b-secondary-hex").value, 
+        user_bubble_color: document.getElementById("b-user-bubble-hex").value 
+      } 
+    };
     showStatus('brand', 'Pushing Changes...', 'loading');
     const res = await fetch(`${API}/admin/branding`, { method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(payload) });
     const d = await res.json(); showStatus('brand', d.message || d.error, d.success ? 'success' : 'error');
   }
 
-  function updatePreview() { const primary = document.getElementById("b-primary-hex").value; document.getElementById("prev-header").style.background = primary; document.getElementById("prev-bubble").style.background = document.getElementById("b-bot-bubble-hex").value; }
+  function updatePreview() {
+    const primary = document.getElementById("b-primary-hex").value;
+    const botBubble = document.getElementById("b-bot-bubble-hex").value;
+    const userBubble = document.getElementById("b-user-bubble-hex").value;
+    const emoji = document.getElementById("b-logo-emoji").value;
+    const title = document.getElementById("b-header-title").value;
+    const subtitle = document.getElementById("b-header-subtitle").value;
+    const placeholder = document.getElementById("b-placeholder").value;
+
+    document.getElementById("prev-header").style.background = primary;
+    document.getElementById("prev-bot-bubble").style.background = botBubble;
+    document.getElementById("prev-user-bubble").style.background = userBubble;
+    document.getElementById("prev-logo").textContent = emoji || "🤖";
+    document.getElementById("prev-title").textContent = title || "Support";
+    document.getElementById("prev-subtitle").textContent = subtitle || "Online";
+    document.getElementById("prev-input").textContent = placeholder || "Type here...";
+  }
   document.addEventListener("input", (e) => { if (e.target.id && e.target.type !== "password") updatePreview(); });
 
   // --- BEHAVIORAL SUITE LOGIC ---
@@ -470,16 +664,24 @@
     const pass = document.getElementById('master-pass').value;
     showStatus('tests', 'Watchdog initializing repairs...', 'loading');
     
-    // Simulate smart repair process
-    setTimeout(() => {
-      document.getElementById('healer-report').style.display = 'block';
-      document.getElementById('healer-actions').innerHTML = `
-        <li>Synchronized Knowledge Base (Dimension Match active)</li>
-        <li>Refreshed API Key Handshake</li>
-        <li>Verified Identity Branding integrity</li>
-      `;
-      showStatus('tests', 'Repairs completed.', 'success');
-    }, 2000);
+    try {
+      const res = await fetch(`${API}/admin/healer/trigger`, {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({ password: pass })
+      });
+      const data = await res.json();
+      
+      if (data.success) {
+        document.getElementById('healer-report').style.display = 'block';
+        document.getElementById('healer-actions').innerHTML = (data.repairs || []).map(r => `<li>${r}</li>`).join('');
+        showStatus('tests', 'Watchdog repairs completed.', 'success');
+      } else {
+        showStatus('tests', 'Watchdog failed to initialize.', 'error');
+      }
+    } catch (e) {
+      showStatus('tests', 'Healer connection error.', 'error');
+    }
   }
 
   function openHealerChat() {
@@ -518,6 +720,173 @@
         addWatchdogMsg("Systems are currently stable at 100% accuracy. No further action required.");
       }
     }, 800);
+  }
+
+  async function loadEmbedCode() {
+    const pass = document.getElementById('master-pass').value;
+    if (!pass) return;
+    try {
+      const res  = await fetch(`${API}/admin/embed-code?password=${encodeURIComponent(pass)}`);
+      const data = await res.json();
+      if (data.snippet) {
+        document.getElementById('embed-snippet').value = data.snippet;
+        showStatus('embed', 'Snippet ready.', 'success');
+      }
+    } catch (e) {
+      showStatus('embed', 'Failed to load snippet.', 'error');
+    }
+  }
+
+  function copyEmbed() {
+    const el = document.getElementById('embed-snippet');
+    if (!el || !el.value) return showStatus('embed', 'Load snippet first.', 'error');
+    navigator.clipboard.writeText(el.value)
+      .then(() => showStatus('embed', 'Copied to clipboard!', 'success'))
+      .catch(() => { el.select(); document.execCommand('copy'); showStatus('embed', 'Copied!', 'success'); });
+  }
+
+  async function updateText() {
+    const pass = document.getElementById('master-pass').value;
+    const text = document.getElementById('content').value.trim();
+    if (!text) return showStatus('ingest', 'No text entered.', 'error');
+    showStatus('ingest', 'Ingesting text...', 'loading');
+    try {
+      const f = new FormData();
+      f.append('password', pass);
+      f.append('text', text);
+      const res = await fetch(`${API}/admin/ingest/text`, { method: 'POST', body: f });
+      const d = await res.json();
+      if (d.success) { document.getElementById('content').value = ''; showStatus('ingest', d.message || 'Ingested.', 'success'); }
+      else showStatus('ingest', d.detail || 'Ingestion failed.', 'error');
+    } catch (e) { showStatus('ingest', 'Connection error.', 'error'); }
+  }
+
+  async function uploadFile() {
+    const pass = document.getElementById('master-pass').value;
+    const fileInput = document.getElementById('file-input');
+    if (!fileInput.files.length) return showStatus('ingest', 'No file selected.', 'error');
+    showStatus('ingest', 'Uploading...', 'loading');
+    try {
+      const f = new FormData();
+      f.append('password', pass);
+      for (const file of fileInput.files) f.append('files', file);
+      const res = await fetch(`${API}/admin/ingest/files`, { method: 'POST', body: f });
+      const d = await res.json();
+      if (d.success) { fileInput.value = ''; showStatus('ingest', d.message || 'Uploaded.', 'success'); }
+      else showStatus('ingest', d.detail || 'Upload failed.', 'error');
+    } catch (e) { showStatus('ingest', 'Connection error.', 'error'); }
+  }
+
+  async function reindexDb() {
+    const pass = document.getElementById('master-pass').value;
+
+    // Step 1: get chunk count from health for time estimate
+    let chunks = 0;
+    try { const h = await fetch(`${API}/health`); const hd = await h.json(); chunks = hd.docs_indexed || 0; } catch(_) {}
+    const estMins = chunks > 0 ? Math.ceil(chunks / 1500) : 5;
+
+    showStatus('ingest', `⏳ Reindexing ${chunks.toLocaleString()} chunks with BGE… estimated ${estMins}–${estMins + 2} minutes. Keep this tab open.`, 'loading', true);
+
+    // Elapsed timer
+    const statusEl = document.getElementById('ingest-status');
+    const start = Date.now();
+    const timer = setInterval(() => {
+      const elapsed = Math.floor((Date.now() - start) / 1000);
+      const m = Math.floor(elapsed / 60), s = elapsed % 60;
+      statusEl.textContent = `⏳ Reindexing ${chunks.toLocaleString()} chunks… ${m}m ${s}s elapsed (est. ${estMins}–${estMins + 2} min total). Keep this tab open.`;
+    }, 1000);
+
+    try {
+      const res = await fetch(`${API}/admin/reindex`, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ password: pass })
+      });
+      clearInterval(timer);
+      const d = await res.json();
+      const elapsed = Math.floor((Date.now() - start) / 1000);
+      const m = Math.floor(elapsed / 60), s = elapsed % 60;
+      if (d.success) {
+        showStatus('ingest', `✅ Done in ${m}m ${s}s — ${d.message || 'Reindex complete. Startup is now ~30s.'}`, 'success', true);
+      } else {
+        showStatus('ingest', `❌ Failed after ${m}m ${s}s — ${d.detail || 'Reindex error.'}`, 'error', true);
+      }
+    } catch (e) {
+      clearInterval(timer);
+      showStatus('ingest', '❌ Connection lost during reindex.', 'error', true);
+    }
+  }
+
+  function inspectSite() {
+    const url = document.getElementById('crawl-url').value.trim();
+    if (!url) return showStatus('crawl', 'Enter a URL first.', 'error');
+    showStatus('crawl', 'Crawl starting directly...', 'loading');
+    crawlSite();
+  }
+
+  async function crawlSite() {
+    const pass = document.getElementById('master-pass').value;
+    const url = document.getElementById('crawl-url').value.trim();
+    const db_name = document.getElementById('crawl-db-name').value.trim();
+    
+    if (!url || !db_name) return showStatus('crawl', 'URL and DB name required.', 'error');
+    
+    showStatus('crawl', 'Starting crawl engine...', 'loading', true);
+    const statusEl = document.getElementById('crawl-status');
+    statusEl.innerHTML = '<div style="margin-bottom:10px;">🚀 Initializing...</div><div id="crawl-logs" style="font-family:monospace; font-size:10px; background:#1e293b; color:#86efac; padding:12px; border-radius:12px; max-height:200px; overflow-y:auto; line-height:1.4;"></div>';
+    const logsEl = document.getElementById('crawl-logs');
+
+    try {
+      const response = await fetch(`${API}/admin/crawl`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ password: pass, url, db_name, max_pages: 100 })
+      });
+
+      if (!response.ok) {
+        const err = await response.json();
+        showStatus('crawl', err.detail || 'Crawl failed.', 'error');
+        return;
+      }
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        
+        const chunk = decoder.decode(value);
+        const lines = chunk.split('\n');
+        
+        for (const line of lines) {
+          if (line.startsWith('data: ')) {
+            try {
+              const data = JSON.parse(line.substring(6));
+              if (data.msg) {
+                const log = document.createElement('div');
+                log.textContent = `> ${data.msg}`;
+                logsEl.appendChild(log);
+                logsEl.scrollTop = logsEl.scrollHeight;
+                statusEl.firstChild.textContent = `⚙️ ${data.msg}`;
+              }
+              if (data.done) {
+                showStatus('crawl', '✅ Crawl & Ingestion Complete!', 'success', true);
+                loadDatabases(); // Refresh DB list
+              }
+            } catch (e) {}
+          }
+        }
+      }
+    } catch (e) {
+      showStatus('crawl', '❌ Connection lost during crawl.', 'error');
+    }
+  }
+
+  function clearDraft() {
+    if (!confirm('Clear all local draft cache?')) return;
+    Object.keys(localStorage).filter(k => k.startsWith('draft_') || k === 'chat_draft').forEach(k => localStorage.removeItem(k));
+    showStatus('auth', 'Local draft cache cleared.', 'success');
   }
 
   function endHealerSession() {
