@@ -2,8 +2,12 @@ fastapi
 uvicorn
 python-dotenv
 langchain-groq
-langchain-pinecone
+langchain-chroma
+langchain-community
+sentence-transformers
 pinecone-client
-pinecone-plugin-inference
+httpx
+pypdf
+beautifulsoup4
 requests
-aiohttp
+python-multipart

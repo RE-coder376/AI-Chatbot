@@ -235,17 +235,17 @@
     contactEmail    = cfg.contact_email    || '';
     contactWhatsApp = cfg.whatsapp_number  || '';
     const b = cfg.branding || {};
-    const p = b.primary_color   || '#6366f1';
-    const s = b.secondary_color || '#4f46e5';
+    const p = b.primary_color   || cfg.primary_color   || '#6366f1';
+    const s = b.secondary_color || cfg.secondary_color || '#4f46e5';
     document.documentElement.style.setProperty('--primary',   p);
     document.documentElement.style.setProperty('--secondary', s);
     document.documentElement.style.setProperty('--gradient',  `linear-gradient(135deg, ${p}, ${s})`);
-    if (b.bot_bubble_color)  document.documentElement.style.setProperty('--bubble-bot',  b.bot_bubble_color);
-    if (b.user_bubble_color) document.documentElement.style.setProperty('--bubble-user', b.user_bubble_color);
-    document.getElementById('h-title').textContent    = b.header_title    || 'Support';
-    document.getElementById('h-sub').textContent      = b.header_subtitle || 'Ready to assist';
-    document.getElementById('welcome-msg').textContent = b.welcome_message || 'Hi! How can I help you today?';
-    if (b.logo_emoji) document.getElementById('h-avatar').textContent = b.logo_emoji;
+    if (b.bot_bubble_color || cfg.bot_bubble_color)  document.documentElement.style.setProperty('--bubble-bot',  b.bot_bubble_color || cfg.bot_bubble_color);
+    if (b.user_bubble_color || cfg.user_bubble_color) document.documentElement.style.setProperty('--bubble-user', b.user_bubble_color || cfg.user_bubble_color);
+    document.getElementById('h-title').textContent    = cfg.header_title    || b.header_title    || 'Support';
+    document.getElementById('h-sub').textContent      = cfg.header_subtitle || b.header_subtitle || 'Ready to assist';
+    document.getElementById('welcome-msg').textContent = cfg.welcome_message || b.welcome_message || 'Hi! How can I help you today?';
+    if (cfg.logo_emoji || b.logo_emoji) document.getElementById('h-avatar').textContent = cfg.logo_emoji || b.logo_emoji;
   }).catch(() => {});
 
   inputEl.addEventListener('keypress', e => { if (e.key === 'Enter') sendMessage(); });
@@ -309,7 +309,6 @@
             }
             fullAnswer += data.content;
             bubble.innerHTML = marked.parse(fullAnswer);
-            messagesEl.scrollTop = messagesEl.scrollHeight;
           } else if (data.type === 'metadata') {
             if (data.capture_lead) showLeadBox();
           } else if (data.type === 'suggestions') {

@@ -168,7 +168,11 @@
       <input type="text" id="ops-async-url" placeholder="https://calendly.com/your-team"/>
       
       <label style="margin-top:24px;">Weekly Business Hours (UTC)</label>
-      <div style="background:#f8fafc; padding:20px; border-radius:16px; border:1.5px solid var(--border);">
+      <div style="display:flex; align-items:center; gap:10px; margin-bottom:12px;">
+        <input type="checkbox" id="ops-always-open" onchange="toggleAlwaysOpen(this.checked)" style="width:18px; height:18px; cursor:pointer;"/>
+        <label for="ops-always-open" style="margin:0; font-weight:700; cursor:pointer;">Open 24/7 (always available)</label>
+      </div>
+      <div id="ops-hours-fields" style="background:#f8fafc; padding:20px; border-radius:16px; border:1.5px solid var(--border);">
         <div class="grid-2" style="gap:20px; margin-bottom:15px; align-items:center;">
           <div style="font-size:12px; font-weight:800; color:var(--text-main);">📅 MONDAY - FRIDAY</div>
           <div style="display:flex; gap:10px;"><input type="text" id="ops-hours-weekday-start" placeholder="09:00" style="padding:8px;"/><input type="text" id="ops-hours-weekday-end" placeholder="17:00" style="padding:8px;"/></div>
@@ -274,24 +278,45 @@
   <div class="card" id="card-ingest">
     <div class="card-header" onclick="toggle('ingest')"><h2>🧠 Knowledge Ingestion Suite</h2><div class="card-arrow">▼</div></div>
     <div class="card-body">
-      <div style="background:#f1f5f9; padding:12px; border-radius:12px; margin-bottom:20px; border:1px solid var(--border);">
-        <span style="font-size:10px; font-weight:800; color:var(--text-muted); text-transform:uppercase;">Target Destination</span>
-        <div style="font-weight:800; color:var(--primary); font-size:14px;" id="active-ingest-db">Loading...</div>
+      <div style="display:flex; justify-content:space-between; align-items:center; gap:16px; background:#f1f5f9; padding:12px 16px; border-radius:12px; margin-bottom:20px; border:1px solid var(--border);">
+        <div>
+          <span style="font-size:10px; font-weight:800; color:var(--text-muted); text-transform:uppercase;">Target DB</span>
+          <div style="font-weight:800; color:var(--primary); font-size:13px;" id="active-ingest-db">Loading...</div>
+        </div>
+        <div style="display:flex; align-items:center; gap:8px;">
+          <label style="margin:0; font-size:11px; font-weight:700; color:var(--text-muted); white-space:nowrap;">Ingest into:</label>
+          <select id="ingest-target-db" style="padding:6px 10px; border-radius:8px; border:1.5px solid var(--border); font-size:12px; font-weight:700; color:var(--text-main); background:#fff; cursor:pointer; min-width:130px;">
+            <option value="">— Active DB —</option>
+          </select>
+        </div>
       </div>
       <div style="background:#fef9c3; border:1.5px solid #fde68a; border-radius:12px; padding:14px; margin-bottom:8px; display:flex; justify-content:space-between; align-items:center; gap:16px;">
-        <div style="font-size:12px; color:#92400e; line-height:1.5;"><strong>Rebuild with BGE (768-dim)</strong><br>Converts this DB from legacy 384-dim to fast BGE. Run once — no data is lost.</div>
+        <div style="font-size:12px; color:#92400e; line-height:1.5;"><strong>Rebuild with BGE (768-dim)</strong><br>Converts selected DB from legacy 384-dim to fast BGE. Run once — no data is lost.</div>
         <button onclick="reindexDb()" style="width:auto; margin:0; padding:10px 20px; background:#d97706; white-space:nowrap;">⚡ Rebuild Index</button>
       </div>
       <div id="ingest-status" class="status-msg" style="margin-bottom:16px;"></div>
       <label>Direct Text Addition</label><textarea id="content" placeholder="Paste data here..." style="height:150px;"></textarea>
       <button onclick="updateText()">📥 Ingest Text</button>
       <div style="margin-top:24px; border-top:1px solid var(--border); padding-top:24px;">
-        <label>Document Upload (PDF/TXT)</label><input type="file" id="file-input" accept=".txt,.pdf"/><button onclick="uploadFile()" class="secondary">📤 Upload Docs</button>
+        <label>Document Upload (PDF/TXT)</label><input type="file" id="file-input" accept=".txt,.pdf" multiple/><button onclick="uploadFile()" class="secondary">📤 Upload Docs</button>
       </div>
     </div>
   </div>
 
-  <!-- 6. Behavioral Suite -->
+  <!-- 6. FAQ Manager -->
+  <div class="card" id="card-faq">
+    <div class="card-header" onclick="toggle('faq')"><h2>💬 FAQ Manager</h2><div class="card-arrow">▼</div></div>
+    <div class="card-body">
+      <p style="color:var(--text-muted);font-size:13px;margin-bottom:16px;">Manually add Q&amp;A pairs the bot can always answer — even if they're not on the website. These get embedded directly into the active DB.</p>
+      <input type="text" id="faq-q" placeholder="Question e.g. Is this for beginners?" style="margin-bottom:8px;"/>
+      <textarea id="faq-a" placeholder="Answer..." style="height:80px;margin-bottom:8px;"></textarea>
+      <button onclick="addFaq()">➕ Add FAQ</button>
+      <div id="faq-status" class="status-msg" style="margin:8px 0;"></div>
+      <div id="faq-list" style="margin-top:16px;"></div>
+    </div>
+  </div>
+
+  <!-- 7. Behavioral Suite -->
   <div class="card" id="card-tests">
     <div class="card-header" onclick="toggle('tests')"><h2>🛡️ Production Behavioral Suite</h2><div class="card-arrow">▼</div></div>
     <div class="card-body">
@@ -467,6 +492,12 @@
     if (activeDb) {
       document.getElementById('active-ingest-db').textContent = activeDb.name;
     }
+    // Populate ingest target dropdown
+    const sel = document.getElementById('ingest-target-db');
+    const prev = sel.value;
+    sel.innerHTML = '<option value="">— Active DB —</option>' +
+      (data.databases || []).map(db => `<option value="${db.name}"${db.name===prev?' selected':''}>${db.name}${db.active?' ★':''}</option>`).join('');
+    if (prev) sel.value = prev;
     
     document.getElementById("db-list").innerHTML = (data.databases || []).map(db => `
       <div class="db-item ${db.active?'active':''}" id="db-${db.name}">
@@ -505,9 +536,54 @@
   });
 
   function expandDb(name) { document.getElementById('db-' + name).classList.toggle('expanded'); }
-  async function setActiveDb(name) { const pass = document.getElementById('master-pass').value; const f = new FormData(); f.append("password", pass); f.append("name", name); await fetch(`${API}/admin/databases/set-active`, { method:"POST", body:f }); loadDatabases(); }
-  async function createDb() { const pass = document.getElementById('master-pass').value; const name = document.getElementById('new-db-name').value; const f = new FormData(); f.append("password", pass); f.append("name", name); await fetch(`${API}/admin/create-db`, { method:"POST", body:f }); loadDatabases(); }
-  async function deleteDb(name) { if (!confirm(`Delete ${name}?`)) return; const pass = document.getElementById('master-pass').value; const f = new FormData(); f.append("password", pass); f.append("name", name); await fetch(`${API}/admin/delete-db`, { method:"POST", body:f }); loadDatabases(); }
+  function clearBrandingFields() {
+    ['b-bot-name','b-biz-name','b-header-title','b-header-subtitle','b-welcome',
+     'b-placeholder','b-page-title','b-logo-emoji','b-primary','b-secondary',
+     'b-bot-bubble','b-user-bubble'].forEach(id => {
+      const el = document.getElementById(id); if (el) el.value = '';
+    });
+    ['ops-email','ops-whatsapp','ops-async-url'].forEach(id => {
+      const el = document.getElementById(id); if (el) el.value = '';
+    });
+    document.getElementById('ops-always-open').checked = false;
+    toggleAlwaysOpen(false);
+  }
+
+  async function setActiveDb(name) {
+    const pass = document.getElementById('master-pass').value;
+    const f = new FormData(); f.append("password", pass); f.append("name", name);
+    showStatus('db', `Switching to ${name}...`, 'loading');
+    const res = await fetch(`${API}/admin/databases/set-active`, { method:"POST", body:f });
+    const d = await res.json();
+    showStatus('db', d.message || d.detail, d.success ? 'success' : 'error');
+    clearBrandingFields();
+    // Reload branding from the new active DB
+    const br = await fetch(`${API}/admin/branding?password=${encodeURIComponent(pass)}`);
+    if (br.ok) { const bd = await br.json(); loadServerData(bd); loadOpsData(bd); }
+    loadDatabases();
+  }
+  async function createDb() { 
+    const pass = document.getElementById('master-pass').value; 
+    const name = document.getElementById('new-db-name').value.trim(); 
+    if (!name) return showStatus('db', 'Name required.', 'error');
+    const f = new FormData(); f.append("password", pass); f.append("name", name); 
+    showStatus('db', `Initializing ${name}...`, 'loading');
+    const res = await fetch(`${API}/admin/create-db`, { method:"POST", body:f }); 
+    const d = await res.json();
+    if (d.success) document.getElementById('new-db-name').value = '';
+    showStatus('db', d.message || d.detail, d.success ? 'success' : 'error');
+    loadDatabases(); 
+  }
+  async function deleteDb(name) { 
+    if (!confirm(`Permanently delete ${name}?`)) return; 
+    const pass = document.getElementById('master-pass').value; 
+    const f = new FormData(); f.append("password", pass); f.append("name", name); 
+    showStatus('db', `Purging ${name}...`, 'loading');
+    const res = await fetch(`${API}/admin/delete-db`, { method:"POST", body:f }); 
+    const d = await res.json();
+    showStatus('db', d.message || d.detail, d.success ? 'success' : 'error');
+    loadDatabases(); 
+  }
 
   async function loadBranding() {
     const pass = document.getElementById('master-pass').value;
@@ -529,6 +605,7 @@
       contact_email: document.getElementById('ops-email').value,
       whatsapp_number: document.getElementById('ops-whatsapp').value,
       async_contact_url: document.getElementById('ops-async-url').value,
+      always_open: document.getElementById('ops-always-open').checked,
       hours: {
         weekday: { start: document.getElementById('ops-hours-weekday-start').value, end: document.getElementById('ops-hours-weekday-end').value },
         weekend: { start: document.getElementById('ops-hours-weekend-start').value, end: document.getElementById('ops-hours-weekend-end').value }
@@ -544,15 +621,22 @@
     showStatus('ops', d.message || d.error, d.success ? 'success' : 'error');
   }
 
+  function toggleAlwaysOpen(checked) {
+    document.getElementById('ops-hours-fields').style.display = checked ? 'none' : 'block';
+  }
+
   function loadOpsData(cfg) {
     document.getElementById('ops-email').value = cfg.contact_email || "";
     document.getElementById('ops-whatsapp').value = cfg.whatsapp_number || "";
     document.getElementById('ops-async-url').value = cfg.async_contact_url || "";
+    const always = cfg.always_open || false;
+    document.getElementById('ops-always-open').checked = always;
+    toggleAlwaysOpen(always);
     const h = cfg.hours || { weekday:{}, weekend:{} };
-    document.getElementById('ops-hours-weekday-start').value = h.weekday.start || "09:00";
-    document.getElementById('ops-hours-weekday-end').value = h.weekday.end || "17:00";
-    document.getElementById('ops-hours-weekend-start').value = h.weekend.start || "Closed";
-    document.getElementById('ops-hours-weekend-end').value = h.weekend.end || "Closed";
+    document.getElementById('ops-hours-weekday-start').value = h.weekday?.start || "09:00";
+    document.getElementById('ops-hours-weekday-end').value = h.weekday?.end || "17:00";
+    document.getElementById('ops-hours-weekend-start').value = h.weekend?.start || "Closed";
+    document.getElementById('ops-hours-weekend-end').value = h.weekend?.end || "Closed";
   }
 
   async function loadOps() {
@@ -612,6 +696,48 @@
     document.getElementById("prev-input").textContent = placeholder || "Type here...";
   }
   document.addEventListener("input", (e) => { if (e.target.id && e.target.type !== "password") updatePreview(); });
+
+  // --- FAQ MANAGER ---
+  async function loadFaqs() {
+    const pass = document.getElementById('master-pass').value;
+    if (!pass) return;
+    const d = await fetch(`/admin/faqs?password=${encodeURIComponent(pass)}`).then(r=>r.json()).catch(()=>({faqs:[]}));
+    const list = document.getElementById('faq-list');
+    if (!d.faqs || d.faqs.length === 0) { list.innerHTML = '<p style="color:var(--text-muted);font-size:13px;">No FAQs yet.</p>'; return; }
+    list.innerHTML = d.faqs.map(f => `
+      <div style="background:#f8fafc;border:1px solid var(--border);border-radius:10px;padding:12px;margin-bottom:8px;">
+        <div style="font-weight:700;margin-bottom:4px;">Q: ${f.question}</div>
+        <div style="color:var(--text-muted);font-size:13px;margin-bottom:8px;">A: ${f.answer}</div>
+        <button onclick="deleteFaq('${f.id}')" style="background:#ef4444;padding:4px 12px;font-size:12px;">🗑 Delete</button>
+      </div>`).join('');
+  }
+
+  async function addFaq() {
+    const pass = document.getElementById('master-pass').value;
+    const q = document.getElementById('faq-q').value.trim();
+    const a = document.getElementById('faq-a').value.trim();
+    if (!q || !a) return showStatus('faq', 'Both question and answer are required.', 'error');
+    showStatus('faq', 'Adding FAQ...', 'loading');
+    const d = await fetch('/admin/faqs', { method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({password: pass, question: q, answer: a}) }).then(r=>r.json());
+    if (d.success) {
+      document.getElementById('faq-q').value = '';
+      document.getElementById('faq-a').value = '';
+      showStatus('faq', 'FAQ added and embedded into DB.', 'success');
+      loadFaqs();
+    } else showStatus('faq', d.detail || 'Failed.', 'error');
+  }
+
+  async function deleteFaq(id) {
+    const pass = document.getElementById('master-pass').value;
+    await fetch(`/admin/faqs/${id}?password=${encodeURIComponent(pass)}`, {method:'DELETE'});
+    loadFaqs();
+  }
+
+  // Auto-load FAQs when section opens
+  document.getElementById('card-faq').querySelector('.card-header').addEventListener('click', () => {
+    setTimeout(loadFaqs, 100);
+  });
 
   // --- BEHAVIORAL SUITE LOGIC ---
   async function runAudit(type = 'all') {
@@ -745,16 +871,21 @@
       .catch(() => { el.select(); document.execCommand('copy'); showStatus('embed', 'Copied!', 'success'); });
   }
 
+  function getIngestTarget() {
+    return document.getElementById('ingest-target-db').value || '';
+  }
+
   async function updateText() {
     const pass = document.getElementById('master-pass').value;
     const text = document.getElementById('content').value.trim();
     if (!text) return showStatus('ingest', 'No text entered.', 'error');
     showStatus('ingest', 'Ingesting text...', 'loading');
     try {
-      const f = new FormData();
-      f.append('password', pass);
-      f.append('text', text);
-      const res = await fetch(`${API}/admin/ingest/text`, { method: 'POST', body: f });
+      const res = await fetch(`${API}/admin/ingest/text`, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ password: pass, text, target_db: getIngestTarget() })
+      });
       const d = await res.json();
       if (d.success) { document.getElementById('content').value = ''; showStatus('ingest', d.message || 'Ingested.', 'success'); }
       else showStatus('ingest', d.detail || 'Ingestion failed.', 'error');
@@ -769,6 +900,7 @@
     try {
       const f = new FormData();
       f.append('password', pass);
+      f.append('target_db', getIngestTarget());
       for (const file of fileInput.files) f.append('files', file);
       const res = await fetch(`${API}/admin/ingest/files`, { method: 'POST', body: f });
       const d = await res.json();
@@ -800,7 +932,7 @@
       const res = await fetch(`${API}/admin/reindex`, {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({ password: pass })
+        body: JSON.stringify({ password: pass, target_db: getIngestTarget() })
       });
       clearInterval(timer);
       const d = await res.json();
