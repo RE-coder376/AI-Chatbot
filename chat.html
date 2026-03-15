@@ -188,9 +188,15 @@
     }
     @keyframes slideUp { from { transform: translateY(20px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
     .lead-card p { font-size: 14px; font-weight: 600; color: #1e293b; margin-bottom: 14px; }
-    .lead-btn-group { display: flex; flex-direction: row; gap: 8px; }
+    .lead-form { display: flex; flex-direction: column; gap: 8px; }
+    .lead-input { 
+      width: 100%; padding: 10px; border: 1.5px solid #e2e8f0; border-radius: 10px; 
+      font-size: 13px; font-family: var(--font-family); transition: border-color 0.2s;
+    }
+    .lead-input:focus { outline: none; border-color: var(--primary); }
+    .lead-btn-group { display: flex; flex-direction: row; gap: 8px; flex-wrap: wrap; }
     .lead-btn {
-      flex: 1; padding: 11px 6px;
+      flex: 1; min-width: 100px; padding: 11px 6px;
       border-radius: 12px; border: none;
       font-weight: 700; font-size: 12px;
       cursor: pointer; transition: all 0.2s;
@@ -198,6 +204,7 @@
     }
     .btn-yes      { background: #6366f1; color: white; }
     .btn-no       { background: #f1f5f9; color: #64748b; }
+    .btn-submit   { background: var(--gradient); color: white; }
     .btn-email    { background: #6366f1; color: white; }
     .btn-whatsapp { background: #22c55e; color: white; }
     .btn-cancel   { background: #f1f5f9; color: #64748b; }
@@ -495,13 +502,52 @@
 
   function showLeadOptions(cardId) {
     document.getElementById(cardId).innerHTML = `
-      <p>How would you like to contact the team?</p>
-      <div class="lead-btn-group">
-        <button class="lead-btn btn-email" onclick="contact('email','${cardId}')">✉️ Email</button>
-        ${contactWhatsApp ? `<button class="lead-btn btn-whatsapp" onclick="contact('whatsapp','${cardId}')">💬 WhatsApp</button>` : ""}
-        <button class="lead-btn btn-cancel" onclick="document.getElementById('${cardId}').remove()">✕ Changed my mind</button>
+      <div class="lead-form">
+        <p>Drop your details and we'll get back to you!</p>
+        <input type="text" id="lead-name-${cardId}" placeholder="Your Name" class="lead-input">
+        <input type="email" id="lead-email-${cardId}" placeholder="Email Address" class="lead-input">
+        <textarea id="lead-msg-${cardId}" placeholder="How can we help?" class="lead-input" rows="2"></textarea>
+        <div class="lead-btn-group">
+          <button class="lead-btn btn-submit" onclick="submitLeadForm('${cardId}')">Send Details</button>
+          ${contactWhatsApp ? `<button class="lead-btn btn-whatsapp" onclick="contact('whatsapp','${cardId}')">💬 WhatsApp</button>` : ""}
+          <button class="lead-btn btn-cancel" onclick="document.getElementById('${cardId}').remove()">✕ Cancel</button>
+        </div>
       </div>
     `;
+  }
+
+  async function submitLeadForm(cardId) {
+    const name  = document.getElementById(`lead-name-${cardId}`).value;
+    const email = document.getElementById(`lead-email-${cardId}`).value;
+    const msg   = document.getElementById(`lead-msg-${cardId}`).value;
+    
+    if(!name || !email) {
+      alert("Please provide at least your name and email.");
+      return;
+    }
+
+    const btn = document.querySelector(`#${cardId} .btn-submit`);
+    btn.disabled = true;
+    btn.innerText = "Sending...";
+
+    try {
+      await fetch(`${API_URL}/submit-lead`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name, email, message: msg, session_id: sessionId })
+      });
+      document.getElementById(cardId).innerHTML = `
+        <div style="text-align:center;color:#16a34a;padding:10px;">
+          <p>✅ <b>Sent!</b></p>
+          <p style="font-size:12px;">We will contact you shortly.</p>
+        </div>
+      `;
+      setTimeout(() => document.getElementById(cardId)?.remove(), 5000);
+    } catch(e) {
+      btn.disabled = false;
+      btn.innerText = "Retry";
+      alert("Error sending details. Please try again.");
+    }
   }
 
   function showLeadBox() {

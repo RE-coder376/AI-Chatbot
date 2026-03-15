@@ -627,6 +627,7 @@ async def chat_stream_generator(q: str, history: List[dict]) -> AsyncGenerator[s
                    f"Here's what I can help you with: {topics}.{contact_str}")
         
         yield f"data: {json.dumps({'type': 'chunk', 'content': idk})}\n\n"
+        yield f"data: {json.dumps({'type': 'metadata', 'capture_lead': True, 'sources': []})}\n\n"
         yield "data: {\"type\": \"done\"}\n\n"
         return
 
@@ -687,7 +688,8 @@ async def chat_stream_generator(q: str, history: List[dict]) -> AsyncGenerator[s
         yield f"data: {json.dumps({'type': 'chunk', 'content': 'I am unable to respond right now. Please try again in a moment.'})}\n\n"
     
     # Smart Lead Trigger
-    is_lead = any(kw in q.lower() for kw in ["price", "buy", "contact", "hire", "cost", "appointment"])
+    lead_keywords = ["price", "buy", "contact", "hire", "cost", "appointment", "book", "demo", "pricing", "sales", "consultation", "order", "quote"]
+    is_lead = any(kw in q.lower() for kw in lead_keywords)
     yield f"data: {json.dumps({'type': 'metadata', 'capture_lead': is_lead, 'sources': sources})}\n\n"
 
 @app.post("/chat")
@@ -1522,6 +1524,34 @@ async def feedback(data: dict):
         FEEDBACK_FILE.write_text(json.dumps(existing, indent=2))
         return {"success": True}
     except Exception as e:
+        return JSONResponse({"detail": str(e)}, status_code=500)
+
+@app.post("/submit-lead")
+async def submit_lead(data: dict):
+    """Save lead data to leads.json for the admin to follow up."""
+    try:
+        LEADS_FILE = Path("leads.json")
+        entry = {
+            "name":      data.get("name", ""),
+            "email":     data.get("email", ""),
+            "whatsapp":  data.get("whatsapp", ""),
+            "message":   data.get("message", ""),
+            "session_id": data.get("session_id", ""),
+            "timestamp":  datetime.now().isoformat(),
+        }
+        
+        # Log to server console for immediate visibility
+        logger.info(f"🔥 NEW LEAD CAPTURED: {entry['name']} ({entry['email']})")
+        
+        existing = []
+        if LEADS_FILE.exists():
+            try: existing = json.loads(LEADS_FILE.read_text())
+            except: pass
+        existing.append(entry)
+        LEADS_FILE.write_text(json.dumps(existing, indent=2))
+        return {"success": True, "message": "Lead captured successfully"}
+    except Exception as e:
+        logger.error(f"Lead capture error: {e}")
         return JSONResponse({"detail": str(e)}, status_code=500)
 
 if __name__ == "__main__":
