@@ -225,21 +225,31 @@
       </div>
 
       <label>Visual Live Preview</label>
-      <div id="brand-preview">
-        <div id="prev-header" style="background:var(--primary); color:white; display:flex; align-items:center; gap:12px; padding:16px;">
-          <span id="prev-logo" style="font-size:24px;">🤖</span>
+      <div id="brand-preview" style="border: 1px solid var(--border); border-radius: 24px; overflow: hidden; max-width: 320px; margin-top: 16px; box-shadow: 0 20px 50px rgba(0,0,0,0.1); background: white;">
+        <!-- Header -->
+        <div id="prev-header" style="background:var(--primary); color:white; display:flex; align-items:center; gap:12px; padding:20px; border-bottom: 1px solid rgba(255,255,255,0.1);">
+          <div style="position: relative;">
+            <span id="prev-logo" style="font-size:28px; background: rgba(255,255,255,0.2); width: 44px; height: 44px; display: flex; align-items: center; justify-content: center; border-radius: 12px;">🤖</span>
+            <div style="position: absolute; bottom: -2px; right: -2px; width: 12px; height: 12px; background: #10b981; border: 2px solid white; border-radius: 50%;"></div>
+          </div>
           <div>
-            <div id="prev-title" style="font-weight:800; font-size:14px;">Support</div>
-            <div id="prev-subtitle" style="font-size:11px; opacity:0.8;">Online</div>
+            <div id="prev-title" style="font-weight:800; font-size:15px; letter-spacing: -0.01em;">Support</div>
+            <div id="prev-subtitle" style="font-size:11px; opacity:0.9; display: flex; align-items: center; gap: 4px;">
+               Active Now
+            </div>
           </div>
         </div>
-        <div style="padding:16px; background:#f8fafc; height:180px; display:flex; flex-direction:column; gap:12px; overflow:hidden;">
-          <div id="prev-bot-bubble" style="background:#f1f5f9; padding:10px 14px; border-radius:12px; font-size:12px; align-self:flex-start; max-width:80%;">Hi! How can I help?</div>
-          <div id="prev-user-bubble" style="background:var(--primary); color:white; padding:10px 14px; border-radius:12px; font-size:12px; align-self:flex-end; max-width:80%;">I have a question.</div>
+        <!-- Chat Area -->
+        <div style="padding:20px; background:#f8fafc; height:220px; display:flex; flex-direction:column; gap:14px; overflow:hidden;">
+          <div id="prev-bot-bubble" style="background:#fff; color: var(--text-main); padding:12px 16px; border-radius:4px 16px 16px 16px; font-size:12px; align-self:flex-start; max-width:85%; box-shadow: 0 2px 5px rgba(0,0,0,0.02); line-height: 1.5;">Hi! I am your Digital FTE. How can I help you today?</div>
+          <div id="prev-user-bubble" style="background:var(--primary); color:white; padding:12px 16px; border-radius:16px 16px 4px 16px; font-size:12px; align-self:flex-end; max-width:85%; box-shadow: 0 4px 12px rgba(99, 102, 241, 0.2); line-height: 1.5;">I want to automate my business.</div>
         </div>
-        <div style="padding:12px; background:white; border-top:1px solid var(--border); display:flex; gap:10px;">
-          <div id="prev-input" style="flex:1; height:34px; background:#f1f5f9; border-radius:10px; border:1.5px solid var(--border); padding:8px; font-size:11px; color:var(--text-muted);">Type here...</div>
-          <div style="width:34px; height:34px; background:var(--primary); border-radius:10px; display:flex; align-items:center; justify-content:center; color:white; font-size:14px;">🚀</div>
+        <!-- Input Area -->
+        <div style="padding:16px; background:white; border-top:1px solid var(--border); display:flex; gap:12px; align-items: center;">
+          <div id="prev-input" style="flex:1; height:40px; background:#f1f5f9; border-radius:20px; border:1px solid var(--border); padding:0 16px; font-size:12px; color:var(--text-muted); display: flex; align-items: center;">Type a message...</div>
+          <div id="prev-send-btn" style="width:40px; height:40px; background:var(--primary); border-radius:50%; display:flex; align-items:center; justify-content:center; color:white; font-size:16px; box-shadow: 0 4px 10px rgba(0,0,0,0.1); cursor: pointer;">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"></line><polygon points="22 2 15 22 11 13 2 9 22 2"></polygon></svg>
+          </div>
         </div>
       </div>
       <div class="grid-2"><button class="secondary" onclick="loadBranding()">🔄 Load Current</button><button onclick="saveBranding()">🚀 Push Branding</button></div>
@@ -265,7 +275,17 @@
     <div class="card-body">
       <label>Target Site URL</label><input type="text" id="crawl-url" placeholder="https://..."/>
       <label>Target DB</label><input type="text" id="crawl-db-name" placeholder="agentfactory"/>
+      <label>Embedding Model</label>
+      <select id="crawl-embedding-model" style="width:100%; padding:10px 14px; border-radius:10px; border:1.5px solid var(--border); font-size:13px; margin-bottom:8px;">
+        <option value="bge">BGE-768 (Recommended — better quality)</option>
+        <option value="minilm">MiniLM-384 (Legacy — only for old DBs)</option>
+      </select>
+      <div style="display:flex; align-items:center; gap:10px; margin-bottom:8px;">
+        <input type="checkbox" id="crawl-clear-first" style="width:18px;height:18px;cursor:pointer;">
+        <label for="crawl-clear-first" style="margin:0;cursor:pointer;">🗑️ Clear existing data before crawling (fresh re-crawl)</label>
+      </div>
       <button id="inspect-btn" onclick="inspectSite()" style="background:#0ea5e9;">🔍 Inspect Site Structure</button>
+      <button onclick="crawlSite()" style="background:#16a34a; margin-top:8px;">🕸️ Crawl & Ingest Entire Site</button>
       <div id="crawl-step2" style="display:none; margin-top:20px; border-top:1px solid var(--border); padding-top:20px;">
         <label>Select Groups to Crawl</label><div id="crawl-path-list" style="max-height:200px; overflow-y:auto; background:#f8fafc; padding:12px; border-radius:12px;"></div>
         <button onclick="crawlSite()" style="background:#16a34a;">🕸️ Start Full Ingestion</button>
@@ -680,6 +700,7 @@
 
   function updatePreview() {
     const primary = document.getElementById("b-primary-hex").value;
+    const secondary = document.getElementById("b-secondary-hex").value;
     const botBubble = document.getElementById("b-bot-bubble-hex").value;
     const userBubble = document.getElementById("b-user-bubble-hex").value;
     const emoji = document.getElementById("b-logo-emoji").value;
@@ -688,6 +709,9 @@
     const placeholder = document.getElementById("b-placeholder").value;
 
     document.getElementById("prev-header").style.background = primary;
+    const sendBtn = document.getElementById("prev-send-btn");
+    if (sendBtn) sendBtn.style.background = secondary;
+    
     document.getElementById("prev-bot-bubble").style.background = botBubble;
     document.getElementById("prev-user-bubble").style.background = userBubble;
     document.getElementById("prev-logo").textContent = emoji || "🤖";
@@ -960,9 +984,17 @@
     const pass = document.getElementById('master-pass').value;
     const url = document.getElementById('crawl-url').value.trim();
     const db_name = document.getElementById('crawl-db-name').value.trim();
-    
+    const embedding_model = document.getElementById('crawl-embedding-model')?.value || 'bge';
+
     if (!url || !db_name) return showStatus('crawl', 'URL and DB name required.', 'error');
-    
+
+    // Save embedding model to DB config first
+    await fetch(`${API}/admin/embedding-model`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ password: pass, embedding_model, db_name })
+    });
+
     showStatus('crawl', 'Starting crawl engine...', 'loading', true);
     const statusEl = document.getElementById('crawl-status');
     statusEl.innerHTML = '<div style="margin-bottom:10px;">🚀 Initializing...</div><div id="crawl-logs" style="font-family:monospace; font-size:10px; background:#1e293b; color:#86efac; padding:12px; border-radius:12px; max-height:200px; overflow-y:auto; line-height:1.4;"></div>';
@@ -972,7 +1004,7 @@
       const response = await fetch(`${API}/admin/crawl`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ password: pass, url, db_name, max_pages: 100 })
+        body: JSON.stringify({ password: pass, url, db_name, max_pages: 2000, embedding_model, clear_before_crawl: document.getElementById('crawl-clear-first').checked })
       });
 
       if (!response.ok) {
