@@ -42,6 +42,13 @@ from pinecone import Pinecone
 from langchain_chroma import Chroma
 from langchain_community.embeddings import HuggingFaceEmbeddings
 
+# SendGrid Imports
+try:
+    from sendgrid import SendGridAPIClient
+    from sendgrid.helpers.mail import Mail
+except ImportError:
+    pass
+
 logging.basicConfig(level=logging.INFO, format="[SERVER] %(message)s")
 logger = logging.getLogger(__name__)
 load_dotenv()
@@ -1526,11 +1533,64 @@ async def feedback(data: dict):
     except Exception as e:
         return JSONResponse({"detail": str(e)}, status_code=500)
 
+async def send_lead_email(lead_data: dict, cfg: dict):
+    """Sends lead notification using SendGrid with automatic API failover."""
+    keys = cfg.get("sendgrid_keys", [])
+    if not keys:
+        logger.warning("No SendGrid keys configured. Skipping email notification.")
+        return False
+    
+    sender = cfg.get("sender_email", "leads@your-digital-fte.com")
+    receiver = cfg.get("contact_email")
+    if not receiver:
+        logger.warning("No contact_email in config. Cannot send notification.")
+        return False
+
+    html_content = f"""
+    <h3>🔥 New Lead Captured</h3>
+    <p><b>Name:</b> {lead_data['name']}</p>
+    <p><b>Email:</b> {lead_data['email']}</p>
+    <p><b>WhatsApp:</b> {lead_data.get('whatsapp', 'N/A')}</p>
+    <p><b>Message:</b> {lead_data.get('message', 'N/A')}</p>
+    <hr>
+    <p><small>Sent from your Digital FTE Platform</small></p>
+    """
+    
+    try:
+        from sendgrid.helpers.mail import Mail
+        message = Mail(
+            from_email=sender,
+            to_emails=receiver,
+            subject=f"New Lead: {lead_data['name']}",
+            html_content=html_content
+        )
+
+        for i, api_key in enumerate(keys):
+            if not api_key or len(api_key) < 10: continue
+            try:
+                from sendgrid import SendGridAPIClient
+                sg = SendGridAPIClient(api_key)
+                response = sg.send(message)
+                if 200 <= response.status_code < 300:
+                    logger.info(f"✅ Lead email sent successfully via SendGrid Key #{i+1}")
+                    return True
+            except Exception as e:
+                logger.warning(f"❌ SendGrid Key #{i+1} failed: {e}")
+                continue # Try next key
+                
+        logger.error("All SendGrid keys failed or are invalid. Notification not sent.")
+        return False
+    except Exception as e:
+        logger.error(f"Critical error in email system: {e}")
+        return False
+
 @app.post("/submit-lead")
 async def submit_lead(data: dict):
-    """Save lead data to leads.json for the admin to follow up."""
+    """Save lead data to leads.json and send email notification with failover."""
     try:
         LEADS_FILE = Path("leads.json")
+        cfg = get_config()
+        
         entry = {
             "name":      data.get("name", ""),
             "email":     data.get("email", ""),
@@ -1540,8 +1600,7 @@ async def submit_lead(data: dict):
             "timestamp":  datetime.now().isoformat(),
         }
         
-        # Log to server console for immediate visibility
-        logger.info(f"🔥 NEW LEAD CAPTURED: {entry['name']} ({entry['email']})")
+        logger.info(f"NEW LEAD CAPTURED: {entry['name']} ({entry['email']})")
         
         existing = []
         if LEADS_FILE.exists():
@@ -1549,6 +1608,10 @@ async def submit_lead(data: dict):
             except: pass
         existing.append(entry)
         LEADS_FILE.write_text(json.dumps(existing, indent=2))
+        
+        # Trigger Email Notification
+        asyncio.create_task(send_lead_email(entry, cfg))
+        
         return {"success": True, "message": "Lead captured successfully"}
     except Exception as e:
         logger.error(f"Lead capture error: {e}")
