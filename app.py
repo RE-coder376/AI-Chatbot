@@ -243,14 +243,33 @@ def _strip_source_leaks(text: str) -> str:
         text = text[0].upper() + text[1:]
     return text
 
+_CONCEPT_MAP = {
+    "curriculum": ["topics", "syllabus", "modules", "what will I learn", "chapters", "subjects", "course content", "roadmap", "outline"],
+    "price": ["cost", "fees", "charges", "subscription", "pricing", "payment", "how much", "rate card"],
+    "contact": ["email", "phone", "whatsapp", "address", "reach out", "support", "help", "connect"],
+    "owner": ["founder", "ceo", "team", "who made", "creator", "management", "leadership"],
+    "location": ["office", "where", "city", "country", "map", "headquarters"]
+}
+
 def expand_query(q: str) -> list:
-    """Return [original_query, keyword_only_query] for broader retrieval coverage."""
-    words = [w.strip("?.,!") for w in q.lower().split()]
+    """Return [original_query, keyword_query, semantic_expansions] for conceptual understanding."""
+    q_lower = q.lower()
+    expanded = [q]
+    
+    # 1. Basic Keyword extraction
+    words = [w.strip("?.,!") for w in q_lower.split()]
     keywords = [w for w in words if w not in _STOP_WORDS and len(w) > 2]
     kw_query = " ".join(keywords)
-    if kw_query and kw_query != q.lower() and len(keywords) >= 2:
-        return [q, kw_query]
-    return [q]
+    if kw_query and kw_query != q_lower and len(keywords) >= 2:
+        expanded.append(kw_query)
+    
+    # 2. Universal Concept Expansion (Semantic understanding)
+    for concept, synonyms in _CONCEPT_MAP.items():
+        if concept in q_lower or any(s in q_lower for s in synonyms):
+            # If the user mentioned the concept or a synonym, add all other synonyms to the search
+            expanded.extend(synonyms[:5]) # Take top 5 to keep search efficient
+            
+    return list(dict.fromkeys(expanded)) # Unique items only
 
 _INVISIBLE_CHARS = re.compile(r'[\u200b\u200c\u200d\ufeff\u00ad\u2060]')
 
@@ -602,14 +621,28 @@ def _context_addresses_query(context: str, q: str) -> bool:
     if any('\u0600' <= char <= '\u06FF' for char in q):
         return len(context.strip()) > 100
 
-    # For English/Roman Urdu, use keyword verification
+    # For English/Roman Urdu, use keyword and concept verification
+    q_lower = q.lower()
     words = {w.strip("?.,!:;'\"").lower() for w in q.split()}
     keywords = {w for w in words - _QUERY_STOP if len(w) > 3}
-    if not keywords:
+    context_lower = context.lower()
+
+    # 1. Literal Keyword check
+    if keywords and any(kw in context_lower for kw in keywords):
         return True
     
-    context_lower = context.lower()
-    return any(kw in context_lower for kw in keywords)
+    # 2. Semantic Concept check (e.g. if user asks 'curriculum' and context has 'topics')
+    for concept, synonyms in _CONCEPT_MAP.items():
+        user_mentioned_concept = (concept in q_lower or any(s in q_lower for s in synonyms))
+        context_has_synonym    = (concept in context_lower or any(s in context_lower for s in synonyms))
+        if user_mentioned_concept and context_has_synonym:
+            return True
+
+    # 3. Trust LLM for very short queries if we found at least some info
+    if not keywords and len(context.strip()) > 50:
+        return True
+    
+    return False
 
 async def chat_stream_generator(q: str, history: List[dict]) -> AsyncGenerator[str, None]:
     log_interaction(q)
