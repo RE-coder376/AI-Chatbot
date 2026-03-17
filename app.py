@@ -188,7 +188,6 @@ BUSINESS CONTEXT (always available):
 - Business: {biz_name}
 - What they offer: {biz_desc if biz_desc else topics}
 - Topics covered: {topics}
-- Contact: {contact_email if contact_email else "reach out via the website"}
 
 KNOWLEDGE BASE (specific details from {biz_name}'s documentation):
 {kb_section}
@@ -1535,6 +1534,7 @@ async def feedback(data: dict):
 
 async def send_lead_email(lead_data: dict, cfg: dict):
     """Sends lead notification using SendGrid with automatic API failover."""
+    logger.info(f"DEBUG: send_lead_email started for {lead_data['email']}")
     keys = cfg.get("sendgrid_keys", [])
     if not keys:
         logger.warning("No SendGrid keys configured. Skipping email notification.")
@@ -1542,6 +1542,8 @@ async def send_lead_email(lead_data: dict, cfg: dict):
     
     sender = cfg.get("sender_email", "leads@your-digital-fte.com")
     receiver = cfg.get("contact_email")
+    logger.info(f"DEBUG: Sender: {sender}, Receiver: {receiver}")
+    
     if not receiver:
         logger.warning("No contact_email in config. Cannot send notification.")
         return False
@@ -1556,38 +1558,66 @@ async def send_lead_email(lead_data: dict, cfg: dict):
     <p><small>Sent from your Digital FTE Platform</small></p>
     """
     
-    try:
-        from sendgrid.helpers.mail import Mail
-        message = Mail(
-            from_email=sender,
-            to_emails=receiver,
-            subject=f"New Lead: {lead_data['name']}",
-            html_content=html_content
-        )
+    payload = {
+        "personalizations": [{
+            "to": [{"email": receiver}],
+            "subject": f"ALERT: New Lead - {lead_data['name']}"
+        }],
+        "from": {
+            "email": sender,
+            "name": "Digital FTE LeadBot"
+        },
+        "reply_to": {"email": lead_data['email']},
+        "content": [{"type": "text/html", "value": html_content}]
+    }
 
+    async with httpx.AsyncClient(timeout=15.0) as client:
         for i, api_key in enumerate(keys):
-            if not api_key or len(api_key) < 10: continue
+            if not api_key or len(api_key) < 10: 
+                logger.warning(f"DEBUG: Skipping invalid Key #{i+1}")
+                continue
+            
+            logger.info(f"DEBUG: Attempting Key #{i+1}...")
             try:
-                from sendgrid import SendGridAPIClient
-                sg = SendGridAPIClient(api_key)
-                response = sg.send(message)
+                headers = {
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json"
+                }
+                response = await client.post("https://api.sendgrid.com/v3/mail/send", json=payload, headers=headers)
+                
+                logger.info(f"DEBUG: SendGrid Key #{i+1} response: {response.status_code}")
                 if 200 <= response.status_code < 300:
                     logger.info(f"✅ Lead email sent successfully via SendGrid Key #{i+1}")
                     return True
+                else:
+                    logger.error(f"❌ SendGrid Key #{i+1} failed with status {response.status_code}: {response.text}")
             except Exception as e:
-                logger.warning(f"❌ SendGrid Key #{i+1} failed: {e}")
+                logger.warning(f"❌ SendGrid Key #{i+1} exception: {e}")
                 continue # Try next key
                 
-        logger.error("All SendGrid keys failed or are invalid. Notification not sent.")
-        return False
-    except Exception as e:
-        logger.error(f"Critical error in email system: {e}")
-        return False
+    logger.error("All SendGrid keys failed or are invalid. Notification not sent.")
+    return False
+
+@app.get("/test-email")
+async def test_email_endpoint():
+    """Manually trigger a test email to verify SendGrid configuration."""
+    cfg = get_config()
+    test_data = {
+        "name": "TEST USER",
+        "email": "test@example.com",
+        "message": "This is a manual test of the email system."
+    }
+    success = await send_lead_email(test_data, cfg)
+    if success:
+        return {"success": True, "message": "Test email sent successfully (check logs for 202)"}
+    else:
+        return JSONResponse({"success": False, "message": "Email failed. Check server logs for errors."}, status_code=500)
 
 @app.post("/submit-lead")
 async def submit_lead(data: dict):
     """Save lead data to leads.json and send email notification with failover."""
     try:
+        logger.info(f"DEBUG: Received /submit-lead request with data: {data}")
         LEADS_FILE = Path("leads.json")
         cfg = get_config()
         
@@ -1600,16 +1630,22 @@ async def submit_lead(data: dict):
             "timestamp":  datetime.now().isoformat(),
         }
         
-        logger.info(f"NEW LEAD CAPTURED: {entry['name']} ({entry['email']})")
+        logger.info(f"*** NEW LEAD CAPTURED ***: {entry['name']} ({entry['email']})")
         
         existing = []
         if LEADS_FILE.exists():
-            try: existing = json.loads(LEADS_FILE.read_text())
-            except: pass
+            try: 
+                existing = json.loads(LEADS_FILE.read_text())
+                logger.info(f"DEBUG: Loaded {len(existing)} existing leads.")
+            except Exception as e: 
+                logger.error(f"DEBUG: Error loading leads.json: {e}")
+        
         existing.append(entry)
         LEADS_FILE.write_text(json.dumps(existing, indent=2))
+        logger.info(f"DEBUG: Saved new lead to leads.json. Total now: {len(existing)}")
         
         # Trigger Email Notification
+        logger.info("DEBUG: Spawning send_lead_email task...")
         asyncio.create_task(send_lead_email(entry, cfg))
         
         return {"success": True, "message": "Lead captured successfully"}
