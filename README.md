@@ -1,6 +1,6 @@
-# Digital FTE — Universal Multilingual RAG Platform
+# Digital FTE — Universal Multilingual RAG Chatbot Platform
 
-A production-hardened **Digital FTE (Full-Time Equivalent)** platform. Transform any business website or knowledge base into a multilingual AI Employee that speaks **English, Urdu Script (نستعلیق), and Roman Urdu** fluently.
+A production-hardened **Digital FTE (Full-Time Equivalent)** platform. Transform any business website or knowledge base into a multilingual AI assistant that speaks **English, Urdu Script (نستعلیق), and Roman Urdu** fluently.
 
 ---
 
@@ -8,30 +8,50 @@ A production-hardened **Digital FTE (Full-Time Equivalent)** platform. Transform
 
 - **Multilingual Brain:** Single unified engine for English and Urdu (both scripts).
 - **Cross-Lingual RAG:** Answers questions in Urdu even if the source documentation is in English.
-- **Production Hardened:** Built-in "Billion Dollar Audit" suite to verify identity, knowledge, and safety.
-- **Stealth Crawler:** Advanced crawler with bot-evasion (Stealth Masking, Human Behavior) to ingest data from any public site.
-- **Multi-Client Architecture:** Switch between brands (`agentfactory`, `tsc_pk`, etc.) instantly with dynamic branding and knowledge isolation.
+- **Production Hardened:** Built-in audit suite to verify identity, knowledge, and safety.
+- **Stealth Crawler:** Advanced Playwright-based crawler to ingest data from any public site.
+- **Multi-Client Architecture:** Switch between brands instantly with dynamic branding and knowledge isolation.
+- **Privacy Guard:** Code-level interception of prompt injection and system prompt reveal attempts.
 
 ---
 
 ## 🔥 Key Features
 
 ### Intelligence & Retrieval
-- **Universal Multilingual Brain:** Powered by `paraphrase-multilingual-MiniLM-L12-v2` (384-dim).
-- **Hybrid Search:** Combines Vector Semantic Search with BM25 keyword matching.
-- **Keyword Rescue:** Deep-scans documentation for exact technical terms (e.g., "LiveKit", "Pipecat").
-- **Language Mirroring:** Automatically detects and responds in the user's exact script and language.
+- **Hybrid Search:** Combines Vector Semantic Search with BM25 keyword matching + CrossEncoder reranking.
+- **Keyword Rescue:** Deep-scans documentation for exact technical terms (acronyms, product names).
+- **Language Mirroring:** Detects and responds in the user's exact script and language.
+- **Multi-Provider LLM:** Groq → OpenAI → Gemini with automatic key rotation and failover.
+
+### Engagement Features
+- **Proactive Idle Trigger:** Bot sends a message after 45s of user inactivity.
+- **Human Handoff:** Detects "talk to human" intent → shows handoff card → emails full transcript to team.
+- **Lead Capture:** 2-step lead form (Name / Email / Phone / Message) with email notification.
+- **Quick Reply Chips:** Suggested follow-up questions after each response.
+- **Inline Source Citations:** Compact `[1] page-name` badge links instead of raw URLs.
+- **Rich Cards:** LLM can emit structured `[CARD]Title|Desc|URL[/CARD]` cards.
+- **CSAT Survey:** 5-star rating widget fires after every 5th message.
+- **Persistent History:** Conversation history saved to localStorage, restored on reload.
 
 ### Enterprise Admin Panel
-- **Visual Branding Suite:** Real-time mobile widget preview with primary/secondary color controls.
-- **Knowledge Hub:** UI-based crawling, file uploads (PDF/DOCX/XLSX), and manual FAQ management.
-- **Behavioral Audit Suite:** Automated testing for Identity, Knowledge Depth, and Hallucination resistance.
-- **System Watchdog:** Self-healing logic to repair dimension mismatches and configuration drift.
+- **Visual Branding Suite:** Real-time mobile widget preview with color controls.
+- **Knowledge Hub:** UI-based crawling, file uploads (PDF/DOCX), manual text ingestion, FAQ management.
+- **Analytics Dashboard:** Chart.js charts — daily queries, CSAT trend, top knowledge gaps.
+- **Knowledge Gap Suggest:** LLM-powered draft answers for unanswered questions, add to KB in one click.
+- **SMTP Email Config:** Configurable sender email, password, host, port per client from admin UI.
+- **Behavioral Audit Suite:** Automated testing for Identity, Knowledge, and Safety.
+- **System Watchdog:** Self-healing logic for dimension mismatches and configuration drift.
+
+### Security
+- **Prompt Injection Guard:** Code-level regex blocks system prompt reveal, jailbreak, and override attempts.
+- **Rate Limiting:** 20 req/min per IP on `/chat`, 10 on `/admin/*`.
+- **Widget Key Auth:** Per-DB UUID key for embed authentication.
+- **Admin Password:** All admin endpoints password-protected.
 
 ### Connectivity
 - **One-Line Embed:** Copy-paste script snippet for WordPress, Shopify, or custom sites.
-- **Lead Capture:** Automated lead generation via Email and WhatsApp buttons.
-- **Streaming UI:** Character-by-character real-time response with Markdown support.
+- **SSE Streaming:** Character-by-character real-time response with Markdown support.
+- **SMTP Notifications:** Lead and handoff emails via Gmail SMTP (or any provider).
 
 ---
 
@@ -39,64 +59,82 @@ A production-hardened **Digital FTE (Full-Time Equivalent)** platform. Transform
 
 | Layer | Technology |
 |---|---|
-| **Backend** | FastAPI (Async) |
-| **LLM** | Groq API (`llama-3.3-70b-versatile`) |
+| **Backend** | FastAPI (Async) + SSE Streaming |
+| **LLM** | Groq (`llama-3.3-70b-versatile`) → OpenAI → Gemini (auto-failover) |
 | **Vector DB** | ChromaDB (Local Persistent) |
-| **Embeddings** | `paraphrase-multilingual-MiniLM-L12-v2` (384-dim) |
-| **Crawler** | Playwright + Playwright-Stealth + Human-Logic |
-| **Memory** | SQLite (Persistent Sessions) |
-| **UI** | Vanilla JS + Tailwind-inspired CSS + SSE Streaming |
+| **Embeddings** | `paraphrase-multilingual-MiniLM-L12-v2` or `BAAI/bge-base-en-v1.5` |
+| **Reranking** | CrossEncoder (`ms-marco-MiniLM-L-6-v2`) |
+| **Keyword Search** | BM25 (rank_bm25) |
+| **Crawler** | Playwright + Playwright-Stealth |
+| **Email** | Gmail SMTP (smtplib) |
+| **UI** | Vanilla JS + CSS + Chart.js + Marked.js |
 
 ---
 
 ## 🚀 Quick Start
 
-### 1. Installation
+### 1. Install
 ```bash
-# Clone and enter directory
 pip install -r requirements.txt
-# Ensure Playwright browsers are ready
 playwright install chromium
 ```
 
-### 2. Run the Engine
-```bash
-python app.py
+### 2. Configure
+Edit `config.json`:
+```json
+{
+  "admin_password": "your_password",
+  "contact_email": "you@gmail.com",
+  "sender_email": "you@gmail.com",
+  "smtp_password": "your_app_password"
+}
 ```
-- **Admin:** `http://localhost:8000/admin` (Default Pass: `admin123`)
+
+### 3. Run
+```bash
+python -u app.py
+```
 - **Chat:** `http://localhost:8000`
+- **Admin:** `http://localhost:8000/admin` (password: from config)
 
 ---
 
-## 🛡️ The "Billion Dollar" Audit
-The platform includes a specialized audit suite to ensure reliability before high-value deployments:
-1. **Identity Audit:** Ensures the bot stays in character.
-2. **Knowledge Audit:** Verifies the bot only answers from the provided DB.
-3. **Safety Audit:** Confirms the "I don't know" guardrails are active.
+## 🛡️ Security & Safety
+
+1. **Prompt Injection:** Code-level regex intercepts before reaching LLM — zero hallucination risk.
+2. **Identity Guard:** Bot stays in persona regardless of instructions.
+3. **Scope Guard:** Strictly answers only about the configured business — no general knowledge.
+4. **IDK Guard:** Never fabricates — logs unknown questions to `knowledge_gaps.json`.
 
 ---
 
 ## 📦 Project Structure
 ```
 AI_Chatbot/
-├── app.py              # Universal Production Server
-├── admin.html          # Premium Admin Dashboard
-├── chat.html           # Professional Chat Interface
-├── config.json         # Root Configuration
-├── databases/          # Isolated Client Knowledge Bases
+├── app.py              # Main FastAPI server (~2400 lines)
+├── admin.html          # Admin dashboard
+├── chat.html           # Chat interface
+├── widget_chat.html    # Embeddable widget version
+├── config.json         # Root configuration (base defaults)
+├── databases/          # Isolated client knowledge bases
 │   └── <brand_name>/
-│       ├── config.json # Brand Overrides (Branding, Topics)
+│       ├── config.json # Per-client overrides
 │       └── chroma.sqlite3
-└── STRATEGY.md         # Sales & Growth Roadmap
+├── knowledge_gaps.json # Unanswered questions log
+├── analytics.json      # Query history and stats
+├── feedback.json       # Thumbs up/down ratings
+├── leads.json          # Captured leads
+└── csat_log.json       # CSAT ratings
 ```
 
 ---
 
 ## ⚖️ Legal & Ethical Usage
-This platform is designed for **Public Data Ingestion**. It follows industry-standard "politeness" rules:
-- **Rate Limited Crawling:** Prevents server overload on target sites.
-- **Robots.txt Respect:** (Configurable) to follow site owner guidelines.
-- **No Private Data:** Designed for public business documentation only.
+Designed for **public data ingestion only**:
+- Rate-limited crawling to prevent server overload.
+- Intended for publicly accessible business documentation.
+- No private or authenticated data should be ingested.
 
 ---
+
 Built for the next generation of **Digital Employees**.

@@ -254,9 +254,24 @@
     window.parent.postMessage('aichat:close', '*');
   }
 
+  // --- Proactive idle trigger (60s for widget) ---
+  let proactiveSent = false;
+  let proactiveTimer = null;
+  function resetProactiveTimer() {
+    clearTimeout(proactiveTimer);
+    if (proactiveSent) return;
+    proactiveTimer = setTimeout(() => {
+      if (proactiveSent || history.length > 0) return;
+      proactiveSent = true;
+      addMessage("Still there? Feel free to ask me anything — I'm here to help!", 'bot');
+    }, 60000);
+  }
+  resetProactiveTimer();
+
   async function sendMessage() {
     const q = inputEl.value.trim();
     if (!q) return;
+    resetProactiveTimer();
 
     addMessage(q, 'user');
     inputEl.value    = '';

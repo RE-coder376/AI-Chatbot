@@ -238,6 +238,16 @@
     }
     .send-btn:hover { transform: scale(1.05); }
     .send-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+    .source-citations { margin-top: 8px; padding-top: 8px; border-top: 1px solid rgba(0,0,0,0.06); display: flex; flex-wrap: wrap; gap: 4px; }
+    .cite-badge { display: inline-block; font-size: 11px; background: #f1f5f9; border: 1px solid #e2e8f0; border-radius: 10px; padding: 2px 8px; color: #6366f1; text-decoration: none; }
+    .cite-badge:hover { background: #e0e7ff; }
+
+    .handoff-card { background: #f0fdf4; border: 2px solid #86efac; border-radius: 20px; padding: 18px; margin: 10px 0; animation: slideUp 0.3s ease-out; }
+    .handoff-card p { font-size: 14px; font-weight: 600; color: #166534; margin-bottom: 12px; }
+    .handoff-input { width:100%; padding:9px; border:1.5px solid #e2e8f0; border-radius:10px; font-size:13px; margin-bottom:8px; box-sizing:border-box; }
+    .btn-handoff { background:#22c55e; color:white; border:none; border-radius:12px; padding:10px 20px; cursor:pointer; font-weight:600; font-size:13px; }
+    .btn-handoff-cancel { background:#f1f5f9; color:#475569; border:1px solid #e2e8f0; border-radius:12px; padding:10px 16px; cursor:pointer; font-size:13px; }
   </style>
 </head>
 <body>
@@ -273,6 +283,7 @@
   const messagesEl = document.getElementById("messages");
   const inputEl    = document.getElementById("user-input");
   const sendBtn    = document.getElementById("send-btn");
+  const HANDOFF_RE = /\b(talk to|speak to|connect me with|live agent|real person|human support|call me|speak with someone|agent please|need help from)\b/i;
 
   // Session — reset if active DB has changed
   let sessionId = localStorage.getItem("chat_session_id");
@@ -346,6 +357,15 @@
   async function sendMessage() {
     const q = inputEl.value.trim();
     if (!q) return;
+    resetProactiveTimer();
+
+    // Human handoff detection
+    if (HANDOFF_RE.test(q)) {
+      addMessage(q, "user");
+      inputEl.value = "";
+      showHandoffCard();
+      return;
+    }
 
     addMessage(q, "user");
     inputEl.value  = "";
@@ -369,7 +389,8 @@
       const response = await fetch(`${API_URL}/chat`, {
         method:  "POST",
         headers: { "Content-Type": "application/json", "X-Widget-Key": widgetKey },
-        body:    JSON.stringify({ question: q, history, session_id: sessionId }),
+        body:    JSON.stringify({ question: q, history, session_id: sessionId,
+                                 visitor_id: sessionId, page_url: location.href, page_title: document.title }),
       });
 
       const reader  = response.body.getReader();
@@ -400,16 +421,22 @@
               bubble = msgDiv.querySelector(".bubble");
             }
             fullAnswer += data.content;
-            bubble.innerHTML = marked.parse(fullAnswer);
+            bubble.innerHTML = marked.parse(renderCards(fullAnswer));
+            messagesEl.scrollTop = messagesEl.scrollHeight;
           } else if (data.type === "metadata") {
             if (data.capture_lead) showLeadBox();
             if (data.sources && data.sources.length > 0) {
               const srcDiv = document.createElement("div");
-              srcDiv.style.cssText = "font-size:10px;color:#94a3b8;margin-top:6px;padding-top:6px;border-top:1px solid #e2e8f0;";
-              srcDiv.innerHTML = "Sources: " + data.sources.map(s => `<a href="${s}" target="_blank" style="color:#6366f1;text-decoration:none;margin-right:6px;">${new URL(s).pathname.split('/').filter(Boolean).pop() || 'link'}</a>`).join('');
+              srcDiv.className = "source-citations";
+              srcDiv.innerHTML = data.sources.map((s, i) => {
+                try {
+                  const seg = new URL(s).pathname.split('/').filter(Boolean).pop() || 'source';
+                  return `<a href="${s}" target="_blank" class="cite-badge">[${i+1}] ${seg}</a>`;
+                } catch { return ''; }
+              }).filter(Boolean).join('');
               if (bubble) bubble.appendChild(srcDiv);
             }
-
+            if (data.options && data.options.length) renderSuggestions(data.options, botMsgId);
           } else if (data.type === "suggestions") {
             renderSuggestions(data.items, botMsgId);
           }
@@ -420,6 +447,7 @@
       if (bubble) {
         renderFeedbackRow(botMsgId, q, fullAnswer);
       }
+      resetProactiveTimer();
 
       history.push({ role: "user", content: q }, { role: "assistant", content: fullAnswer });
       // Keep last 20 messages (10 turns) to avoid unbounded growth
@@ -433,6 +461,61 @@
 
     sendBtn.disabled = false;
     inputEl.focus();
+    checkCsatTrigger();
+  }
+
+  // --- Proactive idle trigger ---
+  let proactiveSent = false;
+  let proactiveTimer = null;
+  function resetProactiveTimer() {
+    clearTimeout(proactiveTimer);
+    if (proactiveSent) return;
+    proactiveTimer = setTimeout(() => {
+      if (proactiveSent) return;
+      proactiveSent = true;
+      addMessage("Still there? Feel free to ask me anything — I'm here to help!", "bot");
+    }, 45000);
+  }
+  resetProactiveTimer();
+
+  // --- Human Handoff ---
+  function showHandoffCard() {
+    const cardId = "handoff-" + Date.now();
+    const div = document.createElement("div");
+    div.className = "message bot";
+    div.id = cardId;
+    div.innerHTML = `<div class="handoff-card">
+      <p>I'll connect you with our team right away!</p>
+      <input class="handoff-input" id="hf-name" placeholder="Your name (optional)" />
+      <input class="handoff-input" id="hf-contact" placeholder="Your email or WhatsApp (optional)" />
+      <div style="display:flex;gap:8px;flex-wrap:wrap;">
+        <button class="btn-handoff" onclick="submitHandoff('${cardId}')">Send my conversation to the team</button>
+        <button class="btn-handoff-cancel" onclick="document.getElementById('${cardId}').remove()">Continue chatting</button>
+      </div>
+    </div>`;
+    messagesEl.appendChild(div);
+    messagesEl.scrollTop = messagesEl.scrollHeight;
+  }
+
+  async function submitHandoff(cardId) {
+    const name = document.getElementById("hf-name")?.value.trim() || "Website Visitor";
+    const contact = document.getElementById("hf-contact")?.value.trim() || "";
+    const card = document.getElementById(cardId);
+    const btn = card?.querySelector(".btn-handoff");
+    if (btn) btn.textContent = "Sending...";
+    try {
+      const r = await fetch(`${API_URL}/handoff`, {
+        method: "POST",
+        headers: {"Content-Type":"application/json","X-Widget-Key":widgetKey},
+        body: JSON.stringify({session_id: sessionId, conversation: history, name, contact_info: contact})
+      });
+      const data = await r.json();
+      const hc = card?.querySelector(".handoff-card");
+      if (hc) hc.innerHTML = `<p style="color:#166534">${data.message || "Team notified!"}</p>`;
+    } catch {
+      const hc = card?.querySelector(".handoff-card");
+      if (hc) hc.innerHTML = `<p style="color:#dc2626">Could not send. Please contact us directly.</p>`;
+    }
   }
 
   function addMessage(html, role, id) {
@@ -501,16 +584,20 @@
   }
 
   function showLeadOptions(cardId) {
+    showLeadEmailForm(cardId);
+  }
+
+  function showLeadEmailForm(cardId) {
     document.getElementById(cardId).innerHTML = `
       <div class="lead-form">
         <p>Drop your details and we'll get back to you!</p>
         <input type="text" id="lead-name-${cardId}" placeholder="Your Name" class="lead-input">
         <input type="email" id="lead-email-${cardId}" placeholder="Email Address" class="lead-input">
+        <input type="tel" id="lead-phone-${cardId}" placeholder="Phone / WhatsApp Number" class="lead-input">
         <textarea id="lead-msg-${cardId}" placeholder="How can we help?" class="lead-input" rows="2"></textarea>
         <div class="lead-btn-group">
           <button class="lead-btn btn-submit" onclick="submitLeadForm('${cardId}')">Send Details</button>
-          ${contactWhatsApp ? `<button class="lead-btn btn-whatsapp" onclick="contact('whatsapp','${cardId}')">💬 WhatsApp</button>` : ""}
-          <button class="lead-btn btn-cancel" onclick="document.getElementById('${cardId}').remove()">✕ Cancel</button>
+          <button class="lead-btn btn-cancel" onclick="showLeadOptions('${cardId}')">← Back</button>
         </div>
       </div>
     `;
@@ -519,8 +606,9 @@
   async function submitLeadForm(cardId) {
     const name  = document.getElementById(`lead-name-${cardId}`).value;
     const email = document.getElementById(`lead-email-${cardId}`).value;
+    const phone = document.getElementById(`lead-phone-${cardId}`)?.value || "";
     const msg   = document.getElementById(`lead-msg-${cardId}`).value;
-    
+
     if(!name || !email) {
       alert("Please provide at least your name and email.");
       return;
@@ -534,7 +622,7 @@
       await fetch(`${API_URL}/submit-lead`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name, email, message: msg, session_id: sessionId })
+        body: JSON.stringify({ name, email, whatsapp: phone, message: msg, session_id: sessionId })
       });
       document.getElementById(cardId).innerHTML = `
         <div style="text-align:center;color:#16a34a;padding:10px;">
@@ -566,12 +654,6 @@
     messagesEl.scrollTop = messagesEl.scrollHeight;
   }
 
-  function contact(type, id) {
-    if (type === "email") window.open(`mailto:${contactEmail}`, "_blank");
-    else window.open(`https://wa.me/${contactWhatsApp.replace(/\D/g, "")}`, "_blank");
-    document.getElementById(id).innerHTML = "<p style='color:#16a34a;text-align:center'>Opening contact link... Thank you!</p>";
-    setTimeout(() => document.getElementById(id)?.remove(), 3000);
-  }
 
   function newChat() {
     localStorage.removeItem(HISTORY_KEY);
@@ -580,7 +662,88 @@
     localStorage.setItem("chat_session_id", sessionId);
     HISTORY_KEY = "chat_history_" + sessionId;
     messagesEl.innerHTML = '<div class="message bot"><div class="bubble">Hi! How can I help you today?</div></div>';
+    clearTimeout(csatTimer);
   }
+
+  // ── Rich card renderer ─────────────────────────────────────────────────────
+  function renderCards(text) {
+    return text.replace(/\[CARD\](.*?)\[\/CARD\]/gs, (_, inner) => {
+      const [title, desc, url] = inner.split('|').map(s => s.trim());
+      const link = url ? `<a href="${url}" target="_blank" style="font-size:12px;color:#6366f1;">View →</a>` : '';
+      return `<div style="border:1px solid #e2e8f0;border-radius:12px;padding:10px 14px;margin:6px 0;background:#f8fafc;">
+        <b>${title || ''}</b>${desc ? `<br><span style="font-size:13px;color:#64748b;">${desc}</span>` : ''}${link ? `<br>${link}` : ''}
+      </div>`;
+    });
+  }
+
+  // ── CSAT survey (fires after 5th question, once per session) ─────────────
+  let csatShown = false;
+  let csatQuestionCount = 0;
+
+  function checkCsatTrigger() {
+    if (csatShown) return;
+    csatQuestionCount++;
+    if (csatQuestionCount === 5) showCsat();
+  }
+
+  function showCsat() {
+    if (csatShown) return;
+    csatShown = true;
+    const div = document.createElement("div");
+    div.className = "message bot";
+    div.style.alignSelf = "center";
+    div.innerHTML = `
+      <div class="bubble" style="background:#fafafa;border:1px solid #e2e8f0;text-align:center;padding:16px 20px;">
+        <p style="margin:0 0 12px;font-weight:600;font-size:14px;color:#1e293b;">How would you rate your experience?</p>
+        <div id="csat-stars" style="display:flex;justify-content:center;gap:4px;">
+          ${[1,2,3,4,5].map(n => `
+            <span class="csat-star"
+              data-val="${n}"
+              onmouseover="highlightStars(${n})"
+              onmouseout="highlightStars(0)"
+              onclick="submitCsat(${n},this)"
+              style="font-size:28px;cursor:pointer;color:#cbd5e1;line-height:1;user-select:none;">&#9733;</span>
+          `).join('')}
+        </div>
+        <p style="margin:8px 0 0;font-size:12px;color:#94a3b8;">Press 1–5 to rate</p>
+      </div>`;
+    messagesEl.appendChild(div);
+    messagesEl.scrollTop = messagesEl.scrollHeight;
+
+    // Keyboard shortcut: 1-5
+    const keyHandler = (e) => {
+      if (['1','2','3','4','5'].includes(e.key)) {
+        const stars = document.querySelectorAll('.csat-star');
+        if (stars.length) { submitCsat(parseInt(e.key), stars[parseInt(e.key)-1]); }
+        document.removeEventListener('keydown', keyHandler);
+      }
+    };
+    document.addEventListener('keydown', keyHandler);
+  }
+
+  function highlightStars(n) {
+    document.querySelectorAll('.csat-star').forEach(s => {
+      s.style.color = parseInt(s.dataset.val) <= n ? '#f59e0b' : '#cbd5e1';
+    });
+  }
+
+  async function submitCsat(rating, btn) {
+    const bubble = btn.closest ? btn.closest('.bubble') : btn.parentElement.closest('.bubble');
+    bubble.innerHTML = `
+      <div style="text-align:center;padding:4px 0;">
+        <div style="display:flex;justify-content:center;gap:2px;margin-bottom:8px;">
+          ${[1,2,3,4,5].map(n => `<span style="font-size:24px;color:${n<=rating?'#f59e0b':'#cbd5e1'};">&#9733;</span>`).join('')}
+        </div>
+        <p style="margin:0;font-weight:600;font-size:14px;color:#1e293b;">Thank you for your feedback.</p>
+      </div>`;
+    try {
+      await fetch(`${API_URL}/csat`, {
+        method: 'POST', headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({ rating, session_id: sessionId })
+      });
+    } catch {}
+  }
+
 </script>
 </body>
 </html>
