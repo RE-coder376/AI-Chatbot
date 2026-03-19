@@ -310,11 +310,27 @@
         <input type="checkbox" id="crawl-clear-first" style="width:18px;height:18px;cursor:pointer;">
         <label for="crawl-clear-first" style="margin:0;cursor:pointer;">🗑️ Clear existing data before crawling (fresh re-crawl)</label>
       </div>
-      <button id="inspect-btn" onclick="inspectSite()" style="background:#0ea5e9;">🔍 Inspect Site Structure</button>
-      <button onclick="crawlSite()" style="background:#16a34a; margin-top:8px;">🕸️ Crawl & Ingest Entire Site</button>
-      <div id="crawl-step2" style="display:none; margin-top:20px; border-top:1px solid var(--border); padding-top:20px;">
-        <label>Select Groups to Crawl</label><div id="crawl-path-list" style="max-height:200px; overflow-y:auto; background:#f8fafc; padding:12px; border-radius:12px;"></div>
-        <button onclick="crawlSite()" style="background:#16a34a;">🕸️ Start Full Ingestion</button>
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px;">
+        <label style="margin:0">Max Pages</label>
+        <label style="margin:0;cursor:pointer;font-size:12px;display:flex;align-items:center;gap:5px;">
+          <input type="checkbox" id="crawl-no-limit" onchange="document.getElementById('crawl-max-pages').disabled=this.checked;document.getElementById('crawl-max-pages').style.opacity=this.checked?'0.4':'1'"/>
+          No limit
+        </label>
+      </div>
+      <input type="number" id="crawl-max-pages" value="2000" min="100" max="100000" style="width:100%;padding:10px 14px;border-radius:10px;border:1.5px solid var(--border);font-size:13px;margin-bottom:8px;"/>
+      <div style="display:flex;gap:8px;margin-top:4px;">
+        <button onclick="smartCrawlInspect()" style="background:#7c3aed;flex:1;">🤖 Smart Crawl</button>
+        <button onclick="fullCrawl()" style="background:#16a34a;flex:1;">⚡ Full Crawl</button>
+      </div>
+      <p style="font-size:11px;color:#94a3b8;margin:6px 0 0;">Smart = inspects &amp; classifies URLs first. Full = crawls everything up to max pages.</p>
+      <div id="smart-inspect-panel" style="display:none;margin-top:16px;border-top:1px solid var(--border);padding-top:16px;">
+        <h4 style="font-size:13px;font-weight:800;margin-bottom:6px;color:#7c3aed;">🤖 URL Classification Results</h4>
+        <p style="font-size:11px;color:#64748b;margin-bottom:10px;">LLM-rated URL groups. Check the ones you want to crawl, then start.</p>
+        <div id="smart-groups-table"></div>
+        <div style="display:flex;gap:8px;margin-top:12px;">
+          <button onclick="startSmartCrawl()" style="background:#7c3aed;flex:1;">🚀 Crawl Selected Groups</button>
+          <button onclick="document.getElementById('smart-inspect-panel').style.display='none'" style="background:#f1f5f9;color:#475569;border:1px solid var(--border);flex:1;">✕ Cancel</button>
+        </div>
       </div>
       <div id="crawl-status" class="status-msg"></div>
     </div>
@@ -1112,22 +1128,97 @@
     }
   }
 
-  function inspectSite() {
+  function inspectSite() { smartCrawlInspect(); }
+  function crawlSite() { fullCrawl(); }
+
+  async function smartCrawlInspect() {
+    const pass = document.getElementById('master-pass').value;
     const url = document.getElementById('crawl-url').value.trim();
     if (!url) return showStatus('crawl', 'Enter a URL first.', 'error');
-    showStatus('crawl', 'Crawl starting directly...', 'loading');
-    crawlSite();
+
+    const panel = document.getElementById('smart-inspect-panel');
+    const tableEl = document.getElementById('smart-groups-table');
+    panel.style.display = 'block';
+    tableEl.innerHTML = '<div style="font-family:monospace;font-size:11px;color:#64748b;padding:8px;">Fetching sitemap...</div>';
+    showStatus('crawl', '🤖 Inspecting site structure...', 'loading', true);
+    const statusEl = document.getElementById('crawl-status');
+    statusEl.innerHTML += '<div id="inspect-logs" style="font-family:monospace;font-size:10px;background:#1e293b;color:#86efac;padding:12px;border-radius:12px;max-height:120px;overflow-y:auto;margin-top:8px;line-height:1.4;"></div>';
+    const logsEl = document.getElementById('inspect-logs');
+
+    const groups = [];
+    try {
+      const response = await fetch(`${API}/admin/crawl-inspect`, {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({password: pass, url})
+      });
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buf = '';
+      while (true) {
+        const {done, value} = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, {stream: true});
+        const lines = buf.split('\n'); buf = lines.pop();
+        for (const line of lines) {
+          if (!line.startsWith('data:')) continue;
+          try {
+            const d = JSON.parse(line.slice(5).trim());
+            if (d.msg && logsEl) { logsEl.innerHTML += `<div>${d.msg}</div>`; logsEl.scrollTop = logsEl.scrollHeight; }
+            if (d.group) { groups.push(d.group); _renderGroupsTable(groups, tableEl); }
+            if (d.done) break;
+          } catch {}
+        }
+      }
+      showStatus('crawl', `✅ Inspection done — ${groups.length} URL groups classified. Select groups below.`, 'success', true);
+    } catch (e) { showStatus('crawl', '❌ Inspection failed.', 'error'); }
   }
 
-  async function crawlSite() {
+  function _renderGroupsTable(groups, el) {
+    const sc = {5:'#16a34a',4:'#0ea5e9',3:'#f59e0b',2:'#94a3b8',1:'#ef4444'};
+    el.innerHTML = `<table style="width:100%;border-collapse:collapse;font-size:11px;">
+      <tr style="background:#f8fafc;font-weight:700;font-size:10px;text-transform:uppercase;color:#94a3b8;">
+        <th style="padding:6px;text-align:center;">Include</th>
+        <th style="padding:6px;text-align:center;">Crawl?</th>
+        <th style="padding:6px;text-align:left;">Pattern</th>
+        <th style="padding:6px;text-align:right;">Pages</th>
+        <th style="padding:6px;text-align:left;">Reason</th>
+      </tr>
+      ${groups.map(g => {
+        const yes = g.recommended;
+        const badge = yes
+          ? `<span style="background:#dcfce7;color:#16a34a;padding:2px 8px;border-radius:8px;font-weight:700;font-size:11px;">✅ Crawl</span>`
+          : `<span style="background:#fee2e2;color:#dc2626;padding:2px 8px;border-radius:8px;font-weight:700;font-size:11px;">❌ Skip</span>`;
+        return `<tr style="border-top:1px solid #e2e8f0;background:${yes?'#f0fdf4':'#fff8f8'};">
+          <td style="padding:6px;text-align:center;"><input type="checkbox" class="group-check" data-pattern="${g.pattern}" ${yes?'checked':''}></td>
+          <td style="padding:6px;text-align:center;">${badge}</td>
+          <td style="padding:6px;font-family:monospace;color:#334155;font-size:10px;">${g.pattern}<br><span style="color:#94a3b8;font-size:9px;">${g.sample_url?g.sample_url.slice(0,60)+'...':''}</span></td>
+          <td style="padding:6px;text-align:right;color:#64748b;">${g.count}</td>
+          <td style="padding:6px;color:#64748b;font-size:10px;">${g.reason}</td>
+        </tr>`;
+      }).join('')}
+    </table>
+    <p style="font-size:10px;color:#94a3b8;margin-top:6px;">You can override any recommendation by checking/unchecking the box.</p>`;
+  }
+
+  async function startSmartCrawl() {
+    const checked = [...document.querySelectorAll('.group-check:checked')];
+    if (!checked.length) return showStatus('crawl', 'Select at least one group.', 'error');
+    const patterns = checked.map(c => c.dataset.pattern);
+    document.getElementById('smart-inspect-panel').style.display = 'none';
+    await fullCrawl(patterns);
+  }
+
+  async function fullCrawl(urlPatterns = []) {
     const pass = document.getElementById('master-pass').value;
     const url = document.getElementById('crawl-url').value.trim();
     const db_name = document.getElementById('crawl-db-name').value.trim();
     const embedding_model = document.getElementById('crawl-embedding-model')?.value || 'bge';
+    const noLimit = document.getElementById('crawl-no-limit')?.checked;
+    const maxPages = noLimit ? 999999 : parseInt(document.getElementById('crawl-max-pages')?.value || '2000');
 
     if (!url || !db_name) return showStatus('crawl', 'URL and DB name required.', 'error');
     const clearFirst = document.getElementById('crawl-clear-first').checked;
-    if (clearFirst && !confirm(`⚠️ WARNING: This will permanently delete all existing data in the "${db_name}" database before crawling.\n\nA backup (chroma.sqlite3.bak) will be saved in the DB folder.\n\nContinue?`)) return;
+    if (clearFirst && !confirm(`⚠️ This will delete all existing data in "${db_name}".\nA backup will be saved first.\n\nContinue?`)) return;
 
     // Save embedding model to DB config first
     await fetch(`${API}/admin/embedding-model`, {
@@ -1145,7 +1236,7 @@
       const response = await fetch(`${API}/admin/crawl`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ password: pass, url, db_name, max_pages: 2000, embedding_model, clear_before_crawl: document.getElementById('crawl-clear-first').checked })
+        body: JSON.stringify({ password: pass, url, db_name, max_pages: maxPages, embedding_model, clear_before_crawl: clearFirst, url_patterns: urlPatterns })
       });
 
       if (!response.ok) {

@@ -554,6 +554,39 @@ def any_key_ready() -> bool:
     except:
         return True  # assume ready if check fails
 
+# Per-model context window budgets (chars, conservative — leaves room for system prompt + history)
+_CONTEXT_CHAR_BUDGET = {
+    'cerebras':  6000,   # llama3.1-8b = 8K tokens total; ~1500 tokens for context
+    'groq':     40000,   # llama-3.3-70b = 128K tokens; generous budget
+    'gemini':   40000,   # gemini-2.0-flash-lite = 1M tokens; generous budget
+    'sambanova':40000,   # Llama-3.3-70B = 128K tokens; generous budget
+    'openai':   40000,   # gpt-4o-mini = 128K tokens; generous budget
+}
+
+def _peek_provider() -> str:
+    """Return the provider string of the healthiest available key (without creating LLM object)."""
+    try:
+        actives = []
+        if KEYS_FILE.exists():
+            keys = json.loads(KEYS_FILE.read_text())
+            actives = [k for k in keys if k.get('status') == 'active']
+        env_key = os.getenv("GROQ_API_KEY")
+        if env_key and not any(k['key'] == env_key for k in actives):
+            actives.append({"key": env_key, "provider": "groq", "label": "Env Key"})
+        if not actives:
+            return 'groq'
+        now = time.time()
+        def _score(k):
+            s = _key_status.get(k['key'], {})
+            if now < s.get("cooldown_until", 0): return (-1, 0, 0)
+            org_id = _key_org_map.get(k['key'])
+            if org_id and now < _org_cooldown.get(org_id, 0): return (-1, 0, 0)
+            return (s.get("tokens", 6000), -s.get("last_used", 0), 0)
+        chosen = sorted(actives, key=_score, reverse=True)[0]
+        return chosen.get('provider', 'groq')
+    except:
+        return 'groq'
+
 def get_fresh_llm():
     """Multi-provider key rotation: Groq (llama-3.3-70b) + OpenAI (gpt-4o-mini) fallback."""
     try:
@@ -1098,10 +1131,10 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
         yield "data: {\"type\": \"done\"}\n\n"
         return
 
-    # ── Context cap — prevent Groq 413 ───────────────────────────────────────
-    MAX_CONTEXT_CHARS = 12000
-    if len(context) > MAX_CONTEXT_CHARS:
-        context = context[:MAX_CONTEXT_CHARS]
+    # ── Context cap — per-model budget (prevent context_length_exceeded) ─────
+    _budget = _CONTEXT_CHAR_BUDGET.get(_peek_provider(), 12000)
+    if len(context) > _budget:
+        context = context[:_budget]
 
     sys_msg = get_system_prompt(cfg, context, doc_count)
     if page_url:
@@ -1828,6 +1861,137 @@ async def reindex(data: dict):
     except Exception as e:
         return JSONResponse({"detail": f"Reindex error: {str(e)}"}, status_code=500)
 
+@app.post("/admin/crawl-inspect")
+async def crawl_inspect(data: dict, request: Request):
+    """Stage 1 of Smart Crawl: fetch sitemap, group URLs by pattern, LLM-rate each group."""
+    cfg = get_config()
+    if data.get("password") != cfg.get("admin_password"):
+        return JSONResponse({"detail": "Unauthorized"}, status_code=401)
+    url = data.get("url", "").strip().rstrip("/")
+    if not url:
+        return JSONResponse({"detail": "url required"}, status_code=400)
+
+    async def _stream():
+        import urllib.parse, requests as _req, random
+        from collections import defaultdict
+
+        def _send(msg):
+            return f"data: {json.dumps({'msg': msg})}\n\n"
+        def _send_group(g):
+            return f"data: {json.dumps({'group': g})}\n\n"
+        def _strip_www(u):
+            return re.sub(r'^(https?://)www\.', r'\1', u)
+        def _url_group(u):
+            path = urllib.parse.urlparse(u).path
+            parts = [p for p in path.strip('/').split('/') if p]
+            norm = []
+            for p in parts:
+                if re.match(r'^[a-f0-9\-]{8,}$', p, re.I) or re.match(r'^\d+$', p) or len(p) > 35:
+                    norm.append('*')
+                else:
+                    norm.append(p)
+            return '/' + '/'.join(norm[:3]) if norm else '/'
+
+        try:
+            parsed     = urllib.parse.urlparse(url)
+            base       = f"{parsed.scheme}://{parsed.netloc}"
+            base_nowww = _strip_www(base)
+            headers    = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+
+            yield _send(f"🔍 Fetching sitemap from {base}/sitemap.xml ...")
+            all_urls = []
+            sitemap_names = {}  # url → sub-sitemap name
+
+            def _fetch_sub(sm_url, name=""):
+                try:
+                    r = _req.get(sm_url.strip(), timeout=12, headers=headers)
+                    if r.status_code != 200:
+                        return []
+                    locs = re.findall(r'<loc>\s*([^<\s]+)\s*</loc>', r.text, re.I)
+                    return [u.strip() for u in locs if _strip_www(u.strip()).startswith(base_nowww)]
+                except Exception:
+                    return []
+
+            try:
+                r = _req.get(f"{base}/sitemap.xml", timeout=15, headers=headers)
+                if r.status_code == 200:
+                    sub_sitemaps = re.findall(r'<sitemap[^>]*>\s*<loc>\s*([^<\s]+)\s*</loc>', r.text, re.I)
+                    if sub_sitemaps:
+                        yield _send(f"📂 Sitemap index — {len(sub_sitemaps)} sub-sitemaps found")
+                        for sm in sub_sitemaps[:30]:
+                            sm = sm.strip()
+                            name = sm.split('/')[-1].replace('.xml', '').replace('sitemap_', '')
+                            urls = _fetch_sub(sm, name)
+                            all_urls.extend(urls)
+                            for u in urls:
+                                sitemap_names[u] = name
+                            yield _send(f"  📄 {name}: {len(urls)} URLs")
+                    else:
+                        all_urls = _fetch_sub(f"{base}/sitemap.xml")
+            except Exception as e:
+                yield _send(f"⚠️ Sitemap error: {e}")
+
+            if not all_urls:
+                yield _send("❌ No URLs found in sitemap. Try Full Crawl instead.")
+                yield "data: {\"done\": true}\n\n"
+                return
+
+            yield _send(f"✅ {len(all_urls)} total URLs — grouping by pattern...")
+
+            groups = defaultdict(list)
+            for u in all_urls:
+                groups[_url_group(u)].append(u)
+
+            yield _send(f"📊 {len(groups)} URL pattern groups — rating with LLM (sampling 2 per group)...")
+
+            llm = get_fresh_llm()
+            for pattern, urls in sorted(groups.items(), key=lambda x: -len(x[1])):
+                samples = random.sample(urls, min(2, len(urls)))
+                snippet = ""
+                for su in samples:
+                    try:
+                        sr = await asyncio.to_thread(_req.get, su, timeout=6, headers=headers, allow_redirects=True)
+                        if sr.status_code == 200:
+                            raw = re.sub(r'<script[^>]*>.*?</script>', ' ', sr.text, flags=re.DOTALL)
+                            raw = re.sub(r'<style[^>]*>.*?</style>', ' ', raw, flags=re.DOTALL)
+                            raw = re.sub(r'<[^>]+>', ' ', raw)
+                            raw = re.sub(r'\s+', ' ', raw).strip()
+                            if len(raw) > 100:
+                                snippet = raw[:500]
+                                break
+                    except Exception:
+                        pass
+
+                score, reason = 3, "Could not classify"
+                try:
+                    prompt = (f"Rate this URL group 1-5 for a customer service chatbot knowledge base.\n"
+                              f"1=junk(login/cart/pagination) 2=low(nav only) 3=medium(category) 4=high(FAQ/policy/guide) 5=very high(article/product detail/comparison)\n"
+                              f"Pattern: {pattern} ({len(urls)} URLs)\nSample: {samples[0]}\nSnippet: {snippet[:400] or '(not fetchable)'}\n"
+                              f"Reply EXACTLY: SCORE: X | REASON: one sentence")
+                    resp = llm.invoke([{"role": "user", "content": prompt}])
+                    sm = re.search(r'SCORE:\s*(\d)', resp.content)
+                    rm = re.search(r'REASON:\s*(.+)', resp.content)
+                    if sm: score = int(sm.group(1))
+                    if rm: reason = rm.group(1).strip()[:120]
+                except Exception:
+                    pass
+
+                sub_name = sitemap_names.get(urls[0], "")
+                yield _send_group({
+                    "pattern": pattern, "count": len(urls), "score": score,
+                    "reason": reason, "sample_url": samples[0],
+                    "sub_sitemap": sub_name, "recommended": score >= 3
+                })
+
+            yield "data: {\"done\": true}\n\n"
+        except Exception as e:
+            import traceback
+            yield _send(f"❌ Error: {e}\n{traceback.format_exc()[:400]}")
+            yield "data: {\"done\": true}\n\n"
+
+    return StreamingResponse(_stream(), media_type="text/event-stream")
+
+
 @app.post("/admin/crawl")
 async def crawl_site(data: dict, request: Request):
     cfg = get_config()
@@ -1838,6 +2002,7 @@ async def crawl_site(data: dict, request: Request):
     db_name    = data.get("db_name", "").strip()
     max_pages  = int(data.get("max_pages", 1000))
     clear_first = bool(data.get("clear_before_crawl", False))
+    url_patterns = data.get("url_patterns", [])  # Smart Crawl filter (empty = full crawl)
 
     if not url or not db_name:
         return JSONResponse({"detail": "url and db_name required"}, status_code=400)
@@ -1957,7 +2122,18 @@ async def crawl_site(data: dict, request: Request):
                         seen_norm.add(n)
                         deduped.append(u)
 
-                to_crawl = deduped[:max_pages]
+                if url_patterns:
+                    def _matches(u):
+                        path = urllib.parse.urlparse(u).path
+                        for pat in url_patterns:
+                            prefix = pat.rstrip('*').rstrip('/')
+                            if not prefix or path.startswith(prefix) or path == prefix:
+                                return True
+                        return False
+                    to_crawl = [u for u in deduped if _matches(u)][:max_pages]
+                    yield _send(f"🎯 Smart filter: {len(to_crawl)} URLs match selected groups")
+                else:
+                    to_crawl = deduped[:max_pages]
                 yield _send(f"📋 {len(to_crawl)} unique pages to crawl...")
 
                 # --- Force Multilingual for all new crawls ---
@@ -2042,7 +2218,7 @@ async def crawl_site(data: dict, request: Request):
                         await asyncio.to_thread(chroma_db.add_documents, chunks)
                     total_chunks += len(chunks)
 
-                PARALLEL = 8  # 8 parallel tabs for maximum speed
+                PARALLEL = 15  # 15 parallel tabs for maximum speed
                 sem = asyncio.Semaphore(PARALLEL)
                 log_queue = asyncio.Queue()
 
@@ -2138,14 +2314,17 @@ async def crawl_site(data: dict, request: Request):
                         completed += 1
 
                         if len(text) > 50:
+                            batch_to_flush = None
                             async with flush_lock:
                                 pending_pages.append({"url": cur_url, "text": text})
                                 await log_queue.put(f"[{completed}/{len(to_crawl)}] ✅ {cur_url[:70]} ({len(text)} chars)")
-                                if len(pending_pages) >= 10:
-                                    batch = pending_pages[:]
+                                if len(pending_pages) >= 30:
+                                    batch_to_flush = pending_pages[:]
                                     pending_pages.clear()
-                                    await log_queue.put(f"💾 Saving batch ({len(batch)} pages, {total_chunks} so far)...")
-                                    await _flush_pages(batch)
+                            # Embed OUTSIDE the lock so other crawl tasks can proceed
+                            if batch_to_flush:
+                                await log_queue.put(f"💾 Saving batch ({len(batch_to_flush)} pages, {total_chunks} so far)...")
+                                await _flush_pages(batch_to_flush)
                         else:
                             await log_queue.put(f"[{completed}/{len(to_crawl)}] ⏭️  {cur_url[:70]} ({len(text)} chars - TOO SHORT)")
 
@@ -2264,12 +2443,19 @@ Base it ONLY on the context below. If context is insufficient, say so briefly.
 Context:
 {context[:1500]}"""
 
-    try:
-        llm = get_fresh_llm()
-        resp = await llm.ainvoke([{"role": "user", "content": prompt}])
-        return {"suggestion": resp.content, "question": question}
-    except Exception as e:
-        return JSONResponse({"detail": str(e)}, status_code=500)
+    # Multi-provider failover loop
+    last_err = "Unknown error"
+    for attempt in range(3):
+        try:
+            llm = get_fresh_llm()
+            if not llm: break
+            resp = await llm.ainvoke([{"role": "user", "content": prompt}])
+            return {"suggestion": resp.content, "question": question}
+        except Exception as e:
+            last_err = str(e)
+            logger.warning(f"Knowledge Gap Suggest Attempt {attempt+1} failed: {e}")
+            await asyncio.sleep(1) # Small pause before retry with fresh key
+    return JSONResponse({"detail": f"Failed after 3 attempts: {last_err}"}, status_code=500)
 
 @app.post("/csat")
 async def submit_csat(data: dict):

@@ -19,7 +19,8 @@ A production-hardened **Digital FTE (Full-Time Equivalent)** platform. Transform
 
 ### Intelligence & Retrieval
 - **Hybrid Search:** Combines Vector Semantic Search with BM25 keyword matching + CrossEncoder reranking.
-- **Keyword Rescue:** Deep-scans documentation for exact technical terms (acronyms, product names).
+- **Context Budgeting:** Dynamic per-model context window management (prevents `context_length_exceeded` errors).
+- **Keyword Rescue:** Deep-scans documentation for exact technical terms (acronyms, product names).      
 - **Language Mirroring:** Detects and responds in the user's exact script and language.
 - **Multi-Provider LLM:** Groq → OpenAI → Gemini with automatic key rotation and failover.
 
@@ -34,10 +35,10 @@ A production-hardened **Digital FTE (Full-Time Equivalent)** platform. Transform
 - **Persistent History:** Conversation history saved to localStorage, restored on reload.
 
 ### Enterprise Admin Panel
+- **Smart Crawl:** Stage 1 (Inspect & LLM-Rate URL groups) → Stage 2 (Targeted ingestion).
 - **Visual Branding Suite:** Real-time mobile widget preview with color controls.
-- **Knowledge Hub:** UI-based crawling, file uploads (PDF/DOCX), manual text ingestion, FAQ management.
-- **Analytics Dashboard:** Chart.js charts — daily queries, CSAT trend, top knowledge gaps.
-- **Knowledge Gap Suggest:** LLM-powered draft answers for unanswered questions, add to KB in one click.
+- **Knowledge Hub:** UI-based crawling, file uploads (PDF/DOCX), manual text ingestion, FAQ management.  
+- **Analytics Dashboard:** Chart.js charts — daily queries, CSAT trend, top knowledge gaps.- **Knowledge Gap Suggest:** LLM-powered draft answers for unanswered questions, add to KB in one click.
 - **SMTP Email Config:** Configurable sender email, password, host, port per client from admin UI.
 - **Behavioral Audit Suite:** Automated testing for Identity, Knowledge, and Safety.
 - **System Watchdog:** Self-healing logic for dimension mismatches and configuration drift.
