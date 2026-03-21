@@ -102,7 +102,36 @@
     @keyframes spin { to { transform: rotate(360deg); } }
 
     #watchdog-chat { display: none; margin-top: 24px; border: 1.5px solid var(--border); border-radius: 16px; padding: 20px; background: #fff; }
+  /* ── Custom Confirm Modal ── */
+  #confirm-overlay {
+    display: none; position: fixed; inset: 0; background: rgba(15,23,42,0.55);
+    z-index: 9999; align-items: center; justify-content: center;
+  }
+  #confirm-overlay.active { display: flex; }
+  #confirm-box {
+    background: #fff; border-radius: 20px; padding: 28px 28px 20px;
+    max-width: 400px; width: 90%; box-shadow: 0 20px 60px rgba(0,0,0,0.18);
+    animation: popIn 0.18s ease-out;
+  }
+  @keyframes popIn { from { transform: scale(0.88); opacity: 0; } to { transform: scale(1); opacity: 1; } }
+  #confirm-box h3 { margin: 0 0 8px; font-size: 16px; color: #1e293b; }
+  #confirm-box p  { margin: 0 0 20px; font-size: 13px; color: #64748b; line-height: 1.5; }
+  #confirm-box .btn-row { display: flex; gap: 10px; justify-content: flex-end; }
+  #confirm-box .btn-cancel { background: #f1f5f9; color: #475569; border: 1px solid #e2e8f0; border-radius: 10px; padding: 9px 18px; cursor: pointer; font-size: 13px; font-weight: 600; }
+  #confirm-box .btn-ok { background: #ef4444; color: #fff; border: none; border-radius: 10px; padding: 9px 18px; cursor: pointer; font-size: 13px; font-weight: 600; }
+  #confirm-box .btn-ok.safe { background: #6366f1; }
   </style>
+  <!-- Custom Confirm Modal -->
+  <div id="confirm-overlay">
+    <div id="confirm-box">
+      <h3 id="confirm-title">Are you sure?</h3>
+      <p id="confirm-msg"></p>
+      <div class="btn-row">
+        <button class="btn-cancel" onclick="confirmResolve(false)">Cancel</button>
+        <button class="btn-ok" id="confirm-ok-btn" onclick="confirmResolve(true)">Confirm</button>
+      </div>
+    </div>
+  </div>
 </head>
 <body class="locked">
 <div class="container">
@@ -115,7 +144,7 @@
   <div class="auth-section">
     <label style="margin-top:0;">Master Admin Password</label>
     <div style="display:flex; gap:12px;">
-      <input type="password" id="master-pass" placeholder="Unlock system to manage instance" style="flex:1;"/>
+      <input type="password" id="master-pass" placeholder="Unlock system to manage instance" style="flex:1;" onkeydown="if(event.key==='Enter') unlockSystem()"/>
       <button onclick="unlockSystem()" style="width:auto; margin:0; padding:0 40px;">Verify & Unlock</button>
     </div>
     <div id="auth-status" class="status-msg"></div>
@@ -454,6 +483,29 @@
   const API = window.location.origin;
   let feedbackChart = null;
 
+  // ── Custom confirm dialog (replaces browser confirm()) ──
+  let confirmResolve = () => {};
+  function showConfirm(title, msg, okLabel = 'Confirm', danger = true) {
+    return new Promise(resolve => {
+      document.getElementById('confirm-title').textContent = title;
+      document.getElementById('confirm-msg').textContent = msg;
+      const btn = document.getElementById('confirm-ok-btn');
+      btn.textContent = okLabel;
+      btn.className = 'btn-ok' + (danger ? '' : ' safe');
+      document.getElementById('confirm-overlay').classList.add('active');
+      confirmResolve = (result) => {
+        document.getElementById('confirm-overlay').classList.remove('active');
+        resolve(result);
+      };
+    });
+  }
+  // Close on backdrop click
+  document.addEventListener('DOMContentLoaded', () => {
+    document.getElementById('confirm-overlay').addEventListener('click', e => {
+      if (e.target === document.getElementById('confirm-overlay')) confirmResolve(false);
+    });
+  });
+
   function showStatus(id, msg, type, persistent = false) { 
     const el = document.getElementById(id + '-status'); 
     if (!el) return; 
@@ -471,9 +523,9 @@
     if (!pass) return showStatus('auth', 'Password required.', 'error');
     showStatus('auth', 'Authenticating...', 'loading');
     fetch(`${API}/admin/branding?password=${encodeURIComponent(pass)}`).then(async r => {
-      if (!r.ok) { localStorage.removeItem('adminPass'); showStatus('auth', 'Denied.', 'error'); return; }
+      if (!r.ok) { sessionStorage.removeItem('adminPass'); showStatus('auth', 'Denied.', 'error'); return; }
       const data = await r.json();
-      localStorage.setItem('adminPass', pass);
+      sessionStorage.setItem('adminPass', pass);
       document.body.classList.remove('locked');
       showStatus('auth', 'System Active', 'success');
       loadServerData(data);
@@ -484,9 +536,9 @@
     }).catch(() => showStatus('auth', 'Failed.', 'error'));
   }
 
-  // Auto-login on page load if password was saved
+  // Auto-login on page load if password was saved this session (clears on tab close)
   document.addEventListener('DOMContentLoaded', () => {
-    const saved = localStorage.getItem('adminPass');
+    const saved = sessionStorage.getItem('adminPass');
     if (saved) {
       document.getElementById('master-pass').value = saved;
       unlockSystem();
@@ -679,10 +731,11 @@
           </div>
         </div>
         <div class="db-details" id="details-${db.name}">
-          <div class="grid-2">
-            <div><label>Storage Size</label><div style="font-weight:700;">${db.size}</div></div>
-            <div><label>Knowledge Chunks</label><div style="font-weight:700;">${db.chunks}</div></div>
+          <div class="grid-2" style="margin-bottom:10px;">
+            <div><label>Storage Size</label><div style="font-weight:700;font-size:15px;">${db.size}</div></div>
+            <div><label>Knowledge Chunks</label><div style="font-weight:700;font-size:15px;">${db.chunks.toLocaleString()}</div></div>
           </div>
+          <button onclick="clearDbData('${db.name}')" style="width:auto;margin:0;padding:5px 14px;font-size:11px;background:#fff8f8;color:#dc2626;border:1.5px solid #fca5a5;border-radius:10px;cursor:pointer;font-weight:700;">🗑 Clear All Data</button>
         </div>
       </div>
     `).join("");
@@ -742,14 +795,25 @@
     loadDatabases(); 
   }
   async function deleteDb(name) { 
-    if (!confirm(`Permanently delete ${name}?`)) return; 
+    if (!await showConfirm('Delete Database', `Permanently delete "${name}" and all its data? This cannot be undone.`, 'Delete', true)) return;
     const pass = document.getElementById('master-pass').value; 
     const f = new FormData(); f.append("password", pass); f.append("name", name); 
     showStatus('db', `Purging ${name}...`, 'loading');
     const res = await fetch(`${API}/admin/delete-db`, { method:"POST", body:f }); 
     const d = await res.json();
     showStatus('db', d.message || d.detail, d.success ? 'success' : 'error');
-    loadDatabases(); 
+    loadDatabases();
+  }
+
+  async function clearDbData(name) {
+    if (!await showConfirm('Clear All Data', `Delete all knowledge chunks from "${name}"? Config and crawl settings are kept. This cannot be undone.`, 'Clear Data', true)) return;
+    const pass = document.getElementById('master-pass').value;
+    const f = new FormData(); f.append("password", pass); f.append("name", name);
+    showStatus('db', `Clearing ${name}...`, 'loading');
+    const res = await fetch(`${API}/admin/databases/clear-data`, { method:"POST", body:f });
+    const d = await res.json();
+    showStatus('db', d.message || d.detail, d.success ? 'success' : 'error');
+    loadDatabases();
   }
 
   async function loadBranding() {
@@ -1164,7 +1228,14 @@
           try {
             const d = JSON.parse(line.slice(5).trim());
             if (d.msg && logsEl) { logsEl.innerHTML += `<div>${d.msg}</div>`; logsEl.scrollTop = logsEl.scrollHeight; }
-            if (d.group) { groups.push(d.group); _renderGroupsTable(groups, tableEl); }
+            if (d.total_groups) { window._inspectTotal = d.total_groups; }
+            if (d.group) {
+              groups.push(d.group);
+              _renderGroupsTable(groups, tableEl);
+              const c = d.group.classified || groups.length;
+              const t = d.group.total || window._inspectTotal || '?';
+              showStatus('crawl', `🔍 Classifying ${c} / ${t} groups...`, 'info', true);
+            }
             if (d.done) break;
           } catch {}
         }
@@ -1181,19 +1252,20 @@
         <th style="padding:6px;text-align:center;">Crawl?</th>
         <th style="padding:6px;text-align:left;">Pattern</th>
         <th style="padding:6px;text-align:right;">Pages</th>
-        <th style="padding:6px;text-align:left;">Reason</th>
+        <th style="padding:6px;text-align:left;">Reason &amp; Content Preview</th>
       </tr>
       ${groups.map(g => {
         const yes = g.recommended;
         const badge = yes
           ? `<span style="background:#dcfce7;color:#16a34a;padding:2px 8px;border-radius:8px;font-weight:700;font-size:11px;">✅ Crawl</span>`
           : `<span style="background:#fee2e2;color:#dc2626;padding:2px 8px;border-radius:8px;font-weight:700;font-size:11px;">❌ Skip</span>`;
+        const preview = g.snippet ? `<div style="margin-top:4px;color:#94a3b8;font-size:9px;font-style:italic;line-height:1.4;">"${g.snippet.slice(0,120)}..."</div>` : '';
         return `<tr style="border-top:1px solid #e2e8f0;background:${yes?'#f0fdf4':'#fff8f8'};">
           <td style="padding:6px;text-align:center;"><input type="checkbox" class="group-check" data-pattern="${g.pattern}" ${yes?'checked':''}></td>
           <td style="padding:6px;text-align:center;">${badge}</td>
           <td style="padding:6px;font-family:monospace;color:#334155;font-size:10px;">${g.pattern}<br><span style="color:#94a3b8;font-size:9px;">${g.sample_url?g.sample_url.slice(0,60)+'...':''}</span></td>
           <td style="padding:6px;text-align:right;color:#64748b;">${g.count}</td>
-          <td style="padding:6px;color:#64748b;font-size:10px;">${g.reason}</td>
+          <td style="padding:6px;color:#64748b;font-size:10px;">${g.reason}${preview}</td>
         </tr>`;
       }).join('')}
     </table>
@@ -1218,7 +1290,7 @@
 
     if (!url || !db_name) return showStatus('crawl', 'URL and DB name required.', 'error');
     const clearFirst = document.getElementById('crawl-clear-first').checked;
-    if (clearFirst && !confirm(`⚠️ This will delete all existing data in "${db_name}".\nA backup will be saved first.\n\nContinue?`)) return;
+    if (clearFirst && !await showConfirm('Clear Before Crawl', `This will delete all existing data in "${db_name}". A backup will be saved first. Continue?`, 'Clear & Crawl', true)) return;
 
     // Save embedding model to DB config first
     await fetch(`${API}/admin/embedding-model`, {
@@ -1279,8 +1351,8 @@
     }
   }
 
-  function clearDraft() {
-    if (!confirm('Clear all local draft cache?')) return;
+  async function clearDraft() {
+    if (!await showConfirm('Clear Draft Cache', 'Clear all locally saved draft content?', 'Clear', false)) return;
     Object.keys(localStorage).filter(k => k.startsWith('draft_') || k === 'chat_draft').forEach(k => localStorage.removeItem(k));
     showStatus('auth', 'Local draft cache cleared.', 'success');
   }

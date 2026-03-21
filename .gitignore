@@ -13,13 +13,24 @@ __pycache__/
 *.pyc
 *.pyo
 *.pyd
+chunks_temp.json
 
-# Logs & Audit
+# Logs, Analytics, & Audit
 *.log
 healer_logs.json
 chat_logs.json
 feedback.json
 leads.json
+analytics.json
+csat_log.json
+knowledge_gaps.json
+visitor_history/
+key_health.json
+watchdog_baseline.json
+watchdog_dialogue.json
+watchdog.lock
+eval_results.txt
+crawl_log*.txt
 app_log.txt
 watchdog_out.log
 server_out.log
@@ -29,6 +40,7 @@ ingest_output.txt
 ingest_output_minilm.txt
 full_ingest_out.log
 deep_ingest.log
+CRITICAL_ERRORS.txt
 
 # Temporary Migration & Audit Scripts
 *_audit.py

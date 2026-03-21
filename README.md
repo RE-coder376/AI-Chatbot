@@ -9,9 +9,9 @@ A production-hardened **Digital FTE (Full-Time Equivalent)** platform. Transform
 - **Multilingual Brain:** Single unified engine for English and Urdu (both scripts).
 - **Cross-Lingual RAG:** Answers questions in Urdu even if the source documentation is in English.
 - **Production Hardened:** Built-in audit suite to verify identity, knowledge, and safety.
-- **Stealth Crawler:** Advanced Playwright-based crawler to ingest data from any public site.
+- **Hybrid Stealth Crawler:** Advanced Playwright-based crawler + **Fast-Path HTTP Ingestion** (5-10x faster for Shopify/WordPress/WooCommerce).
 - **Multi-Client Architecture:** Switch between brands instantly with dynamic branding and knowledge isolation.
-- **Privacy Guard:** Code-level interception of prompt injection and system prompt reveal attempts.
+- **Privacy Guard:** Code-level interception of prompt injection, XSS protection, and system prompt reveal attempts.
 
 ---
 
@@ -19,6 +19,7 @@ A production-hardened **Digital FTE (Full-Time Equivalent)** platform. Transform
 
 ### Intelligence & Retrieval
 - **Hybrid Search:** Combines Vector Semantic Search with BM25 keyword matching + CrossEncoder reranking.
+- **Content-Level Dedup:** MD5-based hashing during crawling to skip duplicate content across product filters/collections.
 - **Context Budgeting:** Dynamic per-model context window management (prevents `context_length_exceeded` errors).
 - **Keyword Rescue:** Deep-scans documentation for exact technical terms (acronyms, product names).      
 - **Language Mirroring:** Detects and responds in the user's exact script and language.
@@ -29,25 +30,29 @@ A production-hardened **Digital FTE (Full-Time Equivalent)** platform. Transform
 - **Human Handoff:** Detects "talk to human" intent → shows handoff card → emails full transcript to team.
 - **Lead Capture:** 2-step lead form (Name / Email / Phone / Message) with email notification.
 - **Quick Reply Chips:** Suggested follow-up questions after each response.
-- **Inline Source Citations:** Compact `[1] page-name` badge links instead of raw URLs.
+- **Inline Source Citations:** Compact `[1] page-name` badge links with protocol validation for security.
 - **Rich Cards:** LLM can emit structured `[CARD]Title|Desc|URL[/CARD]` cards.
 - **CSAT Survey:** 5-star rating widget fires after every 5th message.
 - **Persistent History:** Conversation history saved to localStorage, restored on reload.
 
 ### Enterprise Admin Panel
+- **Fast-Path Ingestion:** Direct HTTP content extraction for 5-10x faster crawling on server-rendered sites.
 - **Smart Crawl:** Stage 1 (Inspect & LLM-Rate URL groups) → Stage 2 (Targeted ingestion).
 - **Visual Branding Suite:** Real-time mobile widget preview with color controls.
-- **Knowledge Hub:** UI-based crawling, file uploads (PDF/DOCX), manual text ingestion, FAQ management.  
-- **Analytics Dashboard:** Chart.js charts — daily queries, CSAT trend, top knowledge gaps.- **Knowledge Gap Suggest:** LLM-powered draft answers for unanswered questions, add to KB in one click.
+- **Knowledge Hub:** UI-based crawling, data clearing, file uploads, manual text ingestion, and FAQ management.
+- **Analytics Dashboard:** Chart.js charts — daily queries, CSAT trend, top knowledge gaps.
+- **Knowledge Gap Suggest:** LLM-powered draft answers for unanswered questions, add to KB in one click.
 - **SMTP Email Config:** Configurable sender email, password, host, port per client from admin UI.
 - **Behavioral Audit Suite:** Automated testing for Identity, Knowledge, and Safety.
 - **System Watchdog:** Self-healing logic for dimension mismatches and configuration drift.
 
 ### Security
+- **XSS Protection:** Strict HTML stripping in the chat UI via `marked.js` renderer overrides.
+- **Session-Locked Admin:** Master password stored in `sessionStorage` (auto-clears on tab close) for maximum security.
 - **Prompt Injection Guard:** Code-level regex blocks system prompt reveal, jailbreak, and override attempts.
 - **Rate Limiting:** 20 req/min per IP on `/chat`, 10 on `/admin/*`.
 - **Widget Key Auth:** Per-DB UUID key for embed authentication.
-- **Admin Password:** All admin endpoints password-protected.
+- **Admin Password:** All admin endpoints password-protected with custom confirmation modals.
 
 ### Connectivity
 - **One-Line Embed:** Copy-paste script snippet for WordPress, Shopify, or custom sites.

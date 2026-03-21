@@ -277,6 +277,13 @@
 </div>
 
 <script>
+  // XSS protection: strip raw HTML blocks from LLM output — keep markdown formatting only
+  (function() {
+    const renderer = new marked.Renderer();
+    renderer.html = () => '';  // drop any raw <script>, <img onerror=...> etc from LLM
+    marked.use({ renderer, breaks: true, gfm: true });
+  })();
+
   const API_URL = (window.location.origin.includes('localhost') || window.location.origin.includes('127.0.0.1'))
     ? 'http://127.0.0.1:8000' : window.location.origin;
 
@@ -430,8 +437,12 @@
               srcDiv.className = "source-citations";
               srcDiv.innerHTML = data.sources.map((s, i) => {
                 try {
-                  const seg = new URL(s).pathname.split('/').filter(Boolean).pop() || 'source';
-                  return `<a href="${s}" target="_blank" class="cite-badge">[${i+1}] ${seg}</a>`;
+                  const u = new URL(s);
+                  // Block non-http schemes (javascript:, data:, etc.)
+                  if (!['http:', 'https:'].includes(u.protocol)) return '';
+                  const seg = u.pathname.split('/').filter(Boolean).pop() || 'source';
+                  const safeUrl = u.href.replace(/"/g, '&quot;');
+                  return `<a href="${safeUrl}" target="_blank" rel="noopener noreferrer" class="cite-badge">[${i+1}] ${seg}</a>`;
                 } catch { return ''; }
               }).filter(Boolean).join('');
               if (bubble) bubble.appendChild(srcDiv);
