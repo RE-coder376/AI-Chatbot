@@ -142,9 +142,11 @@
 
   <!-- Master Unlock -->
   <div class="auth-section">
-    <label style="margin-top:0;">Master Admin Password</label>
+    <label style="margin-top:0;">Client DB Name</label>
+    <input type="text" id="admin-db" placeholder="e.g. agentfactory (your DB name)" style="margin-bottom:8px;" onkeydown="if(event.key==='Enter') unlockSystem()"/>
+    <label>Admin Password</label>
     <div style="display:flex; gap:12px;">
-      <input type="password" id="master-pass" placeholder="Unlock system to manage instance" style="flex:1;" onkeydown="if(event.key==='Enter') unlockSystem()"/>
+      <input type="password" id="master-pass" placeholder="Your admin password" style="flex:1;" onkeydown="if(event.key==='Enter') unlockSystem()"/>
       <button onclick="unlockSystem()" style="width:auto; margin:0; padding:0 40px;">Verify & Unlock</button>
     </div>
     <div id="auth-status" class="status-msg"></div>
@@ -385,11 +387,55 @@
         <div style="font-size:12px; color:#92400e; line-height:1.5;"><strong>Rebuild with BGE (768-dim)</strong><br>Converts selected DB from legacy 384-dim to fast BGE. Run once — no data is lost.</div>
         <button onclick="reindexDb()" style="width:auto; margin:0; padding:10px 20px; background:#d97706; white-space:nowrap;">⚡ Rebuild Index</button>
       </div>
-      <div id="ingest-status" class="status-msg" style="margin-bottom:16px;"></div>
-      <label>Direct Text Addition</label><textarea id="content" placeholder="Paste data here..." style="height:150px;"></textarea>
-      <button onclick="updateText()">📥 Ingest Text</button>
+      <label>Smart Ingest — paste text, JSON, CSV, YAML, XML, Markdown, or a URL</label>
+      <div style="position:relative;">
+        <textarea id="content" placeholder="Paste anything — text, JSON, CSV, YAML, XML, Markdown, or a URL like https://api.jikan.moe/v4/top/anime?limit=25" style="height:160px;padding-bottom:32px;" oninput="detectPasteFormat()"></textarea>
+        <div style="position:absolute;bottom:10px;left:10px;display:flex;align-items:center;gap:8px;">
+          <span id="fmt-badge" style="font-size:10px;font-weight:800;padding:2px 8px;border-radius:20px;background:#e2e8f0;color:#475569;display:none;"></span>
+          <span id="fmt-hint" style="font-size:10px;color:#94a3b8;"></span>
+        </div>
+      </div>
+      <div style="display:flex;gap:8px;margin-top:8px;">
+        <button onclick="updateText()" style="flex:1;">📥 Ingest</button>
+        <select id="fmt-override" onchange="detectPasteFormat()" style="padding:6px 10px;border-radius:8px;border:1.5px solid var(--border);font-size:12px;font-weight:700;color:var(--text-main);background:#fff;min-width:110px;">
+          <option value="">Auto-detect</option>
+          <option value="txt">Plain Text</option>
+          <option value="json">JSON</option>
+          <option value="csv">CSV</option>
+          <option value="yaml">YAML</option>
+          <option value="xml">XML</option>
+          <option value="md">Markdown</option>
+          <option value="html">HTML</option>
+        </select>
+      </div>
+      <div id="ingest-status" class="status-msg" style="margin-top:10px;"></div>
+
       <div style="margin-top:24px; border-top:1px solid var(--border); padding-top:24px;">
-        <label>Document Upload (PDF/TXT)</label><input type="file" id="file-input" accept=".txt,.pdf" multiple/><button onclick="uploadFile()" class="secondary">📤 Upload Docs</button>
+        <label>File Upload — PDF, TXT, JSON, CSV, YAML, XML, DOCX, XLSX, MD</label>
+        <input type="file" id="file-input" accept=".txt,.pdf,.json,.csv,.yaml,.yml,.xml,.md,.markdown,.html,.htm,.docx,.xlsx" multiple/>
+        <button onclick="uploadFile()" class="secondary" style="margin-top:8px;">📤 Upload Files</button>
+      </div>
+
+      <div style="margin-top:24px;border-top:1px solid var(--border);padding-top:24px;">
+        <div style="font-weight:700;font-size:13px;margin-bottom:4px;">🔌 Live API Sources</div>
+        <div style="font-size:12px;color:var(--text-muted);margin-bottom:12px;">APIs polled automatically on schedule. If a user asks something not in the DB, the bot fetches live from these sources.</div>
+        <div id="api-sources-list" style="margin-bottom:12px;"></div>
+        <div style="background:#f8fafc;border-radius:10px;padding:14px;border:1px solid var(--border);">
+          <div style="font-weight:700;font-size:12px;margin-bottom:8px;">➕ Add API Source</div>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:8px;">
+            <input type="text" id="api-src-name" placeholder="Name (e.g. Jikan Anime)"/>
+            <input type="url" id="api-src-url" placeholder="https://api.jikan.moe/v4/top/anime?limit=25"/>
+            <input type="text" id="api-src-key" placeholder="API Key (optional)"/>
+            <input type="text" id="api-src-path" placeholder="JSON path (e.g. data) — leave empty to auto-detect"/>
+          </div>
+          <div style="display:flex;gap:8px;align-items:center;">
+            <label style="font-size:12px;margin:0;display:flex;align-items:center;gap:4px;white-space:nowrap;">Poll every
+              <input type="number" id="api-src-interval" value="24" min="1" max="720" style="width:52px;font-size:12px;padding:4px 6px;text-align:center;"/> h
+            </label>
+            <button onclick="addApiSource()" style="width:auto;margin:0;padding:8px 16px;">💾 Save Source</button>
+          </div>
+          <div id="api-src-status" style="font-size:11px;margin-top:6px;color:var(--text-muted);"></div>
+        </div>
       </div>
     </div>
   </div>
@@ -417,8 +463,12 @@
         <button onclick="runAudit('identity')" class="secondary" style="margin:0; font-size:11px;">🆔 Identity Audit</button>
         <button onclick="runAudit('knowledge')" class="secondary" style="margin:0; font-size:11px;">🧠 Knowledge Audit</button>
       </div>
-      <div class="grid-2" style="margin-bottom:20px;">
+      <div class="grid-2" style="margin-bottom:12px;">
         <button onclick="runAudit('safety')" class="secondary" style="margin:0; font-size:11px;">🛡️ Safety Audit</button>
+        <button onclick="runAudit('live')" class="secondary" style="margin:0; font-size:11px;">🌐 Live API Audit</button>
+      </div>
+      <div class="grid-2" style="margin-bottom:20px;">
+        <button onclick="runAudit('admin-check')" class="secondary" style="margin:0; font-size:11px;">🔧 Admin Audit</button>
         <button onclick="runAudit('all')" style="margin:0; font-size:11px; background:var(--text-main);">🚀 Full System Audit</button>
       </div>
 
@@ -518,16 +568,33 @@
     }
   }
 
+  function authHeaders() {
+    const pass = sessionStorage.getItem('adminPass') || '';
+    const csrf = sessionStorage.getItem('csrfToken') || '';
+    const db   = sessionStorage.getItem('adminDb') || '';
+    return { 'Authorization': `Bearer ${pass}`, 'X-CSRF-Token': csrf, 'X-Admin-DB': db };
+  }
+
   function unlockSystem() {
     const pass = document.getElementById('master-pass').value;
+    const db   = document.getElementById('admin-db').value.trim();
     if (!pass) return showStatus('auth', 'Password required.', 'error');
+    if (!db)   return showStatus('auth', 'DB name required.', 'error');
+    if (pass.length < 6) return showStatus('auth', 'Password too short (min 6 chars).', 'error');
     showStatus('auth', 'Authenticating...', 'loading');
-    fetch(`${API}/admin/branding?password=${encodeURIComponent(pass)}`).then(async r => {
-      if (!r.ok) { sessionStorage.removeItem('adminPass'); showStatus('auth', 'Denied.', 'error'); return; }
+    fetch(`${API}/admin/branding`, { headers: { 'Authorization': `Bearer ${pass}`, 'X-Admin-DB': db } }).then(async r => {
+      if (!r.ok) { sessionStorage.removeItem('adminPass'); sessionStorage.removeItem('csrfToken'); sessionStorage.removeItem('adminDb'); showStatus('auth', 'Denied. Wrong password or DB name.', 'error'); return; }
       const data = await r.json();
       sessionStorage.setItem('adminPass', pass);
+      sessionStorage.setItem('adminDb', db);
+      // Fetch CSRF token for state-changing requests
+      const csrfResp = await fetch(`${API}/admin/csrf-token`, { headers: { 'Authorization': `Bearer ${pass}`, 'X-Admin-DB': db } });
+      if (csrfResp.ok) {
+        const csrfData = await csrfResp.json();
+        sessionStorage.setItem('csrfToken', csrfData.csrf_token);
+      }
       document.body.classList.remove('locked');
-      showStatus('auth', 'System Active', 'success');
+      showStatus('auth', `Logged into: ${db}`, 'success');
       loadServerData(data);
       loadOpsData(data.config_full || data);
       loadDatabases();
@@ -539,8 +606,10 @@
   // Auto-login on page load if password was saved this session (clears on tab close)
   document.addEventListener('DOMContentLoaded', () => {
     const saved = sessionStorage.getItem('adminPass');
-    if (saved) {
+    const savedDb = sessionStorage.getItem('adminDb');
+    if (saved && savedDb) {
       document.getElementById('master-pass').value = saved;
+      document.getElementById('admin-db').value = savedDb;
       unlockSystem();
     }
   });
@@ -549,11 +618,12 @@
     if (document.body.classList.contains('locked')) return;
     const card = document.getElementById('card-' + id); card.classList.toggle('open');
     if (card.classList.contains('open')) {
-      if (id === 'db')    loadDatabases();
-      if (id === 'stats') { loadAnalytics(); loadCharts(); }
-      if (id === 'embed') loadEmbedCode();
-      if (id === 'brand') loadBranding();
-      if (id === 'ops')   loadOps();
+      if (id === 'db')     loadDatabases();
+      if (id === 'stats')  { loadAnalytics(); loadCharts(); }
+      if (id === 'embed')  loadEmbedCode();
+      if (id === 'brand')  loadBranding();
+      if (id === 'ops')    loadOps();
+      if (id === 'ingest') loadApiSources();
     }
   }
 
@@ -581,7 +651,7 @@
     const el = document.getElementById('knowledge-gaps-list');
     el.innerHTML = '<span style="color:#94a3b8;">Loading...</span>';
     try {
-      const res = await fetch(`${API}/admin/knowledge-gaps?password=${encodeURIComponent(pass)}`);
+      const res = await fetch(`${API}/admin/knowledge-gaps`, { headers: authHeaders() });
       const data = await res.json();
       if (!data.length) { el.innerHTML = '<span style="color:#10b981;">No knowledge gaps recorded yet.</span>'; return; }
       // Group by question
@@ -615,8 +685,7 @@
     const pass = document.getElementById('master-pass').value;
     try {
       const r = await fetch(`${API}/admin/knowledge-gaps/suggest`, {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
+        method: 'POST', headers: {...authHeaders(), 'Content-Type': 'application/json'},
         body: JSON.stringify({password: pass, question})
       });
       const d = await r.json();
@@ -637,8 +706,7 @@
     if (!ta || !ta.value.trim()) return;
     const pass = document.getElementById('master-pass').value;
     const r = await fetch(`${API}/admin/ingest/text`, {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
+      method: 'POST', headers: {...authHeaders(), 'Content-Type': 'application/json'},
       body: JSON.stringify({password: pass, text: ta.value.trim()})
     });
     const d = await r.json();
@@ -653,10 +721,10 @@
     const pass = document.getElementById('master-pass').value;
     showStatus('stats', 'Syncing analytics...', 'loading');
     try {
-      const res = await fetch(`${API}/admin/analytics?password=${encodeURIComponent(pass)}`);
+      const res = await fetch(`${API}/admin/analytics`, { headers: authHeaders() });
       const data = await res.json();
       
-      document.getElementById('stat-total').textContent = data.total;
+      document.getElementById('stat-total').textContent = data.total_queries ?? data.total ?? 0;
       
       document.getElementById('stat-most-asked').innerHTML = data.most_asked.map(q => `
         <tr><td style="color:var(--primary); font-weight:800; width:40px;">${q.count}x</td><td>${q.q}</td></tr>
@@ -676,7 +744,7 @@
   async function loadCharts() {
     const pass = document.getElementById('master-pass').value;
     try {
-      const r = await fetch(`${API}/admin/analytics-charts?password=${encodeURIComponent(pass)}`);
+      const r = await fetch(`${API}/admin/analytics-charts`, { headers: authHeaders() });
       if (!r.ok) return;
       const d = await r.json();
       const shortLabels = d.labels.map(l => l.slice(5));
@@ -705,40 +773,138 @@
 
   async function loadDatabases() {
     const pass = document.getElementById('master-pass').value;
-    const res = await fetch(`${API}/admin/databases?password=${encodeURIComponent(pass)}`);
+    const [res, statsRes] = await Promise.all([
+      fetch(`${API}/admin/databases`, { headers: authHeaders() }),
+      fetch(`${API}/admin/db-stats`, { headers: authHeaders() }).catch(()=>({json:()=>({})}))
+    ]);
     const data = await res.json();
+    const statsData = await statsRes.json().catch(()=>({}));
+    const statsMap = {};
+    (statsData.stats || []).forEach(s => statsMap[s.name] = s);
     const activeDb = (data.databases || []).find(db => db.active);
-    if (activeDb) {
-      document.getElementById('active-ingest-db').textContent = activeDb.name;
-    }
-    // Populate ingest target dropdown
+    if (activeDb) document.getElementById('active-ingest-db').textContent = activeDb.name;
     const sel = document.getElementById('ingest-target-db');
     const prev = sel.value;
     sel.innerHTML = '<option value="">— Active DB —</option>' +
       (data.databases || []).map(db => `<option value="${db.name}"${db.name===prev?' selected':''}>${db.name}${db.active?' ★':''}</option>`).join('');
     if (prev) sel.value = prev;
-    
-    document.getElementById("db-list").innerHTML = (data.databases || []).map(db => `
+
+    document.getElementById("db-list").innerHTML = (data.databases || []).map(db => {
+      const st = statsMap[db.name] || {};
+      const lastCrawl = st.last_crawl_time ? new Date(st.last_crawl_time).toLocaleString() : '—';
+      const nextCrawlTs = st.next_crawl_ts || '';
+      const isCrawling = st.is_crawling || false;
+      const hasCrawl = st.auto_crawl_enabled && st.crawl_url;
+      const hasApi = st.api_sources?.length > 0;
+      const intervalM = st.crawl_interval_minutes || 60;
+      const intervalLabel = intervalM < 60 ? `${intervalM}min` : `${intervalM/60}h`;
+      const autoIcon = hasCrawl && hasApi ? '🟢🔌' : hasCrawl ? '🟢' : hasApi ? '🔌' : '⭕';
+      const syncLabel = hasCrawl && hasApi
+        ? `re-crawls every ${intervalLabel} + ${st.api_sources.length} live API source${st.api_sources.length>1?'s':''}`
+        : hasCrawl ? `re-crawls every ${intervalLabel} (new pages only)`
+        : hasApi ? `${st.api_sources.length} live API source${st.api_sources.length>1?'s':''}`
+        : 'no auto-sync';
+      const crawlUrl = st.crawl_url || '';
+      const newChunks = st.last_crawl_chunks || 0;
+      const lastCrawlLabel = lastCrawl !== '—' ? `${lastCrawl} (+${newChunks} new chunks)` : '—';
+      return `
       <div class="db-item ${db.active?'active':''}" id="db-${db.name}">
         <div class="db-row">
-          <div onclick="expandDb('${db.name}')" style="cursor:pointer;">
-            <div style="font-weight:800; font-size:14px; color:var(--text-main);">${db.name} ${db.active?'<span class="badge badge-current" style="margin-left:8px;">Active</span>':''}</div>
-            <div style="font-size:11px; color:var(--text-muted); margin-top:2px;">Click to view technical details</div>
+          <div onclick="expandDb('${db.name}')" style="cursor:pointer;flex:1;">
+            <div style="font-weight:800;font-size:14px;color:var(--text-main);">${db.name} ${db.active?'<span class="badge badge-current" style="margin-left:8px;">Active</span>':''}</div>
+            <div style="font-size:11px;color:var(--text-muted);margin-top:3px;display:flex;gap:16px;flex-wrap:wrap;">
+              <span>📦 ${(st.chunks||db.chunks||0).toLocaleString()} chunks</span>
+              <span>${autoIcon} ${syncLabel}</span>
+              ${hasCrawl ? `<span>🕐 Last: ${lastCrawlLabel}</span><span id="next-crawl-${db.name}" data-ts="${nextCrawlTs}">${isCrawling ? '🔄 Recrawling at the moment...' : '⏭ Next: computing...'}</span>` : ''}
+            </div>
           </div>
           <div class="db-actions">
-            ${!db.active ? `<button class="outline" onclick="setActiveDb('${db.name}')" style="width:auto; margin:0; padding:6px 12px; font-size:11px;">Set Active</button>` : ''}
-            <button class="danger" onclick="deleteDb('${db.name}')" style="width:auto; margin:0; padding:6px 12px; font-size:11px;">Delete</button>
+            ${!db.active ? `<button class="outline" onclick="setActiveDb('${db.name}')" style="width:auto;margin:0;padding:6px 12px;font-size:11px;">Set Active</button>` : ''}
+            <button class="danger" onclick="deleteDb('${db.name}')" style="width:auto;margin:0;padding:6px 12px;font-size:11px;">Delete</button>
           </div>
         </div>
         <div class="db-details" id="details-${db.name}">
           <div class="grid-2" style="margin-bottom:10px;">
             <div><label>Storage Size</label><div style="font-weight:700;font-size:15px;">${db.size}</div></div>
-            <div><label>Knowledge Chunks</label><div style="font-weight:700;font-size:15px;">${db.chunks.toLocaleString()}</div></div>
+            <div><label>Knowledge Chunks</label><div style="font-weight:700;font-size:15px;">${(st.chunks||db.chunks||0).toLocaleString()}</div></div>
+          </div>
+          <div style="background:#f8fafc;border-radius:10px;padding:14px;margin-bottom:10px;border:1px solid var(--border);">
+            <div style="font-weight:700;font-size:12px;margin-bottom:8px;color:var(--text-main);">⏰ Auto Re-Crawl Schedule</div>
+            <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+              <input type="url" id="crawl-url-${db.name}" placeholder="https://yoursite.com" value="${crawlUrl}" oninput="markScheduleDirty('${db.name}')" style="flex:1;min-width:180px;font-size:12px;padding:6px 10px;"/>
+              <label style="font-size:12px;margin:0;display:flex;align-items:center;gap:4px;white-space:nowrap;">Every
+                <input type="number" id="crawl-interval-${db.name}" value="${intervalM}" min="1" max="10080" oninput="markScheduleDirty('${db.name}')" style="width:60px;font-size:12px;padding:4px 6px;text-align:center;"/> min
+              </label>
+              <label style="font-size:12px;margin:0;display:flex;align-items:center;gap:4px;cursor:pointer;">
+                <input type="checkbox" id="crawl-enabled-${db.name}" ${st.auto_crawl_enabled?'checked':''} onchange="markScheduleDirty('${db.name}')" style="width:auto;margin:0;"/> Enable
+              </label>
+              <button id="crawl-save-btn-${db.name}" onclick="saveCrawlSchedule('${db.name}')" style="width:auto;margin:0;padding:6px 12px;font-size:11px;">💾 Save</button>
+            </div>
+            <div id="schedule-status-${db.name}" style="font-size:11px;margin-top:6px;color:var(--text-muted);"></div>
           </div>
           <button onclick="clearDbData('${db.name}')" style="width:auto;margin:0;padding:5px 14px;font-size:11px;background:#fff8f8;color:#dc2626;border:1.5px solid #fca5a5;border-radius:10px;cursor:pointer;font-weight:700;">🗑 Clear All Data</button>
         </div>
-      </div>
-    `).join("");
+      </div>`}).join('') ||
+      `<div style="text-align:center;color:var(--text-muted);padding:24px;">No databases found. Create one above.</div>`;
+
+    // mark currently-crawling spans so interval skips them
+    document.querySelectorAll('[id^="next-crawl-"]').forEach(el => {
+      if (el.textContent.includes('Recrawling')) el.dataset.crawling = '1';
+    });
+    startCrawlCountdowns();
+  }
+
+  let _crawlCountdownTimer = null;
+  function startCrawlCountdowns() {
+    if (_crawlCountdownTimer) clearInterval(_crawlCountdownTimer);
+    _crawlCountdownTimer = setInterval(() => {
+      document.querySelectorAll('[id^="next-crawl-"]').forEach(el => {
+        if (el.dataset.crawling === '1') return; // static "recrawling" message
+        const ts = el.dataset.ts;
+        if (!ts) return;
+        const secs = Math.round((new Date(ts) - Date.now()) / 1000);
+        if (secs <= 0) {
+          el.textContent = '⏭ Next: due now';
+        } else if (secs < 3600) {
+          el.textContent = `⏭ Next: in ${Math.floor(secs/60)}m ${secs%60}s`;
+        } else {
+          el.textContent = `⏭ Next: in ${Math.floor(secs/3600)}h ${Math.floor((secs%3600)/60)}m`;
+        }
+      });
+    }, 1000);
+  }
+
+  function markScheduleDirty(dbName) {
+    const statusEl = document.getElementById(`schedule-status-${dbName}`);
+    if (statusEl && statusEl.dataset.saved === '1') {
+      statusEl.textContent = '';
+      statusEl.dataset.saved = '0';
+    }
+  }
+
+  async function saveCrawlSchedule(dbName) {
+    const pass = document.getElementById('master-pass').value;
+    const url = document.getElementById(`crawl-url-${dbName}`).value.trim();
+    const interval = parseFloat(document.getElementById(`crawl-interval-${dbName}`).value) || 1;
+    const enabled = document.getElementById(`crawl-enabled-${dbName}`).checked;
+    const statusEl = document.getElementById(`schedule-status-${dbName}`);
+    statusEl.textContent = 'Saving...';
+    statusEl.dataset.saved = '0';
+    try {
+      const res = await fetch(`${API}/admin/crawl-schedule`, {
+        method: 'POST', headers: {...authHeaders(), 'Content-Type': 'application/json'},
+        body: JSON.stringify({password:pass, db_name:dbName, enabled, interval_minutes:interval, crawl_url:url})
+      });
+      const d = await res.json();
+      if (d.success) {
+        statusEl.textContent = '✓ Saved';
+        statusEl.style.color = '#16a34a';
+        statusEl.dataset.saved = '1';
+      } else {
+        statusEl.textContent = d.detail || 'Failed';
+        statusEl.style.color = '#dc2626';
+      }
+    } catch(e) { statusEl.textContent = 'Connection error'; statusEl.style.color='#dc2626'; }
   }
 
   // --- GLOBAL KEY LISTENERS ---
@@ -773,12 +939,12 @@
     const pass = document.getElementById('master-pass').value;
     const f = new FormData(); f.append("password", pass); f.append("name", name);
     showStatus('db', `Switching to ${name}...`, 'loading');
-    const res = await fetch(`${API}/admin/databases/set-active`, { method:"POST", body:f });
+    const res = await fetch(`${API}/admin/databases/set-active`, { method:"POST", headers: authHeaders(), body:f });
     const d = await res.json();
     showStatus('db', d.message || d.detail, d.success ? 'success' : 'error');
     clearBrandingFields();
     // Reload branding from the new active DB
-    const br = await fetch(`${API}/admin/branding?password=${encodeURIComponent(pass)}`);
+    const br = await fetch(`${API}/admin/branding`, { headers: authHeaders() });
     if (br.ok) { const bd = await br.json(); loadServerData(bd); loadOpsData(bd); }
     loadDatabases();
   }
@@ -788,7 +954,7 @@
     if (!name) return showStatus('db', 'Name required.', 'error');
     const f = new FormData(); f.append("password", pass); f.append("name", name); 
     showStatus('db', `Initializing ${name}...`, 'loading');
-    const res = await fetch(`${API}/admin/create-db`, { method:"POST", body:f }); 
+    const res = await fetch(`${API}/admin/create-db`, { method:"POST", headers: authHeaders(), body:f }); 
     const d = await res.json();
     if (d.success) document.getElementById('new-db-name').value = '';
     showStatus('db', d.message || d.detail, d.success ? 'success' : 'error');
@@ -799,7 +965,7 @@
     const pass = document.getElementById('master-pass').value; 
     const f = new FormData(); f.append("password", pass); f.append("name", name); 
     showStatus('db', `Purging ${name}...`, 'loading');
-    const res = await fetch(`${API}/admin/delete-db`, { method:"POST", body:f }); 
+    const res = await fetch(`${API}/admin/delete-db`, { method:"POST", headers: authHeaders(), body:f }); 
     const d = await res.json();
     showStatus('db', d.message || d.detail, d.success ? 'success' : 'error');
     loadDatabases();
@@ -810,7 +976,7 @@
     const pass = document.getElementById('master-pass').value;
     const f = new FormData(); f.append("password", pass); f.append("name", name);
     showStatus('db', `Clearing ${name}...`, 'loading');
-    const res = await fetch(`${API}/admin/databases/clear-data`, { method:"POST", body:f });
+    const res = await fetch(`${API}/admin/databases/clear-data`, { method:"POST", headers: authHeaders(), body:f });
     const d = await res.json();
     showStatus('db', d.message || d.detail, d.success ? 'success' : 'error');
     loadDatabases();
@@ -820,7 +986,7 @@
     const pass = document.getElementById('master-pass').value;
     showStatus('brand', 'Fetching current branding...', 'loading');
     try {
-      const res = await fetch(`${API}/admin/branding?password=${encodeURIComponent(pass)}`);
+      const res = await fetch(`${API}/admin/branding`, { headers: authHeaders() });
       const d = await res.json();
       loadServerData(d);
       showStatus('brand', 'Current branding loaded.', 'success');
@@ -848,8 +1014,7 @@
     };
     showStatus('ops', 'Saving operations...', 'loading');
     const res = await fetch(`${API}/admin/ops`, { 
-      method:"POST", 
-      headers:{"Content-Type":"application/json"}, 
+      method: "POST", headers: {...authHeaders(), "Content-Type": "application/json"}, 
       body:JSON.stringify(payload) 
     });
     const d = await res.json();
@@ -882,7 +1047,7 @@
     const pass = document.getElementById('master-pass').value;
     showStatus('ops', 'Fetching settings...', 'loading');
     try {
-      const res = await fetch(`${API}/admin/branding?password=${encodeURIComponent(pass)}`);
+      const res = await fetch(`${API}/admin/branding`, { headers: authHeaders() });
       const d = await res.json();
       loadOpsData(d.config_full || d);
       showStatus('ops', 'Operations loaded.', 'success');
@@ -913,7 +1078,7 @@
       } 
     };
     showStatus('brand', 'Pushing Changes...', 'loading');
-    const res = await fetch(`${API}/admin/branding`, { method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(payload) });
+    const res = await fetch(`${API}/admin/branding`, { method: "POST", headers: {...authHeaders(), "Content-Type": "application/json"}, body:JSON.stringify(payload) });
     const d = await res.json(); showStatus('brand', d.message || d.error, d.success ? 'success' : 'error');
   }
 
@@ -944,7 +1109,7 @@
   async function loadFaqs() {
     const pass = document.getElementById('master-pass').value;
     if (!pass) return;
-    const d = await fetch(`/admin/faqs?password=${encodeURIComponent(pass)}`).then(r=>r.json()).catch(()=>({faqs:[]}));
+    const d = await fetch(`/admin/faqs`, { headers: authHeaders() }).then(r=>r.json()).catch(()=>({faqs:[]}));
     const list = document.getElementById('faq-list');
     if (!d.faqs || d.faqs.length === 0) { list.innerHTML = '<p style="color:var(--text-muted);font-size:13px;">No FAQs yet.</p>'; return; }
     list.innerHTML = d.faqs.map(f => `
@@ -961,7 +1126,7 @@
     const a = document.getElementById('faq-a').value.trim();
     if (!q || !a) return showStatus('faq', 'Both question and answer are required.', 'error');
     showStatus('faq', 'Adding FAQ...', 'loading');
-    const d = await fetch('/admin/faqs', { method:'POST', headers:{'Content-Type':'application/json'},
+    const d = await fetch('/admin/faqs', { method: 'POST', headers: {...authHeaders(), 'Content-Type': 'application/json'},
       body: JSON.stringify({password: pass, question: q, answer: a}) }).then(r=>r.json());
     if (d.success) {
       document.getElementById('faq-q').value = '';
@@ -973,7 +1138,7 @@
 
   async function deleteFaq(id) {
     const pass = document.getElementById('master-pass').value;
-    await fetch(`/admin/faqs/${id}?password=${encodeURIComponent(pass)}`, {method:'DELETE'});
+    await fetch(`/admin/faqs/${id}`, {headers: authHeaders(), method:'DELETE'});
     loadFaqs();
   }
 
@@ -995,7 +1160,7 @@
     const endpoint = type === 'all' ? '/admin/test-detailed' : `/admin/test/${type}`;
     
     try {
-      const res = await fetch(`${API}${endpoint}?password=${encodeURIComponent(pass)}`);
+      const res = await fetch(`${API}${endpoint}`, { headers: authHeaders() });
       const data = await res.json();
       
       const newRows = (data.results || []).map(r => `
@@ -1035,8 +1200,7 @@
     
     try {
       const res = await fetch(`${API}/admin/healer/trigger`, {
-        method: "POST",
-        headers: {"Content-Type": "application/json"},
+        method: "POST", headers: {...authHeaders(), "Content-Type": "application/json"},
         body: JSON.stringify({ password: pass })
       });
       const data = await res.json();
@@ -1095,7 +1259,7 @@
     const pass = document.getElementById('master-pass').value;
     if (!pass) return;
     try {
-      const res  = await fetch(`${API}/admin/embed-code?password=${encodeURIComponent(pass)}`);
+      const res  = await fetch(`${API}/admin/embed-code`, { headers: authHeaders() });
       const data = await res.json();
       if (data.snippet) {
         document.getElementById('embed-snippet').value = data.snippet;
@@ -1118,20 +1282,65 @@
     return document.getElementById('ingest-target-db').value || '';
   }
 
+  function detectPasteFormat() {
+    const text = (document.getElementById('content').value || '').trim();
+    const badge = document.getElementById('fmt-badge');
+    const hint = document.getElementById('fmt-hint');
+    const override = document.getElementById('fmt-override') && document.getElementById('fmt-override').value;
+    if (override && override !== '') { badge.textContent = override.toUpperCase(); badge.style.display = ''; hint.textContent = '(forced)'; return; }
+    if (!text) { badge.style.display = 'none'; hint.textContent = ''; return; }
+    let fmt = 'txt';
+    const s = text.slice(0, 200);
+    if (/^https?:\/\//i.test(s.split('\n')[0].trim())) fmt = 'url';
+    else if (s.startsWith('{') || s.startsWith('[')) fmt = 'json';
+    else if (s.trimStart().startsWith('<?xml') || s.trimStart().startsWith('<')) fmt = 'xml';
+    else if (/^[\w ]+,[\w ]+/.test(s) && s.includes('\n')) fmt = 'csv';
+    else if (/^[a-z_]+:\s/m.test(s) && !s.startsWith('#')) fmt = 'yaml';
+    else if (s.startsWith('#') || /^#{1,6} /m.test(s)) fmt = 'md';
+    const colors = {url:'#dcfce7',json:'#dbeafe',xml:'#fce7f3',csv:'#d1fae5',yaml:'#fef9c3',md:'#ede9fe',txt:'#f1f5f9'};
+    const textColors = {url:'#15803d',json:'#1d4ed8',xml:'#be185d',csv:'#065f46',yaml:'#78350f',md:'#6d28d9',txt:'#475569'};
+    badge.textContent = fmt.toUpperCase();
+    badge.style.background = colors[fmt] || '#e2e8f0';
+    badge.style.color = textColors[fmt] || '#475569';
+    badge.style.display = '';
+    hint.textContent = fmt === 'url' ? 'will fetch & ingest' : 'auto-detected';
+  }
+
   async function updateText() {
     const pass = document.getElementById('master-pass').value;
     const text = document.getElementById('content').value.trim();
-    if (!text) return showStatus('ingest', 'No text entered.', 'error');
-    showStatus('ingest', 'Ingesting text...', 'loading');
+    if (!text) return showStatus('ingest', 'Nothing entered.', 'error');
+    const fmtEl = document.getElementById('fmt-override');
+    const fmt = fmtEl ? fmtEl.value : '';
+    const isUrl = /^https?:\/\//i.test(text.split('\n')[0].trim()) && !fmt;
+    showStatus('ingest', isUrl ? 'Fetching URL...' : 'Ingesting...', 'loading');
     try {
-      const res = await fetch(`${API}/admin/ingest/text`, {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({ password: pass, text, target_db: getIngestTarget() })
-      });
-      const d = await res.json();
-      if (d.success) { document.getElementById('content').value = ''; showStatus('ingest', d.message || 'Ingested.', 'success'); }
-      else showStatus('ingest', d.detail || 'Ingestion failed.', 'error');
+      let res, d;
+      if (isUrl) {
+        res = await fetch(`${API}/admin/ingest/fetch-url`, {
+          method: 'POST', headers: {...authHeaders(), 'Content-Type': 'application/json'},
+          body: JSON.stringify({ password: pass, url: text.split('\n')[0].trim(), target_db: getIngestTarget() })
+        });
+        d = await res.json();
+        if (d.success) {
+          document.getElementById('content').value = '';
+          document.getElementById('fmt-badge').style.display = 'none';
+          document.getElementById('fmt-hint').textContent = '';
+          showStatus('ingest', d.message + ` (${d.chunks} items)`, 'success');
+        } else showStatus('ingest', d.detail || 'Fetch failed.', 'error');
+      } else {
+        res = await fetch(`${API}/admin/ingest/smart-text`, {
+          method: 'POST', headers: {...authHeaders(), 'Content-Type': 'application/json'},
+          body: JSON.stringify({ password: pass, content: text, format: fmt, target_db: getIngestTarget() })
+        });
+        d = await res.json();
+        if (d.success) {
+          document.getElementById('content').value = '';
+          document.getElementById('fmt-badge').style.display = 'none';
+          document.getElementById('fmt-hint').textContent = '';
+          showStatus('ingest', `${d.message} [${d.format_detected?.toUpperCase()}, ${d.chunks} chunks]`, 'success');
+        } else showStatus('ingest', d.detail || 'Ingestion failed.', 'error');
+      }
     } catch (e) { showStatus('ingest', 'Connection error.', 'error'); }
   }
 
@@ -1145,11 +1354,87 @@
       f.append('password', pass);
       f.append('target_db', getIngestTarget());
       for (const file of fileInput.files) f.append('files', file);
-      const res = await fetch(`${API}/admin/ingest/files`, { method: 'POST', body: f });
+      const res = await fetch(`${API}/admin/ingest/files`, { method: 'POST', headers: authHeaders(), body: f });
       const d = await res.json();
       if (d.success) { fileInput.value = ''; showStatus('ingest', d.message || 'Uploaded.', 'success'); }
       else showStatus('ingest', d.detail || 'Upload failed.', 'error');
     } catch (e) { showStatus('ingest', 'Connection error.', 'error'); }
+  }
+
+  async function fetchFromApi() {
+    const pass = document.getElementById('master-pass').value;
+    const url = document.getElementById('api-url').value.trim();
+    const jsonPath = document.getElementById('api-json-path').value.trim();
+    const statusEl = document.getElementById('api-fetch-status');
+    if (!url) { statusEl.textContent = 'Enter an API URL first.'; return; }
+    statusEl.textContent = 'Fetching...';
+    try {
+      // Fetch the external API via a proxy on our server
+      const res = await fetch(`${API}/admin/ingest/fetch-url`, {
+        method: 'POST', headers: {...authHeaders(), 'Content-Type': 'application/json'},
+        body: JSON.stringify({ password: pass, url, json_path: jsonPath, target_db: getIngestTarget() })
+      });
+      const d = await res.json();
+      if (d.success) statusEl.innerHTML = `<span style="color:#16a34a;">✓ ${d.message} (${d.chunks} chunks from ${d.items} items)</span>`;
+      else statusEl.innerHTML = `<span style="color:#dc2626;">✗ ${d.detail || 'Failed'}</span>`;
+    } catch(e) { statusEl.innerHTML = `<span style="color:#dc2626;">✗ Connection error</span>`; }
+  }
+
+  async function loadApiSources() {
+    const pass = document.getElementById('master-pass').value;
+    const db = getIngestTarget();
+    try {
+      const res = await fetch(`${API}/admin/api-sources?db_name=${encodeURIComponent(db)}`, { headers: authHeaders() });
+      const d = await res.json();
+      const sources = d.api_sources || [];
+      const el = document.getElementById('api-sources-list');
+      if (!sources.length) { el.innerHTML = '<div style="font-size:12px;color:var(--text-muted);">No API sources configured for this DB.</div>'; return; }
+      el.innerHTML = sources.map(s => `
+        <div style="display:flex;align-items:center;gap:10px;padding:8px 12px;background:#fff;border:1px solid var(--border);border-radius:8px;margin-bottom:6px;font-size:12px;">
+          <div style="flex:1;">
+            <span style="font-weight:700;">${s.name}</span>
+            <span style="color:var(--text-muted);margin-left:8px;">${s.url.slice(0,50)}${s.url.length>50?'...':''}</span>
+            <span style="margin-left:8px;color:#7c3aed;">every ${s.interval_hours}h</span>
+            <span style="margin-left:8px;color:var(--text-muted);">last: ${s.last_fetch ? new Date(s.last_fetch).toLocaleString() : 'never'}</span>
+          </div>
+          <button onclick="deleteApiSource('${s.name}')" style="width:auto;margin:0;padding:4px 10px;font-size:11px;background:#fee2e2;color:#dc2626;border:none;border-radius:6px;cursor:pointer;font-weight:700;">✕</button>
+        </div>`).join('');
+    } catch(e) { document.getElementById('api-sources-list').innerHTML = '<div style="color:#dc2626;font-size:12px;">Failed to load</div>'; }
+  }
+
+  async function addApiSource() {
+    const pass = document.getElementById('master-pass').value;
+    const statusEl = document.getElementById('api-src-status');
+    statusEl.textContent = 'Saving...'; statusEl.style.color = 'var(--text-muted)';
+    try {
+      const res = await fetch(`${API}/admin/api-sources`, {
+        method: 'POST', headers: {...authHeaders(), 'Content-Type': 'application/json'},
+        body: JSON.stringify({
+          password: pass,
+          db_name: getIngestTarget(),
+          name: document.getElementById('api-src-name').value.trim(),
+          url: document.getElementById('api-src-url').value.trim(),
+          api_key: document.getElementById('api-src-key').value.trim(),
+          json_path: document.getElementById('api-src-path').value.trim(),
+          interval_hours: parseFloat(document.getElementById('api-src-interval').value) || 24,
+        })
+      });
+      const d = await res.json();
+      if (d.success) {
+        statusEl.textContent = '✓ ' + d.message; statusEl.style.color = '#16a34a';
+        ['api-src-name','api-src-url','api-src-key','api-src-path'].forEach(id => document.getElementById(id).value = '');
+        loadApiSources();
+      } else { statusEl.textContent = d.detail || 'Failed'; statusEl.style.color = '#dc2626'; }
+    } catch(e) { statusEl.textContent = 'Connection error'; statusEl.style.color = '#dc2626'; }
+  }
+
+  async function deleteApiSource(name) {
+    const pass = document.getElementById('master-pass').value;
+    await fetch(`${API}/admin/api-sources/delete`, {
+      method: 'POST', headers: {...authHeaders(), 'Content-Type': 'application/json'},
+      body: JSON.stringify({password:pass, db_name:getIngestTarget(), name})
+    });
+    loadApiSources();
   }
 
   async function reindexDb() {
@@ -1173,8 +1458,7 @@
 
     try {
       const res = await fetch(`${API}/admin/reindex`, {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
+        method: 'POST', headers: {...authHeaders(), 'Content-Type': 'application/json'},
         body: JSON.stringify({ password: pass, target_db: getIngestTarget() })
       });
       clearInterval(timer);
@@ -1212,7 +1496,7 @@
     const groups = [];
     try {
       const response = await fetch(`${API}/admin/crawl-inspect`, {
-        method: 'POST', headers: {'Content-Type': 'application/json'},
+        method: 'POST', headers: {...authHeaders(), 'Content-Type': 'application/json'},
         body: JSON.stringify({password: pass, url})
       });
       const reader = response.body.getReader();
