@@ -128,6 +128,85 @@ embeddings_model = None
 import random
 
 _status = "starting"
+
+# ── GitHub Sync ────────────────────────────────────────────────────────────────
+_GITHUB_USERNAME = "RE-coder376"
+_GITHUB_REPO     = "databases"
+_GITHUB_CLONE_DIR = Path("/tmp/chatbot-dbs")
+
+def _github_repo_url() -> str:
+    pat = os.environ.get("GITHUB_PAT", "")
+    return f"https://{pat}@github.com/{_GITHUB_USERNAME}/{_GITHUB_REPO}.git"
+
+def _git(args: list, cwd=None) -> bool:
+    try:
+        r = subprocess.run(args, cwd=str(cwd or _GITHUB_CLONE_DIR),
+                           capture_output=True, text=True, timeout=180)
+        if r.returncode != 0:
+            logger.warning(f"[GH-SYNC] git {args[1]}: {r.stderr.strip()[:200]}")
+        return r.returncode == 0
+    except Exception as e:
+        logger.error(f"[GH-SYNC] git error: {e}")
+        return False
+
+def _github_sync_download():
+    """Startup: clone repo → extract all DB zips into databases/."""
+    import zipfile
+    if not os.environ.get("GITHUB_PAT"):
+        logger.info("[GH-SYNC] No GITHUB_PAT set — skipping download")
+        return
+    try:
+        DATABASES_DIR.mkdir(exist_ok=True)
+        _GITHUB_CLONE_DIR.mkdir(parents=True, exist_ok=True)
+        if (_GITHUB_CLONE_DIR / ".git").exists():
+            logger.info("[GH-SYNC] Pulling latest databases from GitHub...")
+            _git(["git", "pull"])
+        else:
+            logger.info("[GH-SYNC] Cloning databases repo from GitHub...")
+            subprocess.run(["git", "clone", _github_repo_url(), str(_GITHUB_CLONE_DIR)],
+                           capture_output=True, text=True, timeout=300)
+        for zip_path in _GITHUB_CLONE_DIR.glob("*.zip"):
+            db_name = zip_path.stem
+            extract_path = DATABASES_DIR / db_name
+            extract_path.mkdir(exist_ok=True)
+            logger.info(f"[GH-SYNC] Restoring {db_name}...")
+            with zipfile.ZipFile(zip_path, "r") as z:
+                z.extractall(extract_path)
+        logger.info("[GH-SYNC] ✅ All databases restored from GitHub")
+    except Exception as e:
+        logger.error(f"[GH-SYNC] Download error: {e}")
+
+def _github_sync_upload(db_name: str):
+    """After crawl/ingest/config: zip DB and push to GitHub."""
+    import zipfile
+    if not os.environ.get("GITHUB_PAT"):
+        return
+    db_path = DATABASES_DIR / db_name
+    if not db_path.exists():
+        return
+    try:
+        if not (_GITHUB_CLONE_DIR / ".git").exists():
+            _github_sync_download()
+        zip_path = _GITHUB_CLONE_DIR / f"{db_name}.zip"
+        logger.info(f"[GH-SYNC] Zipping {db_name}...")
+        with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as z:
+            for f in db_path.rglob("*"):
+                if not f.is_file():
+                    continue
+                rel = f.relative_to(db_path)
+                if str(rel).startswith("visitor_history"):
+                    continue  # ephemeral — skip
+                z.write(f, rel)
+        _git(["git", "config", "user.email", "deploy@chatbot.com"])
+        _git(["git", "config", "user.name", "Chatbot Deploy"])
+        _git(["git", "add", f"{db_name}.zip"])
+        _git(["git", "commit", "-m", f"sync: {db_name} {datetime.now().strftime('%Y-%m-%d %H:%M')}"])
+        _git(["git", "push"])
+        logger.info(f"[GH-SYNC] ✅ {db_name} saved to GitHub")
+    except Exception as e:
+        logger.error(f"[GH-SYNC] Upload error: {e}")
+# ──────────────────────────────────────────────────────────────────────────────
+
 _intro_q_cache: dict = {}       # keyed by db_name → list[str]
 _widget_key_cache: dict = {}    # widget_key → db_name
 _csrf_tokens: dict = {}         # token → expiry timestamp (TTL 2h)
@@ -1034,6 +1113,7 @@ def save_db_config(updates: dict, db_name: str = ""):
     safe_updates = {k: v for k, v in updates.items() if v != "" or existing.get(k, "") == ""}
     existing.update(safe_updates)
     db_cfg_file.write_text(json.dumps(existing, indent=2), encoding="utf-8")
+    threading.Thread(target=_github_sync_upload, args=(active,), daemon=True).start()
 
 def _atomic_write_json(path: Path, data) -> None:
     """Write JSON atomically — crash during write leaves original intact."""
@@ -1324,6 +1404,7 @@ async def _get_intro_questions(db_name: str, db, cfg) -> list:
 def init_systems():
     global local_db, embeddings_model, _status
     _status = "loading"
+    _github_sync_download()   # restore databases/ from GitHub before loading
 
     try:
         active = ACTIVE_DB_FILE.read_text(encoding="utf-8").strip() if ACTIVE_DB_FILE.exists() else "default"
@@ -3552,6 +3633,7 @@ async def ingest_files(request: Request, password: str = Form(...), target_db: s
             db.add_documents(docs)
             total += len(docs)
         dest = target_db or (ACTIVE_DB_FILE.read_text(encoding="utf-8").strip() if ACTIVE_DB_FILE.exists() else "active")
+        threading.Thread(target=_github_sync_upload, args=(dest,), daemon=True).start()
         return {"success": True, "message": f"Ingested {total} chunks into '{dest}' from {len(files)} file(s)"}
     except Exception as e:
         return JSONResponse({"detail": f"Upload error: {str(e)}"}, status_code=500)
@@ -4683,6 +4765,7 @@ async def crawl_site(data: dict, request: Request):
                 local_db = chroma_db
                 yield _send(f"🔄 DB reloaded in memory — no restart needed.")
             yield _send(f"✅ Done! {total_chunks} chunks ingested into '{db_name}'.")
+            asyncio.get_event_loop().run_in_executor(None, _github_sync_upload, db_name)
             yield "data: {\"done\": true}\n\n"
         except Exception as e:
             import traceback
