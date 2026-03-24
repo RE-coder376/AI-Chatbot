@@ -53,7 +53,6 @@ class _CompatChatOpenAI(_BaseChatOpenAI):
             payload["max_tokens"] = payload.pop("max_completion_tokens")
         return payload
 from langchain_chroma import Chroma
-from langchain_community.embeddings import HuggingFaceEmbeddings
 
 # SendGrid Imports
 try:
@@ -1326,18 +1325,18 @@ def init_systems():
     global local_db, embeddings_model, _status
     _status = "loading"
 
-    if embeddings_model is None:
-        logger.info("📡 Loading Universal Multilingual Engine (MiniLM-L12)...")
-        embeddings_model = HuggingFaceEmbeddings(
-            model_name="sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
-            model_kwargs={"device": "cpu"},
-            encode_kwargs={"normalize_embeddings": True}
-        )
-
     try:
         active = ACTIVE_DB_FILE.read_text(encoding="utf-8").strip() if ACTIVE_DB_FILE.exists() else "default"
         db_path = DATABASES_DIR / active
         if db_path.exists():
+            from langchain_community.embeddings import HuggingFaceEmbeddings
+            if embeddings_model is None:
+                logger.info("📡 Loading Universal Multilingual Engine (MiniLM-L12)...")
+                embeddings_model = HuggingFaceEmbeddings(
+                    model_name="sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
+                    model_kwargs={"device": "cpu"},
+                    encode_kwargs={"normalize_embeddings": True}
+                )
             db_cfg_file = db_path / "config.json"
             db_cfg = {}
             if db_cfg_file.exists():
