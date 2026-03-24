@@ -9,5 +9,3 @@ services:
         sync: false        # Set in Render dashboard — never committed
       - key: SMTP_PASSWORD
         sync: false        # Set in Render dashboard — never committed
-      - key: PORT
-        value: "8000"
