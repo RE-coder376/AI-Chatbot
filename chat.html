@@ -101,7 +101,7 @@
 
     /* Markdown overrides */
     .bubble h3 { font-size: 16px; margin: 12px 0 8px; color: var(--primary); }
-    .bubble ul { margin-left: 20px; margin-bottom: 10px; }
+    .bubble ul, .bubble ol { margin-left: 20px; margin-bottom: 10px; padding-left: 4px; }
     .bubble code { background: rgba(0,0,0,0.05); padding: 2px 4px; border-radius: 4px; font-family: monospace; }
     .bubble pre { background: #1e293b; color: #f8fafc; padding: 12px; border-radius: 12px; margin: 10px 0; overflow-x: auto; }
 
@@ -395,7 +395,7 @@
     try {
       const response = await fetch(`${API_URL}/chat`, {
         method:  "POST",
-        headers: { "Content-Type": "application/json", "X-Widget-Key": widgetKey },
+        headers: Object.assign({"Content-Type": "application/json"}, widgetKey ? {"X-Widget-Key": widgetKey} : {}),
         body:    JSON.stringify({ question: q, history, session_id: sessionId,
                                  visitor_id: sessionId, page_url: location.href, page_title: document.title }),
       });
@@ -485,7 +485,7 @@
       if (proactiveSent) return;
       proactiveSent = true;
       addMessage("Still there? Feel free to ask me anything — I'm here to help!", "bot");
-    }, 45000);
+    }, 120000);
   }
   resetProactiveTimer();
 
@@ -517,7 +517,7 @@
     try {
       const r = await fetch(`${API_URL}/handoff`, {
         method: "POST",
-        headers: {"Content-Type":"application/json","X-Widget-Key":widgetKey},
+        headers: Object.assign({"Content-Type":"application/json"}, widgetKey ? {"X-Widget-Key":widgetKey} : {}),
         body: JSON.stringify({session_id: sessionId, conversation: history, name, contact_info: contact})
       });
       const data = await r.json();

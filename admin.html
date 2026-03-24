@@ -264,6 +264,9 @@
       <label>Welcome Message</label><input type="text" id="b-welcome"/>
       <label>Input Placeholder</label><input type="text" id="b-placeholder"/>
       
+      <label>Secondary / Domain Prompt (Expert Runbook)</label>
+      <textarea id="b-secondary-prompt" placeholder="Additional instructions for the AI for this specific database..." style="height:100px; margin-bottom:12px;"></textarea>
+      
       <div class="grid-2">
         <div><label>Page Title</label><input type="text" id="b-page-title"/></div>
         <div><label>Font Style</label><select id="b-font-style">
@@ -427,6 +430,7 @@
             <input type="url" id="api-src-url" placeholder="https://api.jikan.moe/v4/top/anime?limit=25"/>
             <input type="text" id="api-src-key" placeholder="API Key (optional)"/>
             <input type="text" id="api-src-path" placeholder="JSON path (e.g. data) — leave empty to auto-detect"/>
+            <input type="text" id="api-src-keywords" placeholder="Keywords (comma-sep): top rated, best anime — leave empty = always fire" style="grid-column:1/-1;"/>
           </div>
           <div style="display:flex;gap:8px;align-items:center;">
             <label style="font-size:12px;margin:0;display:flex;align-items:center;gap:4px;white-space:nowrap;">Poll every
@@ -643,6 +647,10 @@
     document.getElementById("b-secondary-hex").value = b.secondary_color || "#4f46e5";
     document.getElementById("b-bot-bubble-hex").value = b.bot_bubble_color || "#f1f5f9";
     document.getElementById("b-user-bubble-hex").value = b.user_bubble_color || "#6366f1";
+    
+    // Load secondary prompt
+    document.getElementById("b-secondary-prompt").value = d.secondary_prompt || "";
+    
     updatePreview();
   }
 
@@ -855,6 +863,7 @@
   }
 
   let _crawlCountdownTimer = null;
+  let _crawlStatsRefreshTimer = null;
   function startCrawlCountdowns() {
     if (_crawlCountdownTimer) clearInterval(_crawlCountdownTimer);
     _crawlCountdownTimer = setInterval(() => {
@@ -872,6 +881,21 @@
         }
       });
     }, 1000);
+    // Re-fetch db-stats every 60s to update next_crawl_ts after crawls complete
+    if (_crawlStatsRefreshTimer) clearInterval(_crawlStatsRefreshTimer);
+    _crawlStatsRefreshTimer = setInterval(async () => {
+      try {
+        const res = await fetch(`${API}/admin/db-stats`, { headers: authHeaders() });
+        if (!res.ok) return;
+        const data = await res.json();
+        const stats = data.stats || [];
+        stats.forEach(st => {
+          const el = document.getElementById(`next-crawl-${st.name}`);
+          if (!el || el.dataset.crawling === '1') return;
+          if (st.next_crawl_ts) el.dataset.ts = st.next_crawl_ts;
+        });
+      } catch(e) { /* silent */ }
+    }, 60000);
   }
 
   function markScheduleDirty(dbName) {
@@ -1061,7 +1085,8 @@
     const payload = { 
       password: pass, 
       bot_name: document.getElementById("b-bot-name").value, 
-      business_name: document.getElementById("b-biz-name").value, 
+      business_name: document.getElementById("b-biz-name").value,
+      secondary_prompt: document.getElementById("b-secondary-prompt").value,
       branding: { 
         welcome_message: document.getElementById("b-welcome").value, 
         primary_color: document.getElementById("b-primary-hex").value, 
@@ -1396,6 +1421,7 @@
             <span style="color:var(--text-muted);margin-left:8px;">${s.url.slice(0,50)}${s.url.length>50?'...':''}</span>
             <span style="margin-left:8px;color:#7c3aed;">every ${s.interval_hours}h</span>
             <span style="margin-left:8px;color:var(--text-muted);">last: ${s.last_fetch ? new Date(s.last_fetch).toLocaleString() : 'never'}</span>
+            ${(s.keywords||[]).length ? `<span style="margin-left:8px;color:#0369a1;font-size:11px;">🔑 ${s.keywords.join(', ')}</span>` : '<span style="margin-left:8px;color:#9ca3af;font-size:11px;">always fires</span>'}
           </div>
           <button onclick="deleteApiSource('${s.name}')" style="width:auto;margin:0;padding:4px 10px;font-size:11px;background:#fee2e2;color:#dc2626;border:none;border-radius:6px;cursor:pointer;font-weight:700;">✕</button>
         </div>`).join('');
@@ -1417,6 +1443,7 @@
           api_key: document.getElementById('api-src-key').value.trim(),
           json_path: document.getElementById('api-src-path').value.trim(),
           interval_hours: parseFloat(document.getElementById('api-src-interval').value) || 24,
+          keywords: document.getElementById('api-src-keywords').value.trim(),
         })
       });
       const d = await res.json();

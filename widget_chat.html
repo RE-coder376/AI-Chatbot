@@ -88,7 +88,7 @@
     .message.user .bubble { background: var(--bubble-user); color: white; border-bottom-right-radius: 3px; }
 
     /* Markdown */
-    .bubble ul  { margin-left: 16px; }
+    .bubble ul, .bubble ol { margin-left: 16px; padding-left: 4px; }
     .bubble code { background: rgba(0,0,0,0.06); padding: 1px 4px; border-radius: 3px; font-family: monospace; font-size: 12px; }
 
     /* Typing */
@@ -264,7 +264,7 @@
       if (proactiveSent || history.length > 0) return;
       proactiveSent = true;
       addMessage("Still there? Feel free to ask me anything — I'm here to help!", 'bot');
-    }, 60000);
+    }, 120000);
   }
   resetProactiveTimer();
 
@@ -292,7 +292,7 @@
     try {
       const res = await fetch(`${API}/chat`, {
         method:  'POST',
-        headers: { 'Content-Type': 'application/json', 'X-Widget-Key': widgetKey },
+        headers: Object.assign({'Content-Type': 'application/json'}, widgetKey ? {'X-Widget-Key': widgetKey} : {}),
         body:    JSON.stringify({ question: q, history, session_id: sessionId }),
       });
 
