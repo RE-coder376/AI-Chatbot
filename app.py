@@ -52,7 +52,6 @@ class _CompatChatOpenAI(_BaseChatOpenAI):
         if "max_completion_tokens" in payload:
             payload["max_tokens"] = payload.pop("max_completion_tokens")
         return payload
-from pinecone import Pinecone
 from langchain_chroma import Chroma
 from langchain_community.embeddings import HuggingFaceEmbeddings
 
