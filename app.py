@@ -152,11 +152,11 @@ def _git(args: list, cwd=None) -> bool:
 def _github_sync_download():
     """Startup: clone repo → extract all DB zips into databases/."""
     import zipfile
+    DATABASES_DIR.mkdir(exist_ok=True)  # always create, even if no PAT
     if not os.environ.get("GITHUB_PAT"):
         logger.info("[GH-SYNC] No GITHUB_PAT set — skipping download")
         return
     try:
-        DATABASES_DIR.mkdir(exist_ok=True)
         _GITHUB_CLONE_DIR.mkdir(parents=True, exist_ok=True)
         if (_GITHUB_CLONE_DIR / ".git").exists():
             logger.info("[GH-SYNC] Pulling latest databases from GitHub...")
@@ -2721,6 +2721,28 @@ async def get_csrf_token(request: Request):
     for t in expired:
         _csrf_tokens.pop(t, None)
     return {"csrf_token": token}
+
+@app.get("/admin/auth-mode")
+async def get_auth_mode(request: Request):
+    """Returns 'owner' if password matches root config, 'client' if only DB-specific password."""
+    password = _extract_password(request, request.query_params.get("password", ""))
+    db_name = _extract_admin_db(request)
+    # Read root config directly (no DB overlay) to get root password
+    root_password = os.getenv("ADMIN_PASSWORD", "")
+    if not root_password:
+        try:
+            root_cfg = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
+            root_password = root_cfg.get("admin_password", "")
+        except Exception:
+            root_password = ""
+    if root_password and hmac.compare_digest(password.encode(), root_password.encode()):
+        return {"role": "owner"}
+    # Not root — check if DB-specific password matches (already validated by branding call)
+    db_cfg = get_config(db_name)
+    db_password = db_cfg.get("admin_password", "")
+    if db_password and hmac.compare_digest(password.encode(), db_password.encode()):
+        return {"role": "client", "db": db_name}
+    return JSONResponse({"detail": "Unauthorized"}, status_code=401)
 
 @app.get("/admin/branding")
 def get_branding(request: Request, password: str = ""):
