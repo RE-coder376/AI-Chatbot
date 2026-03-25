@@ -151,19 +151,21 @@ def _git(args: list, cwd=None) -> bool:
 
 def _github_sync_download():
     """Startup: stream-download DB zips from GitHub API → extract into databases/.
-    Uses direct HTTP (no git subprocess) to keep peak RAM under 50MB."""
-    import zipfile, urllib.request, json as _json
+    Uses requests (handles auth redirects) to keep peak RAM low."""
+    import zipfile, requests as _req
     DATABASES_DIR.mkdir(exist_ok=True)
     pat = os.environ.get("GITHUB_PAT", "")
     if not pat:
         logger.info("[GH-SYNC] No GITHUB_PAT set — skipping download")
         return
+    headers = {"Authorization": f"token {pat}", "User-Agent": "chatbot-sync"}
     try:
         api_url = f"https://api.github.com/repos/{_GITHUB_USERNAME}/{_GITHUB_REPO}/contents/"
-        req = urllib.request.Request(api_url, headers={
-            "Authorization": f"token {pat}", "User-Agent": "chatbot-sync"})
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            contents = _json.loads(resp.read())
+        resp = _req.get(api_url, headers=headers, timeout=30)
+        if resp.status_code != 200:
+            logger.error(f"[GH-SYNC] API error {resp.status_code}: {resp.text[:200]}")
+            return
+        contents = resp.json()
         zip_files = [f for f in contents if isinstance(f, dict) and f.get("name", "").endswith(".zip")]
         if not zip_files:
             logger.warning("[GH-SYNC] No zip files found in repo")
@@ -173,14 +175,12 @@ def _github_sync_download():
             download_url = file_info.get("download_url") or \
                 f"https://raw.githubusercontent.com/{_GITHUB_USERNAME}/{_GITHUB_REPO}/main/{file_info['name']}"
             tmp_zip = Path(f"/tmp/{db_name}_sync.zip")
-            logger.info(f"[GH-SYNC] Downloading {db_name}.zip ({file_info.get('size',0)//1024}KB)...")
-            req2 = urllib.request.Request(download_url, headers={"Authorization": f"token {pat}"})
-            with urllib.request.urlopen(req2, timeout=600) as resp2:
+            size_kb = file_info.get("size", 0) // 1024
+            logger.info(f"[GH-SYNC] Downloading {db_name}.zip ({size_kb}KB)...")
+            with _req.get(download_url, headers=headers, stream=True, timeout=600) as r:
+                r.raise_for_status()
                 with open(tmp_zip, "wb") as fout:
-                    while True:
-                        chunk = resp2.read(65536)
-                        if not chunk:
-                            break
+                    for chunk in r.iter_content(chunk_size=65536):
                         fout.write(chunk)
             extract_path = DATABASES_DIR / db_name
             extract_path.mkdir(exist_ok=True)
