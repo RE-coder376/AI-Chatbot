@@ -1443,6 +1443,13 @@ def _load_db_now():
             _status = "ready_no_db"
             logger.warning("No Knowledge Base loaded.")
             return
+        # Install heavy ML packages lazily if not present (removed from requirements.txt to save startup RAM)
+        try:
+            import sentence_transformers  # noqa
+        except ImportError:
+            logger.info("Installing sentence-transformers + torch (first-time setup, may take 2-3 min)...")
+            subprocess.run([sys.executable, "-m", "pip", "install", "--quiet",
+                            "sentence-transformers", "transformers", "torch"], check=True)
         from langchain_community.embeddings import HuggingFaceEmbeddings
         db_cfg_file = db_path / "config.json"
         db_cfg = {}
