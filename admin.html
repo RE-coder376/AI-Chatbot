@@ -995,15 +995,21 @@
     loadDatabases();
   }
   async function syncFromGithub() {
-    const {pass, db} = getAuth();
-    showStatus('db', 'Syncing from GitHub...', 'loading');
-    const r = await fetch(`${API}/admin/sync-github`, {
-      method: 'POST',
-      headers: {'Authorization': `Bearer ${pass}`, 'X-Admin-DB': db, 'X-CSRF-Token': sessionStorage.getItem('csrfToken')||''}
-    });
-    const data = await r.json();
-    showStatus('db', data.message || (r.ok ? 'Sync started' : 'Failed'), r.ok ? 'success' : 'error');
-    if (r.ok) setTimeout(loadDatabases, 5000);
+    const pass = sessionStorage.getItem('adminPass') || '';
+    const db   = sessionStorage.getItem('adminDb') || '';
+    const csrf = sessionStorage.getItem('csrfToken') || '';
+    showStatus('db', '☁️ Syncing from GitHub — please wait 30-60 seconds...', 'loading');
+    try {
+      const r = await fetch(`${API}/admin/sync-github`, {
+        method: 'POST',
+        headers: {'Authorization': `Bearer ${pass}`, 'X-Admin-DB': db, 'X-CSRF-Token': csrf}
+      });
+      const data = await r.json();
+      showStatus('db', data.message || (r.ok ? 'Sync started — refresh list in 30s' : 'Failed'), r.ok ? 'success' : 'error');
+      if (r.ok) setTimeout(loadDatabases, 35000);
+    } catch(e) {
+      showStatus('db', 'Sync request failed: ' + e.message, 'error');
+    }
   }
 
   async function createDb() {
