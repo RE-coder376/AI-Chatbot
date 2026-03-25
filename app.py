@@ -2932,6 +2932,18 @@ async def clear_db_data(request: Request, password: str = Form(...), name: str =
         local_db = None; embeddings_model = None; _load_db_now()
     return {"success": True, "message": f"All knowledge chunks cleared from '{name}'."}
 
+@app.post("/admin/sync-github")
+async def sync_github(request: Request):
+    """Trigger GitHub DB download manually — useful after fresh Render deploy."""
+    password = _extract_password(request)
+    db_name = _extract_admin_db(request)
+    cfg = get_config(db_name)
+    admin_auth(password, cfg)
+    if not os.environ.get("GITHUB_PAT"):
+        return JSONResponse({"message": "No GITHUB_PAT configured — cannot sync"}, status_code=400)
+    threading.Thread(target=_github_sync_download, daemon=True).start()
+    return {"message": "GitHub sync started in background. Refresh DB list in 30-60 seconds."}
+
 @app.post("/admin/databases/set-active")
 async def set_active_db(request: Request, password: str = Form(...), name: str = Form(...)):
     password = _extract_password(request, password)

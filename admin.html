@@ -329,7 +329,10 @@
     <div class="card-body">
       <label>Create New Knowledge Repository</label>
       <div style="display:flex; gap:12px;"><input type="text" id="new-db-name" placeholder="lowercase_name"/><button onclick="createDb()" style="width:auto; margin:0; background:#10b981;">+ Create</button></div>
-      <label style="margin-top:24px;">Manage Repositories</label>
+      <div style="display:flex;gap:12px;align-items:center;margin-top:24px;">
+        <label style="margin:0;">Manage Repositories</label>
+        <button onclick="syncFromGithub()" style="width:auto;margin:0;padding:6px 16px;font-size:12px;background:#6366f1;">☁️ Sync from GitHub</button>
+      </div>
       <div id="db-list"></div>
       <div id="db-status" class="status-msg"></div>
     </div>
@@ -991,7 +994,19 @@
     if (br.ok) { const bd = await br.json(); loadServerData(bd); loadOpsData(bd); }
     loadDatabases();
   }
-  async function createDb() { 
+  async function syncFromGithub() {
+    const {pass, db} = getAuth();
+    showStatus('db', 'Syncing from GitHub...', 'loading');
+    const r = await fetch(`${API}/admin/sync-github`, {
+      method: 'POST',
+      headers: {'Authorization': `Bearer ${pass}`, 'X-Admin-DB': db, 'X-CSRF-Token': sessionStorage.getItem('csrfToken')||''}
+    });
+    const data = await r.json();
+    showStatus('db', data.message || (r.ok ? 'Sync started' : 'Failed'), r.ok ? 'success' : 'error');
+    if (r.ok) setTimeout(loadDatabases, 5000);
+  }
+
+  async function createDb() {
     const pass = document.getElementById('master-pass').value; 
     const name = document.getElementById('new-db-name').value.trim(); 
     if (!name) return showStatus('db', 'Name required.', 'error');
