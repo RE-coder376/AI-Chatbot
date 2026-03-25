@@ -1005,7 +1005,8 @@
         headers: {'Authorization': `Bearer ${pass}`, 'X-Admin-DB': db, 'X-CSRF-Token': csrf}
       });
       const data = await r.json();
-      showStatus('db', data.message || (r.ok ? 'Sync started — refresh list in 30s' : 'Failed'), r.ok ? 'success' : 'error');
+      const msg = data.message || data.detail || (r.ok ? 'Sync started — refresh list in 30s' : 'Unknown error');
+      showStatus('db', (r.ok ? '' : '❌ ') + msg, r.ok ? 'success' : 'error');
       if (r.ok) setTimeout(loadDatabases, 35000);
     } catch(e) {
       showStatus('db', 'Sync request failed: ' + e.message, 'error');
