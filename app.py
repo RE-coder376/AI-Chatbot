@@ -1475,10 +1475,11 @@ def _load_db_now():
 def init_systems():
     global local_db, embeddings_model, _status
     _status = "loading"
-    _github_sync_download()   # restore databases/ from GitHub before loading
-    # Model loading is deferred to first chat request to stay within Render 512MB RAM
+    # Skip GH download at startup — download happens on-demand when DB is activated via admin
+    # This keeps startup memory under 512MB on Render free tier
+    DATABASES_DIR.mkdir(exist_ok=True)
     _status = "ready_no_db"
-    logger.info("✅ Startup complete — DB will load on first chat request")
+    logger.info("✅ Startup complete — activate a DB via admin to load knowledge base")
 
 def _cleanup_old_data(retention_days: int = 90):
     """Delete visitor history and CSAT entries older than retention_days."""
@@ -2942,6 +2943,9 @@ async def set_active_db(request: Request, password: str = Form(...), name: str =
     if password != root_cfg.get("admin_password", "admin"):
         return JSONResponse({"detail": "Unauthorized"}, status_code=401)
     ACTIVE_DB_FILE.write_text(name, encoding="utf-8")
+    # Download from GitHub if DB doesn't exist locally (e.g. on Render after redeploy)
+    if not (DATABASES_DIR / name).exists():
+        threading.Thread(target=_github_sync_download, daemon=True).start()
     global local_db, embeddings_model
     local_db = None
     embeddings_model = None
