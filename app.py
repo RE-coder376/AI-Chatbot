@@ -1443,36 +1443,18 @@ def _load_db_now():
             _status = "ready_no_db"
             logger.warning("No Knowledge Base loaded.")
             return
-        # Install heavy ML packages lazily if not present (removed from requirements.txt to save startup RAM)
-        try:
-            import sentence_transformers  # noqa
-        except ImportError:
-            logger.info("Installing sentence-transformers + torch (first-time setup, may take 2-3 min)...")
-            subprocess.run([sys.executable, "-m", "pip", "install", "--quiet",
-                            "sentence-transformers", "transformers", "torch"], check=True)
-        from langchain_community.embeddings import HuggingFaceEmbeddings
+        from langchain_community.embeddings.fastembed import FastEmbedEmbeddings
         db_cfg_file = db_path / "config.json"
         db_cfg = {}
         if db_cfg_file.exists():
             try: db_cfg = json.loads(db_cfg_file.read_text(encoding="utf-8-sig"))
             except Exception as e: logger.error(f"DB config unreadable ({db_path.name}): {e}")
-        emb_setting = db_cfg.get("embedding_model", "bge")
 
-        if emb_setting == "bge":
-            logger.info("📡 Loading BGE-Base engine (768-dim)...")
-            bge_model = HuggingFaceEmbeddings(model_name="BAAI/bge-base-en-v1.5")
-            local_db = Chroma(persist_directory=str(db_path), embedding_function=bge_model)
-            _status = "ready_bge"
-        else:
-            if embeddings_model is None:
-                logger.info("📡 Loading Universal Multilingual Engine (MiniLM-L12)...")
-                embeddings_model = HuggingFaceEmbeddings(
-                    model_name="sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
-                    model_kwargs={"device": "cpu"},
-                    encode_kwargs={"normalize_embeddings": True}
-                )
-            local_db = Chroma(persist_directory=str(db_path), embedding_function=embeddings_model)
-            _status = "ready"
+        if embeddings_model is None:
+            logger.info("📡 Loading FastEmbed engine (BAAI/bge-small-en-v1.5, onnxruntime)...")
+            embeddings_model = FastEmbedEmbeddings(model_name="BAAI/bge-small-en-v1.5")
+        local_db = Chroma(persist_directory=str(db_path), embedding_function=embeddings_model)
+        _status = "ready"
 
         logger.info(f"✅ BRAIN READY (Mode: {_status}, DB: {active})")
     except Exception as e:
