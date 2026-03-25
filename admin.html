@@ -1006,9 +1006,13 @@
       });
       const data = await r.json();
       const msg = data.message || data.detail || (r.ok ? 'Sync started — refresh list in 30s' : 'Unknown error');
+      console.log('[SYNC]', r.status, JSON.stringify(data));
+      alert((r.ok ? '✅ ' : '❌ ') + msg);
       showStatus('db', (r.ok ? '' : '❌ ') + msg, r.ok ? 'success' : 'error');
       if (r.ok) setTimeout(loadDatabases, 35000);
     } catch(e) {
+      console.log('[SYNC ERROR]', e);
+      alert('Sync failed: ' + e.message);
       showStatus('db', 'Sync request failed: ' + e.message, 'error');
     }
   }
