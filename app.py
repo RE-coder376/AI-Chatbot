@@ -150,58 +150,90 @@ def _git(args: list, cwd=None) -> bool:
         return False
 
 def _github_sync_download():
-    """Startup: clone repo → extract all DB zips into databases/."""
-    import zipfile
-    DATABASES_DIR.mkdir(exist_ok=True)  # always create, even if no PAT
-    if not os.environ.get("GITHUB_PAT"):
+    """Startup: stream-download DB zips from GitHub API → extract into databases/.
+    Uses direct HTTP (no git subprocess) to keep peak RAM under 50MB."""
+    import zipfile, urllib.request, json as _json
+    DATABASES_DIR.mkdir(exist_ok=True)
+    pat = os.environ.get("GITHUB_PAT", "")
+    if not pat:
         logger.info("[GH-SYNC] No GITHUB_PAT set — skipping download")
         return
     try:
-        _GITHUB_CLONE_DIR.mkdir(parents=True, exist_ok=True)
-        if (_GITHUB_CLONE_DIR / ".git").exists():
-            logger.info("[GH-SYNC] Pulling latest databases from GitHub...")
-            _git(["git", "pull"])
-        else:
-            logger.info("[GH-SYNC] Cloning databases repo from GitHub...")
-            subprocess.run(["git", "clone", _github_repo_url(), str(_GITHUB_CLONE_DIR)],
-                           capture_output=True, text=True, timeout=300)
-        for zip_path in _GITHUB_CLONE_DIR.glob("*.zip"):
-            db_name = zip_path.stem
+        api_url = f"https://api.github.com/repos/{_GITHUB_USERNAME}/{_GITHUB_REPO}/contents/"
+        req = urllib.request.Request(api_url, headers={
+            "Authorization": f"token {pat}", "User-Agent": "chatbot-sync"})
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            contents = _json.loads(resp.read())
+        zip_files = [f for f in contents if isinstance(f, dict) and f.get("name", "").endswith(".zip")]
+        if not zip_files:
+            logger.warning("[GH-SYNC] No zip files found in repo")
+            return
+        for file_info in zip_files:
+            db_name = file_info["name"][:-4]
+            download_url = file_info.get("download_url") or \
+                f"https://raw.githubusercontent.com/{_GITHUB_USERNAME}/{_GITHUB_REPO}/main/{file_info['name']}"
+            tmp_zip = Path(f"/tmp/{db_name}_sync.zip")
+            logger.info(f"[GH-SYNC] Downloading {db_name}.zip ({file_info.get('size',0)//1024}KB)...")
+            req2 = urllib.request.Request(download_url, headers={"Authorization": f"token {pat}"})
+            with urllib.request.urlopen(req2, timeout=600) as resp2:
+                with open(tmp_zip, "wb") as fout:
+                    while True:
+                        chunk = resp2.read(65536)
+                        if not chunk:
+                            break
+                        fout.write(chunk)
             extract_path = DATABASES_DIR / db_name
             extract_path.mkdir(exist_ok=True)
-            logger.info(f"[GH-SYNC] Restoring {db_name}...")
-            with zipfile.ZipFile(zip_path, "r") as z:
+            with zipfile.ZipFile(tmp_zip, "r") as z:
                 z.extractall(extract_path)
+            tmp_zip.unlink(missing_ok=True)
+            logger.info(f"[GH-SYNC] ✅ {db_name} restored")
         logger.info("[GH-SYNC] ✅ All databases restored from GitHub")
     except Exception as e:
         logger.error(f"[GH-SYNC] Download error: {e}")
 
 def _github_sync_upload(db_name: str):
-    """After crawl/ingest/config: zip DB and push to GitHub."""
-    import zipfile
-    if not os.environ.get("GITHUB_PAT"):
+    """After crawl/ingest/config: zip DB and push to GitHub via API (no git subprocess)."""
+    import zipfile, urllib.request, json as _json, base64, io
+    pat = os.environ.get("GITHUB_PAT", "")
+    if not pat:
         return
     db_path = DATABASES_DIR / db_name
     if not db_path.exists():
         return
     try:
-        if not (_GITHUB_CLONE_DIR / ".git").exists():
-            _github_sync_download()
-        zip_path = _GITHUB_CLONE_DIR / f"{db_name}.zip"
         logger.info(f"[GH-SYNC] Zipping {db_name}...")
-        with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as z:
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as z:
             for f in db_path.rglob("*"):
                 if not f.is_file():
                     continue
                 rel = f.relative_to(db_path)
                 if str(rel).startswith("visitor_history"):
-                    continue  # ephemeral — skip
+                    continue
                 z.write(f, rel)
-        _git(["git", "config", "user.email", "deploy@chatbot.com"])
-        _git(["git", "config", "user.name", "Chatbot Deploy"])
-        _git(["git", "add", f"{db_name}.zip"])
-        _git(["git", "commit", "-m", f"sync: {db_name} {datetime.now().strftime('%Y-%m-%d %H:%M')}"])
-        _git(["git", "push"])
+        zip_bytes = buf.getvalue()
+        b64_content = base64.b64encode(zip_bytes).decode()
+        # Get current file SHA (needed for update)
+        api_url = f"https://api.github.com/repos/{_GITHUB_USERNAME}/{_GITHUB_REPO}/contents/{db_name}.zip"
+        sha = None
+        try:
+            req = urllib.request.Request(api_url, headers={
+                "Authorization": f"token {pat}", "User-Agent": "chatbot-sync"})
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                sha = _json.loads(resp.read()).get("sha")
+        except Exception:
+            pass  # file doesn't exist yet — create it
+        payload = _json.dumps({
+            "message": f"sync: {db_name} {datetime.now().strftime('%Y-%m-%d %H:%M')}",
+            "content": b64_content,
+            **({"sha": sha} if sha else {})
+        }).encode()
+        req2 = urllib.request.Request(api_url, data=payload, method="PUT", headers={
+            "Authorization": f"token {pat}", "Content-Type": "application/json",
+            "User-Agent": "chatbot-sync"})
+        with urllib.request.urlopen(req2, timeout=300) as resp2:
+            resp2.read()
         logger.info(f"[GH-SYNC] ✅ {db_name} saved to GitHub")
     except Exception as e:
         logger.error(f"[GH-SYNC] Upload error: {e}")
