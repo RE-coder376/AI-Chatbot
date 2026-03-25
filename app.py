@@ -1401,16 +1401,30 @@ async def _get_intro_questions(db_name: str, db, cfg) -> list:
     return []
 
 
-def init_systems():
+def _load_db_now():
+    """Load embeddings model + ChromaDB. Called lazily on first chat request."""
     global local_db, embeddings_model, _status
-    _status = "loading"
-    _github_sync_download()   # restore databases/ from GitHub before loading
-
     try:
         active = ACTIVE_DB_FILE.read_text(encoding="utf-8").strip() if ACTIVE_DB_FILE.exists() else "default"
         db_path = DATABASES_DIR / active
-        if db_path.exists():
-            from langchain_community.embeddings import HuggingFaceEmbeddings
+        if not db_path.exists():
+            _status = "ready_no_db"
+            logger.warning("No Knowledge Base loaded.")
+            return
+        from langchain_community.embeddings import HuggingFaceEmbeddings
+        db_cfg_file = db_path / "config.json"
+        db_cfg = {}
+        if db_cfg_file.exists():
+            try: db_cfg = json.loads(db_cfg_file.read_text(encoding="utf-8-sig"))
+            except Exception as e: logger.error(f"DB config unreadable ({db_path.name}): {e}")
+        emb_setting = db_cfg.get("embedding_model", "bge")
+
+        if emb_setting == "bge":
+            logger.info("📡 Loading BGE-Base engine (768-dim)...")
+            bge_model = HuggingFaceEmbeddings(model_name="BAAI/bge-base-en-v1.5")
+            local_db = Chroma(persist_directory=str(db_path), embedding_function=bge_model)
+            _status = "ready_bge"
+        else:
             if embeddings_model is None:
                 logger.info("📡 Loading Universal Multilingual Engine (MiniLM-L12)...")
                 embeddings_model = HuggingFaceEmbeddings(
@@ -1418,30 +1432,21 @@ def init_systems():
                     model_kwargs={"device": "cpu"},
                     encode_kwargs={"normalize_embeddings": True}
                 )
-            db_cfg_file = db_path / "config.json"
-            db_cfg = {}
-            if db_cfg_file.exists():
-                try: db_cfg = json.loads(db_cfg_file.read_text(encoding="utf-8-sig"))
-                except Exception as e: logger.error(f"DB config unreadable ({db_path.name}), defaulting to bge: {e}")
-            emb_setting = db_cfg.get("embedding_model", "bge")
+            local_db = Chroma(persist_directory=str(db_path), embedding_function=embeddings_model)
+            _status = "ready"
 
-            if emb_setting == "bge":
-                logger.info("📡 Loading BGE-Base engine (768-dim)...")
-                bge_model = HuggingFaceEmbeddings(model_name="BAAI/bge-base-en-v1.5")
-                local_db = Chroma(persist_directory=str(db_path), embedding_function=bge_model)
-                _status = "ready_bge"
-            else:
-                # multilingual (default) — also handles legacy minilm_old after reindex
-                local_db = Chroma(persist_directory=str(db_path), embedding_function=embeddings_model)
-                _status = "ready"
-
-            logger.info(f"✅ BRAIN READY (Mode: {_status}, DB: {active})")
-        else:
-            _status = "ready_no_db"
-            logger.warning("No Knowledge Base loaded.")
+        logger.info(f"✅ BRAIN READY (Mode: {_status}, DB: {active})")
     except Exception as e:
-        logger.error(f"Init Error: {e}")
+        logger.error(f"Load DB Error: {e}")
         _status = "error"
+
+def init_systems():
+    global local_db, embeddings_model, _status
+    _status = "loading"
+    _github_sync_download()   # restore databases/ from GitHub before loading
+    # Model loading is deferred to first chat request to stay within Render 512MB RAM
+    _status = "ready_no_db"
+    logger.info("✅ Startup complete — DB will load on first chat request")
 
 def _cleanup_old_data(retention_days: int = 90):
     """Delete visitor history and CSAT entries older than retention_days."""
@@ -1955,6 +1960,9 @@ async def _comparative_retrieve(q: str, db) -> tuple:
 
 
 async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "", page_url: str = "", page_title: str = "", request: Request = None, cfg: dict = None, tenant_db=None, db_name: str = "") -> AsyncGenerator[str, None]:
+    # Lazy-load model on first request (keeps startup memory under 512MB on Render)
+    if local_db is None and _status in ("ready_no_db", "loading"):
+        await asyncio.to_thread(_load_db_now)
     # log_interaction already called by /chat endpoint with session_id
     if visitor_id: save_visitor_turn(visitor_id, "user", q)
     if cfg is None:
@@ -2888,7 +2896,7 @@ async def clear_db_data(request: Request, password: str = Form(...), name: str =
     # Re-init active DB so in-memory handle points to fresh empty DB
     if name == active_name:
         local_db = None
-        init_systems()
+        local_db = None; embeddings_model = None; _load_db_now()
     return {"success": True, "message": f"All knowledge chunks cleared from '{name}'."}
 
 @app.post("/admin/databases/set-active")
@@ -2902,7 +2910,10 @@ async def set_active_db(request: Request, password: str = Form(...), name: str =
     if password != root_cfg.get("admin_password", "admin"):
         return JSONResponse({"detail": "Unauthorized"}, status_code=401)
     ACTIVE_DB_FILE.write_text(name, encoding="utf-8")
-    init_systems()
+    global local_db, embeddings_model
+    local_db = None
+    embeddings_model = None
+    _load_db_now()
     return {"success": True, "message": f"System transformed into {name} specialist."}
 
 @app.post("/admin/create-db")
@@ -3683,12 +3694,12 @@ async def reindex(data: dict):
             # Temporarily switch active, reindex, restore
             prev = ACTIVE_DB_FILE.read_text(encoding="utf-8").strip() if ACTIVE_DB_FILE.exists() else ""
             ACTIVE_DB_FILE.write_text(target, encoding="utf-8")
-            init_systems()
+            local_db = None; embeddings_model = None; _load_db_now()
             if prev: ACTIVE_DB_FILE.write_text(prev, encoding="utf-8")
-            init_systems()
+            local_db = None; embeddings_model = None; _load_db_now()
             return {"success": True, "message": f"Reindex of '{target}' complete"}
         else:
-            init_systems()
+            local_db = None; embeddings_model = None; _load_db_now()
             return {"success": True, "message": "Reindex complete"}
     except Exception as e:
         return JSONResponse({"detail": f"Reindex error: {str(e)}"}, status_code=500)
