@@ -3,7 +3,7 @@ services:
     name: chatbot
     runtime: python
     buildCommand: pip install -r requirements.txt
-    startCommand: gunicorn app:app -w 1 -k uvicorn.workers.UvicornWorker --bind 0.0.0.0:$PORT
+    startCommand: uvicorn app:app --host 0.0.0.0 --port $PORT
     envVars:
       - key: ADMIN_PASSWORD
         sync: false        # Set in Render dashboard — never committed
