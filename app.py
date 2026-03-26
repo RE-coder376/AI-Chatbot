@@ -1793,10 +1793,20 @@ def health():
     except Exception:
         doc_count = 0
     active = ACTIVE_DB_FILE.read_text(encoding="utf-8").strip() if ACTIVE_DB_FILE.exists() else "none"
+    try:
+        keys_data = json.loads(KEYS_FILE.read_text(encoding="utf-8")) if KEYS_FILE.exists() else []
+        active_keys = len([k for k in keys_data if k.get("status") == "active"])
+        providers = list({k.get("provider") for k in keys_data if k.get("status") == "active"})
+    except Exception as ke:
+        active_keys = -1; providers = [str(ke)]
     return {
         "status": _status,
         "active_db": active,
         "docs_indexed": doc_count,
+        "keys_file": KEYS_FILE.exists(),
+        "active_keys": active_keys,
+        "providers": providers,
+        "any_key_ready": any_key_ready(),
     }
 
 @app.get("/")
