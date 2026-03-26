@@ -733,7 +733,8 @@ async def retrieve_context(q: str, db, k: int = 15, fast: bool = False, expansio
         for v in intent_vars:
             if v not in search_queries:
                 search_queries.append(v)
-            
+        search_queries = search_queries[:4]  # cap: 4 searches × k=15 is plenty; more = slower
+
     logger.debug(f"Expanded queries: {search_queries}")
     
     # 3. Handle Urdu script
@@ -1427,18 +1428,24 @@ async def _get_intro_questions(db_name: str, db, cfg) -> list:
             # Support both legacy list and new dict format
             hist = adata.get("history", [])
             # Extract questions from history list
-            q_list = [e.get("q", "").strip() for e in hist if e.get("q")]
+            _TEST_SUFFIX_RE = re.compile(r'\s+q=\d+\s*$', re.IGNORECASE)
+            q_list = [_TEST_SUFFIX_RE.sub('', e.get("q", "")).strip() for e in hist if e.get("q")]
             if len(q_list) >= 8:
                 from collections import Counter
                 counts = Counter(q_list)
-                top = [
-                    q for q, _ in counts.most_common(20)
-                    if len(q) > 16 and len(q) < 120
-                    and not _BAD_PATTERNS.match(q)
-                    and not _SCOPE_TERMS.search(q)
-                    and not _XSS_JUNK.search(q)
-                    and "?" in q
-                ][:4]
+                seen_norm = set()
+                top = []
+                for q, _ in counts.most_common(20):
+                    norm = re.sub(r'\W+', '', q.lower())  # dedup by content ignoring punctuation
+                    if norm in seen_norm: continue
+                    if (len(q) > 16 and len(q) < 120
+                            and not _BAD_PATTERNS.match(q)
+                            and not _SCOPE_TERMS.search(q)
+                            and not _XSS_JUNK.search(q)
+                            and "?" in q):
+                        seen_norm.add(norm)
+                        top.append(q)
+                        if len(top) == 4: break
                 if len(top) >= 3:
                     return top
     except Exception:
