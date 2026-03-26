@@ -704,7 +704,7 @@ async def async_intent_aware_expansion(q: str) -> list:
         logger.error(f"Intent expansion failed: {e}")
         return [q]
 
-async def retrieve_context(q: str, db, k: int = 15, fast: bool = False) -> tuple:
+async def retrieve_context(q: str, db, k: int = 15, fast: bool = False, expansion_task=None) -> tuple:
     """Multilingual Retrieval: Handles English and Urdu in the same vector space.
     Returns (context_text, doc_count, sources) so callers can cite sources.
     fast=True skips the LLM expansion step (used for sub-queries in multi-part decomposition)."""
@@ -722,7 +722,14 @@ async def retrieve_context(q: str, db, k: int = 15, fast: bool = False) -> tuple
 
     # 2. Add LLM-based intent expansion (smart) — skip for sub-queries to avoid rate limits
     if not fast:
-        intent_vars = await async_intent_aware_expansion(q)
+        if expansion_task is not None:
+            # Reuse the pre-fired concurrent task (saves 2-5s on critical path)
+            try:
+                intent_vars = await asyncio.wait_for(asyncio.shield(expansion_task), timeout=6)
+            except (asyncio.TimeoutError, Exception):
+                intent_vars = [q]
+        else:
+            intent_vars = await async_intent_aware_expansion(q)
         for v in intent_vars:
             if v not in search_queries:
                 search_queries.append(v)
@@ -2056,9 +2063,10 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
     intent    = classify_intent(q)
     is_urdu   = user_lang in ("Urdu Script", "Roman Urdu")
 
-    # Fire entity extraction early — if it returns "X|Y", that's a comparison
-    # regardless of how the user phrased it. Runs in parallel with off-topic checks below.
+    # Fire entity extraction + intent expansion early — both run in parallel with
+    # off-topic checks below, so by the time retrieve_context is called they may be done.
     _early_entity_task = asyncio.create_task(_extract_search_entity(q))
+    _early_expansion_task = asyncio.create_task(async_intent_aware_expansion(q))
 
     # ── Off-topic guard — code-level, fires before retrieval ─────────────────
     _OFF_TOPIC_RE = re.compile(
@@ -2305,15 +2313,18 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
             pass
     else:
         _early_entity_task.cancel()
+        _early_expansion_task.cancel()
 
     # ── Retrieval — route by intent ───────────────────────────────────────────
     if _local_db:
         if intent == "comparative":
+            _early_expansion_task.cancel()
             context, doc_count, sources = await _comparative_retrieve(q, _local_db)
         elif intent == "multi_part":
+            _early_expansion_task.cancel()
             context, doc_count, sources = await _decompose_and_retrieve(q, _local_db)
         else:
-            context, doc_count, sources = await retrieve_context(q, _local_db)
+            context, doc_count, sources = await retrieve_context(q, _local_db, expansion_task=_early_expansion_task)
     else:
         context, doc_count, sources = "", 0, []
 
