@@ -1460,6 +1460,9 @@ async def _get_intro_questions(db_name: str, db, cfg) -> list:
 def _load_db_now():
     """Load embeddings model + ChromaDB. Called lazily on first chat request."""
     global local_db, embeddings_model, _status
+    if _status == "loading":
+        return  # already loading in another thread
+    _status = "loading"
     try:
         active = ACTIVE_DB_FILE.read_text(encoding="utf-8").strip() if ACTIVE_DB_FILE.exists() else "default"
         db_path = DATABASES_DIR / active
@@ -2011,9 +2014,10 @@ async def _comparative_retrieve(q: str, db) -> tuple:
 
 async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "", page_url: str = "", page_title: str = "", request: Request = None, cfg: dict = None, tenant_db=None, db_name: str = "") -> AsyncGenerator[str, None]:
     # Lazy-load model on first request — but don't block the stream (model download ~2min on Render)
-    if local_db is None and _status in ("ready_no_db", "loading"):
-        threading.Thread(target=_load_db_now, daemon=True).start()
-        yield f"data: {json.dumps({'type':'chunk','content':'I am warming up — please send your message again in about 30 seconds.'})}\n\n"
+    if local_db is None:
+        if _status != "loading":
+            threading.Thread(target=_load_db_now, daemon=True).start()
+        yield f"data: {json.dumps({'type':'chunk','content':'I am still warming up — please try again in 1-2 minutes.'})}\n\n"
         yield "data: {\"type\": \"done\"}\n\n"
         return
     # log_interaction already called by /chat endpoint with session_id
