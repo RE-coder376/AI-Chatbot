@@ -150,34 +150,34 @@ def _git(args: list, cwd=None) -> bool:
         return False
 
 def _github_sync_download():
-    """Startup: stream-download DB zips from GitHub API → extract into databases/.
-    Uses requests (handles auth redirects) to keep peak RAM low."""
+    """Download DB zips from GitHub Releases → extract into databases/."""
     import zipfile, requests as _req
     DATABASES_DIR.mkdir(exist_ok=True)
     pat = os.environ.get("GITHUB_PAT", "")
     if not pat:
         logger.info("[GH-SYNC] No GITHUB_PAT set — skipping download")
         return
-    headers = {"Authorization": f"token {pat}", "User-Agent": "chatbot-sync"}
+    headers = {"Authorization": f"token {pat}", "User-Agent": "chatbot-sync",
+               "Accept": "application/octet-stream"}
+    api_hdr = {"Authorization": f"token {pat}", "User-Agent": "chatbot-sync"}
     try:
-        api_url = f"https://api.github.com/repos/{_GITHUB_USERNAME}/{_GITHUB_REPO}/contents/"
-        resp = _req.get(api_url, headers=headers, timeout=30)
+        release_url = f"https://api.github.com/repos/{_GITHUB_USERNAME}/{_GITHUB_REPO}/releases/tags/databases-latest"
+        resp = _req.get(release_url, headers=api_hdr, timeout=30)
         if resp.status_code != 200:
-            logger.error(f"[GH-SYNC] API error {resp.status_code}: {resp.text[:200]}")
+            logger.error(f"[GH-SYNC] Release not found ({resp.status_code}): {resp.text[:200]}")
             return
-        contents = resp.json()
-        zip_files = [f for f in contents if isinstance(f, dict) and f.get("name", "").endswith(".zip")]
-        if not zip_files:
-            logger.warning("[GH-SYNC] No zip files found in repo")
+        assets = resp.json().get("assets", [])
+        zip_assets = [a for a in assets if a["name"].endswith(".zip")]
+        if not zip_assets:
+            logger.warning("[GH-SYNC] No zip assets found in release")
             return
-        for file_info in zip_files:
-            db_name = file_info["name"][:-4]
-            download_url = file_info.get("download_url") or \
-                f"https://raw.githubusercontent.com/{_GITHUB_USERNAME}/{_GITHUB_REPO}/main/{file_info['name']}"
+        for asset in zip_assets:
+            db_name = asset["name"][:-4]
+            size_mb = asset["size"] / 1024 / 1024
+            logger.info(f"[GH-SYNC] Downloading {db_name}.zip ({size_mb:.1f}MB)...")
             tmp_zip = Path(f"/tmp/{db_name}_sync.zip")
-            size_kb = file_info.get("size", 0) // 1024
-            logger.info(f"[GH-SYNC] Downloading {db_name}.zip ({size_kb}KB)...")
-            with _req.get(download_url, headers=headers, stream=True, timeout=600) as r:
+            asset_url = f"https://api.github.com/repos/{_GITHUB_USERNAME}/{_GITHUB_REPO}/releases/assets/{asset['id']}"
+            with _req.get(asset_url, headers=headers, stream=True, timeout=600) as r:
                 r.raise_for_status()
                 with open(tmp_zip, "wb") as fout:
                     for chunk in r.iter_content(chunk_size=65536):
