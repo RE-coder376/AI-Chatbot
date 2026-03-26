@@ -1647,7 +1647,10 @@ async def _auto_scheduler():
                     now = datetime.now()
 
                     # ── Auto-crawl check ──────────────────────────────────
-                    if db_cfg.get("auto_crawl_enabled") and db_cfg.get("crawl_url"):
+                    # Only crawl the active DB — other DBs need a different embedding model
+                    # which would cause OOM on Render 512MB when loaded alongside the active one
+                    _active_now = ACTIVE_DB_FILE.read_text(encoding="utf-8").strip() if ACTIVE_DB_FILE.exists() else ""
+                    if db_cfg.get("auto_crawl_enabled") and db_cfg.get("crawl_url") and db_name == _active_now:
                         interval_m = float(db_cfg.get("crawl_interval_minutes", 60))
                         # Read last_crawl_time from sidecar (written by scheduler) — not config.json
                         # (config.json has stale timestamp from last GitHub upload)
@@ -3072,9 +3075,9 @@ async def set_active_db(request: Request, password: str = Form(...), name: str =
         except: pass
     logged_in_db = _extract_admin_db(request)
     per_db_password = get_config(logged_in_db).get("admin_password", "") if logged_in_db else ""
-    valid = (root_password and hmac.compare_digest(password.encode(), root_password.encode())) or \
+    pw_ok = (root_password and hmac.compare_digest(password.encode(), root_password.encode())) or \
             (per_db_password and hmac.compare_digest(password.encode(), per_db_password.encode()))
-    if not valid:
+    if not pw_ok:
         return JSONResponse({"detail": "Unauthorized"}, status_code=401)
     ACTIVE_DB_FILE.write_text(name, encoding="utf-8")
     global local_db, embeddings_model
