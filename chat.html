@@ -595,7 +595,13 @@
   }
 
   function showLeadOptions(cardId) {
-    showLeadEmailForm(cardId);
+    document.getElementById(cardId).innerHTML = `
+      <p>Would you like to connect with our team?</p>
+      <div class="lead-btn-group">
+        <button class="lead-btn btn-yes" onclick="showLeadEmailForm('${cardId}')">✅ Yes, connect me</button>
+        <button class="lead-btn btn-no" onclick="document.getElementById('${cardId}').remove()">✕ No thanks</button>
+      </div>
+    `;
   }
 
   function showLeadEmailForm(cardId) {
@@ -657,7 +663,7 @@
     div.innerHTML = `
       <p>Would you like to connect with our team?</p>
       <div class="lead-btn-group">
-        <button class="lead-btn btn-yes" onclick="showLeadOptions('${cardId}')">✅ Yes, connect me</button>
+        <button class="lead-btn btn-yes" onclick="showLeadEmailForm('${cardId}')">✅ Yes, connect me</button>
         <button class="lead-btn btn-no" onclick="document.getElementById('${cardId}').remove()">✕ No thanks</button>
       </div>
     `;
