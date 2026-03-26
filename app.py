@@ -2001,9 +2001,12 @@ async def _comparative_retrieve(q: str, db) -> tuple:
 
 
 async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "", page_url: str = "", page_title: str = "", request: Request = None, cfg: dict = None, tenant_db=None, db_name: str = "") -> AsyncGenerator[str, None]:
-    # Lazy-load model on first request (keeps startup memory under 512MB on Render)
+    # Lazy-load model on first request — but don't block the stream (model download ~2min on Render)
     if local_db is None and _status in ("ready_no_db", "loading"):
-        await asyncio.to_thread(_load_db_now)
+        threading.Thread(target=_load_db_now, daemon=True).start()
+        yield f"data: {json.dumps({'type':'chunk','content':'I am warming up — please send your message again in about 30 seconds.'})}\n\n"
+        yield "data: {\"type\": \"done\"}\n\n"
+        return
     # log_interaction already called by /chat endpoint with session_id
     if visitor_id: save_visitor_turn(visitor_id, "user", q)
     if cfg is None:
