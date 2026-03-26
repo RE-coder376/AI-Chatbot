@@ -199,6 +199,15 @@ def _github_sync_download():
             tmp_zip.unlink(missing_ok=True)
             logger.info(f"[GH-SYNC] ✅ {db_name} restored")
         logger.info("[GH-SYNC] ✅ All databases restored from GitHub")
+        # Auto-set active DB if not already set
+        if not ACTIVE_DB_FILE.exists() or not ACTIVE_DB_FILE.read_text().strip():
+            preferred = ["agentfactory", "default"]
+            for p in preferred:
+                if (DATABASES_DIR / p).exists():
+                    ACTIVE_DB_FILE.write_text(p, encoding="utf-8")
+                    logger.info(f"[GH-SYNC] Auto-set active DB → {p}")
+                    threading.Thread(target=_load_db_now, daemon=True).start()
+                    break
     except Exception as e:
         logger.error(f"[GH-SYNC] Download error: {e}")
 
@@ -1714,7 +1723,7 @@ async def csrf_middleware(request: Request, call_next):
     """Enforce CSRF token on state-changing admin requests (POST/DELETE/PUT to /admin/*)."""
     if request.method in ("POST", "DELETE", "PUT") and request.url.path.startswith("/admin/"):
         # Exempt the CSRF token endpoint itself and ingest/file upload endpoints
-        exempt = {"/admin/csrf-token", "/admin/ingest/files"}
+        exempt = {"/admin/csrf-token", "/admin/ingest/files", "/admin/sync-github", "/admin/databases/set-active"}
         if request.url.path not in exempt:
             token = request.headers.get("X-CSRF-Token", "")
             if not token or token not in _csrf_tokens or time.time() > _csrf_tokens.get(token, 0):
