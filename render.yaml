@@ -9,3 +9,7 @@ services:
         sync: false        # Set in Render dashboard — never committed
       - key: SMTP_PASSWORD
         sync: false        # Set in Render dashboard — never committed
+      - key: MALLOC_TRIM_THRESHOLD_
+        value: "65536"     # Return freed memory to OS aggressively (Linux malloc)
+      - key: PYTHONDONTWRITEBYTECODE
+        value: "1"         # Skip .pyc files — saves a little RAM

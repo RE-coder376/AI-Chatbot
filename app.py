@@ -72,7 +72,14 @@ ACTIVE_DB_FILE = Path("active_db.txt")
 DATABASES_DIR = Path("databases")
 ANALYTICS_FILE = Path("analytics.json")  # legacy fallback only
 def _get_active_db() -> str:
-    return ACTIVE_DB_FILE.read_text(encoding="utf-8").strip() if ACTIVE_DB_FILE.exists() else ""
+    if ACTIVE_DB_FILE.exists():
+        v = ACTIVE_DB_FILE.read_text(encoding="utf-8").strip()
+        if v: return v
+    # Fallback: pick first available DB when active_db.txt is missing/empty
+    if DATABASES_DIR.exists():
+        dbs = sorted(d.name for d in DATABASES_DIR.iterdir() if d.is_dir())
+        if dbs: return dbs[0]
+    return ""
 
 def _get_db_for_widget_key(key: str) -> str:
     """Return the db_name that owns this widget_key, or '' if not found. Cached."""
@@ -265,7 +272,7 @@ _csrf_tokens: dict = {}         # token → expiry timestamp (TTL 2h)
 _db_instance_cache: dict = {}   # db_name → Chroma instance (LRU, max 50)
 _api_resp_cache: dict = {}      # url → (text, expiry) — Jikan response cache (10 min TTL)
 _entity_cache: dict = {}        # question_lower → extracted entity string (LRU, max 500)
-_DB_CACHE_MAX = 50
+_DB_CACHE_MAX = 1  # Render free tier: 512MB RAM — only 1 extra DB instance in cache
 _API_CACHE_MAX = 200            # max entries before LRU eviction
 _ENTITY_CACHE_MAX = 500
 
@@ -294,7 +301,7 @@ async def _extract_search_entity(q: str) -> str:
         # Override max_tokens to 20 — title extraction needs only a few tokens
         try: llm.max_tokens = 30
         except Exception: pass
-        result = await llm.ainvoke([
+        result = await asyncio.wait_for(llm.ainvoke([
             {"role": "system", "content":
                 "Extract the search term from the anime/manga question. "
                 "If comparing TWO titles, return both separated by | with nothing else. "
@@ -314,7 +321,7 @@ async def _extract_search_entity(q: str) -> str:
                 "'suggest shounen anime for beginners' → 'shounen anime' | "
                 "'what horror anime should i watch' → 'horror anime'"},
             {"role": "user", "content": q}
-        ])
+        ]), timeout=10)
         entity = (result.content if hasattr(result, "content") else str(result)).strip().strip('"\'')
         # Sanity check: if LLM hallucinated something way longer, fall back
         if not entity or len(entity) > len(q) + 20:
@@ -660,10 +667,10 @@ async def _translate_query_for_search(q: str) -> str:
     try:
         llm = get_fresh_llm()
         if not llm: return q
-        res = await llm.ainvoke([
+        res = await asyncio.wait_for(llm.ainvoke([
             SystemMessage(content="Extract the core technical concepts and product names from this Urdu query and translate them to English keywords for database search. Only return the English keywords, separated by spaces. Example: 'لائیو کٹ کیا ہے' -> 'LiveKit'"),
             HumanMessage(content=q)
-        ])
+        ]), timeout=10)
         return res.content.strip()
     except:
         return q
@@ -1435,7 +1442,7 @@ async def _get_intro_questions(db_name: str, db, cfg) -> list:
             context = "\n---\n".join(docs)[:2000]
             biz = cfg.get("business_name", "this business")
             llm = get_fresh_llm()
-            resp = await llm.ainvoke([{   # ainvoke (non-blocking) — llm.invoke() blocks event loop
+            resp = await asyncio.wait_for(llm.ainvoke([{
                 "role": "user",
                 "content": (
                     f"You are helping set up a chatbot for {biz}. "
@@ -1443,7 +1450,7 @@ async def _get_intro_questions(db_name: str, db, cfg) -> list:
                     f"a first-time visitor might ask. "
                     f"Return ONLY a JSON array of 4 strings. No explanation.\n\nKB:\n{context}"
                 )
-            }])
+            }]), timeout=15)
             raw = resp.content.strip()
             # Extract JSON array even if wrapped in markdown
             m = re.search(r'\[.*\]', raw, re.DOTALL)
@@ -1481,6 +1488,7 @@ def _load_db_now():
             logger.info("📡 Loading FastEmbed engine (BAAI/bge-small-en-v1.5, onnxruntime)...")
             embeddings_model = FastEmbedEmbeddings(model_name="BAAI/bge-small-en-v1.5")
         local_db = Chroma(persist_directory=str(db_path), embedding_function=embeddings_model)
+        gc.collect()  # return freed memory to OS after heavy load
         _status = "ready"
 
         logger.info(f"✅ BRAIN READY (Mode: {_status}, DB: {active})")
@@ -2201,14 +2209,15 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
         try:
             llm_mem, _ = get_llm()
             reply_mem = ""
-            async for chunk in llm_mem.astream(messages_mem):
-                reply_mem += chunk.content
-                yield f"data: {json.dumps({'type':'chunk','content':chunk.content})}\n\n"
+            async with asyncio.timeout(30):
+                async for chunk in llm_mem.astream(messages_mem):
+                    reply_mem += chunk.content
+                    yield f"data: {json.dumps({'type':'chunk','content':chunk.content})}\n\n"
             if visitor_id: save_visitor_turn(visitor_id, "assistant", reply_mem)
             yield f"data: {json.dumps({'type':'metadata','capture_lead':False,'sources':[]})}\n\n"
             yield "data: {\"type\": \"done\"}\n\n"
             return
-        except Exception:
+        except (Exception, asyncio.TimeoutError):
             pass  # fall through to normal path if LLM fails
 
     # ── Small talk / meta — bot identity + capability questions ─────────────
@@ -2526,7 +2535,8 @@ async def chat(request: Request):
             chat_stream_generator(q, hist, visitor_id, page_url, page_title,
                                   request=request, cfg=tenant_cfg,
                                   tenant_db=tenant_db_instance, db_name=tenant_db_name),
-            media_type="text/event-stream"
+            media_type="text/event-stream",
+            headers={"X-Accel-Buffering": "no", "Cache-Control": "no-cache"}
         )
     else:
         # NON-STREAMING JSON MODE
@@ -2626,7 +2636,7 @@ async def chat(request: Request):
             llm = get_fresh_llm()
             if not llm: return JSONResponse({"answer": "No active API keys found."}, status_code=500)
             try:
-                resp = await llm.ainvoke(messages)
+                resp = await asyncio.wait_for(llm.ainvoke(messages), timeout=30)
                 return JSONResponse({"answer": _strip_source_leaks(resp.content, kb_context=context)})
             except Exception as e:
                 err_str = str(e).lower()
@@ -2751,9 +2761,13 @@ async def debug_retrieve(request: Request):
 
 
 @app.get("/config")
-def public_config():
-    """Public endpoint — returns branding/contact config, no password needed."""
-    cfg = get_config()
+def public_config(request: Request):
+    """Public endpoint — returns branding/contact config, no password needed.
+    Respects X-Widget-Key header or ?key= param so each embed gets its own branding."""
+    widget_key = (request.headers.get("X-Widget-Key", "").strip()
+                  or request.query_params.get("key", "").strip())
+    db_name = _get_db_for_widget_key(widget_key) if widget_key else ""
+    cfg = get_config(db_name)
     # Merge branding into root for simpler frontend consumption
     branding = cfg.get("branding", {})
     return {
@@ -4973,7 +4987,7 @@ Context:
         try:
             llm = get_fresh_llm()
             if not llm: break
-            resp = await llm.ainvoke([{"role": "user", "content": prompt}])
+            resp = await asyncio.wait_for(llm.ainvoke([{"role": "user", "content": prompt}]), timeout=30)
             return {"suggestion": resp.content, "question": question}
         except Exception as e:
             last_err = str(e)

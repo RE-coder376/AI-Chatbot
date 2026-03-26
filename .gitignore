@@ -3,6 +3,9 @@
 keys.json
 config.json
 
+# Runtime state — never commit (Render manages this via ACTIVE_DB env var)
+active_db.txt
+
 # Local Databases & Cache
 databases/
 db/

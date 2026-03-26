@@ -230,8 +230,9 @@
   let contactEmail    = '';
   let contactWhatsApp = '';
 
-  // Load branding
-  fetch(`${API}/config`).then(r => r.json()).then(cfg => {
+  // Load branding — pass widget key so server returns this DB's config, not the active DB's
+  const configUrl = widgetKey ? `${API}/config?key=${encodeURIComponent(widgetKey)}` : `${API}/config`;
+  fetch(configUrl).then(r => r.json()).then(cfg => {
     contactEmail    = cfg.contact_email    || '';
     contactWhatsApp = cfg.whatsapp_number  || '';
     const b = cfg.branding || {};
