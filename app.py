@@ -1789,13 +1789,13 @@ async def rate_and_error_middleware(request: Request, call_next):
 @app.get("/health")
 def health():
     try:
-        docs = local_db.get()["ids"] if local_db else []
-        doc_count = len(docs)
+        doc_count = local_db._collection.count() if local_db else 0
     except Exception:
         doc_count = 0
+    active = ACTIVE_DB_FILE.read_text(encoding="utf-8").strip() if ACTIVE_DB_FILE.exists() else "none"
     return {
         "status": _status,
-        "db": ACTIVE_DB_FILE.read_text(encoding="utf-8").strip() if ACTIVE_DB_FILE.exists() else "none",
+        "active_db": active,
         "docs_indexed": doc_count,
     }
 
