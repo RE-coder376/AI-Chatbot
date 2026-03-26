@@ -733,7 +733,7 @@ async def retrieve_context(q: str, db, k: int = 8, fast: bool = False, expansion
         for v in intent_vars:
             if v not in search_queries:
                 search_queries.append(v)
-        search_queries = search_queries[:4]  # cap: 4 searches × k=15 is plenty; more = slower
+        search_queries = search_queries[:2]  # cap: 2 searches on shared-CPU Render (0.1 vCPU); more = slower due to thread contention
 
     logger.debug(f"Expanded queries: {search_queries}")
     
@@ -2373,7 +2373,8 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
         if visitor_id: save_visitor_turn(visitor_id, "assistant", idk)
         yield f"data: {json.dumps({'type': 'chunk', 'content': idk})}\n\n"
         _lead_on = not cfg.get("disable_lead_box", False)
-        yield f"data: {json.dumps({'type': 'metadata', 'capture_lead': _lead_on, 'sources': []})}\n\n"
+        quick_opts_idk = await _get_intro_questions(db_name or _get_active_db(), _local_db, cfg)
+        yield f"data: {json.dumps({'type': 'metadata', 'capture_lead': _lead_on, 'sources': [], 'options': quick_opts_idk})}\n\n"
         yield "data: {\"type\": \"done\"}\n\n"
         return
 
