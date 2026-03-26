@@ -1198,8 +1198,10 @@ def any_key_ready() -> bool:
     try:
         keys = json.loads(KEYS_FILE.read_text(encoding="utf-8")) if KEYS_FILE.exists() else []
         actives = [k for k in keys if k.get('status') == 'active']
-        if os.getenv("GROQ_API_KEY"):
-            actives.append({"key": os.getenv("GROQ_API_KEY")})
+        for ev, prov in [("GROQ_API_KEY","groq"),("GEMINI_API_KEY","gemini"),("CEREBRAS_API_KEY","cerebras"),("SAMBANOVA_API_KEY","sambanova"),("OPENAI_API_KEY","openai")]:
+            v = os.getenv(ev)
+            if v and not any(k.get('key') == v for k in actives):
+                actives.append({"key": v, "provider": prov, "label": f"Env {prov}"})
         for k in actives:
             s = _key_status.get(k['key'], {})
             if now >= s.get("cooldown_until", 0):
@@ -1227,9 +1229,10 @@ def _peek_provider() -> str:
         if KEYS_FILE.exists():
             keys = json.loads(KEYS_FILE.read_text(encoding="utf-8"))
             actives = [k for k in keys if k.get('status') == 'active']
-        env_key = os.getenv("GROQ_API_KEY")
-        if env_key and not any(k['key'] == env_key for k in actives):
-            actives.append({"key": env_key, "provider": "groq", "label": "Env Key"})
+        for ev, prov in [("GROQ_API_KEY","groq"),("GEMINI_API_KEY","gemini"),("CEREBRAS_API_KEY","cerebras"),("SAMBANOVA_API_KEY","sambanova"),("OPENAI_API_KEY","openai")]:
+            v = os.getenv(ev)
+            if v and not any(k.get('key') == v for k in actives):
+                actives.append({"key": v, "provider": prov, "label": f"Env {prov}"})
         if not actives:
             return 'groq'
         now = time.time()
@@ -1252,9 +1255,10 @@ def get_fresh_llm():
             keys = json.loads(KEYS_FILE.read_text(encoding="utf-8"))
             actives = [k for k in keys if k.get('status') == 'active']
 
-        env_key = os.getenv("GROQ_API_KEY")
-        if env_key and not any(k['key'] == env_key for k in actives):
-            actives.append({"key": env_key, "provider": "groq", "label": "Env Key"})
+        for ev, prov in [("GROQ_API_KEY","groq"),("GEMINI_API_KEY","gemini"),("CEREBRAS_API_KEY","cerebras"),("SAMBANOVA_API_KEY","sambanova"),("OPENAI_API_KEY","openai")]:
+            v = os.getenv(ev)
+            if v and not any(k.get('key') == v for k in actives):
+                actives.append({"key": v, "provider": prov, "label": f"Env {prov}"})
 
         if not actives: return None
 
