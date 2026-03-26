@@ -625,6 +625,15 @@
       loadDatabases();
       loadEmbedCode();
       loadCharts();
+      // Show system health in header
+      fetch(`${API}/health`).then(r => r.json()).then(h => {
+        const keyOk  = h.any_key_ready;
+        const dbOk   = h.status === 'ready';
+        const keyTxt = keyOk ? `✅ ${h.active_keys} keys (${(h.providers||[]).join(', ')})` : '❌ No keys loaded';
+        const dbTxt  = dbOk  ? `✅ DB: ${h.active_db} (${h.docs_indexed} docs)` : `⚠️ DB: ${h.status}`;
+        document.getElementById('global-status').innerHTML =
+          `<span style="margin-right:16px">${dbTxt}</span><span>${keyTxt}</span>`;
+      }).catch(() => {});
     }).catch(() => showStatus('auth', 'Failed.', 'error'));
   }
 
