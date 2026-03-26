@@ -1706,6 +1706,22 @@ async def _auto_scheduler():
             logger.error(f"[SCHEDULER] Loop error: {e}")
         await asyncio.sleep(60)
 
+async def _prewarm_intro_questions():
+    """Pre-populate intro question cache once DB is ready — universal, no hardcoding."""
+    for _ in range(180):  # wait up to 3 min for DB + keys
+        if _status == "ready" and local_db is not None and any_key_ready():
+            break
+        await asyncio.sleep(1)
+    if _status != "ready" or local_db is None:
+        return
+    try:
+        db_name = _get_active_db()
+        cfg = get_config(db_name)
+        questions = await _get_intro_questions(db_name, local_db, cfg)
+        logger.info(f"✅ Intro questions pre-warmed for '{db_name}': {questions}")
+    except Exception as e:
+        logger.warning(f"Intro question pre-warm failed: {e}")
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # These can be slow on Windows/large DBs; run in threads to let FastAPI bind to port 8000 immediately
@@ -1714,6 +1730,7 @@ async def lifespan(app: FastAPI):
     asyncio.create_task(asyncio.to_thread(init_systems))
     asyncio.create_task(asyncio.to_thread(_cleanup_old_data))
     asyncio.create_task(_auto_scheduler())
+    asyncio.create_task(_prewarm_intro_questions())
     yield
     # Graceful shutdown — persist state before exit
     logger.info("Shutting down — saving key health...")
