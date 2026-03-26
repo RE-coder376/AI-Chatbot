@@ -678,7 +678,7 @@ async def async_intent_aware_expansion(q: str) -> list:
         llm = get_fresh_llm()
         if not llm: return [q]
         
-        res = await llm.ainvoke([
+        res = await asyncio.wait_for(llm.ainvoke([
             SystemMessage(content=(
                 "You are a search query optimizer. Given a user query, identify the core intent and "
                 "return 2-3 specific search phrases that would help find the answer in a knowledge base. "
@@ -687,7 +687,7 @@ async def async_intent_aware_expansion(q: str) -> list:
                 "Example: 'whats the curriculam' -> 'course syllabus|learning modules|main topics'"
             )),
             HumanMessage(content=q)
-        ])
+        ]), timeout=8)
         
         variations = [v.strip() for v in res.content.split("|") if v.strip()]
         unique_vars = [v for v in variations if v.lower() != q_lower]
@@ -1487,11 +1487,19 @@ def _load_db_now():
 def init_systems():
     global local_db, embeddings_model, _status
     _status = "loading"
-    # Skip GH download at startup — download happens on-demand when DB is activated via admin
-    # This keeps startup memory under 512MB on Render free tier
     DATABASES_DIR.mkdir(exist_ok=True)
     _status = "ready_no_db"
-    logger.info("✅ Startup complete — activate a DB via admin to load knowledge base")
+    # Auto-sync from GitHub in background if GITHUB_PAT is set (restores DBs after Render redeploy)
+    if os.environ.get("GITHUB_PAT"):
+        logger.info("🔄 Auto-syncing databases from GitHub in background...")
+        threading.Thread(target=_startup_sync, daemon=True).start()
+    else:
+        logger.info("✅ Startup complete — no GITHUB_PAT set, skipping auto-sync")
+
+def _startup_sync():
+    """Background: sync from GitHub then load the active DB."""
+    _github_sync_download()
+    _load_db_now()
 
 def _cleanup_old_data(retention_days: int = 90):
     """Delete visitor history and CSAT entries older than retention_days."""
