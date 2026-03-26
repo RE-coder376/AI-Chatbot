@@ -2944,14 +2944,15 @@ async def set_active_db(request: Request, password: str = Form(...), name: str =
     if password != root_cfg.get("admin_password", "admin"):
         return JSONResponse({"detail": "Unauthorized"}, status_code=401)
     ACTIVE_DB_FILE.write_text(name, encoding="utf-8")
-    # Download from GitHub if DB doesn't exist locally (e.g. on Render after redeploy)
-    if not (DATABASES_DIR / name).exists():
-        threading.Thread(target=_github_sync_download, daemon=True).start()
     global local_db, embeddings_model
     local_db = None
     embeddings_model = None
-    _load_db_now()
-    return {"success": True, "message": f"System transformed into {name} specialist."}
+    # Download from GitHub if DB doesn't exist locally (e.g. on Render after redeploy)
+    if not (DATABASES_DIR / name).exists():
+        threading.Thread(target=_github_sync_download, daemon=True).start()
+    # Load in background — model download can take 2-3 min on first use
+    threading.Thread(target=_load_db_now, daemon=True).start()
+    return {"success": True, "message": f"Switching to {name} — loading in background, ready in ~30s."}
 
 @app.post("/admin/create-db")
 async def create_db(request: Request, password: str = Form(...), name: str = Form(...)):

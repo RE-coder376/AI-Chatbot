@@ -845,7 +845,7 @@
             <div style="font-size:11px;color:var(--text-muted);margin-top:3px;display:flex;gap:16px;flex-wrap:wrap;">
               <span>📦 ${(st.chunks||db.chunks||0).toLocaleString()} chunks</span>
               <span>${autoIcon} ${syncLabel}</span>
-              ${hasCrawl ? `<span>🕐 Last: ${lastCrawlLabel}</span><span id="next-crawl-${db.name}" data-ts="${nextCrawlTs}">${isCrawling ? '🔄 Recrawling at the moment...' : '⏭ Next: computing...'}</span>` : ''}
+              ${hasCrawl ? `<span>🕐 Last: ${lastCrawlLabel}</span><span id="next-crawl-${db.name}" data-ts="${nextCrawlTs}">${isCrawling ? '🔄 Recrawling now...' : nextCrawlTs ? '⏭ Next: computing...' : '⏭ Next: due now'}</span>` : ''}
             </div>
           </div>
           <div class="db-actions">
