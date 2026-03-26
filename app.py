@@ -1649,7 +1649,14 @@ async def _auto_scheduler():
                     # ── Auto-crawl check ──────────────────────────────────
                     if db_cfg.get("auto_crawl_enabled") and db_cfg.get("crawl_url"):
                         interval_m = float(db_cfg.get("crawl_interval_minutes", 60))
-                        last_str = db_cfg.get("last_crawl_time", "")
+                        # Read last_crawl_time from sidecar (written by scheduler) — not config.json
+                        # (config.json has stale timestamp from last GitHub upload)
+                        _sidecar = db_dir / "_crawl_times.json"
+                        try:
+                            _sc = json.loads(_sidecar.read_text(encoding="utf-8")) if _sidecar.exists() else {}
+                        except Exception:
+                            _sc = {}
+                        last_str = _sc.get("last_crawl_time") or db_cfg.get("last_crawl_time", "")
                         due = True
                         if last_str:
                             try:
@@ -3055,16 +3062,19 @@ async def sync_github(request: Request):
 @app.post("/admin/databases/set-active")
 async def set_active_db(request: Request, password: str = Form(...), name: str = Form(...)):
     password = _extract_password(request, password)
-    # Always use ROOT config password for DB switching — per-DB overrides must not block master switch
+    # Auth: try root password first; fall back to the currently-logged-in DB's password
+    # (on Render there is no root config.json, so per-DB password must be accepted)
     root_password = os.environ.get("ADMIN_PASSWORD", "")
     if not root_password and CONFIG_FILE.exists():
         try:
             root_cfg = json.loads(CONFIG_FILE.read_text(encoding="utf-8-sig"))
             root_password = root_cfg.get("admin_password", "")
         except: pass
-    if not root_password:
-        root_password = "admin"
-    if not hmac.compare_digest(password.encode(), root_password.encode()):
+    logged_in_db = _extract_admin_db(request)
+    per_db_password = get_config(logged_in_db).get("admin_password", "") if logged_in_db else ""
+    valid = (root_password and hmac.compare_digest(password.encode(), root_password.encode())) or \
+            (per_db_password and hmac.compare_digest(password.encode(), per_db_password.encode()))
+    if not valid:
         return JSONResponse({"detail": "Unauthorized"}, status_code=401)
     ACTIVE_DB_FILE.write_text(name, encoding="utf-8")
     global local_db, embeddings_model
@@ -4336,7 +4346,13 @@ def get_db_stats(request: Request, password: str = ""):
                 except: pass
         auto_enabled = db_cfg.get("auto_crawl_enabled", False)
         interval_m = float(db_cfg.get("crawl_interval_minutes", 60))
-        last_crawl = db_cfg.get("last_crawl_time", "")
+        # Prefer sidecar for live last_crawl_time (config.json has stale upload-time value)
+        _sc_path = db_dir / "_crawl_times.json"
+        try:
+            _sc_data = json.loads(_sc_path.read_text(encoding="utf-8")) if _sc_path.exists() else {}
+        except Exception:
+            _sc_data = {}
+        last_crawl = _sc_data.get("last_crawl_time") or db_cfg.get("last_crawl_time", "")
         next_crawl_ts = ""
         if last_crawl and auto_enabled:
             try:
