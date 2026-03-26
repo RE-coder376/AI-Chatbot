@@ -2937,11 +2937,15 @@ async def sync_github(request: Request):
 async def set_active_db(request: Request, password: str = Form(...), name: str = Form(...)):
     password = _extract_password(request, password)
     # Always use ROOT config password for DB switching — per-DB overrides must not block master switch
-    root_cfg = {}
-    if CONFIG_FILE.exists():
-        try: root_cfg = json.loads(CONFIG_FILE.read_text(encoding="utf-8-sig"))
+    root_password = os.environ.get("ADMIN_PASSWORD", "")
+    if not root_password and CONFIG_FILE.exists():
+        try:
+            root_cfg = json.loads(CONFIG_FILE.read_text(encoding="utf-8-sig"))
+            root_password = root_cfg.get("admin_password", "")
         except: pass
-    if password != root_cfg.get("admin_password", "admin"):
+    if not root_password:
+        root_password = "admin"
+    if not hmac.compare_digest(password.encode(), root_password.encode()):
         return JSONResponse({"detail": "Unauthorized"}, status_code=401)
     ACTIVE_DB_FILE.write_text(name, encoding="utf-8")
     global local_db, embeddings_model
