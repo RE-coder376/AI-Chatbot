@@ -199,15 +199,16 @@ def _github_sync_download():
             tmp_zip.unlink(missing_ok=True)
             logger.info(f"[GH-SYNC] ✅ {db_name} restored")
         logger.info("[GH-SYNC] ✅ All databases restored from GitHub")
-        # Auto-set active DB if not already set
-        if not ACTIVE_DB_FILE.exists() or not ACTIVE_DB_FILE.read_text().strip():
-            preferred = ["agentfactory", "default"]
-            for p in preferred:
-                if (DATABASES_DIR / p).exists():
-                    ACTIVE_DB_FILE.write_text(p, encoding="utf-8")
-                    logger.info(f"[GH-SYNC] Auto-set active DB → {p}")
-                    threading.Thread(target=_load_db_now, daemon=True).start()
-                    break
+        # Set active DB: ACTIVE_DB env var > first available DB
+        env_db = os.environ.get("ACTIVE_DB", "").strip()
+        chosen = env_db if env_db and (DATABASES_DIR / env_db).exists() else ""
+        if not chosen:
+            available = sorted(d.name for d in DATABASES_DIR.iterdir() if d.is_dir())
+            chosen = available[0] if available else ""
+        if chosen:
+            ACTIVE_DB_FILE.write_text(chosen, encoding="utf-8")
+            logger.info(f"[GH-SYNC] Active DB set → {chosen}")
+            threading.Thread(target=_load_db_now, daemon=True).start()
     except Exception as e:
         logger.error(f"[GH-SYNC] Download error: {e}")
 
