@@ -704,7 +704,7 @@ async def async_intent_aware_expansion(q: str) -> list:
         logger.error(f"Intent expansion failed: {e}")
         return [q]
 
-async def retrieve_context(q: str, db, k: int = 15, fast: bool = False, expansion_task=None) -> tuple:
+async def retrieve_context(q: str, db, k: int = 8, fast: bool = False, expansion_task=None) -> tuple:
     """Multilingual Retrieval: Handles English and Urdu in the same vector space.
     Returns (context_text, doc_count, sources) so callers can cite sources.
     fast=True skips the LLM expansion step (used for sub-queries in multi-part decomposition)."""
@@ -787,24 +787,28 @@ async def retrieve_context(q: str, db, k: int = 15, fast: bool = False, expansio
         seen.add(r.page_content[:100])
     if not _skip_chromadb:
         loop = asyncio.get_event_loop()
-        for query in search_queries:
-            try:
-                _q = _clean_text(query)
-                # Run in executor — similarity_search is sync (ONNX embed + HNSW scan)
-                # Calling it directly blocks the event loop, freezing SSE and all timeouts
-                res = await asyncio.wait_for(
-                    loop.run_in_executor(None, lambda q=_q: db.similarity_search(q, k=k)),
-                    timeout=20
-                )
-                for r in res:
-                    key = r.page_content[:100]
-                    if key not in seen:
-                        seen.add(key)
-                        results.append(r)
-            except asyncio.TimeoutError:
-                logger.warning(f"ChromaDB retrieval timed out for query: {query[:50]}")
-            except Exception as e:
-                logger.error(f"Retrieval error for query '{query}': {e}")
+        # Run all searches IN PARALLEL — was sequential (4 × 1-2s = 4-8s), now just the slowest one
+        _search_tasks = [
+            loop.run_in_executor(None, lambda q=_clean_text(query): db.similarity_search(q, k=k))
+            for query in search_queries
+        ]
+        try:
+            _search_results = await asyncio.wait_for(
+                asyncio.gather(*_search_tasks, return_exceptions=True),
+                timeout=20
+            )
+        except asyncio.TimeoutError:
+            logger.warning("ChromaDB parallel search timed out")
+            _search_results = []
+        for idx, res in enumerate(_search_results):
+            if isinstance(res, Exception):
+                logger.error(f"Retrieval error for query '{search_queries[idx] if idx < len(search_queries) else idx}': {res}")
+                continue
+            for r in res:
+                key = r.page_content[:100]
+                if key not in seen:
+                    seen.add(key)
+                    results.append(r)
 
     # Rescue chunks go first (exact match), similarity results fill the rest
     top = (rescue_results + results)[:25]
