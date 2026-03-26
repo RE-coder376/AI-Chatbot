@@ -168,6 +168,16 @@ def _github_sync_download():
             return
         assets = resp.json().get("assets", [])
         zip_assets = [a for a in assets if a["name"].endswith(".zip")]
+        # Download keys.json if present
+        for asset in assets:
+            if asset["name"] == "keys.json":
+                logger.info("[GH-SYNC] Downloading keys.json...")
+                asset_url = f"https://api.github.com/repos/{_GITHUB_USERNAME}/{_GITHUB_REPO}/releases/assets/{asset['id']}"
+                r = _req.get(asset_url, headers=headers, timeout=60)
+                r.raise_for_status()
+                KEYS_FILE.write_bytes(r.content)
+                logger.info("[GH-SYNC] ✅ keys.json restored")
+                break
         if not zip_assets:
             logger.warning("[GH-SYNC] No zip assets found in release")
             return

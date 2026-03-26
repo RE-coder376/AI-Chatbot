@@ -40,6 +40,20 @@ existing = {a["name"]: a["id"]
 dbs = [d for d in DATABASES_DIR.iterdir() if d.is_dir()]
 print(f"Found {len(dbs)} DB(s): {[d.name for d in dbs]}\n")
 
+# Upload keys.json first
+KEYS_FILE = Path("keys.json")
+if KEYS_FILE.exists():
+    keys_name = "keys.json"
+    print(f"  Uploading {keys_name}...", end=" ", flush=True)
+    if keys_name in existing:
+        requests.delete(f"{API}/releases/assets/{existing[keys_name]}", headers=HDR, timeout=30)
+    upload_headers = {**HDR, "Content-Type": "application/json"}
+    r = requests.post(f"{UPLOAD_API}/releases/{release_id}/assets?name={keys_name}",
+                      headers=upload_headers, data=KEYS_FILE.read_bytes(), timeout=60)
+    print("✅ done" if r.status_code in (200,201) else f"❌ HTTP {r.status_code}")
+else:
+    print("  keys.json not found — skipping")
+
 for db_path in dbs:
     db_name  = db_path.name
     zip_name = f"{db_name}.zip"
