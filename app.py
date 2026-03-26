@@ -2209,7 +2209,7 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
         r'derivative of|integral of|what is \d|capital of|weather in|stock price|'
         r'recipe for|how to cook|biryani|calories in|convert \d|square root|'
         r'who won|world cup|football|cricket|current president|prime minister of|'
-        r'news about|latest news|define |definition of|wikipedia|synonym for|'
+        r'news about|latest news|definition of|wikipedia|synonym for|'
         r'translate to|in spanish|in french|in german)\b',
         re.IGNORECASE
     )
@@ -2653,7 +2653,7 @@ async def chat(request: Request):
             r'derivative of|integral of|what is \d|capital of|weather in|stock price|'
             r'recipe for|how to cook|biryani|calories in|convert \d|square root|'
             r'who won|world cup|football|cricket|current president|prime minister of|'
-            r'news about|latest news|define |definition of|wikipedia|synonym for|'
+            r'news about|latest news|definition of|wikipedia|synonym for|'
             r'translate to|in spanish|in french|in german)\b',
             re.IGNORECASE
         )
