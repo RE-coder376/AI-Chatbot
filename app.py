@@ -2561,6 +2561,10 @@ async def chat(request: Request):
         # NON-STREAMING JSON MODE
         cfg = tenant_cfg
 
+        # Warm-up check (mirror of streaming path line 2044)
+        if tenant_db_instance is None:
+            return JSONResponse({"answer": "I am still warming up — please try again in 1-2 minutes."})
+
         # ── Pre-LLM guards (same as streaming path) ──────────────────────────
         _bot  = cfg.get("bot_name", "Assistant")
         _biz  = cfg.get("business_name", "the company")
