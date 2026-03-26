@@ -1729,12 +1729,8 @@ async def rate_and_error_middleware(request: Request, call_next):
         if path == "/chat":
             if not check_rate_limit(ip, _chat_rate, limit=20):
                 return JSONResponse({"detail": "Too many requests. Slow down."}, status_code=429)
-        elif path.startswith("/admin/ingest") or path in ("/admin/databases", "/admin/db-stats", "/admin/api-sources", "/admin/embed-code", "/admin/analytics-charts", "/admin/analytics", "/admin/config", "/admin/embedding-model", "/admin/sync-github", "/admin/databases/set-active", "/admin/branding", "/admin/crawl-schedule", "/admin/faqs", "/admin/auth-mode", "/admin/csrf-token"):
-            if not check_rate_limit(ip, _admin_rate, limit=120):
-                return JSONResponse({"detail": "Too many admin requests."}, status_code=429)
         elif path.startswith("/admin") or path.startswith("/debug"):
-            if not check_rate_limit(ip, _admin_rate, limit=30):
-                return JSONResponse({"detail": "Too many admin requests."}, status_code=429)
+            pass  # admin is password-protected — no rate limit needed
         response = await call_next(request)
         response.headers["Server"] = "Server"  # suppress uvicorn version leak
         return response
