@@ -778,14 +778,23 @@ async def retrieve_context(q: str, db, k: int = 15, fast: bool = False) -> tuple
     for r in rescue_results:
         seen.add(r.page_content[:100])
     if not _skip_chromadb:
+        loop = asyncio.get_event_loop()
         for query in search_queries:
             try:
-                res = db.similarity_search(_clean_text(query), k=k)
+                _q = _clean_text(query)
+                # Run in executor — similarity_search is sync (ONNX embed + HNSW scan)
+                # Calling it directly blocks the event loop, freezing SSE and all timeouts
+                res = await asyncio.wait_for(
+                    loop.run_in_executor(None, lambda q=_q: db.similarity_search(q, k=k)),
+                    timeout=20
+                )
                 for r in res:
                     key = r.page_content[:100]
                     if key not in seen:
                         seen.add(key)
                         results.append(r)
+            except asyncio.TimeoutError:
+                logger.warning(f"ChromaDB retrieval timed out for query: {query[:50]}")
             except Exception as e:
                 logger.error(f"Retrieval error for query '{query}': {e}")
 
