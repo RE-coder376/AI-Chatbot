@@ -1429,19 +1429,26 @@ async def _get_intro_questions(db_name: str, db, cfg) -> list:
         af = _analytics_file(db_name)
         if af.exists():
             adata = json.loads(af.read_text(encoding="utf-8"))
-            # Support both legacy list and new dict format
             hist = adata.get("history", [])
-            # Extract questions from history list
             _TEST_SUFFIX_RE = re.compile(r'\s+q=\d+\s*$', re.IGNORECASE)
             q_list = [_TEST_SUFFIX_RE.sub('', e.get("q", "")).strip() for e in hist if e.get("q")]
             if len(q_list) >= 8:
+                # Load known IDK questions — never suggest what the bot can't answer
+                _gap_norms = set()
+                try:
+                    gf = _gaps_file(db_name)
+                    if gf.exists():
+                        gaps = json.loads(gf.read_text(encoding="utf-8"))
+                        _gap_norms = {re.sub(r'\W+', '', g.get("question","").lower()) for g in gaps}
+                except Exception:
+                    pass
                 from collections import Counter
                 counts = Counter(q_list)
                 seen_norm = set()
                 top = []
                 for q, _ in counts.most_common(20):
-                    norm = re.sub(r'\W+', '', q.lower())  # dedup by content ignoring punctuation
-                    if norm in seen_norm: continue
+                    norm = re.sub(r'\W+', '', q.lower())
+                    if norm in seen_norm or norm in _gap_norms: continue
                     if (len(q) > 16 and len(q) < 120
                             and not _BAD_PATTERNS.match(q)
                             and not _SCOPE_TERMS.search(q)
