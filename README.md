@@ -1,3 +1,12 @@
+---
+title: AI Chatbot
+emoji: 🤖
+colorFrom: indigo
+colorTo: purple
+sdk: docker
+pinned: false
+---
+
 # Digital FTE — Universal Multilingual RAG Chatbot Platform
 
 A production-hardened **Digital FTE (Full-Time Equivalent)** platform. Transform any business website or knowledge base into a multilingual AI assistant that speaks **English, Urdu Script (نستعلیق), and Roman Urdu** fluently.

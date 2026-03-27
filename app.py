@@ -70,6 +70,16 @@ KEYS_FILE = Path("keys.json")
 CONFIG_FILE = Path("config.json")
 ACTIVE_DB_FILE = Path("active_db.txt")
 DATABASES_DIR = Path("databases")
+
+# HF Spaces / containerised deploy: restore files from env vars if missing
+_keys_env = os.environ.get("KEYS_JSON", "")
+if _keys_env and not KEYS_FILE.exists():
+    try: KEYS_FILE.write_text(_keys_env, encoding="utf-8")
+    except Exception as _e: print(f"[STARTUP] Could not write keys.json: {_e}")
+_cfg_env = os.environ.get("CONFIG_JSON", "")
+if _cfg_env and not CONFIG_FILE.exists():
+    try: CONFIG_FILE.write_text(_cfg_env, encoding="utf-8")
+    except Exception as _e: print(f"[STARTUP] Could not write config.json: {_e}")
 ANALYTICS_FILE = Path("analytics.json")  # legacy fallback only
 def _get_active_db() -> str:
     if ACTIVE_DB_FILE.exists():
@@ -205,6 +215,19 @@ def _github_sync_download():
                 z.extractall(extract_path)
             tmp_zip.unlink(missing_ok=True)
             logger.info(f"[GH-SYNC] ✅ {db_name} restored")
+        # Restore crawled_urls.txt for each DB (backed up separately, not in zip)
+        for asset in [a for a in assets if a["name"].startswith("crawled_urls_") and a["name"].endswith(".txt")]:
+            db_n = asset["name"][len("crawled_urls_"):-len(".txt")]
+            db_dir = DATABASES_DIR / db_n
+            if not db_dir.exists(): continue
+            try:
+                asset_url = f"https://api.github.com/repos/{_GITHUB_USERNAME}/{_GITHUB_REPO}/releases/assets/{asset['id']}"
+                r = _req.get(asset_url, headers=headers, timeout=60)
+                if r.status_code == 200:
+                    (db_dir / "crawled_urls.txt").write_bytes(r.content)
+                    logger.info(f"[GH-SYNC] ✅ crawled_urls.txt restored for {db_n}")
+            except Exception as e:
+                logger.warning(f"[GH-SYNC] crawled_urls restore failed for {db_n}: {e}")
         logger.info("[GH-SYNC] ✅ All databases restored from GitHub")
         # Set active DB: ACTIVE_DB env var > first available DB
         env_db = os.environ.get("ACTIVE_DB", "").strip()
@@ -219,51 +242,87 @@ def _github_sync_download():
     except Exception as e:
         logger.error(f"[GH-SYNC] Download error: {e}")
 
-def _github_sync_upload(db_name: str):
-    """After crawl/ingest/config: zip DB and push to GitHub via API (no git subprocess)."""
-    import zipfile, urllib.request, json as _json, base64, io
+def _github_backup_crawled_urls(db_name: str):
+    """Upload crawled_urls.txt to GitHub Contents API (small file, no size limit issue).
+    Called after every auto-crawl so fresh deploys don't re-crawl all pages."""
+    import requests as _req
     pat = os.environ.get("GITHUB_PAT", "")
-    if not pat:
-        return
-    db_path = DATABASES_DIR / db_name
-    if not db_path.exists():
-        return
+    if not pat: return
+    seen_file = DATABASES_DIR / db_name / "crawled_urls.txt"
+    if not seen_file.exists(): return
     try:
-        logger.info(f"[GH-SYNC] Zipping {db_name}...")
-        buf = io.BytesIO()
-        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as z:
-            for f in db_path.rglob("*"):
-                if not f.is_file():
-                    continue
-                rel = f.relative_to(db_path)
-                if str(rel).startswith("visitor_history"):
-                    continue
-                z.write(f, rel)
-        zip_bytes = buf.getvalue()
-        b64_content = base64.b64encode(zip_bytes).decode()
-        # Get current file SHA (needed for update)
-        api_url = f"https://api.github.com/repos/{_GITHUB_USERNAME}/{_GITHUB_REPO}/contents/{db_name}.zip"
+        content_b64 = __import__("base64").b64encode(seen_file.read_bytes()).decode()
+        api_hdr = {"Authorization": f"token {pat}", "User-Agent": "chatbot-sync"}
+        api_url = f"https://api.github.com/repos/{_GITHUB_USERNAME}/{_GITHUB_REPO}/contents/crawled_urls_{db_name}.txt"
         sha = None
         try:
-            req = urllib.request.Request(api_url, headers={
-                "Authorization": f"token {pat}", "User-Agent": "chatbot-sync"})
-            with urllib.request.urlopen(req, timeout=15) as resp:
-                sha = _json.loads(resp.read()).get("sha")
-        except Exception:
-            pass  # file doesn't exist yet — create it
-        payload = _json.dumps({
-            "message": f"sync: {db_name} {datetime.now().strftime('%Y-%m-%d %H:%M')}",
-            "content": b64_content,
-            **({"sha": sha} if sha else {})
-        }).encode()
-        req2 = urllib.request.Request(api_url, data=payload, method="PUT", headers={
-            "Authorization": f"token {pat}", "Content-Type": "application/json",
-            "User-Agent": "chatbot-sync"})
-        with urllib.request.urlopen(req2, timeout=300) as resp2:
-            resp2.read()
-        logger.info(f"[GH-SYNC] ✅ {db_name} saved to GitHub")
+            r = _req.get(api_url, headers=api_hdr, timeout=10)
+            if r.status_code == 200:
+                sha = r.json().get("sha")
+        except Exception: pass
+        payload = {"message": f"crawl-urls: {db_name} {datetime.now().strftime('%Y-%m-%d %H:%M')}",
+                   "content": content_b64}
+        if sha: payload["sha"] = sha
+        r2 = _req.put(api_url, json=payload, headers=api_hdr, timeout=30)
+        if r2.status_code in (200, 201):
+            logger.info(f"[GH-SYNC] ✅ crawled_urls_{db_name}.txt backed up")
+        else:
+            logger.warning(f"[GH-SYNC] crawled_urls backup failed: {r2.status_code}")
+    except Exception as e:
+        logger.warning(f"[GH-SYNC] crawled_urls backup error: {e}")
+
+def _github_sync_upload(db_name: str):
+    """Zip DB and upload to GitHub Releases as an asset (supports files >100MB).
+    Uses a temp file on disk — NOT BytesIO — to avoid OOM on Render 512MB."""
+    import zipfile, requests as _req
+    pat = os.environ.get("GITHUB_PAT", "")
+    if not pat: return
+    db_path = DATABASES_DIR / db_name
+    if not db_path.exists(): return
+    tmp_zip = Path(f"/tmp/{db_name}_upload.zip")
+    try:
+        logger.info(f"[GH-SYNC] Zipping {db_name} to temp file...")
+        with zipfile.ZipFile(tmp_zip, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as z:
+            for f in db_path.rglob("*"):
+                if not f.is_file(): continue
+                rel = f.relative_to(db_path)
+                if str(rel).startswith("visitor_history"): continue
+                z.write(f, rel)
+        file_size = tmp_zip.stat().st_size
+        logger.info(f"[GH-SYNC] {db_name}.zip → {file_size/1024/1024:.1f}MB")
+        api_hdr = {"Authorization": f"token {pat}", "User-Agent": "chatbot-sync"}
+        # Get the databases-latest release
+        rel_resp = _req.get(
+            f"https://api.github.com/repos/{_GITHUB_USERNAME}/{_GITHUB_REPO}/releases/tags/databases-latest",
+            headers=api_hdr, timeout=30)
+        if rel_resp.status_code != 200:
+            logger.error(f"[GH-SYNC] Release not found ({rel_resp.status_code}) — run upload_dbs_to_github.py first")
+            return
+        release_data = rel_resp.json()
+        release_id = release_data["id"]
+        # Delete existing asset with same name (GitHub requires this before re-upload)
+        for asset in release_data.get("assets", []):
+            if asset["name"] == f"{db_name}.zip":
+                _req.delete(
+                    f"https://api.github.com/repos/{_GITHUB_USERNAME}/{_GITHUB_REPO}/releases/assets/{asset['id']}",
+                    headers=api_hdr, timeout=30)
+                break
+        # Stream-upload from temp file — no in-memory zip buffer
+        upload_url = (f"https://uploads.github.com/repos/{_GITHUB_USERNAME}/{_GITHUB_REPO}"
+                      f"/releases/{release_id}/assets?name={db_name}.zip")
+        with open(tmp_zip, "rb") as fz:
+            up = _req.post(upload_url, data=fz,
+                           headers={**api_hdr, "Content-Type": "application/zip",
+                                    "Content-Length": str(file_size)},
+                           timeout=600)
+        if up.status_code in (200, 201):
+            logger.info(f"[GH-SYNC] ✅ {db_name} uploaded ({file_size/1024/1024:.1f}MB)")
+        else:
+            logger.error(f"[GH-SYNC] Upload failed {up.status_code}: {up.text[:200]}")
     except Exception as e:
         logger.error(f"[GH-SYNC] Upload error: {e}")
+    finally:
+        tmp_zip.unlink(missing_ok=True)
 # ──────────────────────────────────────────────────────────────────────────────
 
 _intro_q_cache: dict = {}       # keyed by db_name → list[str]
@@ -1162,9 +1221,8 @@ def get_config(db_name: str = ""):
             except Exception as e:
                 logger.warning(f"get_config: could not parse DB config for '{active}': {e}")
     # --- Overlay secrets from environment variables (highest priority) ---
-    env_admin = os.getenv("ADMIN_PASSWORD")
-    if env_admin:
-        root["admin_password"] = env_admin
+    # NOTE: ADMIN_PASSWORD env var is intentionally NOT overlaid here — it's the super-admin
+    # password checked separately in admin_auth(). Overlaying it would break per-DB client auth.
     env_smtp = os.getenv("SMTP_PASSWORD")
     if env_smtp:
         root["smtp_password"] = env_smtp
@@ -1215,9 +1273,14 @@ def _validate_db_name(name: str) -> str:
     return name
 
 def admin_auth(password: str, cfg: dict):
-    expected = cfg.get("admin_password", "") or ""
-    if not hmac.compare_digest(password.encode(), expected.encode()):
-        raise HTTPException(status_code=401, detail="Unauthorized")
+    """Accept if password matches ADMIN_PASSWORD env var (super-admin) OR the DB's own admin_password."""
+    root_pw = os.getenv("ADMIN_PASSWORD", "") or ""
+    db_pw   = cfg.get("admin_password", "") or ""
+    if root_pw and hmac.compare_digest(password.encode(), root_pw.encode()):
+        return  # super-admin
+    if db_pw and hmac.compare_digest(password.encode(), db_pw.encode()):
+        return  # per-DB client admin
+    raise HTTPException(status_code=401, detail="Unauthorized")
 
 def _extract_password(request: Request, fallback: str = "") -> str:
     """Extract password from Authorization: Bearer <pass> header, or fall back to provided value."""
@@ -1625,6 +1688,8 @@ async def _auto_crawl_db(db_name: str, url: str, max_pages: int = 100) -> int:
     if new_urls:
         try: seen_file.write_text("\n".join(already_seen | set(new_urls)), encoding="utf-8")
         except Exception as e: logger.warning(f"[CRAWL] Could not persist seen URLs for {db_name}: {e}")
+        # Back up crawled_urls.txt to GitHub — critical so fresh deploys don't re-crawl everything
+        threading.Thread(target=_github_backup_crawled_urls, args=(db_name,), daemon=True).start()
     _crawling_dbs.discard(db_name)
     return added
 
@@ -3065,20 +3130,33 @@ async def sync_github(request: Request):
 @app.post("/admin/databases/set-active")
 async def set_active_db(request: Request, password: str = Form(...), name: str = Form(...)):
     password = _extract_password(request, password)
-    # Auth: try root password first; fall back to the currently-logged-in DB's password
-    # (on Render there is no root config.json, so per-DB password must be accepted)
-    root_password = os.environ.get("ADMIN_PASSWORD", "")
-    if not root_password and CONFIG_FILE.exists():
+    # Auth for set-active: only the super-admin (root/env password) may switch active DB.
+    # If no root password is configured (single-tenant / first setup), fall back to
+    # accepting any valid per-DB password so the owner isn't locked out.
+    root_pw = os.environ.get("ADMIN_PASSWORD", "")
+    if not root_pw and CONFIG_FILE.exists():
         try:
-            root_cfg = json.loads(CONFIG_FILE.read_text(encoding="utf-8-sig"))
-            root_password = root_cfg.get("admin_password", "")
+            root_pw = json.loads(CONFIG_FILE.read_text(encoding="utf-8-sig")).get("admin_password", "")
         except: pass
-    logged_in_db = _extract_admin_db(request)
-    per_db_password = get_config(logged_in_db).get("admin_password", "") if logged_in_db else ""
-    pw_ok = (root_password and hmac.compare_digest(password.encode(), root_password.encode())) or \
-            (per_db_password and hmac.compare_digest(password.encode(), per_db_password.encode()))
-    if not pw_ok:
-        return JSONResponse({"detail": "Unauthorized"}, status_code=401)
+    if root_pw:
+        # Root password IS configured — only accept it (per-DB passwords rejected)
+        if not hmac.compare_digest(password.encode(), root_pw.encode()):
+            return JSONResponse({"detail": "Unauthorized — only the super-admin may switch active DB"}, status_code=401)
+    else:
+        # No root password configured (single-tenant / local dev) — accept any valid DB password
+        found = False
+        for db_dir in DATABASES_DIR.iterdir():
+            if not db_dir.is_dir(): continue
+            cfg_path = db_dir / "config.json"
+            if not cfg_path.exists(): continue
+            try:
+                db_pw = json.loads(cfg_path.read_text(encoding="utf-8-sig")).get("admin_password", "")
+                if db_pw and hmac.compare_digest(password.encode(), db_pw.encode()):
+                    found = True; break
+            except: pass
+        if not found:
+            return JSONResponse({"detail": "Unauthorized"}, status_code=401)
+    name = _validate_db_name(name)
     ACTIVE_DB_FILE.write_text(name, encoding="utf-8")
     global local_db, embeddings_model
     local_db = None
@@ -3206,7 +3284,7 @@ def analytics_charts(request: Request, password: str = ""):
     dates = [(today - timedelta(days=i)).isoformat() for i in range(13, -1, -1)]
 
     daily_q: dict = defaultdict(int)
-    af = _analytics_file(_get_active_db())
+    af = _analytics_file(db_name)
     if af.exists():
         try:
             adata = json.loads(af.read_text(encoding="utf-8"))
@@ -3218,7 +3296,7 @@ def analytics_charts(request: Request, password: str = ""):
             pass
 
     daily_csat: dict = defaultdict(list)
-    ff = _feedback_file()
+    ff = _feedback_file(db_name)
     if ff.exists():
         try:
             for fb in json.loads(ff.read_text(encoding="utf-8")):
@@ -3230,7 +3308,7 @@ def analytics_charts(request: Request, password: str = ""):
             pass
 
     gap_counter: Counter = Counter()
-    gf = _gaps_file()
+    gf = _gaps_file(db_name)
     if gf.exists():
         try:
             for g in json.loads(gf.read_text(encoding="utf-8")):
@@ -4379,14 +4457,14 @@ def get_db_stats(request: Request, password: str = ""):
     return {"stats": stats}
 
 @app.post("/admin/crawl-schedule")
-async def set_crawl_schedule(data: dict):
-    cfg = get_config()
-    if not hmac.compare_digest(_extract_password(request, data.get("password", "")).encode(), cfg.get("admin_password", "").encode()):
-        return JSONResponse({"detail": "Unauthorized"}, status_code=401)
-    db_name = data.get("db_name", "").strip()
+async def set_crawl_schedule(request: Request, data: dict = None):
+    if data is None: data = await request.json()
+    db_name = _extract_admin_db(request, data.get("db_name", "")).strip()
     if not db_name:
         db_name = ACTIVE_DB_FILE.read_text(encoding="utf-8").strip() if ACTIVE_DB_FILE.exists() else ""
     if not db_name: return JSONResponse({"detail": "No active DB"}, status_code=400)
+    cfg = get_config(db_name)
+    admin_auth(_extract_password(request, data.get("password", "")), cfg)
     db_cfg_file = DATABASES_DIR / db_name / "config.json"
     existing = {}
     if db_cfg_file.exists():
