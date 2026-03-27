@@ -1780,7 +1780,10 @@ async def _auto_scheduler():
                                 for v in raw.values():
                                     if isinstance(v, list) and v: obj = v; break
                             items = obj if isinstance(obj, list) else [obj]
-                            db = _get_db_instance(db_name)
+                            # Skip ChromaDB indexing for API-only DBs (no crawl_url) —
+                            # they use live fetch per-query; indexing causes ONNX conflicts
+                            has_crawl = bool(db_cfg.get("crawl_url", "").strip())
+                            db = _get_db_instance(db_name) if has_crawl else None
                             if db:
                                 from langchain_core.documents import Document as _Doc
                                 docs = [_Doc(page_content=_flatten_to_text(item).strip(),
@@ -1791,6 +1794,8 @@ async def _auto_scheduler():
                                     loop = asyncio.get_running_loop()
                                     await loop.run_in_executor(None, lambda d=docs: db.add_documents(d))
                                 logger.info(f"[SCHEDULER] API '{src['name']}': +{len(docs)} docs")
+                            else:
+                                logger.info(f"[SCHEDULER] API '{src['name']}': fetched {len(items)} items (api-only, no indexing)")
                             _fetch_times[src["name"]] = now.isoformat()
                             _sidecar_path.write_text(json.dumps(_fetch_times, indent=2), encoding="utf-8")
                         except Exception as e:
