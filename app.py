@@ -1795,6 +1795,7 @@ async def _auto_scheduler():
                             _sidecar_path.write_text(json.dumps(_fetch_times, indent=2), encoding="utf-8")
                         except Exception as e:
                             logger.error(f"[SCHEDULER] API error '{src['name']}': {e}")
+                        await asyncio.sleep(1.5)  # avoid rate limits (e.g. Jikan 3 req/s)
         except Exception as e:
             logger.error(f"[SCHEDULER] Loop error: {e}")
         await asyncio.sleep(60)
