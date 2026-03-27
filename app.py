@@ -3546,6 +3546,9 @@ def _get_db_instance(db_name: str):
     db_path = DATABASES_DIR / db_name
     if not db_path.exists():
         return None
+    # Don't create a new Chroma instance if no DB file exists (API-only DBs like mal)
+    if not (db_path / "chroma.sqlite3").exists():
+        return None
     db_cfg_file = db_path / "config.json"
     db_cfg = {}
     if db_cfg_file.exists():
