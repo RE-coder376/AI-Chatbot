@@ -1,18 +1,15 @@
 FROM python:3.11-slim
 
-# Install system deps + uv (fast package installer)
+# Install system deps
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    gcc g++ libxml2-dev libxslt1-dev curl \
-    && rm -rf /var/lib/apt/lists/* \
-    && curl -LsSf https://astral.sh/uv/install.sh | sh
-
-ENV PATH="/root/.local/bin:$PATH"
+    gcc g++ libxml2-dev libxslt1-dev \
+    && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
-# Install Python deps with uv (10-100x faster than pip)
+# Install uv via pip, then use uv for fast installs
 COPY requirements.txt .
-RUN uv pip install --system --no-cache -r requirements.txt
+RUN pip install uv && uv pip install --system --no-cache -r requirements.txt
 
 # Copy app code
 COPY . .
