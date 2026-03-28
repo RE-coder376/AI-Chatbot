@@ -838,10 +838,10 @@ async def retrieve_context(q: str, db, k: int = 8, fast: bool = False, expansion
     except Exception:
         pass
 
-    # Keyword rescue FIRST — exact matches; skipped if Jikan fast path handles the query
+    # Keyword rescue FIRST — exact matches; skipped if Jikan fast path or no DB
     rescue_seen: set = set()
     rescue_results = []
-    if not _skip_chromadb:
+    if not _skip_chromadb and db is not None:
         for rescue_q in [q] + search_queries:
             for r in _keyword_rescue(rescue_q, db, rescue_seen):
                 rescue_results.append(r)
@@ -858,7 +858,7 @@ async def retrieve_context(q: str, db, k: int = 8, fast: bool = False, expansion
     # Seed seen with rescued chunks so similarity doesn't duplicate them
     for r in rescue_results:
         seen.add(r.page_content[:100])
-    if not _skip_chromadb:
+    if not _skip_chromadb and db is not None:
         loop = asyncio.get_event_loop()
         # Run all searches IN PARALLEL — was sequential (4 × 1-2s = 4-8s), now just the slowest one
         _search_tasks = [
