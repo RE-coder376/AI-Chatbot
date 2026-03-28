@@ -1,5 +1,6 @@
 FROM python:3.11-slim
 
+# bust cache: 2026-03-28
 # Install system deps for chromadb / lxml
 RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc g++ libxml2-dev libxslt1-dev \
