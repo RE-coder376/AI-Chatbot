@@ -2768,7 +2768,7 @@ async def chat(request: Request):
         if _OOS_RE_NS.search(q) and not _PRODUCT_Q_RE_NS.search(q):
             return JSONResponse({"answer": f"I specialize in {_topics} for {_biz}. For other topics, I'd suggest a general search engine."})
 
-        context, doc_count, sources = await retrieve_context(q, tenant_db_instance) if tenant_db_instance else ("", 0, [])
+        context, doc_count, sources = await retrieve_context(q, tenant_db_instance)
 
         # Sparse KB guard
         if not _context_addresses_query(context, q):
