@@ -3582,6 +3582,7 @@ def _get_db_instance(db_name: str):
             emb = embeddings_model
     elif emb_setting == "minilm_old":
         if legacy_embeddings is None:
+            try:
                 from langchain_community.embeddings import HuggingFaceEmbeddings
                 globals()["legacy_embeddings"] = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
             except ImportError:
