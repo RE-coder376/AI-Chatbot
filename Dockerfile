@@ -1,15 +1,16 @@
 FROM python:3.11-slim
 
-# Install system deps
+# Install system deps (cmake needed if any wheel must compile from source)
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    gcc g++ libxml2-dev libxslt1-dev \
+    gcc g++ cmake libxml2-dev libxslt1-dev \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
 # Install uv via pip, then use uv for fast installs
+# --prefer-binary avoids C++ source compilation for hnswlib/chromadb
 COPY requirements.txt .
-RUN pip install uv && uv pip install --system --no-cache -r requirements.txt
+RUN pip install uv && uv pip install --system --no-cache --prefer-binary -r requirements.txt
 
 # Copy app code
 COPY . .
