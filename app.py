@@ -198,7 +198,8 @@ def _github_sync_download():
         if not zip_assets:
             logger.warning("[GH-SYNC] No zip assets found in release")
             return
-        for asset in zip_assets:
+
+        def _download_zip(asset):
             db_name = asset["name"][:-4]
             size_mb = asset["size"] / 1024 / 1024
             logger.info(f"[GH-SYNC] Downloading {db_name}.zip ({size_mb:.1f}MB)...")
@@ -215,6 +216,19 @@ def _github_sync_download():
                 z.extractall(extract_path)
             tmp_zip.unlink(missing_ok=True)
             logger.info(f"[GH-SYNC] ✅ {db_name} restored")
+
+        # Download active DB first so startup is fast, then rest in background
+        env_db = os.environ.get("ACTIVE_DB", "").strip()
+        active_asset = next((a for a in zip_assets if a["name"][:-4] == env_db), None)
+        other_assets = [a for a in zip_assets if a != active_asset]
+        if active_asset:
+            _download_zip(active_asset)
+        def _bg_sync_rest():
+            for asset in other_assets:
+                try: _download_zip(asset)
+                except Exception as e: logger.warning(f"[GH-SYNC] Background sync failed for {asset['name']}: {e}")
+        if other_assets:
+            threading.Thread(target=_bg_sync_rest, daemon=True).start()
         # Restore crawled_urls.txt for each DB (backed up separately, not in zip)
         for asset in [a for a in assets if a["name"].startswith("crawled_urls_") and a["name"].endswith(".txt")]:
             db_n = asset["name"][len("crawled_urls_"):-len(".txt")]
