@@ -10,7 +10,7 @@ WORKDIR /app
 
 # Install Python deps first (cached layer)
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir --prefer-binary -r requirements.txt
 
 # Copy app code
 COPY . .
