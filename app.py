@@ -1588,6 +1588,11 @@ def _load_db_now():
             _status = "ready_no_db"
             logger.warning("No Knowledge Base loaded.")
             return
+        # API-only DB (no ChromaDB) — skip embedding load entirely
+        if not (db_path / "chroma.sqlite3").exists():
+            _status = "ready_no_db"
+            logger.info(f"✅ API-only DB '{active}' — no ChromaDB, skipping embedding load")
+            return
         from langchain_community.embeddings.fastembed import FastEmbedEmbeddings
         db_cfg_file = db_path / "config.json"
         db_cfg = {}
