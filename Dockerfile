@@ -10,7 +10,7 @@ WORKDIR /app
 # Install uv via pip, then use uv for fast installs
 # --prefer-binary avoids C++ source compilation for hnswlib/chromadb
 COPY requirements.txt .
-RUN pip install uv && uv pip install --system --no-cache --prefer-binary -r requirements.txt
+RUN pip install uv && uv pip install --system --no-cache -r requirements.txt
 
 # Copy app code
 COPY . .
