@@ -2459,7 +2459,8 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
         else:
             context, doc_count, sources = await retrieve_context(q, _local_db, expansion_task=_early_expansion_task)
     else:
-        context, doc_count, sources = "", 0, []
+        # API-only DB (no ChromaDB) — still run retrieve_context for live API fetch
+        context, doc_count, sources = await retrieve_context(q, None, expansion_task=_early_expansion_task)
 
     # ── Sparse KB guard ───────────────────────────────────────────────────────
     if not _context_addresses_query(context, q):
