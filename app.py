@@ -1754,6 +1754,10 @@ async def _auto_scheduler():
                         _fetch_times = json.loads(_sidecar_path.read_text(encoding="utf-8")) if _sidecar_path.exists() else {}
                     except Exception:
                         _fetch_times = {}
+                    # API-only DBs (no crawl_url) use live fetch per-query — skip scheduler pre-fetch
+                    has_crawl = bool(db_cfg.get("crawl_url", "").strip())
+                    if not has_crawl:
+                        continue
                     for src in db_cfg.get("api_sources", []):
                         interval_h = float(src.get("interval_hours", 24))
                         last_str = _fetch_times.get(src["name"], src.get("last_fetch", ""))
@@ -1780,22 +1784,16 @@ async def _auto_scheduler():
                                 for v in raw.values():
                                     if isinstance(v, list) and v: obj = v; break
                             items = obj if isinstance(obj, list) else [obj]
-                            # Skip ChromaDB indexing for API-only DBs (no crawl_url) —
-                            # they use live fetch per-query; indexing causes ONNX conflicts
-                            has_crawl = bool(db_cfg.get("crawl_url", "").strip())
-                            db = _get_db_instance(db_name) if has_crawl else None
+                            db = _get_db_instance(db_name)
                             if db:
                                 from langchain_core.documents import Document as _Doc
                                 docs = [_Doc(page_content=_flatten_to_text(item).strip(),
                                              metadata={"source": src["url"], "api_name": src["name"]})
                                         for item in items if len(_flatten_to_text(item).strip()) > 20]
                                 if docs:
-                                    # Run ChromaDB write in executor — do NOT block event loop
                                     loop = asyncio.get_running_loop()
                                     await loop.run_in_executor(None, lambda d=docs: db.add_documents(d))
                                 logger.info(f"[SCHEDULER] API '{src['name']}': +{len(docs)} docs")
-                            else:
-                                logger.info(f"[SCHEDULER] API '{src['name']}': fetched {len(items)} items (api-only, no indexing)")
                             _fetch_times[src["name"]] = now.isoformat()
                             _sidecar_path.write_text(json.dumps(_fetch_times, indent=2), encoding="utf-8")
                         except Exception as e:
