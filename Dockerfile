@@ -1,16 +1,18 @@
 FROM python:3.11-slim
 
-# bust cache: 2026-03-28
-# Install system deps for chromadb / lxml
+# Install system deps + uv (fast package installer)
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    gcc g++ libxml2-dev libxslt1-dev \
-    && rm -rf /var/lib/apt/lists/*
+    gcc g++ libxml2-dev libxslt1-dev curl \
+    && rm -rf /var/lib/apt/lists/* \
+    && curl -LsSf https://astral.sh/uv/install.sh | sh
+
+ENV PATH="/root/.local/bin:$PATH"
 
 WORKDIR /app
 
-# Install Python deps first (cached layer)
+# Install Python deps with uv (10-100x faster than pip)
 COPY requirements.txt .
-RUN pip install --no-cache-dir --prefer-binary -r requirements.txt
+RUN uv pip install --system --no-cache -r requirements.txt
 
 # Copy app code
 COPY . .
