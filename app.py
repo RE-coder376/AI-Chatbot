@@ -3560,13 +3560,19 @@ def _get_db_instance(db_name: str):
     emb_setting = db_cfg.get("embedding_model", "bge")
     
     if emb_setting == "bge":
-        # Support legacy 768-dim English DBs
-        from langchain_community.embeddings import HuggingFaceEmbeddings
-        emb = HuggingFaceEmbeddings(model_name="BAAI/bge-base-en-v1.5")
+        try:
+            from langchain_community.embeddings import HuggingFaceEmbeddings
+            emb = HuggingFaceEmbeddings(model_name="BAAI/bge-base-en-v1.5")
+        except ImportError:
+            logger.warning("[DB] sentence-transformers not installed, falling back to fastembed for BGE DB")
+            emb = embeddings_model
     elif emb_setting == "minilm_old":
         if legacy_embeddings is None:
-            from langchain_community.embeddings import HuggingFaceEmbeddings
-            globals()["legacy_embeddings"] = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
+                from langchain_community.embeddings import HuggingFaceEmbeddings
+                globals()["legacy_embeddings"] = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
+            except ImportError:
+                logger.warning("[DB] sentence-transformers not installed, falling back to fastembed")
+                globals()["legacy_embeddings"] = embeddings_model
         emb = legacy_embeddings
     else:
         # Default to the primary multilingual model
