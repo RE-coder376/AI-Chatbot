@@ -1935,7 +1935,7 @@ def health():
     except Exception as ke:
         active_keys = -1; providers = [str(ke)]
     return {
-        "status": _status,
+        "status": "ok" if _status in ("ready", "ready_no_db") else _status,
         "active_db": active,
         "docs_indexed": doc_count,
         "keys_file": KEYS_FILE.exists(),
@@ -2176,7 +2176,7 @@ async def _comparative_retrieve(q: str, db) -> tuple:
 
 async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "", page_url: str = "", page_title: str = "", request: Request = None, cfg: dict = None, tenant_db=None, db_name: str = "") -> AsyncGenerator[str, None]:
     # Lazy-load model on first request — but don't block the stream (model download ~2min on Render)
-    if local_db is None:
+    if local_db is None and _status not in ("ready_no_db",):
         if _status != "loading":
             threading.Thread(target=_load_db_now, daemon=True).start()
         yield f"data: {json.dumps({'type':'chunk','content':'I am still warming up — please try again in 1-2 minutes.'})}\n\n"
@@ -2702,7 +2702,7 @@ async def chat(request: Request):
         cfg = tenant_cfg
 
         # Warm-up check (mirror of streaming path line 2044)
-        if tenant_db_instance is None:
+        if tenant_db_instance is None and _status not in ("ready_no_db",):
             return JSONResponse({"answer": "I am still warming up — please try again in 1-2 minutes."})
 
         # ── Pre-LLM guards (same as streaming path) ──────────────────────────
