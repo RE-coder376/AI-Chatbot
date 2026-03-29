@@ -1360,8 +1360,8 @@ def any_key_ready() -> bool:
 
 # Per-model context window budgets (chars, conservative — leaves room for system prompt + history)
 _CONTEXT_CHAR_BUDGET = {
-    'cerebras':  6000,   # llama3.1-8b = 8K tokens total; ~1500 tokens for context
-    'groq':      6000,   # free-tier TPM ~6K tokens; keep context small
+    'cerebras':  3000,   # llama3.1-8b = 8K tokens; reserve ~5K for sys prompt + 8-turn history
+    'groq':      5000,   # free-tier TPM; reserve headroom for sys prompt + history
     'gemini':   40000,   # gemini-2.0-flash-lite = 1M tokens; generous budget
     'sambanova':40000,   # Llama-3.3-70B = 128K tokens; generous budget
     'openai':   40000,   # gpt-4o-mini = 128K tokens; generous budget
