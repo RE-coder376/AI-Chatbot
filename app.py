@@ -343,6 +343,7 @@ _intro_q_cache: dict = {}       # keyed by db_name → list[str]
 _widget_key_cache: dict = {}    # widget_key → db_name
 _csrf_tokens: dict = {}         # token → expiry timestamp (TTL 2h)
 _db_instance_cache: dict = {}   # db_name → Chroma instance (LRU, max 50)
+_analytics_lock = threading.Lock()  # prevents concurrent analytics.json corruption
 _api_resp_cache: dict = {}      # url → (text, expiry) — Jikan response cache (10 min TTL)
 _entity_cache: dict = {}        # question_lower → extracted entity string (LRU, max 500)
 _DB_CACHE_MAX = 1  # Render free tier: 512MB RAM — only 1 extra DB instance in cache
@@ -1163,32 +1164,33 @@ def _fast_format_jikan(context: str, q: str) -> str | None:
     return "".join(parts).strip() or None
 
 
-def log_interaction(q: str, session_id: str = ""):
-    try:
-        af = _analytics_file(_get_active_db())
-        data = {"total_queries": 0, "total_sessions": 0, "sessions": [], "history": [], "questions": {}}
-        if af.exists():
-            try:
-                raw = json.loads(af.read_text(encoding="utf-8"))
-                if "total" in raw and "total_queries" not in raw:
-                    raw["total_queries"] = raw.pop("total")
-                data.update(raw)
-            except Exception as e:
-                logger.warning(f"Analytics file corrupt, resetting: {e}")
+def log_interaction(q: str, session_id: str = "", db_name: str = ""):
+    with _analytics_lock:
+        try:
+            af = _analytics_file(db_name or _get_active_db())
+            data = {"total_queries": 0, "total_sessions": 0, "sessions": [], "history": [], "questions": {}}
+            if af.exists():
+                try:
+                    raw = json.loads(af.read_text(encoding="utf-8"))
+                    if "total" in raw and "total_queries" not in raw:
+                        raw["total_queries"] = raw.pop("total")
+                    data.update(raw)
+                except Exception as e:
+                    logger.warning(f"Analytics file corrupt, resetting: {e}")
 
-        data["total_queries"] = data.get("total_queries", 0) + 1
-        data["history"].insert(0, {"q": q, "t": datetime.now().isoformat()})
-        data["history"] = data["history"][:200]
-        data["questions"][q] = data["questions"].get(q, 0) + 1
+            data["total_queries"] = data.get("total_queries", 0) + 1
+            data["history"].insert(0, {"q": q, "t": datetime.now().isoformat()})
+            data["history"] = data["history"][:200]
+            data["questions"][q] = data["questions"].get(q, 0) + 1
 
-        if session_id and session_id not in data.get("sessions", []):
-            data.setdefault("sessions", []).append(session_id)
-            data["sessions"] = data["sessions"][-500:]
-            data["total_sessions"] = len(data["sessions"])
+            if session_id and session_id not in data.get("sessions", []):
+                data.setdefault("sessions", []).append(session_id)
+                data["sessions"] = data["sessions"][-500:]
+                data["total_sessions"] = len(data["sessions"])
 
-        af.write_text(json.dumps(data, indent=2), encoding="utf-8")
-    except Exception as e:
-        logger.error(f"Analytics Error: {e}")
+            af.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        except Exception as e:
+            logger.error(f"Analytics Error: {e}")
 
 def log_knowledge_gap(q: str):
     try:
@@ -2676,7 +2678,6 @@ async def chat(request: Request):
     if len(q) > 2000:
         return Response(content=json.dumps({"detail": "Message too long (max 2000 characters)"}), status_code=400, media_type="application/json")
     visitor_id = str(data.get("visitor_id", "") or data.get("session_id", ""))[:64]
-    log_interaction(q, session_id=visitor_id)
     # Cap history message length to prevent LLM context bloat from malicious clients
     hist = [
         {**m, "content": str(m.get("content", ""))[:500]}
@@ -2708,6 +2709,7 @@ async def chat(request: Request):
         tenant_db_name = _get_active_db()
         tenant_db_instance = local_db
     tenant_cfg = get_config(tenant_db_name)
+    asyncio.get_event_loop().run_in_executor(None, log_interaction, q, visitor_id, tenant_db_name)
 
     if stream:
         return StreamingResponse(
