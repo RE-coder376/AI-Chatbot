@@ -377,22 +377,22 @@ async def _extract_search_entity(q: str) -> str:
         result = await asyncio.wait_for(llm.ainvoke([
             {"role": "system", "content":
                 "Extract the search term from the anime/manga question. "
+                "If the question is about a CHARACTER (person/villain/hero), return the CHARACTER NAME. "
+                "If the question is about an ANIME/MANGA TITLE, return the TITLE. "
                 "If comparing TWO titles, return both separated by | with nothing else. "
-                "If one specific title, return just that title. "
                 "If about a genre/category/type (no specific title), return just the genre keywords. "
                 "No punctuation, no explanation, no full sentences. "
                 "Examples: "
+                "'tell me about uchiha madara' → 'uchiha madara' | "
+                "'who is gojo satoru' → 'gojo satoru' | "
+                "'tell me about levi ackerman' → 'levi ackerman' | "
                 "'who is the main character of oshi no ko' → 'oshi no ko' | "
                 "'how many episodes does bleach TYBW have' → 'bleach thousand year blood war' | "
                 "'is attack on titan worth watching' → 'attack on titan' | "
                 "'jujutsu kaisen or attack on titan rating' → 'jujutsu kaisen|attack on titan' | "
                 "'compare naruto and one piece' → 'naruto|one piece' | "
-                "'which is better demon slayer vs fullmetal alchemist' → 'demon slayer|fullmetal alchemist brotherhood' | "
                 "'what are the best isekai anime' → 'isekai anime' | "
-                "'recommend some mecha anime' → 'mecha anime' | "
-                "'best romance anime of 2024' → 'romance anime' | "
-                "'suggest shounen anime for beginners' → 'shounen anime' | "
-                "'what horror anime should i watch' → 'horror anime'"},
+                "'recommend some mecha anime' → 'mecha anime'"},
             {"role": "user", "content": q}
         ]), timeout=10)
         entity = (result.content if hasattr(result, "content") else str(result)).strip().strip('"\'')
