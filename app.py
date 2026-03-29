@@ -2709,7 +2709,7 @@ async def chat(request: Request):
         tenant_db_name = _get_active_db()
         tenant_db_instance = local_db
     tenant_cfg = get_config(tenant_db_name)
-    asyncio.get_event_loop().run_in_executor(None, log_interaction, q, visitor_id, tenant_db_name)
+    asyncio.get_running_loop().run_in_executor(None, log_interaction, q, visitor_id, tenant_db_name)
 
     if stream:
         return StreamingResponse(
