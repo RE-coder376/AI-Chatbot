@@ -3090,7 +3090,7 @@ async def set_embedding_model(request: Request, data: dict = None):
 def get_databases(request: Request, password: str = ""):
     password = _extract_password(request, password)
     cfg = get_config()
-    if not hmac.compare_digest(password.encode(), cfg.get("admin_password", "").encode()): return JSONResponse({"detail": "Unauthorized"}, status_code=401)
+    admin_auth(password, cfg)
     dbs = []
     active = ACTIVE_DB_FILE.read_text(encoding="utf-8").strip() if ACTIVE_DB_FILE.exists() else "default"
     if DATABASES_DIR.exists():
@@ -4864,8 +4864,8 @@ async def crawl_site(data: dict, request: Request):
                         chroma_db = Chroma(persist_directory=str(db_dir), embedding_function=emb)
                     except Exception:
                         chroma_db = None  # dimension mismatch or corrupt — will create fresh
-                chunk_size = 800
-                chunk_overlap = 150         # overlap between consecutive chunks
+                chunk_size = 350            # ~350 words ≈ 450 tokens, safely under bge-small's 512-token limit
+                chunk_overlap = 50          # overlap between consecutive chunks
                 chunk_step = chunk_size - chunk_overlap
                 total_chunks = 0
                 completed = 0
