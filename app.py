@@ -3249,15 +3249,13 @@ async def delete_db(request: Request, password: str = Form(...), name: str = For
     
     if db_path.exists():
         import shutil
-        import time
-        # Try to delete multiple times in case of Windows file locks
         for i in range(3):
             try:
-                shutil.rmtree(db_path)
+                await asyncio.to_thread(shutil.rmtree, db_path)
                 return {"success": True, "message": f"Repository '{db_name}' purged."}
             except Exception as e:
                 if i == 2: return JSONResponse({"detail": f"Purge failed (file lock): {str(e)}"}, status_code=500)
-                time.sleep(1)
+                await asyncio.sleep(1)
     return {"success": False, "message": "Repository not found."}
 
 @app.get("/admin/analytics")
