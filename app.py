@@ -344,6 +344,7 @@ _widget_key_cache: dict = {}    # widget_key → db_name
 _csrf_tokens: dict = {}         # token → expiry timestamp (TTL 2h)
 _db_instance_cache: dict = {}   # db_name → Chroma instance (LRU, max 50)
 _analytics_lock = threading.Lock()  # prevents concurrent analytics.json corruption
+_llm_key_lock  = threading.Lock()   # prevents key-selection race under concurrent requests
 _api_resp_cache: dict = {}      # url → (text, expiry) — Jikan response cache (10 min TTL)
 _entity_cache: dict = {}        # question_lower → extracted entity string (LRU, max 500)
 _DB_CACHE_MAX = 1  # Render free tier: 512MB RAM — only 1 extra DB instance in cache
@@ -1192,6 +1193,13 @@ def log_interaction(q: str, session_id: str = "", db_name: str = ""):
         except Exception as e:
             logger.error(f"Analytics Error: {e}")
 
+def _run_in_bg(fn, *args):
+    """Fire-and-forget: run sync fn in thread pool without blocking the event loop."""
+    try:
+        asyncio.get_running_loop().run_in_executor(None, fn, *args)
+    except RuntimeError:
+        fn(*args)  # no running loop (e.g. tests) — call directly
+
 def log_knowledge_gap(q: str, db_name: str = ""):
     try:
         gf = _gaps_file(db_name or _get_active_db())
@@ -1412,15 +1420,15 @@ def get_fresh_llm():
             tokens = s.get("tokens", 6000)
             return (tokens, -s.get("last_used", 0), random.random())
 
-        healthiest = sorted(actives, key=key_health_score, reverse=True)
-        chosen = healthiest[0]
-        key_val = chosen['key']
-        provider = chosen.get('provider', 'groq')
-
-        # Update last_used for round-robin tracking
-        status = _key_status.get(key_val, {"tokens": 6000, "requests": 14400, "last_used": 0})
-        status["last_used"] = now
-        _key_status[key_val] = status
+        with _llm_key_lock:
+            healthiest = sorted(actives, key=key_health_score, reverse=True)
+            chosen = healthiest[0]
+            key_val = chosen['key']
+            provider = chosen.get('provider', 'groq')
+            # Update last_used inside lock so concurrent requests get different keys
+            status = _key_status.get(key_val, {"tokens": 6000, "requests": 14400, "last_used": 0})
+            status["last_used"] = now
+            _key_status[key_val] = status
 
         if provider == 'openai':
             from langchain_openai import ChatOpenAI
@@ -2196,7 +2204,7 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
         yield "data: {\"type\": \"done\"}\n\n"
         return
     # log_interaction already called by /chat endpoint with session_id
-    if visitor_id: save_visitor_turn(visitor_id, "user", q, db_name)
+    if visitor_id: _run_in_bg(save_visitor_turn, visitor_id, "user", q, db_name)
     if cfg is None:
         cfg = get_config(db_name=db_name or _get_active_db())
     _local_db = tenant_db if tenant_db is not None else local_db
@@ -2226,7 +2234,7 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
         reply = (f"I specialize in {topics} for {business}. "
                  f"For other topics, I'd suggest a general search engine. "
                  f"Is there something about {topics} I can help you with?")
-        if visitor_id: save_visitor_turn(visitor_id, "assistant", reply, db_name)
+        if visitor_id: _run_in_bg(save_visitor_turn, visitor_id, "assistant", reply, db_name)
         yield f"data: {json.dumps({'type': 'chunk', 'content': reply})}\n\n"
         yield f"data: {json.dumps({'type': 'metadata', 'capture_lead': False, 'sources': []})}\n\n"
         yield "data: {\"type\": \"done\"}\n\n"
@@ -2245,7 +2253,7 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
         bot_name = cfg.get("bot_name", "Assistant")
         topics   = cfg.get("topics", "our products and services")
         reply = f"I'm {bot_name}, here to help with {topics}. What can I assist you with today?"
-        if visitor_id: save_visitor_turn(visitor_id, "assistant", reply, db_name)
+        if visitor_id: _run_in_bg(save_visitor_turn, visitor_id, "assistant", reply, db_name)
         yield f"data: {json.dumps({'type': 'chunk', 'content': reply})}\n\n"
         yield f"data: {json.dumps({'type': 'metadata', 'capture_lead': False, 'sources': []})}\n\n"
         yield "data: {\"type\": \"done\"}\n\n"
@@ -2264,7 +2272,7 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
         reply = (f"I'm {bot_name}, a customer service assistant for {business}. "
                  f"I'm not able to translate text. "
                  f"I can help you with {topics} — what would you like to know?")
-        if visitor_id: save_visitor_turn(visitor_id, "assistant", reply, db_name)
+        if visitor_id: _run_in_bg(save_visitor_turn, visitor_id, "assistant", reply, db_name)
         yield f"data: {json.dumps({'type': 'chunk', 'content': reply})}\n\n"
         yield f"data: {json.dumps({'type': 'metadata', 'capture_lead': False, 'sources': []})}\n\n"
         yield "data: {\"type\": \"done\"}\n\n"
@@ -2282,7 +2290,7 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
         business = cfg.get("business_name", "the company")
         reply = (f"I'm {bot_name}, the assistant for {business}. "
                  f"My identity is set by the admin and cannot be changed through chat.")
-        if visitor_id: save_visitor_turn(visitor_id, "assistant", reply, db_name)
+        if visitor_id: _run_in_bg(save_visitor_turn, visitor_id, "assistant", reply, db_name)
         yield f"data: {json.dumps({'type': 'chunk', 'content': reply})}\n\n"
         yield f"data: {json.dumps({'type': 'metadata', 'capture_lead': False, 'sources': []})}\n\n"
         yield "data: {\"type\": \"done\"}\n\n"
@@ -2304,7 +2312,7 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
         reply = (f"I'm {bot_name}, a customer service assistant for {business}. "
                  f"I'm not able to help with general coding tasks. "
                  f"I can help you with {topics} — what would you like to know?")
-        if visitor_id: save_visitor_turn(visitor_id, "assistant", reply, db_name)
+        if visitor_id: _run_in_bg(save_visitor_turn, visitor_id, "assistant", reply, db_name)
         yield f"data: {json.dumps({'type': 'chunk', 'content': reply})}\n\n"
         yield f"data: {json.dumps({'type': 'metadata', 'capture_lead': False, 'sources': []})}\n\n"
         yield "data: {\"type\": \"done\"}\n\n"
@@ -2333,7 +2341,7 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
         reply = (f"I specialize in helping with {topics} for {business}. "
                  f"For other topics, I'd suggest a general search engine. "
                  f"Is there something about {topics} I can help you with?")
-        if visitor_id: save_visitor_turn(visitor_id, "assistant", reply, db_name)
+        if visitor_id: _run_in_bg(save_visitor_turn, visitor_id, "assistant", reply, db_name)
         yield f"data: {json.dumps({'type': 'chunk', 'content': reply})}\n\n"
         yield f"data: {json.dumps({'type': 'metadata', 'capture_lead': False, 'sources': []})}\n\n"
         yield "data: {\"type\": \"done\"}\n\n"
@@ -2349,7 +2357,7 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
             reply = f"Salam! Main {bot_name} hoon. Main aapki {topics} ke baare mein madad kar sakta hoon. Kya jaanna chahte hain?"
         else:
             reply = f"Hello! I'm {bot_name}. I can help you with {topics}. What would you like to know?"
-        if visitor_id: save_visitor_turn(visitor_id, "assistant", reply, db_name)
+        if visitor_id: _run_in_bg(save_visitor_turn, visitor_id, "assistant", reply, db_name)
         yield f"data: {json.dumps({'type': 'chunk', 'content': reply})}\n\n"
         yield f"data: {json.dumps({'type': 'metadata', 'capture_lead': False, 'sources': [], 'options': quick_opts})}\n\n"
         yield "data: {\"type\": \"done\"}\n\n"
@@ -2381,7 +2389,7 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
                 async for chunk in llm_mem.astream(messages_mem):
                     reply_mem += chunk.content
                     yield f"data: {json.dumps({'type':'chunk','content':chunk.content})}\n\n"
-            if visitor_id: save_visitor_turn(visitor_id, "assistant", reply_mem, db_name)
+            if visitor_id: _run_in_bg(save_visitor_turn, visitor_id, "assistant", reply_mem, db_name)
             yield f"data: {json.dumps({'type':'metadata','capture_lead':False,'sources':[]})}\n\n"
             yield "data: {\"type\": \"done\"}\n\n"
             return
@@ -2403,7 +2411,7 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
             reply = (f"I'm {bot_name}{biz_str} — an AI assistant. "
                      f"I can help you with questions about {topics}. "
                      f"What would you like to know?")
-        if visitor_id: save_visitor_turn(visitor_id, "assistant", reply, db_name)
+        if visitor_id: _run_in_bg(save_visitor_turn, visitor_id, "assistant", reply, db_name)
         yield f"data: {json.dumps({'type': 'chunk', 'content': reply})}\n\n"
         yield f"data: {json.dumps({'type': 'metadata', 'capture_lead': False, 'sources': [], 'options': quick_opts})}\n\n"
         yield "data: {\"type\": \"done\"}\n\n"
@@ -2420,7 +2428,7 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
             reply = (f"I can hear that you're frustrated, and I'm sorry about that. "
                      f"I genuinely want to help — can you tell me more about what's going on? "
                      f"If you'd prefer to speak with someone directly, our team is happy to assist.{contact_str}")
-        if visitor_id: save_visitor_turn(visitor_id, "assistant", reply, db_name)
+        if visitor_id: _run_in_bg(save_visitor_turn, visitor_id, "assistant", reply, db_name)
         yield f"data: {json.dumps({'type': 'chunk', 'content': reply})}\n\n"
         _lead_on = not cfg.get("disable_lead_box", False)
         yield f"data: {json.dumps({'type': 'metadata', 'capture_lead': _lead_on, 'sources': []})}\n\n"
@@ -2436,7 +2444,7 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
         else:
             reply = (f"Could you be more specific? Are you asking about pricing, availability, "
                      f"a specific product, or something else related to {topics}?")
-        if visitor_id: save_visitor_turn(visitor_id, "assistant", reply, db_name)
+        if visitor_id: _run_in_bg(save_visitor_turn, visitor_id, "assistant", reply, db_name)
         yield f"data: {json.dumps({'type': 'chunk', 'content': reply})}\n\n"
         yield f"data: {json.dumps({'type': 'metadata', 'capture_lead': False, 'sources': [], 'options': quick_opts})}\n\n"
         yield "data: {\"type\": \"done\"}\n\n"
@@ -2472,7 +2480,7 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
 
     # ── Sparse KB guard ───────────────────────────────────────────────────────
     if not _context_addresses_query(context, q):
-        log_knowledge_gap(q, db_name)
+        _run_in_bg(log_knowledge_gap, q, db_name)
         topics      = cfg.get("topics", "our services")
         contact     = cfg.get("contact_email", "")
         contact_str = f" or reach us at {contact}" if contact else ""
@@ -2484,7 +2492,7 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
             idk = (f"I don't have specific details about that in my knowledge base right now. "
                    f"I'm best equipped to help you with: {topics}. "
                    f"Is there something specific within that scope I can help with?")
-        if visitor_id: save_visitor_turn(visitor_id, "assistant", idk, db_name)
+        if visitor_id: _run_in_bg(save_visitor_turn, visitor_id, "assistant", idk, db_name)
         yield f"data: {json.dumps({'type': 'chunk', 'content': idk})}\n\n"
         _lead_on = not cfg.get("disable_lead_box", False)
         quick_opts_idk = await _get_intro_questions(db_name or _get_active_db(), _local_db, cfg)
@@ -2495,7 +2503,7 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
     # ── Fast path: bypass LLM for structured Jikan responses ─────────────────
     _fast_resp = _fast_format_jikan(context, q)
     if _fast_resp:
-        if visitor_id: save_visitor_turn(visitor_id, "assistant", _fast_resp, db_name)
+        if visitor_id: _run_in_bg(save_visitor_turn, visitor_id, "assistant", _fast_resp, db_name)
         yield f"data: {json.dumps({'type': 'chunk', 'content': _fast_resp})}\n\n"
         _lead_on = not cfg.get("disable_lead_box", False)
         yield f"data: {json.dumps({'type': 'metadata', 'capture_lead': _lead_on, 'sources': sources[:3]})}\n\n"
@@ -2627,13 +2635,13 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
 
     if success:
         cleaned = _strip_source_leaks("".join(response_buffer), kb_context=context)
-        if visitor_id: save_visitor_turn(visitor_id, "assistant", cleaned, db_name)
+        if visitor_id: _run_in_bg(save_visitor_turn, visitor_id, "assistant", cleaned, db_name)
         yield f"data: {json.dumps({'type': 'chunk', 'content': cleaned})}\n\n"
         # Suppress sources and log gap if LLM indicated it doesn't have the info
         _idk_sigs = ["don't have", "do not have", "not available", "no information",
                      "cannot find", "can't find", "not sure about", "no specific", "not in my"]
         is_idk = any(s in cleaned.lower() for s in _idk_sigs)
-        if is_idk: log_knowledge_gap(q, db_name)
+        if is_idk: _run_in_bg(log_knowledge_gap, q, db_name)
         # Suppress sources for conversational/memory queries — answered from history, not KB
         _conv_sigs = ["what is my name", "what's my name", "my name is", "you called me",
                       "what did i say", "do you remember", "who am i", "i told you",
