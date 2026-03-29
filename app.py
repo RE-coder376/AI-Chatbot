@@ -520,7 +520,18 @@ def get_system_prompt(cfg, context, doc_count: int = 0, is_urdu: bool = False):
     context_empty  = not context or context.strip() == ""
     context_sparse = not context_empty and doc_count <= 2
 
-    if context_empty:
+    # API-only DBs (no crawl_url, has api_sources) → LLM may use own knowledge
+    _is_api_only = (not cfg.get("crawl_url", "")) and bool(cfg.get("api_sources"))
+
+    if _is_api_only:
+        kb_section = context if not context_empty else "(No live API data returned for this query)"
+        grounding_rule = (
+            f"3b. LIVE API DATA ({doc_count} items). Use the live data above as your primary source.\n"
+            "   For details the API data doesn't explicitly include (e.g. season count, character backstory,\n"
+            "   studio history, episode titles), SUPPLEMENT with your own expert training knowledge.\n"
+            "   You are a domain expert — answer confidently. Never say IDK for facts you know."
+        )
+    elif context_empty:
         kb_section = "(No relevant documents found for this query)"
         grounding_rule = (
             "3b. NO KB MATCH — HARD RULE: Zero documents were retrieved for this query.\n"
