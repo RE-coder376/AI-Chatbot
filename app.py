@@ -1867,17 +1867,9 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 
-# CORS — configurable via allowed_origins in config; defaults to ["*"] for embedded widget support
-def _get_allowed_origins():
-    try:
-        cfg = get_config()
-        origins = cfg.get("allowed_origins", ["*"])
-        return origins if isinstance(origins, list) and origins else ["*"]
-    except:
-        return ["*"]
-
+# CORS — allow all origins so all client widgets work regardless of which DB is active at startup
 app.add_middleware(CORSMiddleware,
-    allow_origins=_get_allowed_origins(),
+    allow_origins=["*"],
     allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
     allow_headers=["Content-Type", "Authorization", "X-Widget-Key"]
 )
