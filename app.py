@@ -2104,7 +2104,10 @@ def _is_ambiguous_query(q: str) -> bool:
     words = re.findall(r'\b\w+\b', ql)
     vague = {"everything", "all", "stuff", "things", "something", "anything",
              "info", "information", "details", "tell", "show", "about", "more"}
-    if len(words) <= 4 and len(set(words) & vague) >= 1:
+    _stops = {"me", "i", "a", "the", "you", "what", "how", "is", "are", "can",
+              "do", "does", "please", "u", "it", "this", "that", "my", "your"}
+    # Only flag as vague if ALL words are vague/stop words (no real entity/content word)
+    if len(words) <= 4 and not any(w not in (vague | _stops) for w in words):
         return True
     # Single-word vague queries: "pricing?", "products?", "catalog?"
     single_vague = {"pricing", "prices", "products", "catalog", "catalogue",
@@ -3640,8 +3643,9 @@ def _flatten_search_item(obj) -> str:
     year    = (obj.get("aired") or {}).get("prop", {}).get("from", {}).get("year") or obj.get("year", "")
     genres  = ", ".join(g["name"] for g in obj.get("genres", []) if isinstance(g, dict) and g.get("name"))
     studios = ", ".join(s["name"] for s in obj.get("studios", []) if isinstance(s, dict) and s.get("name"))
-    # Character search returns nicknames and about field
-    about   = (obj.get("about") or "")[:120]
+    # Anime/manga synopsis; character about field
+    synopsis = (obj.get("synopsis") or "")[:400]
+    about    = (obj.get("about") or "")[:300]
     parts = [title]
     if score:   parts.append(f"Score: {score}")
     if rank:    parts.append(f"Rank: #{rank}")
@@ -3651,6 +3655,7 @@ def _flatten_search_item(obj) -> str:
     if status:  parts.append(f"Status: {status}")
     if genres:  parts.append(f"Genres: {genres}")
     if studios: parts.append(f"Studio: {studios}")
+    if synopsis: parts.append(f"Synopsis: {synopsis}")
     if about:   parts.append(f"About: {about}")
     return " | ".join(parts)
 
