@@ -625,15 +625,9 @@
       loadDatabases();
       loadEmbedCode();
       loadCharts();
-      // Show system health in header
-      fetch(`${API}/health`).then(r => r.json()).then(h => {
-        const keyOk  = h.any_key_ready;
-        const dbOk   = h.status === 'ready';
-        const keyTxt = keyOk ? `✅ ${h.active_keys} keys (${(h.providers||[]).join(', ')})` : '❌ No keys loaded';
-        const dbTxt  = dbOk  ? `✅ DB: ${h.active_db} (${h.docs_indexed} docs)` : `⚠️ DB: ${h.status}`;
-        document.getElementById('global-status').innerHTML =
-          `<span style="margin-right:16px">${dbTxt}</span><span>${keyTxt}</span>`;
-      }).catch(() => {});
+      updateHealthStatus();
+      if (window._healthInterval) clearInterval(window._healthInterval);
+      window._healthInterval = setInterval(updateHealthStatus, 60000);
     }).catch(() => showStatus('auth', 'Failed.', 'error'));
   }
 
@@ -903,7 +897,7 @@
         const ts = el.dataset.ts;
         if (!ts) return;
         const secs = Math.round((new Date(ts) - Date.now()) / 1000);
-        if (secs <= 0) {
+        if (isNaN(secs) || secs <= 0) {
           el.textContent = '⏭ Next: due now';
         } else if (secs < 3600) {
           el.textContent = `⏭ Next: in ${Math.floor(secs/60)}m ${secs%60}s`;
@@ -939,10 +933,14 @@
 
   async function saveCrawlSchedule(dbName) {
     const pass = document.getElementById('master-pass').value;
-    const url = document.getElementById(`crawl-url-${dbName}`).value.trim();
-    const interval = parseFloat(document.getElementById(`crawl-interval-${dbName}`).value) || 1;
-    const enabled = document.getElementById(`crawl-enabled-${dbName}`).checked;
+    const urlEl = document.getElementById(`crawl-url-${dbName}`);
+    const intervalEl = document.getElementById(`crawl-interval-${dbName}`);
+    const enabledEl = document.getElementById(`crawl-enabled-${dbName}`);
     const statusEl = document.getElementById(`schedule-status-${dbName}`);
+    if (!urlEl || !intervalEl || !enabledEl || !statusEl) return;
+    const url = urlEl.value.trim();
+    const interval = parseFloat(intervalEl.value) || 1;
+    const enabled = enabledEl.checked;
     statusEl.textContent = 'Saving...';
     statusEl.dataset.saved = '0';
     try {
@@ -990,18 +988,34 @@
     toggleAlwaysOpen(false);
   }
 
+  function updateHealthStatus() {
+    const el = document.getElementById('global-status');
+    if (!el) return;
+    el.innerHTML = '<span style="opacity:0.5">Checking...</span>';
+    fetch(`${API}/health`).then(r => r.json()).then(h => {
+      const keyTxt = h.any_key_ready
+        ? `✅ ${h.active_keys} keys (${(h.providers||[]).join(', ')})`
+        : '❌ No keys loaded';
+      const dbTxt = h.status === 'ready'
+        ? `✅ DB: ${h.active_db} (${h.docs_indexed} docs)`
+        : `⚠️ DB: ${h.status}`;
+      el.innerHTML = `<span style="margin-right:16px">${dbTxt}</span><span>${keyTxt}</span>`;
+    }).catch(() => { el.innerHTML = '⚠️ Server unreachable'; });
+  }
+
   async function setActiveDb(name) {
     const pass = document.getElementById('master-pass').value;
     const f = new FormData(); f.append("password", pass); f.append("name", name);
     showStatus('db', `Switching to ${name}...`, 'loading');
     const res = await fetch(`${API}/admin/databases/set-active`, { method:"POST", headers: authHeaders(), body:f });
     const d = await res.json();
-    showStatus('db', d.message || d.detail, d.success ? 'success' : 'error');
+    showStatus('db', (d.message || d.detail) + ' — refresh the chat page to start fresh.', d.success ? 'success' : 'error');
     clearBrandingFields();
     // Reload branding from the new active DB
     const br = await fetch(`${API}/admin/branding`, { headers: authHeaders() });
     if (br.ok) { const bd = await br.json(); loadServerData(bd); loadOpsData(bd); }
     loadDatabases();
+    updateHealthStatus();
   }
   async function syncFromGithub() {
     const pass = sessionStorage.getItem('adminPass') || '';
@@ -1018,11 +1032,10 @@
       console.log('[SYNC]', r.status, JSON.stringify(data));
       showStatus('db', (r.ok ? '☁️ Sync started — refreshing in 60s...' : '❌ ' + msg), r.ok ? 'loading' : 'error');
       if (r.ok) {
-        setTimeout(() => { loadDatabases(); showStatus('db', '✅ Sync complete', 'success'); }, 60000);
+        setTimeout(() => { loadDatabases(); updateHealthStatus(); showStatus('db', '✅ Sync complete', 'success'); }, 60000);
       }
     } catch(e) {
       console.log('[SYNC ERROR]', e);
-      alert('Sync failed: ' + e.message);
       showStatus('db', 'Sync request failed: ' + e.message, 'error');
     }
   }
@@ -1573,6 +1586,7 @@
     tableEl.innerHTML = '<div style="font-family:monospace;font-size:11px;color:#64748b;padding:8px;">Fetching sitemap...</div>';
     showStatus('crawl', '🤖 Inspecting site structure...', 'loading', true);
     const statusEl = document.getElementById('crawl-status');
+    statusEl.innerHTML = '';
     statusEl.innerHTML += '<div id="inspect-logs" style="font-family:monospace;font-size:10px;background:#1e293b;color:#86efac;padding:12px;border-radius:12px;max-height:120px;overflow-y:auto;margin-top:8px;line-height:1.4;"></div>';
     const logsEl = document.getElementById('inspect-logs');
 
