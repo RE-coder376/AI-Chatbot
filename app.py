@@ -5252,36 +5252,27 @@ async def send_notification_email(subject: str, html_body: str, cfg: dict, reply
     from email.mime.multipart import MIMEMultipart
     from email.mime.text import MIMEText as _MIMEText
 
-    sender = cfg.get("sender_email", "")
+    email = cfg.get("contact_email", "")
     smtp_pass = cfg.get("smtp_password", "")
-    receiver = cfg.get("contact_email", "")
 
-    if not sender or not smtp_pass or not receiver:
-        logger.warning("Gmail SMTP not configured — missing sender_email, smtp_password, or contact_email")
+    if not email or not smtp_pass:
+        logger.warning("Gmail SMTP not configured — missing contact_email or smtp_password")
         return False
 
     try:
         msg = MIMEMultipart("alternative")
         msg["Subject"] = subject
-        msg["From"] = sender
-        msg["To"] = receiver
+        msg["From"] = email
+        msg["To"] = email
         if reply_to:
             msg["Reply-To"] = reply_to
         msg.attach(_MIMEText(html_body, "html"))
 
-        smtp_host = cfg.get("smtp_host", "smtp.gmail.com")
-        smtp_port = int(cfg.get("smtp_port", 465))
         loop = asyncio.get_event_loop()
         def _send():
-            if smtp_port == 587:
-                with smtplib.SMTP(smtp_host, smtp_port, timeout=15) as s:
-                    s.starttls()
-                    s.login(sender, smtp_pass)
-                    s.sendmail(sender, receiver, msg.as_string())
-            else:
-                with smtplib.SMTP_SSL(smtp_host, smtp_port, timeout=15) as s:
-                    s.login(sender, smtp_pass)
-                    s.sendmail(sender, receiver, msg.as_string())
+            with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=15) as s:
+                s.login(email, smtp_pass)
+                s.sendmail(email, email, msg.as_string())
         await loop.run_in_executor(None, _send)
         logger.info(f"✅ Email sent: {subject}")
         return True

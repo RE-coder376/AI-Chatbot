@@ -219,16 +219,11 @@
       <label>Async Contact URL (Lead Form/Calendar)</label>
       <input type="text" id="ops-async-url" placeholder="https://calendly.com/your-team"/>
 
-      <h3 style="font-size:12px;font-weight:800;color:var(--text-muted);margin:24px 0 12px;text-transform:uppercase;">📧 Email Sending (SMTP)</h3>
+      <h3 style="font-size:12px;font-weight:800;color:var(--text-muted);margin:24px 0 12px;text-transform:uppercase;">📧 Email Notifications (Gmail)</h3>
       <div class="grid-2">
-        <div><label>Sender Email</label><input type="text" id="ops-sender-email" placeholder="you@gmail.com"/></div>
-        <div><label>App Password</label><input type="password" id="ops-smtp-password" placeholder="xxxx xxxx xxxx xxxx"/></div>
+        <div><label>Gmail App Password</label><input type="password" id="ops-smtp-password" placeholder="xxxx xxxx xxxx xxxx"/></div>
       </div>
-      <div class="grid-2">
-        <div><label>SMTP Host</label><input type="text" id="ops-smtp-host" placeholder="smtp.gmail.com"/></div>
-        <div><label>SMTP Port</label><input type="text" id="ops-smtp-port" placeholder="465"/></div>
-      </div>
-      <p style="font-size:11px;color:var(--text-muted);margin-top:4px;">Gmail: host=smtp.gmail.com port=465 · Outlook: smtp.office365.com port=587 · <a href="https://myaccount.google.com/apppasswords" target="_blank" style="color:var(--primary)">Get Gmail App Password ↗</a></p>
+      <p style="font-size:11px;color:var(--text-muted);margin-top:4px;">The contact email above will self-send lead notifications. · <a href="https://myaccount.google.com/apppasswords" target="_blank" style="color:var(--primary)">Get Gmail App Password ↗</a></p>
       
       <label style="margin-top:24px;">Weekly Business Hours (UTC)</label>
       <div style="display:flex; align-items:center; gap:10px; margin-bottom:12px;">
@@ -1095,10 +1090,7 @@
       contact_email: document.getElementById('ops-email').value,
       whatsapp_number: document.getElementById('ops-whatsapp').value,
       async_contact_url: document.getElementById('ops-async-url').value,
-      sender_email: document.getElementById('ops-sender-email').value,
       smtp_password: document.getElementById('ops-smtp-password').value,
-      smtp_host: document.getElementById('ops-smtp-host').value || 'smtp.gmail.com',
-      smtp_port: parseInt(document.getElementById('ops-smtp-port').value) || 465,
       always_open: document.getElementById('ops-always-open').checked,
       hours: {
         weekday: { start: document.getElementById('ops-hours-weekday-start').value, end: document.getElementById('ops-hours-weekday-end').value },
@@ -1122,10 +1114,7 @@
     document.getElementById('ops-email').value = cfg.contact_email || "";
     document.getElementById('ops-whatsapp').value = cfg.whatsapp_number || "";
     document.getElementById('ops-async-url').value = cfg.async_contact_url || "";
-    document.getElementById('ops-sender-email').value = cfg.sender_email || "";
     document.getElementById('ops-smtp-password').value = cfg.smtp_password || "";
-    document.getElementById('ops-smtp-host').value = cfg.smtp_host || "smtp.gmail.com";
-    document.getElementById('ops-smtp-port').value = cfg.smtp_port || "465";
     const always = cfg.always_open || false;
     document.getElementById('ops-always-open').checked = always;
     toggleAlwaysOpen(always);
