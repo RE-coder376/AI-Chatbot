@@ -1,0 +1,17 @@
+{
+  "embedding_model": "bge",
+  "quick_replies": [
+    "Which products are currently on sale?",
+    "What toys are suitable for babies under 1 year?",
+    "Do you have any RC cars and how much do they cost?",
+    "What educational or learning toys do you sell?"
+  ],
+  "bot_name": "Babyfy Assistant",
+  "business_name": "Babyfy",
+  "topics": "baby toys, kids products, educational toys, RC cars, baby gear",
+  "auto_crawl_enabled": true,
+  "crawl_interval_minutes": 5.0,
+  "crawl_url": "https://babyfy.pk/",
+  "last_crawl_time": "2026-03-24T02:45:43.998080",
+  "last_crawl_chunks": 0
+}

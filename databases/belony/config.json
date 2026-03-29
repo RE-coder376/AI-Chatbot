@@ -1,0 +1,8 @@
+{
+  "embedding_model": "bge",
+  "crawl_url": "https://belony.pk",
+  "auto_crawl_enabled": true,
+  "crawl_interval_minutes": 5.0,
+  "last_crawl_time": "2026-03-24T02:45:44.050551",
+  "last_crawl_chunks": 0
+}

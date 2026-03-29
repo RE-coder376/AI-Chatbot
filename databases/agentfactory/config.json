@@ -1,0 +1,47 @@
+{
+  "admin_password": "iaah2006",
+  "bot_name": "Agni",
+  "business_name": "AgentFactory by Panaversity",
+  "contact_email": "hamzanaimat.14@gmail.com",
+  "sender_email": "hamzanaimat.14@gmail.com",
+  "smtp_password": "iiur bwpk zhpz zash",
+  "smtp_host": "smtp.gmail.com",
+  "smtp_port": 465,
+  "branding": {
+    "welcome_message": "Hi! I am Agni, your AgentFactory assistant. How can I help you today?",
+    "primary_color": "#64f2a1",
+    "bot_bubble_color": "#caddd5",
+    "header_title": "Agni - AgentFactory Assistant",
+    "header_subtitle": "Powered by Panaversity",
+    "logo_emoji": "AF",
+    "logo_url": "",
+    "input_placeholder": "Ask me anything...",
+    "page_title": "",
+    "font_style": "Modern Sans",
+    "secondary_color": "#b6e548",
+    "user_bubble_color": "#b3c690"
+  },
+  "embedding_model": "multilingual",
+  "whatsapp_number": "+923330410367",
+  "async_contact_url": "",
+  "hours": {
+    "weekday": {
+      "start": "09:00",
+      "end": "17:00"
+    },
+    "weekend": {
+      "start": "Closed",
+      "end": "Closed"
+    }
+  },
+  "always_open": true,
+  "topics": "AI agent development, AgentFactory courses, Panaversity programs, AI education, company info, team & leadership, pricing, enrollment, curriculum",
+  "business_description": "AgentFactory by Panaversity is a platform for learning to build AI agents and autonomous AI systems. It offers courses, books, and programs taught by Zia Khan (CEO & founder of Panaversity) and co-authors including Wania Kazmi (AI educator and co-author of the AgentFactory course materials). Panaversity's mission is to democratize AI-native education.",
+  "primary_color": "#64f2a1",
+  "welcome_message": "Hi! I am Agni, your AgentFactory assistant. How can I help you today?",
+  "auto_crawl_enabled": true,
+  "crawl_interval_minutes": 5.0,
+  "crawl_url": "https://agentfactory.panaversity.org",
+  "last_crawl_time": "2026-03-24T02:45:43.826628",
+  "last_crawl_chunks": 0
+}
