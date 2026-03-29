@@ -426,10 +426,14 @@
               msgDiv.innerHTML = `<div class="bubble"></div>`;
               messagesEl.appendChild(msgDiv);
               bubble = msgDiv.querySelector(".bubble");
+              // Scroll to top of new bot message so user reads from the start
+              msgDiv.scrollIntoView({ block: 'start', behavior: 'smooth' });
             }
             fullAnswer += data.content;
             bubble.innerHTML = marked.parse(renderCards(fullAnswer));
-            messagesEl.scrollTop = messagesEl.scrollHeight;
+            // Only auto-scroll during streaming if user hasn't scrolled up to read
+            const nearBottom = messagesEl.scrollHeight - messagesEl.scrollTop - messagesEl.clientHeight < 80;
+            if (nearBottom) messagesEl.scrollTop = messagesEl.scrollHeight;
           } else if (data.type === "metadata") {
             if (data.capture_lead) showLeadBox();
             if (data.sources && data.sources.length > 0) {
@@ -680,6 +684,8 @@
     HISTORY_KEY = "chat_history_" + sessionId;
     messagesEl.innerHTML = '<div class="message bot"><div class="bubble">Hi! How can I help you today?</div></div>';
     clearTimeout(csatTimer);
+    proactiveSent = false;
+    resetProactiveTimer();
   }
 
   // ── Rich card renderer ─────────────────────────────────────────────────────

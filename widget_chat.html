@@ -265,7 +265,7 @@
       if (proactiveSent || history.length > 0) return;
       proactiveSent = true;
       addMessage("Still there? Feel free to ask me anything — I'm here to help!", 'bot');
-    }, 120000);
+    }, 60000);
   }
   resetProactiveTimer();
 
@@ -322,9 +322,12 @@
               msgDiv.innerHTML = '<div class="bubble"></div>';
               messagesEl.appendChild(msgDiv);
               bubble = msgDiv.querySelector('.bubble');
+              msgDiv.scrollIntoView({ block: 'start', behavior: 'smooth' });
             }
             fullAnswer += data.content;
             bubble.innerHTML = marked.parse(fullAnswer);
+            const nearBottom = messagesEl.scrollHeight - messagesEl.scrollTop - messagesEl.clientHeight < 80;
+            if (nearBottom) messagesEl.scrollTop = messagesEl.scrollHeight;
           } else if (data.type === 'metadata') {
             if (data.capture_lead) showLeadBox();
           } else if (data.type === 'suggestions') {
