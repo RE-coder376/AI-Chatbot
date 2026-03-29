@@ -4784,14 +4784,9 @@ async def crawl_site(data: dict, request: Request):
                     to_crawl = deduped[:max_pages]
                 yield _send(f"📋 {len(to_crawl)} unique pages to crawl...")
 
-                # --- Embedding model: BGE by default, MiniLM only if explicitly set ---
-                if embedding_model == "minilm":
-                    emb = embeddings_model
-                    yield _send("🧠 Using MiniLM-L12 (384-dim)")
-                else:
-                    emb = HuggingFaceEmbeddings(model_name="BAAI/bge-base-en-v1.5",
-                                                encode_kwargs={"normalize_embeddings": True})
-                    yield _send("🧠 Using BGE-Base (768-dim) — default")
+                # --- Embedding model: always bge-small (384-dim) to match the loader ---
+                emb = embeddings_model  # FastEmbed bge-small-en-v1.5 (384-dim)
+                yield _send("🧠 Using BGE-Small / FastEmbed (384-dim)")
 
                 db_dir = DATABASES_DIR / db_name
                 if clear_first and db_dir.exists():
