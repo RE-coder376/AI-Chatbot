@@ -322,9 +322,28 @@
   let contactEmail     = "support@agentfactory.com";
   let contactWhatsApp  = "";
 
+  // Auto-clear chat when active bot changes (e.g. admin switches DB)
+  let _activeBotName = "";
+  function _checkBotChanged() {
+    fetch(`${API_URL}/config`).then(r => r.json()).then(cfg => {
+      const name = cfg.bot_name || "";
+      if (_activeBotName && name && name !== _activeBotName) {
+        newChat();
+        // Reload branding for new bot
+        document.getElementById("header-title").textContent = cfg.header_title || (cfg.branding||{}).header_title || "Support";
+        document.getElementById("header-subtitle").textContent = cfg.header_subtitle || (cfg.branding||{}).header_subtitle || "Ready to assist";
+        document.getElementById("welcome-msg").textContent = cfg.welcome_message || (cfg.branding||{}).welcome_message || "Hi! How can I help you today?";
+      }
+      _activeBotName = name || _activeBotName;
+    }).catch(() => {});
+  }
+  document.addEventListener("visibilitychange", () => { if (!document.hidden) _checkBotChanged(); });
+  window.addEventListener("focus", _checkBotChanged);
+
   // Load branding config
   fetch(`${API_URL}/config`).then(r => r.json()).then(cfg => {
     widgetKey       = cfg.widget_key;
+    _activeBotName  = cfg.bot_name || "";
     contactEmail    = cfg.contact_email;
     contactWhatsApp = cfg.whatsapp_number;
 
@@ -428,6 +447,10 @@
               bubble = msgDiv.querySelector(".bubble");
               // Scroll to top of new bot message so user reads from the start
               msgDiv.scrollIntoView({ block: 'start', behavior: 'smooth' });
+              fullAnswer += data.content;
+              bubble.innerHTML = marked.parse(renderCards(fullAnswer));
+              // Skip nearBottom on first chunk — scrollIntoView already positioned correctly
+              continue;
             }
             fullAnswer += data.content;
             bubble.innerHTML = marked.parse(renderCards(fullAnswer));
