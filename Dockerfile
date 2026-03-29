@@ -7,10 +7,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
-# Install uv via pip, then use uv for fast installs
-# --prefer-binary avoids C++ source compilation for hnswlib/chromadb
+# Install packages
 COPY requirements.txt .
 RUN pip install uv && uv pip install --system -r requirements.txt
+
+# Pre-download fastembed ONNX model so DB loading is instant at runtime
+# Without this, HF downloads ~30MB model on first DB switch (2-5 min delay)
+RUN python -c "from langchain_community.embeddings.fastembed import FastEmbedEmbeddings; FastEmbedEmbeddings(model_name='BAAI/bge-small-en-v1.5')" || true
 
 # Copy app code
 COPY . .
