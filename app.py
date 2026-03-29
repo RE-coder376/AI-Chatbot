@@ -3047,6 +3047,7 @@ async def update_branding(request: Request, data: dict = None):
     if not hmac.compare_digest(password.encode(), cfg.get("admin_password", "").encode()): return JSONResponse({"detail": "Unauthorized"}, status_code=401)
     updates = {k: v for k, v in data.items() if k not in ("password", "db_name")}
     save_db_config(updates, db_name)
+    _intro_q_cache.pop(db_name, None)  # invalidate so new quick_replies take effect immediately
     return {"success": True, "message": f"Branding saved to DB: {db_name}."}
 
 @app.get("/admin/embedding-model")
