@@ -909,7 +909,7 @@
             </div>
           </div>
           <div class="db-actions">
-            ${!isClient ? `<button class="outline" onclick="setActiveDb('${db.name}')" style="width:auto;margin:0;padding:6px 12px;font-size:11px;">Set Test Active</button>` : ''}
+            ${!isClient ? (db.active ? `<span style="font-size:11px;color:#10b981;font-weight:700;padding:6px 12px;">✓ Active</span>` : `<button class="outline" onclick="setActiveDb('${db.name}')" style="width:auto;margin:0;padding:6px 12px;font-size:11px;">Set Test Active</button>`) : ''}
             <button class="danger" onclick="deleteDb('${db.name}')" style="width:auto;margin:0;padding:6px 12px;font-size:11px;">Delete</button>
           </div>
         </div>

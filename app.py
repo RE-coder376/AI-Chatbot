@@ -3203,6 +3203,9 @@ async def set_active_db(request: Request, password: str = Form(...), name: str =
         if not found:
             return JSONResponse({"detail": "Unauthorized"}, status_code=401)
     name = _validate_db_name(name)
+    current = ACTIVE_DB_FILE.read_text(encoding="utf-8").strip() if ACTIVE_DB_FILE.exists() else ""
+    if current == name:
+        return {"success": True, "message": f"{name} is already the active DB."}
     ACTIVE_DB_FILE.write_text(name, encoding="utf-8")
     global local_db, embeddings_model
     local_db = None
