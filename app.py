@@ -217,6 +217,15 @@ def _github_sync_download():
                     if member == "config.json":
                         continue  # Never overwrite repo config — passwords/settings live there
                     z.extract(member, extract_path)
+                    # Fix permissions — Windows zips store 0o000 on Linux; make files rw
+                    try:
+                        extracted = extract_path / member
+                        if extracted.is_file():
+                            extracted.chmod(0o644)
+                        elif extracted.is_dir():
+                            extracted.chmod(0o755)
+                    except Exception:
+                        pass
             tmp_zip.unlink(missing_ok=True)
             logger.info(f"[GH-SYNC] ✅ {db_name} restored")
 
@@ -4967,8 +4976,9 @@ async def crawl_site(data: dict, request: Request):
                                     Chroma.from_documents, chunks, emb, persist_directory=str(db_dir)
                                 )
                             except Exception as _e:
-                                if "acquire_write" in str(_e) or "no such table" in str(_e):
-                                    # Old ChromaDB schema — wipe entire dir and retry once
+                                _es = str(_e).lower()
+                                if "acquire_write" in _es or "no such table" in _es or "readonly" in _es:
+                                    # Stale/locked/readonly DB — wipe entire dir and retry once
                                     await asyncio.to_thread(_wipe_chroma_dir, db_dir)
                                     chroma_db = await asyncio.to_thread(
                                         Chroma.from_documents, chunks, emb, persist_directory=str(db_dir)
