@@ -1,4 +1,5 @@
 {
+  "admin_password": "mali2024",
   "auto_crawl_enabled": false,
   "crawl_interval_minutes": 60,
   "crawl_url": "",
