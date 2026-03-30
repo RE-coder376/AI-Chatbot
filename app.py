@@ -4901,18 +4901,36 @@ async def crawl_site(data: dict, request: Request):
                         yield _send("❌ Failed to clear all files. Proceeding with partial data.")
 
                 db_dir.mkdir(parents=True, exist_ok=True)
+
+                def _wipe_chroma_dir(target_dir):
+                    """Delete all ChromaDB files/dirs in target_dir, preserving config.json."""
+                    import stat as _stat
+                    def _force_rm(func, path, exc):
+                        try:
+                            os.chmod(path, _stat.S_IWRITE)
+                            func(path)
+                        except Exception:
+                            pass
+                    for item in target_dir.iterdir():
+                        if item.name == "config.json":
+                            continue
+                        try:
+                            if item.is_dir():
+                                shutil.rmtree(item, onerror=_force_rm)
+                            else:
+                                item.unlink(missing_ok=True)
+                        except Exception:
+                            pass
+
                 # When NOT clearing, pre-open existing Chroma so we append instead of recreating
                 chroma_db = None
                 if not clear_first and (db_dir / "chroma.sqlite3").exists():
                     try:
                         chroma_db = Chroma(persist_directory=str(db_dir), embedding_function=emb)
                     except Exception:
-                        # dimension mismatch, corrupt, or old ChromaDB schema (missing acquire_write table)
-                        # wipe the SQLite file so from_documents creates a fresh compatible DB
-                        try:
-                            (db_dir / "chroma.sqlite3").unlink(missing_ok=True)
-                        except Exception:
-                            pass
+                        # dimension mismatch, corrupt, or old ChromaDB schema —
+                        # wipe entire chroma dir (sqlite + UUID segment dirs) so from_documents starts fresh
+                        _wipe_chroma_dir(db_dir)
                         chroma_db = None
                 chunk_size = 350            # ~350 words ≈ 450 tokens, safely under bge-small's 512-token limit
                 chunk_overlap = 50          # overlap between consecutive chunks
@@ -4943,11 +4961,8 @@ async def crawl_site(data: dict, request: Request):
                             )
                         except Exception as _e:
                             if "acquire_write" in str(_e) or "no such table" in str(_e):
-                                # Old ChromaDB schema from GitHub zip — wipe SQLite and retry fresh
-                                try:
-                                    (db_dir / "chroma.sqlite3").unlink(missing_ok=True)
-                                except Exception:
-                                    pass
+                                # Old ChromaDB schema — wipe entire dir (sqlite + UUID segments) and retry
+                                await asyncio.to_thread(_wipe_chroma_dir, db_dir)
                                 chroma_db = await asyncio.to_thread(
                                     Chroma.from_documents, chunks, emb, persist_directory=str(db_dir)
                                 )
