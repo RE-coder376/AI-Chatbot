@@ -122,10 +122,10 @@
   #confirm-box .btn-ok { background: #ef4444; color: #fff; border: none; border-radius: 10px; padding: 9px 18px; cursor: pointer; font-size: 13px; font-weight: 600; }
   #confirm-box .btn-ok.safe { background: #6366f1; }
   /* Client mode — hide owner-only sections */
-  body.client-mode #card-db,
   body.client-mode #card-tests,
   body.client-mode #owner-only-ops,
   body.client-mode #owner-only-api,
+  body.client-mode #owner-only-create,
   body.client-mode #global-status { display: none !important; }
   </style>
   <!-- Custom Confirm Modal -->
@@ -332,11 +332,17 @@
   <div class="card" id="card-db">
     <div class="card-header" onclick="toggle('db')"><h2>🗄️ Database Hub & Selector</h2><div class="card-arrow">▼</div></div>
     <div class="card-body">
-      <label>Create New Knowledge Repository</label>
-      <div style="display:flex; gap:12px;"><input type="text" id="new-db-name" placeholder="lowercase_name"/><button onclick="createDb()" style="width:auto; margin:0; background:#10b981;">+ Create</button></div>
-      <div style="display:flex;gap:12px;align-items:center;margin-top:24px;">
-        <label style="margin:0;">Manage Repositories</label>
-        <button onclick="syncFromGithub()" style="width:auto;margin:0;padding:6px 16px;font-size:12px;background:#6366f1;">☁️ Sync from GitHub</button>
+      <div id="owner-only-create">
+        <label>Create New Knowledge Repository</label>
+        <div style="display:flex; gap:8px; flex-wrap:wrap;">
+          <input type="text" id="new-db-name" placeholder="db_name" style="flex:1;min-width:120px;"/>
+          <input type="password" id="new-db-pass" placeholder="Client password" style="flex:1;min-width:140px;" autocomplete="new-password"/>
+          <button onclick="createDb()" style="width:auto; margin:0; background:#10b981;">+ Create</button>
+        </div>
+        <div style="display:flex;gap:12px;align-items:center;margin-top:24px;">
+          <label style="margin:0;">Manage Repositories</label>
+          <button onclick="syncFromGithub()" style="width:auto;margin:0;padding:6px 16px;font-size:12px;background:#6366f1;">☁️ Sync from GitHub</button>
+        </div>
       </div>
       <div id="db-list"></div>
       <div id="db-status" class="status-msg"></div>
@@ -837,6 +843,7 @@
     const statsData = await statsRes.json().catch(()=>({}));
     const statsMap = {};
     (statsData.stats || []).forEach(s => statsMap[s.name] = s);
+    const isClient = document.body.classList.contains('client-mode');
     const sessionDb = sessionStorage.getItem('adminDb') || '—';
     document.getElementById('active-ingest-db').textContent = sessionDb;
     const sel = document.getElementById('ingest-target-db');
@@ -845,7 +852,9 @@
       (data.databases || []).map(db => `<option value="${db.name}"${db.name===prev?' selected':''}>${db.name}</option>`).join('');
     if (prev) sel.value = prev;
 
-    document.getElementById("db-list").innerHTML = (data.databases || []).map(db => {
+    let dbs = data.databases || [];
+    if (isClient) dbs = dbs.filter(db => db.name === sessionDb);
+    document.getElementById("db-list").innerHTML = dbs.map(db => {
       const st = statsMap[db.name] || {};
       const lastCrawl = st.last_crawl_time ? new Date(st.last_crawl_time).toLocaleString() : '—';
       const nextCrawlTs = st.next_crawl_ts || '';
@@ -875,7 +884,7 @@
             </div>
           </div>
           <div class="db-actions">
-            <button class="outline" onclick="setActiveDb('${db.name}')" style="width:auto;margin:0;padding:6px 12px;font-size:11px;">Set Test Active</button>
+            ${!isClient ? `<button class="outline" onclick="setActiveDb('${db.name}')" style="width:auto;margin:0;padding:6px 12px;font-size:11px;">Set Test Active</button>` : ''}
             <button class="danger" onclick="deleteDb('${db.name}')" style="width:auto;margin:0;padding:6px 12px;font-size:11px;">Delete</button>
           </div>
         </div>
@@ -1063,16 +1072,17 @@
   }
 
   async function createDb() {
-    const pass = document.getElementById('master-pass').value; 
-    const name = document.getElementById('new-db-name').value.trim(); 
+    const pass = document.getElementById('master-pass').value;
+    const name = document.getElementById('new-db-name').value.trim();
+    const dbPass = document.getElementById('new-db-pass').value.trim();
     if (!name) return showStatus('db', 'Name required.', 'error');
-    const f = new FormData(); f.append("password", pass); f.append("name", name); 
+    const f = new FormData(); f.append("password", pass); f.append("name", name); f.append("db_password", dbPass);
     showStatus('db', `Initializing ${name}...`, 'loading');
-    const res = await fetch(`${API}/admin/create-db`, { method:"POST", headers: authHeaders(), body:f }); 
+    const res = await fetch(`${API}/admin/create-db`, { method:"POST", headers: authHeaders(), body:f });
     const d = await res.json();
-    if (d.success) document.getElementById('new-db-name').value = '';
+    if (d.success) { document.getElementById('new-db-name').value = ''; document.getElementById('new-db-pass').value = ''; }
     showStatus('db', d.message || d.detail, d.success ? 'success' : 'error');
-    loadDatabases(); 
+    loadDatabases();
   }
   async function deleteDb(name) { 
     if (!await showConfirm('Delete Database', `Permanently delete "${name}" and all its data? This cannot be undone.`, 'Delete', true)) return;

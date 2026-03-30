@@ -3212,31 +3212,32 @@ async def set_active_db(request: Request, password: str = Form(...), name: str =
     return {"success": True, "message": f"Switching to {name} — loading in background, ready in ~30s."}
 
 @app.post("/admin/create-db")
-async def create_db(request: Request, password: str = Form(...), name: str = Form(...)):
-    password = _extract_password(request, password)
+async def create_db(request: Request, password: str = Form(...), name: str = Form(...), db_password: str = Form("")):
     password = _extract_password(request, password)
     cfg = get_config()
     if not hmac.compare_digest(password.encode(), cfg.get("admin_password", "").encode()): return JSONResponse({"detail": "Unauthorized"}, status_code=401)
     db_name = name.strip().lower()
     db_path = DATABASES_DIR / db_name
     db_path.mkdir(parents=True, exist_ok=True)
-    
-    # Initialize empty Chroma to avoid 'empty directory' errors
-    try:
-        from langchain_chroma import Chroma
-        temp_db = Chroma(persist_directory=str(db_path), embedding_function=embeddings_model)
-        # No need to add documents, just initializing the structure
-    except Exception as e:
-        logger.error(f"Failed to initialize Chroma for {db_name}: {e}")
-
+    # Write per-DB config with admin_password so client can log in immediately
+    db_cfg_path = db_path / "config.json"
+    if not db_cfg_path.exists():
+        db_cfg_path.write_text(json.dumps({"admin_password": db_password.strip()}, indent=2), encoding="utf-8")
+    elif db_password.strip():
+        try:
+            existing = json.loads(db_cfg_path.read_text(encoding="utf-8"))
+            existing["admin_password"] = db_password.strip()
+            db_cfg_path.write_text(json.dumps(existing, indent=2), encoding="utf-8")
+        except Exception: pass
     return {"success": True, "message": f"Repository '{db_name}' initialized and ready."}
 
 @app.post("/admin/delete-db")
 async def delete_db(request: Request, password: str = Form(...), name: str = Form(...)):
     password = _extract_password(request, password)
-    password = _extract_password(request, password)
-    cfg = get_config()
-    if not hmac.compare_digest(password.encode(), cfg.get("admin_password", "").encode()): return JSONResponse({"detail": "Unauthorized"}, status_code=401)
+    db_name_req = name.strip().lower()
+    # Accept root password OR the DB's own password (client self-delete)
+    if not admin_auth(request, password, db_name_req):
+        return JSONResponse({"detail": "Unauthorized"}, status_code=401)
     
     db_name = name.strip().lower()
     db_path = DATABASES_DIR / db_name
