@@ -122,7 +122,8 @@
   #confirm-box .btn-ok.safe { background: #6366f1; }
   /* Client mode — hide owner-only sections */
   body.client-mode #card-db,
-  body.client-mode #card-tests { display: none !important; }
+  body.client-mode #card-tests,
+  body.client-mode #owner-only-ops { display: none !important; }
   </style>
   <!-- Custom Confirm Modal -->
   <div id="confirm-overlay">
@@ -213,7 +214,7 @@
         <div><label>Primary Contact Email (receives leads)</label><input type="text" id="ops-email" placeholder="support@company.com"/></div>
         <div><label>WhatsApp Number</label><input type="text" id="ops-whatsapp" placeholder="+1234567890"/></div>
       </div>
-      <div class="grid-2">
+      <div class="grid-2" id="owner-only-ops">
         <div><label>Admin Password (set client's login password)</label><input type="password" id="ops-admin-password" placeholder="Leave blank to keep current"/></div>
       </div>
       <label>Async Contact URL (Lead Form/Calendar)</label>
