@@ -4930,31 +4930,38 @@ async def crawl_site(data: dict, request: Request):
                         except Exception:
                             pass
 
-                # Always initialize ChromaDB eagerly before the crawl loop.
-                # This ensures migrations run fully (creating acquire_write etc.)
-                # before any concurrent writes happen. _flush_pages only calls add_documents.
+                # Single-threaded executor: ALL chromadb ops run in the same thread.
+                # chromadb 1.5.x uses per-thread SQLite connections — cross-thread
+                # access causes "no such table" errors. One thread = one connection.
+                import concurrent.futures as _cf
+                _chroma_ex = _cf.ThreadPoolExecutor(max_workers=1)
+                _loop = asyncio.get_event_loop()
+
+                def _chroma_run(fn, *args, **kwargs):
+                    return _loop.run_in_executor(_chroma_ex, lambda: fn(*args, **kwargs))
+
                 if clear_first or not (db_dir / "chroma.sqlite3").exists():
-                    _wipe_chroma_dir(db_dir)  # ensure clean slate
+                    _wipe_chroma_dir(db_dir)
                 chroma_db = None
                 try:
-                    chroma_db = await asyncio.to_thread(
+                    chroma_db = await _chroma_run(
                         Chroma, persist_directory=str(db_dir), embedding_function=emb
                     )
                 except Exception as _init_e:
                     yield _send(f"⚠️ DB init failed ({_init_e}), wiping and retrying...")
                     _wipe_chroma_dir(db_dir)
-                    chroma_db = await asyncio.to_thread(
+                    chroma_db = await _chroma_run(
                         Chroma, persist_directory=str(db_dir), embedding_function=emb
                     )
-                chunk_size = 350            # ~350 words ≈ 450 tokens, safely under bge-small's 512-token limit
-                chunk_overlap = 50          # overlap between consecutive chunks
+                chunk_size = 350
+                chunk_overlap = 50
                 chunk_step = chunk_size - chunk_overlap
                 total_chunks = 0
                 completed = 0
                 flush_lock = asyncio.Lock()
-                chroma_write_lock = asyncio.Lock()  # serialize concurrent chroma writes
+                chroma_write_lock = asyncio.Lock()
                 pending_pages = []
-                seen_content_hashes: set = set()  # content-level dedup
+                seen_content_hashes: set = set()
 
                 async def _flush_pages(batch):
                     nonlocal chroma_db, total_chunks
@@ -4970,7 +4977,7 @@ async def crawl_site(data: dict, request: Request):
                     if not chunks:
                         return
                     async with chroma_write_lock:
-                        await asyncio.to_thread(chroma_db.add_documents, chunks)
+                        await _chroma_run(chroma_db.add_documents, chunks)
                     total_chunks += len(chunks)
 
                 PARALLEL = 8  # 8 parallel tabs — safe RAM limit (~800MB peak)
