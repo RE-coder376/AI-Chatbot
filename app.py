@@ -1970,13 +1970,6 @@ def health():
         "any_key_ready": any_key_ready(),
     }
 
-@app.get("/db-names")
-def list_db_names():
-    """Public endpoint — returns list of DB names for admin login autocomplete."""
-    if not DATABASES_DIR.exists():
-        return {"names": []}
-    names = sorted(d.name for d in DATABASES_DIR.iterdir() if d.is_dir() and (d / "config.json").exists())
-    return {"names": names}
 
 @app.get("/")
 def serve_ui():

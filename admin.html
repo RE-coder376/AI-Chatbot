@@ -611,6 +611,11 @@
       const data = await r.json();
       sessionStorage.setItem('adminPass', pass);
       sessionStorage.setItem('adminDb', db);
+      // Save DB name to this browser's local history for dropdown
+      const hist = JSON.parse(localStorage.getItem('adminDbHistory') || '[]');
+      if (!hist.includes(db)) { hist.unshift(db); localStorage.setItem('adminDbHistory', JSON.stringify(hist.slice(0, 10))); }
+      const dl = document.getElementById('db-names-list');
+      if (dl) dl.innerHTML = JSON.parse(localStorage.getItem('adminDbHistory') || '[]').map(n => `<option value="${n}">`).join('');
       // Fetch CSRF token for state-changing requests
       const csrfResp = await fetch(`${API}/admin/csrf-token`, { headers: { 'Authorization': `Bearer ${pass}`, 'X-Admin-DB': db } });
       if (csrfResp.ok) {
@@ -665,11 +670,12 @@
       document.getElementById('admin-db').value = '';
       document.getElementById('master-pass').value = '';
     }, 100);
-    // Populate DB name dropdown for login convenience
-    fetch(`${API}/db-names`).then(r => r.json()).then(d => {
-      const dl = document.getElementById('db-names-list');
-      if (dl) dl.innerHTML = (d.names || []).map(n => `<option value="${n}">`).join('');
-    }).catch(() => {});
+    // Populate DB name dropdown from this browser's login history only
+    const dl = document.getElementById('db-names-list');
+    if (dl) {
+      const prev = JSON.parse(localStorage.getItem('adminDbHistory') || '[]');
+      dl.innerHTML = prev.map(n => `<option value="${n}">`).join('');
+    }
   });
 
   function toggle(id) {
