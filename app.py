@@ -3172,6 +3172,11 @@ async def clear_db_data(request: Request, password: str = Form(...), name: str =
         errors.append(str(ex))
     if errors:
         return JSONResponse({"success": False, "message": f"Error clearing DB: {errors[0]}"}, status_code=500)
+    # Also remove chroma.sqlite3 so next crawl gets a fully fresh schema (no stale v0.4/v0.5 tables)
+    try:
+        (db_path / "chroma.sqlite3").unlink(missing_ok=True)
+    except Exception:
+        pass
     # Re-init active DB so in-memory handle points to fresh empty DB
     if name == active_name:
         local_db = None
