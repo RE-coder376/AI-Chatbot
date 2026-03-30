@@ -124,7 +124,8 @@
   /* Client mode — hide owner-only sections */
   body.client-mode #card-db,
   body.client-mode #card-tests,
-  body.client-mode #owner-only-ops { display: none !important; }
+  body.client-mode #owner-only-ops,
+  body.client-mode #global-status { display: none !important; }
   </style>
   <!-- Custom Confirm Modal -->
   <div id="confirm-overlay">
@@ -646,11 +647,16 @@
   }
 
   document.addEventListener('DOMContentLoaded', () => {
-    // Clear any saved credentials so page always starts fresh
+    // Clear any saved credentials and browser-autofilled values
     sessionStorage.removeItem('adminPass');
     sessionStorage.removeItem('adminDb');
     sessionStorage.removeItem('clientMode');
     sessionStorage.removeItem('csrfToken');
+    // Force-clear fields in case browser autocomplete filled them
+    setTimeout(() => {
+      document.getElementById('admin-db').value = '';
+      document.getElementById('master-pass').value = '';
+    }, 100);
   });
 
   function toggle(id) {
