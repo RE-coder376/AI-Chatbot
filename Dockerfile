@@ -11,15 +11,15 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install uv && uv pip install --system -r requirements.txt
 
-# Install Playwright browser binaries (needed for JS-rendered site crawling)
-RUN playwright install chromium --with-deps
-
 # Pre-download fastembed ONNX model so DB loading is instant at runtime
-# Without this, HF downloads ~30MB model on first DB switch (2-5 min delay)
 RUN python -c "from langchain_community.embeddings.fastembed import FastEmbedEmbeddings; FastEmbedEmbeddings(model_name='BAAI/bge-small-en-v1.5')" || true
 
 # Copy app code
 COPY . .
+
+# Install Playwright to /app/.playwright so user 1000 can access it at runtime
+ENV PLAYWRIGHT_BROWSERS_PATH=/app/.playwright
+RUN playwright install --with-deps chromium
 
 # HF Spaces runs as non-root user 1000
 RUN chown -R 1000:1000 /app
