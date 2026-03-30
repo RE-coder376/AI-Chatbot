@@ -131,6 +131,8 @@
   body.client-mode #owner-only-cache,
   body.client-mode #card-embed,
   body.client-mode #global-status { display: none !important; }
+  #client-preview-section { display: none; }
+  body.client-mode #client-preview-section { display: block !important; }
   </style>
   <!-- Custom Confirm Modal -->
   <div id="confirm-overlay">
@@ -554,6 +556,13 @@
         <button onclick="previewBot()" style="margin:0; width:auto; background:#10b981;">🤖 Preview Your Bot</button>
       </div>
       <div id="embed-status" class="status-msg"></div>
+    </div>
+  </div>
+
+  <!-- Client-only preview button (shown instead of full embed card) -->
+  <div id="client-preview-section" class="card">
+    <div class="card-body" style="padding:20px; text-align:center;">
+      <button onclick="previewBot()" style="background:#10b981; margin:0; width:100%;">🤖 Preview Your Bot</button>
     </div>
   </div>
 
