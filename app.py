@@ -4938,6 +4938,7 @@ async def crawl_site(data: dict, request: Request):
                 total_chunks = 0
                 completed = 0
                 flush_lock = asyncio.Lock()
+                chroma_write_lock = asyncio.Lock()  # serialize concurrent chroma writes
                 pending_pages = []
                 seen_content_hashes: set = set()  # content-level dedup
 
@@ -4954,22 +4955,23 @@ async def crawl_site(data: dict, request: Request):
                                 break
                     if not chunks:
                         return
-                    if chroma_db is None:
-                        try:
-                            chroma_db = await asyncio.to_thread(
-                                Chroma.from_documents, chunks, emb, persist_directory=str(db_dir)
-                            )
-                        except Exception as _e:
-                            if "acquire_write" in str(_e) or "no such table" in str(_e):
-                                # Old ChromaDB schema — wipe entire dir (sqlite + UUID segments) and retry
-                                await asyncio.to_thread(_wipe_chroma_dir, db_dir)
+                    async with chroma_write_lock:
+                        if chroma_db is None:
+                            try:
                                 chroma_db = await asyncio.to_thread(
                                     Chroma.from_documents, chunks, emb, persist_directory=str(db_dir)
                                 )
-                            else:
-                                raise
-                    else:
-                        await asyncio.to_thread(chroma_db.add_documents, chunks)
+                            except Exception as _e:
+                                if "acquire_write" in str(_e) or "no such table" in str(_e):
+                                    # Old ChromaDB schema — wipe entire dir and retry once
+                                    await asyncio.to_thread(_wipe_chroma_dir, db_dir)
+                                    chroma_db = await asyncio.to_thread(
+                                        Chroma.from_documents, chunks, emb, persist_directory=str(db_dir)
+                                    )
+                                else:
+                                    raise
+                        else:
+                            await asyncio.to_thread(chroma_db.add_documents, chunks)
                     total_chunks += len(chunks)
 
                 PARALLEL = 8  # 8 parallel tabs — safe RAM limit (~800MB peak)
