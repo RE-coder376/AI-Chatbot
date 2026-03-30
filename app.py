@@ -4663,9 +4663,6 @@ async def crawl_site(data: dict, request: Request):
         import xml.etree.ElementTree as ET
         import requests as _req
         import random
-        from playwright.async_api import async_playwright
-        from playwright_stealth import Stealth as _Stealth
-        async def stealth(pg): await _Stealth().apply_stealth_async(pg)
         from langchain_core.documents import Document
         from langchain_chroma import Chroma
 
@@ -4739,6 +4736,10 @@ async def crawl_site(data: dict, request: Request):
             return [u.strip() for u in all_locs if _strip_www(u.strip()).startswith(base_domain)]
 
         try:
+            from playwright.async_api import async_playwright
+            from playwright_stealth import Stealth as _Stealth
+            async def stealth(pg): await _Stealth().apply_stealth_async(pg)
+            yield _send("🔧 Playwright loaded — launching browser...")
             parsed     = urllib.parse.urlparse(url)
             base       = f"{parsed.scheme}://{parsed.netloc}"
             base_nowww = _strip_www(base)
@@ -5148,7 +5149,9 @@ async def crawl_site(data: dict, request: Request):
             yield "data: {\"done\": true}\n\n"
         except Exception as e:
             import traceback
-            yield _send(f"❌ Error: {e}\n{traceback.format_exc()[:600]}")
+            tb = traceback.format_exc()
+            logger.error(f"[CRAWL] ❌ {db_name}: {e}\n{tb[:800]}")
+            yield _send(f"❌ Error: {e}\n{tb[:600]}")
             yield "data: {\"done\": true}\n\n"
 
     return StreamingResponse(_stream(), media_type="text/event-stream")
