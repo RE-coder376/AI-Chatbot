@@ -340,6 +340,27 @@ def _github_sync_upload(db_name: str):
         logger.error(f"[GH-SYNC] Upload error: {e}")
     finally:
         tmp_zip.unlink(missing_ok=True)
+
+def _github_sync_delete(db_name: str):
+    """Remove DB zip from GitHub releases when a DB is deleted."""
+    import requests as _req
+    pat = os.environ.get("GITHUB_PAT", "")
+    if not pat: return
+    api_hdr = {"Authorization": f"token {pat}", "User-Agent": "chatbot-sync"}
+    try:
+        rel_resp = _req.get(
+            f"https://api.github.com/repos/{_GITHUB_USERNAME}/{_GITHUB_REPO}/releases/tags/databases-latest",
+            headers=api_hdr, timeout=30)
+        if rel_resp.status_code != 200: return
+        for asset in rel_resp.json().get("assets", []):
+            if asset["name"] == f"{db_name}.zip":
+                _req.delete(
+                    f"https://api.github.com/repos/{_GITHUB_USERNAME}/{_GITHUB_REPO}/releases/assets/{asset['id']}",
+                    headers=api_hdr, timeout=30)
+                logger.info(f"[GH-SYNC] Deleted {db_name}.zip from GitHub releases")
+                return
+    except Exception as e:
+        logger.error(f"[GH-SYNC] Delete error for {db_name}: {e}")
 # ──────────────────────────────────────────────────────────────────────────────
 
 _intro_q_cache: dict = {}       # keyed by db_name → list[str]
@@ -3155,6 +3176,7 @@ async def clear_db_data(request: Request, password: str = Form(...), name: str =
     if name == active_name:
         local_db = None
         local_db = None; embeddings_model = None; _load_db_now()
+    threading.Thread(target=_github_sync_upload, args=(name,), daemon=True).start()
     return {"success": True, "message": f"All knowledge chunks cleared from '{name}'."}
 
 @app.post("/admin/sync-github")
@@ -3235,6 +3257,7 @@ async def create_db(request: Request, password: str = Form(...), name: str = For
             existing["admin_password"] = db_password.strip()
             db_cfg_path.write_text(json.dumps(existing, indent=2), encoding="utf-8")
         except Exception: pass
+    threading.Thread(target=_github_sync_upload, args=(db_name,), daemon=True).start()
     return {"success": True, "message": f"Repository '{db_name}' initialized and ready."}
 
 @app.post("/admin/delete-db")
@@ -3261,6 +3284,7 @@ async def delete_db(request: Request, password: str = Form(...), name: str = For
         for i in range(3):
             try:
                 await asyncio.to_thread(shutil.rmtree, db_path)
+                threading.Thread(target=_github_sync_delete, args=(db_name,), daemon=True).start()
                 return {"success": True, "message": f"Repository '{db_name}' purged."}
             except Exception as e:
                 if i == 2: return JSONResponse({"detail": f"Purge failed (file lock): {str(e)}"}, status_code=500)
