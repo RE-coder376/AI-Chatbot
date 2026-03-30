@@ -1757,10 +1757,7 @@ async def _auto_scheduler():
                     now = datetime.now()
 
                     # ── Auto-crawl check ──────────────────────────────────
-                    # Only crawl the active DB — other DBs need a different embedding model
-                    # which would cause OOM on Render 512MB when loaded alongside the active one
-                    _active_now = ACTIVE_DB_FILE.read_text(encoding="utf-8").strip() if ACTIVE_DB_FILE.exists() else ""
-                    if db_cfg.get("auto_crawl_enabled") and db_cfg.get("crawl_url") and db_name == _active_now:
+                    if db_cfg.get("auto_crawl_enabled") and db_cfg.get("crawl_url"):
                         interval_m = float(db_cfg.get("crawl_interval_minutes", 60))
                         # Read last_crawl_time from sidecar (written by scheduler) — not config.json
                         # (config.json has stale timestamp from last GitHub upload)
@@ -1799,9 +1796,6 @@ async def _auto_scheduler():
                         _fetch_times = json.loads(_sidecar_path.read_text(encoding="utf-8")) if _sidecar_path.exists() else {}
                     except Exception:
                         _fetch_times = {}
-                    # API sources polling only for active DB (same OOM reason as crawl)
-                    if db_name != _active_now:
-                        continue
                     # API-only DBs (no crawl_url) use live fetch per-query — skip scheduler pre-fetch
                     has_crawl = bool(db_cfg.get("crawl_url", "").strip())
                     if not has_crawl:
@@ -1973,6 +1967,14 @@ def health():
         "providers": providers,
         "any_key_ready": any_key_ready(),
     }
+
+@app.get("/db-names")
+def list_db_names():
+    """Public endpoint — returns list of DB names for admin login autocomplete."""
+    if not DATABASES_DIR.exists():
+        return {"names": []}
+    names = sorted(d.name for d in DATABASES_DIR.iterdir() if d.is_dir() and (d / "config.json").exists())
+    return {"names": names}
 
 @app.get("/")
 def serve_ui():

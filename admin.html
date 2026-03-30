@@ -150,7 +150,8 @@
   <!-- Master Unlock -->
   <div class="auth-section">
     <label style="margin-top:0;">Client DB Name</label>
-    <input type="text" id="admin-db" placeholder="e.g. agentfactory" style="margin-bottom:8px;" autocomplete="off" autocorrect="off" spellcheck="false" onkeydown="if(event.key==='Enter') unlockSystem()"/>
+    <input type="text" id="admin-db" placeholder="e.g. agentfactory" style="margin-bottom:8px;" autocomplete="off" autocorrect="off" spellcheck="false" list="db-names-list" onkeydown="if(event.key==='Enter') unlockSystem()"/>
+    <datalist id="db-names-list"></datalist>
     <label>Admin Password</label>
     <div style="display:flex; gap:12px;">
       <div style="position:relative; flex:1;">
@@ -658,6 +659,11 @@
       document.getElementById('admin-db').value = '';
       document.getElementById('master-pass').value = '';
     }, 100);
+    // Populate DB name dropdown for login convenience
+    fetch(`${API}/db-names`).then(r => r.json()).then(d => {
+      const dl = document.getElementById('db-names-list');
+      if (dl) dl.innerHTML = (d.names || []).map(n => `<option value="${n}">`).join('');
+    }).catch(() => {});
   });
 
   function toggle(id) {
@@ -831,12 +837,12 @@
     const statsData = await statsRes.json().catch(()=>({}));
     const statsMap = {};
     (statsData.stats || []).forEach(s => statsMap[s.name] = s);
-    const activeDb = (data.databases || []).find(db => db.active);
-    if (activeDb) document.getElementById('active-ingest-db').textContent = activeDb.name;
+    const sessionDb = sessionStorage.getItem('adminDb') || '—';
+    document.getElementById('active-ingest-db').textContent = sessionDb;
     const sel = document.getElementById('ingest-target-db');
     const prev = sel.value;
-    sel.innerHTML = '<option value="">— Active DB —</option>' +
-      (data.databases || []).map(db => `<option value="${db.name}"${db.name===prev?' selected':''}>${db.name}${db.active?' ★':''}</option>`).join('');
+    sel.innerHTML = '<option value="">— Session DB —</option>' +
+      (data.databases || []).map(db => `<option value="${db.name}"${db.name===prev?' selected':''}>${db.name}</option>`).join('');
     if (prev) sel.value = prev;
 
     document.getElementById("db-list").innerHTML = (data.databases || []).map(db => {
@@ -858,10 +864,10 @@
       const newChunks = st.last_crawl_chunks || 0;
       const lastCrawlLabel = lastCrawl !== '—' ? `${lastCrawl} (+${newChunks} new chunks)` : '—';
       return `
-      <div class="db-item ${db.active?'active':''}" id="db-${db.name}">
+      <div class="db-item" id="db-${db.name}">
         <div class="db-row">
           <div onclick="expandDb('${db.name}')" style="cursor:pointer;flex:1;">
-            <div style="font-weight:800;font-size:14px;color:var(--text-main);">${db.name} ${db.active?'<span class="badge badge-current" style="margin-left:8px;">Active</span>':''}</div>
+            <div style="font-weight:800;font-size:14px;color:var(--text-main);">${db.name}</div>
             <div style="font-size:11px;color:var(--text-muted);margin-top:3px;display:flex;gap:16px;flex-wrap:wrap;">
               <span>📦 ${(st.chunks||db.chunks||0).toLocaleString()} chunks</span>
               <span>${autoIcon} ${syncLabel}</span>
@@ -869,7 +875,6 @@
             </div>
           </div>
           <div class="db-actions">
-            ${!db.active ? `<button class="outline" onclick="setActiveDb('${db.name}')" style="width:auto;margin:0;padding:6px 12px;font-size:11px;">Set Active</button>` : ''}
             <button class="danger" onclick="deleteDb('${db.name}')" style="width:auto;margin:0;padding:6px 12px;font-size:11px;">Delete</button>
           </div>
         </div>
@@ -1013,9 +1018,8 @@
       const keyTxt = h.any_key_ready
         ? `✅ ${h.active_keys} keys (${(h.providers||[]).join(', ')})`
         : '❌ No keys loaded';
-      const dbTxt = h.status === 'ready'
-        ? `✅ DB: ${h.active_db} (${h.docs_indexed} docs)`
-        : `⚠️ DB: ${h.status}`;
+      const sessionDb = sessionStorage.getItem('adminDb') || '';
+      const dbTxt = sessionDb ? `✅ Managing: ${sessionDb}` : (h.status === 'ready' ? `✅ Server ready` : `⚠️ ${h.status}`);
       el.innerHTML = `<span style="margin-right:16px">${dbTxt}</span><span>${keyTxt}</span>`;
     }).catch(() => { el.innerHTML = '⚠️ Server unreachable'; });
   }
