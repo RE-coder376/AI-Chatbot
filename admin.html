@@ -1771,17 +1771,20 @@
         for (const line of lines) {
           if (line.startsWith('data: ')) {
             try {
-              const data = JSON.parse(line.substring(6));
-              if (data.msg) {
+              const ev = JSON.parse(line.substring(6));
+              if (ev.msg) {
                 const log = document.createElement('div');
-                log.textContent = `> ${data.msg}`;
+                log.textContent = `> ${ev.msg}`;
+                if (ev.msg.startsWith('❌')) log.style.color = '#f87171';
                 logsEl.appendChild(log);
                 logsEl.scrollTop = logsEl.scrollHeight;
-                statusEl.firstChild.textContent = `⚙️ ${data.msg}`;
+                statusEl.firstChild.textContent = `⚙️ ${ev.msg}`;
               }
-              if (data.done) {
-                showStatus('crawl', '✅ Crawl & Ingestion Complete!', 'success', true);
-                loadDatabases(); // Refresh DB list
+              if (ev.done) {
+                const lastLog = logsEl.lastChild?.textContent || '';
+                const isError = lastLog.includes('❌') || lastLog.includes('Error');
+                showStatus('crawl', isError ? '❌ Crawl failed — see logs above' : '✅ Crawl & Ingestion Complete!', isError ? 'error' : 'success', true);
+                if (!isError) loadDatabases();
               }
             } catch (e) {}
           }
