@@ -1694,13 +1694,12 @@ def _check_config_security():
 
 async def _auto_crawl_db(db_name: str, url: str, max_pages: int = 100) -> int:
     """Scheduled re-crawl — only fetches URLs not seen before. Returns new chunks added."""
-    import requests as _req
+    import httpx as _hx
     from bs4 import BeautifulSoup
     from urllib.parse import urljoin, urlparse
-    db = _get_db_instance(db_name)
+    db = await asyncio.to_thread(_get_db_instance, db_name)
     if not db or not url: return 0
     _crawling_dbs.add(db_name)
-    # Load previously crawled URLs so we only fetch NEW pages
     seen_file = DATABASES_DIR / db_name / "crawled_urls.txt"
     already_seen: set = set()
     if seen_file.exists():
@@ -1710,32 +1709,35 @@ async def _auto_crawl_db(db_name: str, url: str, max_pages: int = 100) -> int:
     queue = [url.rstrip("/")]
     base = urlparse(url).netloc
     new_urls, added = [], 0
-    while queue and len(new_urls) < max_pages:
-        page_url = queue.pop(0)
-        if page_url in visited: continue
-        visited.add(page_url)
-        new_urls.append(page_url)
-        try:
-            r = _req.get(page_url, timeout=10, headers={"User-Agent": "Mozilla/5.0"})
-            if r.status_code != 200: continue
-            soup = BeautifulSoup(r.text, "html.parser")
-            for tag in soup(["script","style","nav","footer","header"]): tag.decompose()
-            text = soup.get_text(separator="\n", strip=True)
-            if len(text) > 100:
-                db.add_documents([Document(page_content=text[:2000], metadata={"source": page_url})])
-                added += 1
-            for a in soup.find_all("a", href=True):
-                link = urljoin(page_url, a["href"]).split("?")[0].rstrip("/")
-                if urlparse(link).netloc == base and link not in visited:
-                    queue.append(link)
-        except Exception as e: logger.warning(f"[CRAWL] Page error {page_url}: {e}")
-    # Persist all seen URLs so next crawl skips them
+    try:
+        async with _hx.AsyncClient(timeout=10, headers={"User-Agent": "Mozilla/5.0"}, follow_redirects=True) as client:
+            while queue and len(new_urls) < max_pages:
+                page_url = queue.pop(0)
+                if page_url in visited: continue
+                visited.add(page_url)
+                new_urls.append(page_url)
+                try:
+                    r = await client.get(page_url)
+                    if r.status_code != 200: continue
+                    soup = BeautifulSoup(r.text, "html.parser")
+                    for tag in soup(["script","style","nav","footer","header"]): tag.decompose()
+                    text = soup.get_text(separator="\n", strip=True)
+                    if len(text) > 100:
+                        doc = Document(page_content=text[:2000], metadata={"source": page_url})
+                        await asyncio.to_thread(db.add_documents, [doc])
+                        added += 1
+                    for a in soup.find_all("a", href=True):
+                        link = urljoin(page_url, a["href"]).split("?")[0].rstrip("/")
+                        if urlparse(link).netloc == base and link not in visited:
+                            queue.append(link)
+                except Exception as e: logger.warning(f"[CRAWL] Page error {page_url}: {e}")
+    finally:
+        _crawling_dbs.discard(db_name)
     if new_urls:
-        try: seen_file.write_text("\n".join(already_seen | set(new_urls)), encoding="utf-8")
+        try:
+            await asyncio.to_thread(seen_file.write_text, "\n".join(already_seen | set(new_urls)), "utf-8")
         except Exception as e: logger.warning(f"[CRAWL] Could not persist seen URLs for {db_name}: {e}")
-        # Back up crawled_urls.txt to GitHub — critical so fresh deploys don't re-crawl everything
         threading.Thread(target=_github_backup_crawled_urls, args=(db_name,), daemon=True).start()
-    _crawling_dbs.discard(db_name)
     return added
 
 async def _auto_scheduler():
