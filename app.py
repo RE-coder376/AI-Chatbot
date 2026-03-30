@@ -1899,7 +1899,11 @@ async def security_and_logging_middleware(request: Request, call_next):
         logger.info(f"ACCESS {ip} {request.method} {request.url.path} {response.status_code} {elapsed_ms}ms")
     # Security headers
     response.headers["X-Content-Type-Options"] = "nosniff"
-    response.headers["X-Frame-Options"] = "SAMEORIGIN"
+    # Allow widget pages to be embedded in client sites; restrict everything else
+    if request.url.path.startswith("/widget"):
+        response.headers["X-Frame-Options"] = "ALLOWALL"
+    else:
+        response.headers["X-Frame-Options"] = "SAMEORIGIN"
     response.headers["X-XSS-Protection"] = "1; mode=block"
     response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
     response.headers["Permissions-Policy"] = "geolocation=(), microphone=(), camera=()"
