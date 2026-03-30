@@ -213,7 +213,10 @@ def _github_sync_download():
             extract_path = DATABASES_DIR / db_name
             extract_path.mkdir(exist_ok=True)
             with zipfile.ZipFile(tmp_zip, "r") as z:
-                z.extractall(extract_path)
+                for member in z.namelist():
+                    if member == "config.json":
+                        continue  # Never overwrite repo config — passwords/settings live there
+                    z.extract(member, extract_path)
             tmp_zip.unlink(missing_ok=True)
             logger.info(f"[GH-SYNC] ✅ {db_name} restored")
 

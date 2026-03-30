@@ -126,6 +126,8 @@
   body.client-mode #owner-only-ops,
   body.client-mode #owner-only-api,
   body.client-mode #owner-only-create,
+  body.client-mode #owner-only-brand,
+  body.client-mode #owner-only-reindex,
   body.client-mode #global-status { display: none !important; }
   </style>
   <!-- Custom Confirm Modal -->
@@ -275,8 +277,10 @@
       <label>Welcome Message</label><input type="text" id="b-welcome"/>
       <label>Input Placeholder</label><input type="text" id="b-placeholder"/>
       
-      <label>Secondary / Domain Prompt (Expert Runbook)</label>
-      <textarea id="b-secondary-prompt" placeholder="Additional instructions for the AI for this specific database..." style="height:100px; margin-bottom:12px;"></textarea>
+      <div id="owner-only-brand">
+        <label>Secondary / Domain Prompt (Expert Runbook)</label>
+        <textarea id="b-secondary-prompt" placeholder="Additional instructions for the AI for this specific database..." style="height:100px; margin-bottom:12px;"></textarea>
+      </div>
       
       <div class="grid-2">
         <div><label>Page Title</label><input type="text" id="b-page-title"/></div>
@@ -406,7 +410,7 @@
           </select>
         </div>
       </div>
-      <div style="background:#fef9c3; border:1.5px solid #fde68a; border-radius:12px; padding:14px; margin-bottom:8px; display:flex; justify-content:space-between; align-items:center; gap:16px;">
+      <div id="owner-only-reindex" style="background:#fef9c3; border:1.5px solid #fde68a; border-radius:12px; padding:14px; margin-bottom:8px; display:flex; justify-content:space-between; align-items:center; gap:16px;">
         <div style="font-size:12px; color:#92400e; line-height:1.5;"><strong>Rebuild with BGE (768-dim)</strong><br>Converts selected DB from legacy 384-dim to fast BGE. Run once — no data is lost.</div>
         <button onclick="reindexDb()" style="width:auto; margin:0; padding:10px 20px; background:#d97706; white-space:nowrap;">⚡ Rebuild Index</button>
       </div>
