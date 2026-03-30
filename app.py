@@ -4907,7 +4907,13 @@ async def crawl_site(data: dict, request: Request):
                     try:
                         chroma_db = Chroma(persist_directory=str(db_dir), embedding_function=emb)
                     except Exception:
-                        chroma_db = None  # dimension mismatch or corrupt — will create fresh
+                        # dimension mismatch, corrupt, or old ChromaDB schema (missing acquire_write table)
+                        # wipe the SQLite file so from_documents creates a fresh compatible DB
+                        try:
+                            (db_dir / "chroma.sqlite3").unlink(missing_ok=True)
+                        except Exception:
+                            pass
+                        chroma_db = None
                 chunk_size = 350            # ~350 words ≈ 450 tokens, safely under bge-small's 512-token limit
                 chunk_overlap = 50          # overlap between consecutive chunks
                 chunk_step = chunk_size - chunk_overlap
@@ -4931,9 +4937,22 @@ async def crawl_site(data: dict, request: Request):
                     if not chunks:
                         return
                     if chroma_db is None:
-                        chroma_db = await asyncio.to_thread(
-                            Chroma.from_documents, chunks, emb, persist_directory=str(db_dir)
-                        )
+                        try:
+                            chroma_db = await asyncio.to_thread(
+                                Chroma.from_documents, chunks, emb, persist_directory=str(db_dir)
+                            )
+                        except Exception as _e:
+                            if "acquire_write" in str(_e) or "no such table" in str(_e):
+                                # Old ChromaDB schema from GitHub zip — wipe SQLite and retry fresh
+                                try:
+                                    (db_dir / "chroma.sqlite3").unlink(missing_ok=True)
+                                except Exception:
+                                    pass
+                                chroma_db = await asyncio.to_thread(
+                                    Chroma.from_documents, chunks, emb, persist_directory=str(db_dir)
+                                )
+                            else:
+                                raise
                     else:
                         await asyncio.to_thread(chroma_db.add_documents, chunks)
                     total_chunks += len(chunks)
