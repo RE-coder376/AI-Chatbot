@@ -4930,16 +4930,22 @@ async def crawl_site(data: dict, request: Request):
                         except Exception:
                             pass
 
-                # When NOT clearing, pre-open existing Chroma so we append instead of recreating
+                # Always initialize ChromaDB eagerly before the crawl loop.
+                # This ensures migrations run fully (creating acquire_write etc.)
+                # before any concurrent writes happen. _flush_pages only calls add_documents.
+                if clear_first or not (db_dir / "chroma.sqlite3").exists():
+                    _wipe_chroma_dir(db_dir)  # ensure clean slate
                 chroma_db = None
-                if not clear_first and (db_dir / "chroma.sqlite3").exists():
-                    try:
-                        chroma_db = Chroma(persist_directory=str(db_dir), embedding_function=emb)
-                    except Exception:
-                        # dimension mismatch, corrupt, or old ChromaDB schema —
-                        # wipe entire chroma dir (sqlite + UUID segment dirs) so from_documents starts fresh
-                        _wipe_chroma_dir(db_dir)
-                        chroma_db = None
+                try:
+                    chroma_db = await asyncio.to_thread(
+                        Chroma, persist_directory=str(db_dir), embedding_function=emb
+                    )
+                except Exception as _init_e:
+                    yield _send(f"⚠️ DB init failed ({_init_e}), wiping and retrying...")
+                    _wipe_chroma_dir(db_dir)
+                    chroma_db = await asyncio.to_thread(
+                        Chroma, persist_directory=str(db_dir), embedding_function=emb
+                    )
                 chunk_size = 350            # ~350 words ≈ 450 tokens, safely under bge-small's 512-token limit
                 chunk_overlap = 50          # overlap between consecutive chunks
                 chunk_step = chunk_size - chunk_overlap
@@ -4964,23 +4970,7 @@ async def crawl_site(data: dict, request: Request):
                     if not chunks:
                         return
                     async with chroma_write_lock:
-                        if chroma_db is None:
-                            try:
-                                chroma_db = await asyncio.to_thread(
-                                    Chroma.from_documents, chunks, emb, persist_directory=str(db_dir)
-                                )
-                            except Exception as _e:
-                                _es = str(_e).lower()
-                                if "acquire_write" in _es or "no such table" in _es or "readonly" in _es:
-                                    # Stale/locked/readonly DB — wipe entire dir and retry once
-                                    await asyncio.to_thread(_wipe_chroma_dir, db_dir)
-                                    chroma_db = await asyncio.to_thread(
-                                        Chroma.from_documents, chunks, emb, persist_directory=str(db_dir)
-                                    )
-                                else:
-                                    raise
-                        else:
-                            await asyncio.to_thread(chroma_db.add_documents, chunks)
+                        await asyncio.to_thread(chroma_db.add_documents, chunks)
                     total_chunks += len(chunks)
 
                 PARALLEL = 8  # 8 parallel tabs — safe RAM limit (~800MB peak)
