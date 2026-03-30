@@ -148,10 +148,15 @@
   <!-- Master Unlock -->
   <div class="auth-section">
     <label style="margin-top:0;">Client DB Name</label>
-    <input type="text" id="admin-db" placeholder="e.g. agentfactory (your DB name)" style="margin-bottom:8px;" onkeydown="if(event.key==='Enter') unlockSystem()"/>
+    <input type="text" id="admin-db" placeholder="e.g. agentfactory" style="margin-bottom:8px;" autocomplete="off" autocorrect="off" spellcheck="false" onkeydown="if(event.key==='Enter') unlockSystem()"/>
     <label>Admin Password</label>
     <div style="display:flex; gap:12px;">
-      <input type="password" id="master-pass" placeholder="Your admin password" style="flex:1;" onkeydown="if(event.key==='Enter') unlockSystem()"/>
+      <div style="position:relative; flex:1;">
+        <input type="password" id="master-pass" placeholder="Your admin password" style="width:100%; padding-right:44px;" autocomplete="new-password" onkeydown="if(event.key==='Enter') unlockSystem()"/>
+        <button type="button" onclick="togglePassVis()" style="position:absolute;right:10px;top:50%;transform:translateY(-50%);background:none;border:none;cursor:pointer;padding:0;margin:0;width:auto;color:#94a3b8;" id="eye-btn">
+          <svg id="eye-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+        </button>
+      </div>
       <button onclick="unlockSystem()" style="width:auto; margin:0; padding:0 40px;">Verify & Unlock</button>
     </div>
     <div id="auth-status" class="status-msg"></div>
@@ -628,16 +633,24 @@
     }).catch(() => showStatus('auth', 'Failed.', 'error'));
   }
 
-  // Auto-login on page load if password was saved this session (clears on tab close)
-  document.addEventListener('DOMContentLoaded', () => {
-    const saved = sessionStorage.getItem('adminPass');
-    const savedDb = sessionStorage.getItem('adminDb');
-    if (sessionStorage.getItem('clientMode') === '1') document.body.classList.add('client-mode');
-    if (saved && savedDb) {
-      document.getElementById('master-pass').value = saved;
-      document.getElementById('admin-db').value = savedDb;
-      unlockSystem();
+  function togglePassVis() {
+    const inp = document.getElementById('master-pass');
+    const icon = document.getElementById('eye-icon');
+    if (inp.type === 'password') {
+      inp.type = 'text';
+      icon.innerHTML = '<path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/>';
+    } else {
+      inp.type = 'password';
+      icon.innerHTML = '<path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/>';
     }
+  }
+
+  document.addEventListener('DOMContentLoaded', () => {
+    // Clear any saved credentials so page always starts fresh
+    sessionStorage.removeItem('adminPass');
+    sessionStorage.removeItem('adminDb');
+    sessionStorage.removeItem('clientMode');
+    sessionStorage.removeItem('csrfToken');
   });
 
   function toggle(id) {
