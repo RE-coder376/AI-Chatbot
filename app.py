@@ -639,8 +639,13 @@ def detect_language(text: str) -> str:
     # Roman Urdu: require 2+ unambiguous Urdu-specific words to avoid false positives
     # Removed: ko/se/ki/ka — too common in English words (korea, select, kill, kangaroo)
     roman_urdu_patterns = [r"\bhai\b", r"\bkya\b", r"\bhoon\b", r"\bnahi\b", r"\baap\b",
-                           r"\bkaro\b", r"\bkaro\b", r"\bkuch\b", r"\bwoh\b", r"\byeh\b",
-                           r"\bhumare\b", r"\bapka\b", r"\bthoda\b", r"\bbaad\b", r"\bshukriya\b"]
+                           r"\bkaro\b", r"\bkuch\b", r"\bwoh\b", r"\byeh\b",
+                           r"\bhumare\b", r"\bapka\b", r"\bthoda\b", r"\bbaad\b", r"\bshukriya\b",
+                           r"\bmjhe\b", r"\bmujhe\b", r"\bbtao\b", r"\bbatao\b", r"\bbaare\b",
+                           r"\bmai\b", r"\bmain\b", r"\bkai\b", r"\bkoi\b", r"\bkab\b",
+                           r"\bkaise\b", r"\bkyun\b", r"\bkyunke\b", r"\bkahan\b", r"\bkaun\b",
+                           r"\baur\b", r"\bbhi\b", r"\bsirf\b", r"\bsab\b", r"\bwala\b",
+                           r"\bwali\b", r"\bkarna\b", r"\bkaro\b", r"\bkarta\b", r"\blagta\b"]
     hits = sum(1 for p in roman_urdu_patterns if re.search(p, text.lower()))
     if hits >= 2:
         return "Roman Urdu"
