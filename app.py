@@ -3092,7 +3092,8 @@ async def set_embedding_model(request: Request, data: dict = None):
 @app.get("/admin/databases")
 def get_databases(request: Request, password: str = ""):
     password = _extract_password(request, password)
-    cfg = get_config()
+    db_name = _extract_admin_db(request, "")
+    cfg = get_config(db_name) if db_name else get_config()
     admin_auth(password, cfg)
     dbs = []
     active = ACTIVE_DB_FILE.read_text(encoding="utf-8").strip() if ACTIVE_DB_FILE.exists() else "default"
