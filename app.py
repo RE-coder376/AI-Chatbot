@@ -4852,6 +4852,10 @@ async def crawl_site(data: dict, request: Request):
                 yield _send("🧠 Using BGE-Small / FastEmbed (384-dim)")
 
                 db_dir = DATABASES_DIR / db_name
+                # Use /tmp (tmpfs) for all ChromaDB ops — Docker overlayfs breaks SQLite WAL mode.
+                # /tmp on Linux is tmpfs and fully supports WAL, fixing all "no such table" errors.
+                chroma_dir = Path(f"/tmp/chroma_{db_name}")
+                chroma_dir.mkdir(parents=True, exist_ok=True)
                 if clear_first and db_dir.exists():
                     import shutil, gc
                     yield _send("🗑️ Attempting to clear old data...")
@@ -4940,18 +4944,18 @@ async def crawl_site(data: dict, request: Request):
                 def _chroma_run(fn, *args, **kwargs):
                     return _loop.run_in_executor(_chroma_ex, lambda: fn(*args, **kwargs))
 
-                if clear_first or not (db_dir / "chroma.sqlite3").exists():
-                    _wipe_chroma_dir(db_dir)
+                # Always wipe chroma_dir (/tmp) to start fresh — it's tmpfs, no old data
+                _wipe_chroma_dir(chroma_dir)
                 chroma_db = None
                 try:
                     chroma_db = await _chroma_run(
-                        Chroma, persist_directory=str(db_dir), embedding_function=emb
+                        Chroma, persist_directory=str(chroma_dir), embedding_function=emb
                     )
                 except Exception as _init_e:
                     yield _send(f"⚠️ DB init failed ({_init_e}), wiping and retrying...")
-                    _wipe_chroma_dir(db_dir)
+                    _wipe_chroma_dir(chroma_dir)
                     chroma_db = await _chroma_run(
-                        Chroma, persist_directory=str(db_dir), embedding_function=emb
+                        Chroma, persist_directory=str(chroma_dir), embedding_function=emb
                     )
                 chunk_size = 350
                 chunk_overlap = 50
@@ -5180,6 +5184,26 @@ async def crawl_site(data: dict, request: Request):
                         await _flush_pages(pending_pages)
 
                 await browser.close()
+
+                # Copy ChromaDB files from /tmp back to persistent db_dir
+                yield _send("📦 Saving ChromaDB to persistent storage...")
+                try:
+                    for _item in chroma_dir.iterdir():
+                        _dst = db_dir / _item.name
+                        if _item.is_dir():
+                            if _dst.exists():
+                                shutil.rmtree(str(_dst))
+                            shutil.copytree(str(_item), str(_dst))
+                        else:
+                            shutil.copy2(str(_item), str(_dst))
+                    yield _send("✅ ChromaDB saved.")
+                except Exception as _cp_e:
+                    yield _send(f"⚠️ Copy from /tmp failed: {_cp_e}")
+                finally:
+                    try:
+                        shutil.rmtree(str(chroma_dir), ignore_errors=True)
+                    except Exception:
+                        pass
 
             # Reload local_db if we just re-crawled the active DB
             active_name = ACTIVE_DB_FILE.read_text(encoding="utf-8").strip() if ACTIVE_DB_FILE.exists() else ""
