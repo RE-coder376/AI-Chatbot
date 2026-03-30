@@ -1916,7 +1916,7 @@ async def csrf_middleware(request: Request, call_next):
     """Enforce CSRF token on state-changing admin requests (POST/DELETE/PUT to /admin/*)."""
     if request.method in ("POST", "DELETE", "PUT") and request.url.path.startswith("/admin/"):
         # Exempt the CSRF token endpoint itself and ingest/file upload endpoints
-        exempt = {"/admin/csrf-token", "/admin/ingest/files", "/admin/sync-github", "/admin/databases/set-active"}
+        exempt = {"/admin/csrf-token", "/admin/ingest/files", "/admin/sync-github", "/admin/databases/set-active", "/admin/crawl"}
         if request.url.path not in exempt:
             token = request.headers.get("X-CSRF-Token", "")
             if not token or token not in _csrf_tokens or time.time() > _csrf_tokens.get(token, 0):
@@ -4617,9 +4617,9 @@ async def delete_api_source(data: dict):
 
 @app.post("/admin/crawl")
 async def crawl_site(data: dict, request: Request):
-    cfg = get_config()
-    if not hmac.compare_digest(_extract_password(request, data.get("password", "")).encode(), cfg.get("admin_password", "").encode()):
-        return JSONResponse({"detail": "Unauthorized"}, status_code=401)
+    db_name_auth = _extract_admin_db(request, data.get("db_name", "").strip())
+    cfg = get_config(db_name_auth) if db_name_auth else get_config()
+    admin_auth(_extract_password(request, data.get("password", "")), cfg)
 
     url             = data.get("url", "").strip().rstrip("/")
     db_name         = data.get("db_name", "").strip()
