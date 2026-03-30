@@ -550,6 +550,7 @@
 
       <div style="margin-top:16px; display:flex; gap:10px; flex-wrap:wrap;">
         <button onclick="loadEmbedCode()" class="secondary" style="margin:0; width:auto;">🔄 Refresh Snippet</button>
+        <button onclick="previewBot()" style="margin:0; width:auto; background:#10b981;">🤖 Preview Your Bot</button>
       </div>
       <div id="embed-status" class="status-msg"></div>
     </div>
@@ -1399,6 +1400,13 @@
     } catch (e) {
       showStatus('embed', 'Failed to load snippet.', 'error');
     }
+  }
+
+  async function previewBot() {
+    const snippet = document.getElementById('embed-snippet').value;
+    const m = snippet.match(/key=([a-f0-9\-]{36})/);
+    if (!m) { await loadEmbedCode(); return previewBot(); }
+    window.open(`${API}/widget-chat?key=${m[1]}`, '_blank');
   }
 
   function copyEmbed() {
