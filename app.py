@@ -1799,6 +1799,9 @@ async def _auto_scheduler():
                         _fetch_times = json.loads(_sidecar_path.read_text(encoding="utf-8")) if _sidecar_path.exists() else {}
                     except Exception:
                         _fetch_times = {}
+                    # API sources polling only for active DB (same OOM reason as crawl)
+                    if db_name != _active_now:
+                        continue
                     # API-only DBs (no crawl_url) use live fetch per-query — skip scheduler pre-fetch
                     has_crawl = bool(db_cfg.get("crawl_url", "").strip())
                     if not has_crawl:
