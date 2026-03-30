@@ -3161,31 +3161,25 @@ async def clear_db_data(request: Request, password: str = Form(...), name: str =
     if not db_path.exists(): return JSONResponse({"detail": "DB not found"}, status_code=404)
     global local_db
     active_name = ACTIVE_DB_FILE.read_text(encoding="utf-8").strip() if ACTIVE_DB_FILE.exists() else ""
-    # Use ChromaDB API to delete collections — avoids Windows file lock issues entirely
-    # For active DB, use existing handle; for others, open a temporary client
-    deleted_cols = []
-    errors = []
-    try:
-        import chromadb as _cdb2
-        if name == active_name and local_db is not None:
-            _client = local_db._client  # reuse active client
-        else:
-            _client = _cdb2.PersistentClient(str(db_path))
-        for col_name in ["langchain", "documents"]:
-            try:
-                _client.delete_collection(col_name)
-                deleted_cols.append(col_name)
-            except Exception:
-                pass  # collection didn't exist — that's fine
-    except Exception as ex:
-        errors.append(str(ex))
-    if errors:
-        return JSONResponse({"success": False, "message": f"Error clearing DB: {errors[0]}"}, status_code=500)
-    # Also remove chroma.sqlite3 so next crawl gets a fully fresh schema (no stale v0.4/v0.5 tables)
-    try:
-        (db_path / "chroma.sqlite3").unlink(missing_ok=True)
-    except Exception:
-        pass
+    # Wipe all ChromaDB files unconditionally first (preserving config.json).
+    # Do this BEFORE any ChromaDB API calls so a corrupt/stale DB never blocks the clear.
+    import stat as _stat
+    def _force_rm(func, path, exc):
+        try:
+            os.chmod(path, _stat.S_IWRITE)
+            func(path)
+        except Exception:
+            pass
+    for _item in list(db_path.iterdir()):
+        if _item.name == "config.json":
+            continue
+        try:
+            if _item.is_dir():
+                shutil.rmtree(_item, onerror=_force_rm)
+            else:
+                _item.unlink(missing_ok=True)
+        except Exception:
+            pass
     # Re-init active DB so in-memory handle points to fresh empty DB
     if name == active_name:
         local_db = None
