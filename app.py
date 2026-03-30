@@ -3008,7 +3008,9 @@ def get_branding(request: Request, password: str = ""):
     password = _extract_password(request, password)
     db_name = _extract_admin_db(request)
     cfg = get_config(db_name)
-    if not hmac.compare_digest(password.encode(), cfg.get("admin_password", "").encode()):
+    try:
+        admin_auth(password, cfg)
+    except HTTPException:
         return JSONResponse({"detail": "Unauthorized"}, status_code=401)
     return {
         "bot_name":        cfg.get("bot_name"),
