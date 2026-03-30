@@ -645,6 +645,9 @@
         if (authMode.role === 'client') {
           document.body.classList.add('client-mode');
           sessionStorage.setItem('clientMode', '1');
+          // Auto-switch active DB so HF Space URL shows their bot
+          const sf = new FormData(); sf.append("password", pass); sf.append("name", db);
+          fetch(`${API}/admin/databases/set-active`, { method:"POST", headers: authHeaders(), body:sf }).catch(()=>{});
         } else {
           document.body.classList.remove('client-mode');
           sessionStorage.removeItem('clientMode');

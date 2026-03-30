@@ -3181,9 +3181,13 @@ async def set_active_db(request: Request, password: str = Form(...), name: str =
             root_pw = json.loads(CONFIG_FILE.read_text(encoding="utf-8-sig")).get("admin_password", "")
         except: pass
     if root_pw:
-        # Root password IS configured — only accept it (per-DB passwords rejected)
+        # Root password OR per-DB password for their own DB only
         if not hmac.compare_digest(password.encode(), root_pw.encode()):
-            return JSONResponse({"detail": "Unauthorized — only the super-admin may switch active DB"}, status_code=401)
+            # Not root — check if per-DB password matches the requested DB
+            db_cfg = get_config(name)
+            db_pw = db_cfg.get("admin_password", "")
+            if not (db_pw and hmac.compare_digest(password.encode(), db_pw.encode())):
+                return JSONResponse({"detail": "Unauthorized — only the super-admin may switch active DB"}, status_code=401)
     else:
         # No root password configured (single-tenant / local dev) — accept any valid DB password
         found = False
