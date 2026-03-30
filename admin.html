@@ -129,6 +129,7 @@
   body.client-mode #owner-only-brand,
   body.client-mode #owner-only-reindex,
   body.client-mode #owner-only-cache,
+  body.client-mode #card-embed,
   body.client-mode #global-status { display: none !important; }
   </style>
   <!-- Custom Confirm Modal -->
@@ -1403,10 +1404,12 @@
   }
 
   async function previewBot() {
-    const snippet = document.getElementById('embed-snippet').value;
+    let snippet = document.getElementById('embed-snippet').value;
+    if (!snippet.includes('widget-chat')) await loadEmbedCode();
+    snippet = document.getElementById('embed-snippet').value;
     const m = snippet.match(/key=([a-f0-9\-]{36})/);
-    if (!m) { await loadEmbedCode(); return previewBot(); }
-    window.open(`${API}/widget-chat?key=${m[1]}`, '_blank');
+    if (m) window.open(`${API}/widget-chat?key=${m[1]}`, '_blank');
+    else showStatus('embed', 'Could not find widget key. Try Refresh Snippet first.', 'error');
   }
 
   function copyEmbed() {

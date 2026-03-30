@@ -3979,14 +3979,23 @@ async def ingest_files(request: Request, password: str = Form(...), target_db: s
 @app.get("/admin/embed-code")
 def get_embed_code(request: Request, password: str = ""):
     password = _extract_password(request, password)
-    cfg = get_config()
-    if not hmac.compare_digest(password.encode(), cfg.get("admin_password", "").encode()):
-        return JSONResponse({"detail": "Unauthorized"}, status_code=401)
-    
-    active = ACTIVE_DB_FILE.read_text(encoding="utf-8").strip() if ACTIVE_DB_FILE.exists() else "default"
-    host = str(request.base_url)
-    snippet = f'<script src="{host}widget.js" data-db="{active}"></script>'
-    return {"snippet": snippet, "embed_code": snippet, "db": active}
+    db_name = _extract_admin_db(request, "")
+    cfg = get_config(db_name) if db_name else get_config()
+    admin_auth(password, cfg)
+    host = str(request.base_url).rstrip("/")
+    widget_key = cfg.get("widget_key", "")
+    primary = cfg.get("branding", {}).get("primary_color", "#6366f1") if isinstance(cfg.get("branding"), dict) else "#6366f1"
+    snippet = (
+        f'<!-- {cfg.get("bot_name","AI")} Chat Widget -->\n'
+        f'<iframe id="ai-chat-frame" src="{host}/widget-chat?key={widget_key}" '
+        f'style="position:fixed;bottom:90px;right:24px;width:380px;height:600px;border:none;'
+        f'border-radius:16px;box-shadow:0 12px 48px rgba(0,0,0,0.3);z-index:9998;display:none;" allow="clipboard-write"></iframe>\n'
+        f'<button id="ai-chat-btn" onclick="var f=document.getElementById(\'ai-chat-frame\');f.style.display=f.style.display===\'none\'?\'block\':\'none\'" '
+        f'style="position:fixed;bottom:24px;right:24px;width:60px;height:60px;border-radius:50%;'
+        f'background:{primary};border:none;cursor:pointer;z-index:9999;box-shadow:0 4px 20px rgba(0,0,0,0.25);'
+        f'font-size:26px;display:flex;align-items:center;justify-content:center;color:white;">💬</button>'
+    )
+    return {"snippet": snippet, "embed_code": snippet, "db": db_name, "widget_key": widget_key}
 
 @app.post("/admin/reindex")
 async def reindex(data: dict):
