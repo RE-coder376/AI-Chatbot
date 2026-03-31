@@ -20,19 +20,6 @@ import httpx
 from collections import deque
 import threading
 
-# Fix: ChromaDB uses SQLite WAL mode which fails on Docker overlayfs (HF Spaces).
-# Patch sqlite3.connect to force DELETE journal mode on every connection —
-# works on any filesystem regardless of tmpfs vs overlayfs.
-import sqlite3 as _sqlite3
-_orig_sqlite_connect = _sqlite3.connect
-def _patched_sqlite_connect(*args, **kwargs):
-    conn = _orig_sqlite_connect(*args, **kwargs)
-    try:
-        conn.execute("PRAGMA journal_mode=DELETE")
-    except Exception:
-        pass
-    return conn
-_sqlite3.connect = _patched_sqlite_connect
 
 # Suppress console windows for all subprocesses on Windows (Playwright, etc.)
 if sys.platform == 'win32':
@@ -3636,7 +3623,7 @@ async def run_detailed_tests(request: Request, password: str = ""):
 def _ensure_tmp_chroma(db_name: str, src_path: Path) -> Path:
     """Copy ChromaDB from overlayfs → /tmp (tmpfs) to avoid SQLite WAL mode failures on Docker."""
     import shutil as _shutil
-    tmp_path = Path(f"/tmp/chroma_{db_name}")
+    tmp_path = Path(f"/dev/shm/chroma_{db_name}")
     if not (tmp_path / "chroma.sqlite3").exists() and (src_path / "chroma.sqlite3").exists():
         tmp_path.mkdir(parents=True, exist_ok=True)
         for item in src_path.iterdir():
@@ -3649,7 +3636,7 @@ def _ensure_tmp_chroma(db_name: str, src_path: Path) -> Path:
                     _shutil.copytree(str(item), str(tmp_path / item.name), dirs_exist_ok=True)
             except Exception as _e:
                 logger.warning(f"[ChromaDB] copy {item.name} → /tmp failed: {_e}")
-        logger.info(f"[ChromaDB] Copied {db_name} → /tmp/chroma_{db_name} (overlayfs WAL fix)")
+        logger.info(f"[ChromaDB] Copied {db_name} → /dev/shm/chroma_{db_name} (overlayfs WAL fix)")
     return tmp_path
 
 
@@ -4890,7 +4877,7 @@ async def crawl_site(data: dict, request: Request):
                 db_dir = DATABASES_DIR / db_name
                 # Use /tmp (tmpfs) for all ChromaDB ops — Docker overlayfs breaks SQLite WAL mode.
                 # /tmp on Linux is tmpfs and fully supports WAL, fixing all "no such table" errors.
-                chroma_dir = Path(f"/tmp/chroma_{db_name}")
+                chroma_dir = Path(f"/dev/shm/chroma_{db_name}")
                 chroma_dir.mkdir(parents=True, exist_ok=True)
                 if clear_first and db_dir.exists():
                     import shutil, gc
@@ -5221,7 +5208,21 @@ async def crawl_site(data: dict, request: Request):
 
                 await browser.close()
 
-                # Copy ChromaDB files from /tmp back to persistent db_dir
+                # Checkpoint WAL and switch to DELETE journal mode before copying.
+                # /dev/shm is tmpfs (WAL works), but databases/ is overlayfs (WAL breaks).
+                # Converting to DELETE mode here means the copied file is WAL-free.
+                try:
+                    import sqlite3 as _sq3
+                    _sq3_path = chroma_dir / "chroma.sqlite3"
+                    if _sq3_path.exists():
+                        _sq3_conn = _sq3.connect(str(_sq3_path))
+                        _sq3_conn.execute("PRAGMA wal_checkpoint(FULL)")
+                        _sq3_conn.execute("PRAGMA journal_mode=DELETE")
+                        _sq3_conn.close()
+                except Exception as _sq3_e:
+                    logger.warning(f"[ChromaDB] WAL checkpoint failed (non-fatal): {_sq3_e}")
+
+                # Copy ChromaDB files from /dev/shm back to persistent db_dir
                 yield _send("📦 Saving ChromaDB to persistent storage...")
                 try:
                     for _item in chroma_dir.iterdir():
