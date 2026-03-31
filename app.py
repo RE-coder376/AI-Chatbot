@@ -20,6 +20,20 @@ import httpx
 from collections import deque
 import threading
 
+# Fix: ChromaDB uses SQLite WAL mode which fails on Docker overlayfs (HF Spaces).
+# Patch sqlite3.connect to force DELETE journal mode on every connection —
+# works on any filesystem regardless of tmpfs vs overlayfs.
+import sqlite3 as _sqlite3
+_orig_sqlite_connect = _sqlite3.connect
+def _patched_sqlite_connect(*args, **kwargs):
+    conn = _orig_sqlite_connect(*args, **kwargs)
+    try:
+        conn.execute("PRAGMA journal_mode=DELETE")
+    except Exception:
+        pass
+    return conn
+_sqlite3.connect = _patched_sqlite_connect
+
 # Suppress console windows for all subprocesses on Windows (Playwright, etc.)
 if sys.platform == 'win32':
     _orig_popen_init = subprocess.Popen.__init__
