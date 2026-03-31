@@ -4875,9 +4875,11 @@ async def crawl_site(data: dict, request: Request):
                 yield _send("🧠 Using BGE-Small / FastEmbed (384-dim)")
 
                 db_dir = DATABASES_DIR / db_name
-                # Use /tmp (tmpfs) for all ChromaDB ops — Docker overlayfs breaks SQLite WAL mode.
-                # /tmp on Linux is tmpfs and fully supports WAL, fixing all "no such table" errors.
-                chroma_dir = Path(f"/dev/shm/chroma_{db_name}")
+                # Use a DIFFERENT path prefix from local_db (/dev/shm/chroma_*).
+                # chromadb's Rust layer caches clients by path — if crawl reuses local_db's
+                # path, the cached client (pointing to the wiped/deleted inode) causes
+                # "no such table: collections". A unique crawl prefix avoids the conflict.
+                chroma_dir = Path(f"/tmp/crawl_{db_name}")
                 chroma_dir.mkdir(parents=True, exist_ok=True)
                 if clear_first and db_dir.exists():
                     import shutil, gc
