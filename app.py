@@ -147,8 +147,8 @@ import random
 _status = "starting"
 
 # ── GitHub Sync ────────────────────────────────────────────────────────────────
-_GITHUB_USERNAME = "RE-coder376"
-_GITHUB_REPO     = "databases"
+_GITHUB_USERNAME = os.getenv("GITHUB_USERNAME", "")
+_GITHUB_REPO     = os.getenv("GITHUB_REPO", "")
 _GITHUB_CLONE_DIR = Path("/tmp/chatbot-dbs")
 
 def _github_repo_url() -> str:
@@ -1662,7 +1662,8 @@ def _load_db_now():
         if embeddings_model is None:
             logger.info("📡 Loading FastEmbed engine (BAAI/bge-small-en-v1.5, onnxruntime)...")
             embeddings_model = FastEmbedEmbeddings(model_name="BAAI/bge-small-en-v1.5")
-        local_db = Chroma(persist_directory=str(db_path), embedding_function=embeddings_model)
+        tmp_dir = _ensure_tmp_chroma(active, db_path)
+        local_db = Chroma(persist_directory=str(tmp_dir), embedding_function=embeddings_model)
         gc.collect()  # return freed memory to OS after heavy load
         _status = "ready"
 
@@ -3618,6 +3619,26 @@ async def run_detailed_tests(request: Request, password: str = ""):
 
 
 
+def _ensure_tmp_chroma(db_name: str, src_path: Path) -> Path:
+    """Copy ChromaDB from overlayfs → /tmp (tmpfs) to avoid SQLite WAL mode failures on Docker."""
+    import shutil as _shutil
+    tmp_path = Path(f"/tmp/chroma_{db_name}")
+    if not (tmp_path / "chroma.sqlite3").exists() and (src_path / "chroma.sqlite3").exists():
+        tmp_path.mkdir(parents=True, exist_ok=True)
+        for item in src_path.iterdir():
+            if item.name in ("config.json", "visitor_history"):
+                continue
+            try:
+                if item.is_file():
+                    _shutil.copy2(str(item), str(tmp_path / item.name))
+                elif item.is_dir():
+                    _shutil.copytree(str(item), str(tmp_path / item.name), dirs_exist_ok=True)
+            except Exception as _e:
+                logger.warning(f"[ChromaDB] copy {item.name} → /tmp failed: {_e}")
+        logger.info(f"[ChromaDB] Copied {db_name} → /tmp/chroma_{db_name} (overlayfs WAL fix)")
+    return tmp_path
+
+
 def _get_db_instance(db_name: str):
     """Return a Chroma instance for any DB (not just active). Cached per db_name."""
     if db_name in _db_instance_cache:
@@ -3654,7 +3675,8 @@ def _get_db_instance(db_name: str):
     else:
         # Default to the primary multilingual model
         emb = embeddings_model
-    instance = Chroma(persist_directory=str(db_path), embedding_function=emb)
+    tmp_dir = _ensure_tmp_chroma(db_name, db_path)
+    instance = Chroma(persist_directory=str(tmp_dir), embedding_function=emb)
     # LRU eviction — remove oldest entry when over limit
     if len(_db_instance_cache) >= _DB_CACHE_MAX:
         oldest = next(iter(_db_instance_cache))
