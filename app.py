@@ -4982,9 +4982,9 @@ async def crawl_site(data: dict, request: Request):
                     chroma_db = await _chroma_run(
                         Chroma, persist_directory=str(chroma_dir), embedding_function=emb
                     )
-                chunk_size = 350
-                chunk_overlap = 50
-                chunk_step = chunk_size - chunk_overlap
+                chunk_size = 300
+                chunk_overlap = 100
+                chunk_step = chunk_size - chunk_overlap  # 200 — 50% more chunks vs old 300-step
                 total_chunks = 0
                 completed = 0
                 flush_lock = asyncio.Lock()
