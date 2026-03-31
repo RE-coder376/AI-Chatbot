@@ -4879,7 +4879,7 @@ async def crawl_site(data: dict, request: Request):
                 # chromadb's Rust layer caches clients by path — if crawl reuses local_db's
                 # path, the cached client (pointing to the wiped/deleted inode) causes
                 # "no such table: collections". A unique crawl prefix avoids the conflict.
-                chroma_dir = Path(f"/tmp/crawl_{db_name}")
+                chroma_dir = Path(f"/dev/shm/crawl_{db_name}")
                 chroma_dir.mkdir(parents=True, exist_ok=True)
                 if clear_first and db_dir.exists():
                     import shutil, gc
