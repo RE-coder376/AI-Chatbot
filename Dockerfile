@@ -11,6 +11,8 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install uv && uv pip install --system -r requirements.txt
 
+# Set HOME so fastembed/HF cache goes to /app/.cache (writable by user 1000)
+ENV HOME=/app
 # Pre-download fastembed ONNX model so DB loading is instant at runtime
 RUN python -c "from langchain_community.embeddings.fastembed import FastEmbedEmbeddings; FastEmbedEmbeddings(model_name='BAAI/bge-small-en-v1.5')" || true
 
