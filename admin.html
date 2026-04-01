@@ -710,9 +710,6 @@
       const prev = JSON.parse(localStorage.getItem('adminDbHistory') || '[]');
       dl.innerHTML = prev.map(n => `<option value="${n}">`).join('');
     }
-    // Pre-fill fields from last login (no auto-submit — user still clicks Unlock)
-    const savedDb = localStorage.getItem('adminDb') || '';
-    if (savedDb) document.getElementById('admin-db').value = savedDb;
   });
 
   function toggle(id) {

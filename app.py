@@ -167,12 +167,16 @@ def _git(args: list, cwd=None) -> bool:
         logger.error(f"[GH-SYNC] git error: {e}")
         return False
 
+_github_sync_result: dict = {"status": "not_run", "detail": ""}  # visible in /health
+
 def _github_sync_download():
     """Download DB zips from GitHub Releases → extract into databases/."""
+    global _github_sync_result
     import zipfile, requests as _req
     DATABASES_DIR.mkdir(exist_ok=True)
     pat = os.environ.get("GITHUB_PAT", "")
     if not pat:
+        _github_sync_result = {"status": "skipped", "detail": "No GITHUB_PAT env var set"}
         logger.info("[GH-SYNC] No GITHUB_PAT set — skipping download")
         return
     headers = {"Authorization": f"token {pat}", "User-Agent": "chatbot-sync",
@@ -182,6 +186,7 @@ def _github_sync_download():
         release_url = f"https://api.github.com/repos/{_GITHUB_USERNAME}/{_GITHUB_REPO}/releases/tags/databases-latest"
         resp = _req.get(release_url, headers=api_hdr, timeout=30)
         if resp.status_code != 200:
+            _github_sync_result = {"status": "failed", "detail": f"Release fetch {resp.status_code} — PAT may be expired"}
             logger.error(f"[GH-SYNC] Release not found ({resp.status_code}): {resp.text[:200]}")
             return
         assets = resp.json().get("assets", [])
@@ -255,6 +260,7 @@ def _github_sync_download():
                     logger.info(f"[GH-SYNC] ✅ crawled_urls.txt restored for {db_n}")
             except Exception as e:
                 logger.warning(f"[GH-SYNC] crawled_urls restore failed for {db_n}: {e}")
+        _github_sync_result = {"status": "ok", "detail": f"{len(zip_assets)} DBs restored"}
         logger.info("[GH-SYNC] ✅ All databases restored from GitHub")
         # Set active DB: ACTIVE_DB env var > first available DB
         env_db = os.environ.get("ACTIVE_DB", "").strip()
@@ -2014,6 +2020,7 @@ def health():
         "active_keys": active_keys,
         "providers": providers,
         "any_key_ready": any_key_ready(),
+        "github_sync": _github_sync_result,
     }
 
 
