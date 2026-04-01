@@ -153,7 +153,7 @@ _GITHUB_REPO     = os.getenv("GITHUB_REPO", "")
 _GITHUB_CLONE_DIR = Path("/tmp/chatbot-dbs")
 
 def _github_repo_url() -> str:
-    pat = os.environ.get("GITHUB_PAT", "")
+    pat = os.environ.get("GITHUB_PAT", "").strip()
     return f"https://{pat}@github.com/{_GITHUB_USERNAME}/{_GITHUB_REPO}.git"
 
 def _git(args: list, cwd=None) -> bool:
@@ -174,7 +174,7 @@ def _github_sync_download():
     global _github_sync_result
     import zipfile, requests as _req
     DATABASES_DIR.mkdir(exist_ok=True)
-    pat = os.environ.get("GITHUB_PAT", "")
+    pat = os.environ.get("GITHUB_PAT", "").strip()
     if not pat:
         _github_sync_result = {"status": "skipped", "detail": "No GITHUB_PAT env var set"}
         logger.info("[GH-SYNC] No GITHUB_PAT set — skipping download")
@@ -280,7 +280,7 @@ def _github_backup_crawled_urls(db_name: str):
     """Upload crawled_urls.txt to GitHub Contents API (small file, no size limit issue).
     Called after every auto-crawl so fresh deploys don't re-crawl all pages."""
     import requests as _req
-    pat = os.environ.get("GITHUB_PAT", "")
+    pat = os.environ.get("GITHUB_PAT", "").strip()
     if not pat: return
     seen_file = DATABASES_DIR / db_name / "crawled_urls.txt"
     if not seen_file.exists(): return
@@ -309,7 +309,7 @@ def _github_sync_upload(db_name: str):
     """Zip DB and upload to GitHub Releases as an asset (supports files >100MB).
     Uses a temp file on disk — NOT BytesIO — to avoid OOM on Render 512MB."""
     import zipfile, requests as _req
-    pat = os.environ.get("GITHUB_PAT", "")
+    pat = os.environ.get("GITHUB_PAT", "").strip()
     if not pat: return
     db_path = DATABASES_DIR / db_name
     if not db_path.exists(): return
@@ -361,7 +361,7 @@ def _github_sync_upload(db_name: str):
 def _github_sync_delete(db_name: str):
     """Remove DB zip from GitHub releases when a DB is deleted."""
     import requests as _req
-    pat = os.environ.get("GITHUB_PAT", "")
+    pat = os.environ.get("GITHUB_PAT", "").strip()
     if not pat: return
     api_hdr = {"Authorization": f"token {pat}", "User-Agent": "chatbot-sync"}
     try:
