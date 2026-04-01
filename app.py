@@ -273,6 +273,7 @@ def _github_sync_download():
             logger.info(f"[GH-SYNC] Active DB set → {chosen}")
             threading.Thread(target=_load_db_now, daemon=True).start()
     except Exception as e:
+        _github_sync_result = {"status": "failed", "detail": str(e)}
         logger.error(f"[GH-SYNC] Download error: {e}")
 
 def _github_backup_crawled_urls(db_name: str):
