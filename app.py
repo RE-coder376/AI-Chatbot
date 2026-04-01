@@ -3678,7 +3678,7 @@ def _get_db_instance(db_name: str):
     
     if emb_setting == "bge":
         try:
-            from langchain_community.embeddings import HuggingFaceEmbeddings
+            from langchain_huggingface import HuggingFaceEmbeddings
             emb = HuggingFaceEmbeddings(model_name="BAAI/bge-base-en-v1.5")
         except ImportError:
             logger.warning("[DB] sentence-transformers not installed, falling back to fastembed for BGE DB")
@@ -3686,7 +3686,7 @@ def _get_db_instance(db_name: str):
     elif emb_setting == "minilm_old":
         if legacy_embeddings is None:
             try:
-                from langchain_community.embeddings import HuggingFaceEmbeddings
+                from langchain_huggingface import HuggingFaceEmbeddings
                 globals()["legacy_embeddings"] = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
             except ImportError:
                 logger.warning("[DB] sentence-transformers not installed, falling back to fastembed")
