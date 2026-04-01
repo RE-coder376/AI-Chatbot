@@ -609,9 +609,9 @@
   }
 
   function authHeaders() {
-    const pass = sessionStorage.getItem('adminPass') || '';
+    const pass = localStorage.getItem('adminPass') || '';
     const csrf = sessionStorage.getItem('csrfToken') || '';
-    const db   = sessionStorage.getItem('adminDb') || '';
+    const db   = localStorage.getItem('adminDb') || '';
     return { 'Authorization': `Bearer ${pass}`, 'X-CSRF-Token': csrf, 'X-Admin-DB': db };
   }
 
@@ -623,10 +623,10 @@
     if (pass.length < 6) return showStatus('auth', 'Password too short (min 6 chars).', 'error');
     showStatus('auth', 'Authenticating...', 'loading');
     fetch(`${API}/admin/branding`, { headers: { 'Authorization': `Bearer ${pass}`, 'X-Admin-DB': db } }).then(async r => {
-      if (!r.ok) { sessionStorage.removeItem('adminPass'); sessionStorage.removeItem('csrfToken'); sessionStorage.removeItem('adminDb'); showStatus('auth', 'Denied. Wrong password or DB name.', 'error'); return; }
+      if (!r.ok) { localStorage.removeItem('adminPass'); sessionStorage.removeItem('csrfToken'); localStorage.removeItem('adminDb'); showStatus('auth', 'Denied. Wrong password or DB name.', 'error'); return; }
       const data = await r.json();
-      sessionStorage.setItem('adminPass', pass);
-      sessionStorage.setItem('adminDb', db);
+      localStorage.setItem('adminPass', pass);
+      localStorage.setItem('adminDb', db);
       // Save DB name to this browser's local history for dropdown
       const hist = JSON.parse(localStorage.getItem('adminDbHistory') || '[]');
       if (!hist.includes(db)) { hist.unshift(db); localStorage.setItem('adminDbHistory', JSON.stringify(hist.slice(0, 10))); }
@@ -679,21 +679,22 @@
   }
 
   document.addEventListener('DOMContentLoaded', () => {
-    // Clear any saved credentials and browser-autofilled values
-    sessionStorage.removeItem('adminPass');
-    sessionStorage.removeItem('adminDb');
+    // Clear volatile session state only (credentials stay in localStorage)
     sessionStorage.removeItem('clientMode');
     sessionStorage.removeItem('csrfToken');
-    // Force-clear fields in case browser autocomplete filled them
-    setTimeout(() => {
-      document.getElementById('admin-db').value = '';
-      document.getElementById('master-pass').value = '';
-    }, 100);
-    // Populate DB name dropdown from this browser's login history only
+    // Populate DB name dropdown from login history
     const dl = document.getElementById('db-names-list');
     if (dl) {
       const prev = JSON.parse(localStorage.getItem('adminDbHistory') || '[]');
       dl.innerHTML = prev.map(n => `<option value="${n}">`).join('');
+    }
+    // Auto-restore: if credentials saved, fill fields and log in automatically
+    const savedPass = localStorage.getItem('adminPass') || '';
+    const savedDb   = localStorage.getItem('adminDb') || '';
+    if (savedPass && savedDb) {
+      document.getElementById('master-pass').value = savedPass;
+      document.getElementById('admin-db').value = savedDb;
+      unlockSystem();
     }
   });
 
@@ -869,7 +870,7 @@
     const statsMap = {};
     (statsData.stats || []).forEach(s => statsMap[s.name] = s);
     const isClient = document.body.classList.contains('client-mode');
-    const sessionDb = sessionStorage.getItem('adminDb') || '—';
+    const sessionDb = localStorage.getItem('adminDb') || '—';
     document.getElementById('active-ingest-db').textContent = sessionDb;
     const sel = document.getElementById('ingest-target-db');
     const prev = sel.value;
@@ -1053,7 +1054,7 @@
       const keyTxt = h.any_key_ready
         ? `✅ ${h.active_keys} keys (${(h.providers||[]).join(', ')})`
         : '❌ No keys loaded';
-      const sessionDb = sessionStorage.getItem('adminDb') || '';
+      const sessionDb = localStorage.getItem('adminDb') || '';
       const dbTxt = sessionDb ? `✅ Managing: ${sessionDb}` : (h.status === 'ready' ? `✅ Server ready` : `⚠️ ${h.status}`);
       el.innerHTML = `<span style="margin-right:16px">${dbTxt}</span><span>${keyTxt}</span>`;
     }).catch(() => { el.innerHTML = '⚠️ Server unreachable'; });
@@ -1074,8 +1075,8 @@
     updateHealthStatus();
   }
   async function syncFromGithub() {
-    const pass = sessionStorage.getItem('adminPass') || '';
-    const db   = sessionStorage.getItem('adminDb') || '';
+    const pass = localStorage.getItem('adminPass') || '';
+    const db   = localStorage.getItem('adminDb') || '';
     const csrf = sessionStorage.getItem('csrfToken') || '';
     showStatus('db', '☁️ Syncing from GitHub — please wait 30-60 seconds...', 'loading');
     try {
