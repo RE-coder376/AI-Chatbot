@@ -5174,13 +5174,9 @@ async def crawl_site(data: dict, request: Request):
                                 await log_queue.put(f"[{completed}/{len(to_crawl)}] ⚠️  {cur_url[:70]} (PDF failed)")
                             return
 
-                        # --- Fast path: try requests first (5-10x faster, no browser overhead) ---
-                        text = await _requests_extract(cur_url)
-
-                        if not text or len(text) < 1500:
-                            # --- Playwright path: needed for JS-rendered/Next.js/SPA pages ---
-                            # 1500 char threshold: SSR skeleton (nav+header+footer) easily clears 300
-                            # but real course/doc content is 1500+ chars when fully rendered
+                        text = None  # Always use Playwright — captures every word including JS-rendered content
+                        if True:
+                            # --- Playwright: full JS render + lazy scroll for every page ---
                             pg = await ctx.new_page()
                             await stealth(pg)
                             for attempt in range(3):
