@@ -1798,7 +1798,7 @@
                       statusDiv.innerHTML = `
                         <div style="color:#4ade80;font-weight:600;margin-bottom:8px">✅ Crawl Complete!</div>
                         <div style="color:#94a3b8;margin-bottom:12px">📦 <b style="color:#e2e8f0">${chunkCount}</b> chunks &nbsp;·&nbsp; 💾 <b style="color:#e2e8f0">${sizeMB} MB</b></div>
-                        <button onclick="syncToGithub('${db_name}', '${pass}')" style="background:#6366f1;color:#fff;border:none;padding:8px 20px;border-radius:6px;cursor:pointer;font-size:13px;font-weight:600">☁️ Save to GitHub</button>
+                        <div id="github-sync-status" style="color:#a78bfa;font-size:13px">☁️ Syncing to GitHub automatically...</div>
                       `;
                       statusDiv.style.display = 'block';
                     }
