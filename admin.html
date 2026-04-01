@@ -1783,8 +1783,30 @@
               if (ev.done) {
                 const lastLog = logsEl.lastChild?.textContent || '';
                 const isError = lastLog.includes('❌') || lastLog.includes('Error');
-                showStatus('crawl', isError ? '❌ Crawl failed — see logs above' : '✅ Crawl & Ingestion Complete!', isError ? 'error' : 'success', true);
-                if (!isError) loadDatabases();
+                if (isError) {
+                  showStatus('crawl', '❌ Crawl failed — see logs above', 'error', true);
+                } else {
+                  // Fetch final chunk count + size then show sync button
+                  try {
+                    const statsRes = await fetch(`${API}/admin/db-stats?password=${encodeURIComponent(pass)}&db_name=${encodeURIComponent(db_name)}`);
+                    const statsJson = await statsRes.json();
+                    const dbStat = (statsJson.stats || []).find(s => s.name === db_name) || {};
+                    const chunkCount = dbStat.chunks ?? '?';
+                    const sizeMB = dbStat.size_mb != null ? dbStat.size_mb.toFixed(1) : '?';
+                    const statusDiv = document.getElementById('status-crawl');
+                    if (statusDiv) {
+                      statusDiv.innerHTML = `
+                        <div style="color:#4ade80;font-weight:600;margin-bottom:8px">✅ Crawl Complete!</div>
+                        <div style="color:#94a3b8;margin-bottom:12px">📦 <b style="color:#e2e8f0">${chunkCount}</b> chunks &nbsp;·&nbsp; 💾 <b style="color:#e2e8f0">${sizeMB} MB</b></div>
+                        <button onclick="syncToGithub('${db_name}', '${pass}')" style="background:#6366f1;color:#fff;border:none;padding:8px 20px;border-radius:6px;cursor:pointer;font-size:13px;font-weight:600">☁️ Save to GitHub</button>
+                      `;
+                      statusDiv.style.display = 'block';
+                    }
+                  } catch (_) {
+                    showStatus('crawl', '✅ Crawl & Ingestion Complete!', 'success', true);
+                  }
+                  loadDatabases();
+                }
               }
             } catch (e) {}
           }
@@ -1792,6 +1814,26 @@
       }
     } catch (e) {
       showStatus('crawl', '❌ Connection lost during crawl.', 'error');
+    }
+  }
+
+  async function syncToGithub(dbName, pass) {
+    const btn = event.target;
+    btn.disabled = true;
+    btn.textContent = '⏳ Saving...';
+    try {
+      const r = await fetch(`${API}/admin/sync-github`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ password: pass, db_name: dbName })
+      });
+      const data = await r.json();
+      btn.textContent = '✅ Saved to GitHub!';
+      btn.style.background = '#22c55e';
+    } catch (e) {
+      btn.textContent = '❌ Sync failed';
+      btn.style.background = '#ef4444';
+      btn.disabled = false;
     }
   }
 
