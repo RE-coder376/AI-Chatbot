@@ -5066,9 +5066,80 @@ async def crawl_site(data: dict, request: Request):
                     except Exception:
                         return None
 
+                async def _pdf_extract(pdf_url):
+                    """Download and extract all text from a PDF URL."""
+                    try:
+                        r = await asyncio.to_thread(
+                            _req.get, pdf_url, timeout=30,
+                            headers={"User-Agent": ua}
+                        )
+                        if r.status_code != 200:
+                            return None
+                        import io, pypdf
+                        reader = pypdf.PdfReader(io.BytesIO(r.content))
+                        parts = []
+                        for page in reader.pages:
+                            t = page.extract_text() or ""
+                            if t.strip():
+                                parts.append(t.strip())
+                        full = "\n".join(parts)
+                        return full if len(full) > 100 else None
+                    except Exception as _e:
+                        logger.warning(f"[PDF] {pdf_url}: {_e}")
+                        return None
+
+                async def _ocr_page_images(pg):
+                    """Extract text from images on a Playwright page using OCR."""
+                    try:
+                        import pytesseract
+                        from PIL import Image
+                        import io as _io
+                        img_urls = await pg.evaluate("""() =>
+                            Array.from(document.querySelectorAll('img'))
+                                .filter(i => i.naturalWidth > 150 && i.naturalHeight > 150)
+                                .map(i => i.src)
+                                .filter(s => s && !s.startsWith('data:') && !s.match(/\.(svg|gif)$/i))
+                                .slice(0, 8)
+                        """)
+                        texts = []
+                        for img_url in img_urls:
+                            try:
+                                r = await asyncio.to_thread(
+                                    _req.get, img_url, timeout=8, headers={"User-Agent": ua}
+                                )
+                                if r.status_code == 200:
+                                    img = Image.open(_io.BytesIO(r.content))
+                                    ocr_text = await asyncio.to_thread(
+                                        pytesseract.image_to_string, img
+                                    )
+                                    if len(ocr_text.strip()) > 20:
+                                        texts.append(ocr_text.strip())
+                            except Exception:
+                                pass
+                        return " ".join(texts)
+                    except Exception:
+                        return ""
+
                 async def _crawl_one(cur_url, idx):
                     nonlocal completed
                     async with sem:
+                        # --- PDF path ---
+                        if cur_url.lower().endswith(".pdf"):
+                            text = await _pdf_extract(cur_url)
+                            completed += 1
+                            if text:
+                                await log_queue.put(f"[{completed}/{len(to_crawl)}] 📄 {cur_url[:70]} ({len(text)} chars PDF)")
+                                async with flush_lock:
+                                    pending_pages.append({"url": cur_url, "text": text})
+                                    if len(pending_pages) >= 5:
+                                        batch = pending_pages[:]
+                                        pending_pages.clear()
+                                        await log_queue.put(f"💾 Saving batch (5 pages, {total_chunks} so far)...")
+                                        await _flush_pages(batch)
+                            else:
+                                await log_queue.put(f"[{completed}/{len(to_crawl)}] ⚠️  {cur_url[:70]} (PDF failed)")
+                            return
+
                         # --- Fast path: try requests first (5-10x faster, no browser overhead) ---
                         text = await _requests_extract(cur_url)
 
@@ -5096,6 +5167,14 @@ async def crawl_site(data: dict, request: Request):
                                             )
                                         except Exception:
                                             pass  # take whatever is there
+                                    # Lazy-scroll: trigger scroll-loaded content
+                                    try:
+                                        for _ in range(6):
+                                            await pg.evaluate("window.scrollBy(0, window.innerHeight)")
+                                            await asyncio.sleep(0.25)
+                                        await pg.evaluate("window.scrollTo(0, 0)")
+                                    except Exception:
+                                        pass
                                     title = await pg.title()
                                     try:
                                         meta_desc = await pg.eval_on_selector("meta[name='description']", "el => el.content")
@@ -5151,6 +5230,10 @@ async def crawl_site(data: dict, request: Request):
                                     text = re.sub(r'\s+', ' ', _clean_text(text or "")).strip()
                                     if len(text) < 200:
                                         text = f"{title}. {meta_desc}. {text}".strip()
+                                    # OCR: append text extracted from page images
+                                    ocr_text = await _ocr_page_images(pg)
+                                    if ocr_text:
+                                        text = f"{text} {ocr_text}".strip()
                                     break
                                 except Exception as e:
                                     if attempt < 2:
