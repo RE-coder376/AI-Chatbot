@@ -4982,9 +4982,9 @@ async def crawl_site(data: dict, request: Request):
                     chroma_db = await _chroma_run(
                         Chroma, persist_directory=str(chroma_dir), embedding_function=emb
                     )
-                chunk_size = 300
-                chunk_overlap = 100
-                chunk_step = chunk_size - chunk_overlap  # 200 — 50% more chunks vs old 300-step
+                chunk_size = 500
+                chunk_overlap = 50
+                chunk_step = chunk_size - chunk_overlap  # 450 — minimal overlap, max unique coverage
                 total_chunks = 0
                 completed = 0
                 flush_lock = asyncio.Lock()
@@ -4999,7 +4999,7 @@ async def crawl_site(data: dict, request: Request):
                         words = _clean_text(p["text"]).split()
                         for j in range(0, max(1, len(words)), chunk_step):
                             chunk = " ".join(words[j:j+chunk_size])
-                            if len(chunk) > 80:
+                            if len(chunk) > 20:
                                 chunks.append(Document(page_content=chunk, metadata={"source": p["url"]}))
                             if j + chunk_size >= len(words):
                                 break
