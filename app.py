@@ -5222,6 +5222,21 @@ async def crawl_site(data: dict, request: Request):
                                             )
                                         except Exception:
                                             pass  # take whatever is there
+                                    # Expand accordions/collapsibles — curriculum details often hidden inside
+                                    try:
+                                        await pg.evaluate("""() => {
+                                            const triggers = document.querySelectorAll(
+                                                '[data-accordion], [data-toggle], .accordion-trigger, ' +
+                                                '.accordion-button, .accordion-header, summary, ' +
+                                                'details:not([open]), [aria-expanded="false"], ' +
+                                                '.faq-question, .collapse-trigger, .expandable, ' +
+                                                '[class*="accordion"], [class*="collapse"], [class*="expand"]'
+                                            );
+                                            triggers.forEach(el => { try { el.click(); } catch(e) {} });
+                                        }""")
+                                        await asyncio.sleep(0.3)
+                                    except Exception:
+                                        pass
                                     # Lazy-scroll: trigger scroll-loaded content
                                     try:
                                         for _ in range(6):
