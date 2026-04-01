@@ -566,7 +566,7 @@
     </div>
   </div>
 
-  <div id="owner-only-cache"><button class="danger secondary" onclick="clearDraft()" style="margin-top:40px; color:#ef4444;">🗑️ Reset System Draft Cache</button></div>
+  <div id="owner-only-cache" style="display:none"></div>
 </div>
 
 <script>
@@ -710,14 +710,9 @@
       const prev = JSON.parse(localStorage.getItem('adminDbHistory') || '[]');
       dl.innerHTML = prev.map(n => `<option value="${n}">`).join('');
     }
-    // Auto-restore: if credentials saved, fill fields and log in automatically
-    const savedPass = localStorage.getItem('adminPass') || '';
-    const savedDb   = localStorage.getItem('adminDb') || '';
-    if (savedPass && savedDb) {
-      document.getElementById('master-pass').value = savedPass;
-      document.getElementById('admin-db').value = savedDb;
-      unlockSystem();
-    }
+    // Pre-fill fields from last login (no auto-submit — user still clicks Unlock)
+    const savedDb = localStorage.getItem('adminDb') || '';
+    if (savedDb) document.getElementById('admin-db').value = savedDb;
   });
 
   function toggle(id) {
