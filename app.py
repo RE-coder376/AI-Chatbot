@@ -334,25 +334,38 @@ def _github_sync_upload(db_name: str):
             return
         release_data = rel_resp.json()
         release_id = release_data["id"]
-        # Delete existing asset with same name (GitHub requires this before re-upload)
-        for asset in release_data.get("assets", []):
-            if asset["name"] == f"{db_name}.zip":
-                _req.delete(
-                    f"https://api.github.com/repos/{_GITHUB_USERNAME}/{_GITHUB_REPO}/releases/assets/{asset['id']}",
-                    headers=api_hdr, timeout=30)
-                break
-        # Stream-upload from temp file — no in-memory zip buffer
+        assets_map = {a["name"]: a for a in release_data.get("assets", [])}
+        # Step 1: upload under temp name first — old asset stays intact until upload confirmed
+        temp_name = f"{db_name}_uploading.zip"
+        # Clean up any stale temp asset from a previous failed upload
+        if temp_name in assets_map:
+            _req.delete(f"https://api.github.com/repos/{_GITHUB_USERNAME}/{_GITHUB_REPO}/releases/assets/{assets_map[temp_name]['id']}", headers=api_hdr, timeout=30)
         upload_url = (f"https://uploads.github.com/repos/{_GITHUB_USERNAME}/{_GITHUB_REPO}"
-                      f"/releases/{release_id}/assets?name={db_name}.zip")
+                      f"/releases/{release_id}/assets?name={temp_name}")
         with open(tmp_zip, "rb") as fz:
             up = _req.post(upload_url, data=fz,
                            headers={**api_hdr, "Content-Type": "application/zip",
                                     "Content-Length": str(file_size)},
                            timeout=600)
-        if up.status_code in (200, 201):
+        if up.status_code not in (200, 201):
+            logger.error(f"[GH-SYNC] Upload failed {up.status_code}: {up.text[:200]}")
+            return
+        new_asset_id = up.json()["id"]
+        # Step 2: upload confirmed — now safe to delete old asset
+        if f"{db_name}.zip" in assets_map:
+            _req.delete(f"https://api.github.com/repos/{_GITHUB_USERNAME}/{_GITHUB_REPO}/releases/assets/{assets_map[f'{db_name}.zip']['id']}", headers=api_hdr, timeout=30)
+        # Step 3: re-upload with final name (GitHub has no rename API)
+        with open(tmp_zip, "rb") as fz:
+            final_up = _req.post(
+                f"https://uploads.github.com/repos/{_GITHUB_USERNAME}/{_GITHUB_REPO}/releases/{release_id}/assets?name={db_name}.zip",
+                data=fz, headers={**api_hdr, "Content-Type": "application/zip", "Content-Length": str(file_size)},
+                timeout=600)
+        # Clean up temp asset regardless of final result
+        _req.delete(f"https://api.github.com/repos/{_GITHUB_USERNAME}/{_GITHUB_REPO}/releases/assets/{new_asset_id}", headers=api_hdr, timeout=30)
+        if final_up.status_code in (200, 201):
             logger.info(f"[GH-SYNC] ✅ {db_name} uploaded ({file_size/1024/1024:.1f}MB)")
         else:
-            logger.error(f"[GH-SYNC] Upload failed {up.status_code}: {up.text[:200]}")
+            logger.error(f"[GH-SYNC] Final rename-upload failed {final_up.status_code}: {final_up.text[:200]}")
     except Exception as e:
         logger.error(f"[GH-SYNC] Upload error: {e}")
     finally:
