@@ -216,16 +216,16 @@ def _github_sync_download():
                 with open(tmp_zip, "wb") as fout:
                     for chunk in r.iter_content(chunk_size=65536):
                         fout.write(chunk)
-            extract_path = DATABASES_DIR / db_name
-            extract_path.mkdir(exist_ok=True)
+            (DATABASES_DIR / db_name).mkdir(exist_ok=True)
             with zipfile.ZipFile(tmp_zip, "r") as z:
                 for member in z.namelist():
-                    if member == "config.json":
-                        continue  # Never overwrite repo config — passwords/settings live there
-                    z.extract(member, extract_path)
+                    # Skip config.json at root level — passwords/settings live in repo config
+                    if member in (f"{db_name}/config.json", "config.json"):
+                        continue
+                    z.extract(member, DATABASES_DIR)
                     # Fix permissions — Windows zips store 0o000 on Linux; make files rw
                     try:
-                        extracted = extract_path / member
+                        extracted = DATABASES_DIR / member
                         if extracted.is_file():
                             extracted.chmod(0o644)
                         elif extracted.is_dir():
