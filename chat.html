@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
   <title>Support Chat</title>
   <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/dompurify@3/dist/purify.min.js"></script>
   <style>
     :root {
       --primary: #6366f1;
@@ -448,12 +449,12 @@
               // Scroll to top of new bot message so user reads from the start
               msgDiv.scrollIntoView({ block: 'start', behavior: 'smooth' });
               fullAnswer += data.content;
-              bubble.innerHTML = marked.parse(renderCards(fullAnswer));
+              bubble.innerHTML = DOMPurify.sanitize(marked.parse(renderCards(fullAnswer)));
               // Skip nearBottom on first chunk — scrollIntoView already positioned correctly
               continue;
             }
             fullAnswer += data.content;
-            bubble.innerHTML = marked.parse(renderCards(fullAnswer));
+            bubble.innerHTML = DOMPurify.sanitize(marked.parse(renderCards(fullAnswer)));
             // Only auto-scroll during streaming if user hasn't scrolled up to read
             const nearBottom = messagesEl.scrollHeight - messagesEl.scrollTop - messagesEl.clientHeight < 80;
             if (nearBottom) messagesEl.scrollTop = messagesEl.scrollHeight;

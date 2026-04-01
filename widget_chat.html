@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
   <title>Chat</title>
   <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/dompurify@3/dist/purify.min.js"></script>
   <style>
     :root {
       --primary: #6366f1;
@@ -325,7 +326,7 @@
               msgDiv.scrollIntoView({ block: 'start', behavior: 'smooth' });
             }
             fullAnswer += data.content;
-            bubble.innerHTML = marked.parse(fullAnswer);
+            bubble.innerHTML = DOMPurify.sanitize(marked.parse(fullAnswer));
             const nearBottom = messagesEl.scrollHeight - messagesEl.scrollTop - messagesEl.clientHeight < 80;
             if (nearBottom) messagesEl.scrollTop = messagesEl.scrollHeight;
           } else if (data.type === 'metadata') {

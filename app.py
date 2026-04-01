@@ -5474,7 +5474,7 @@ async def human_handoff(request: Request):
     return {"success": False, "message": "Could not send — please contact us directly."}
 
 @app.post("/admin/knowledge-gaps/suggest")
-async def suggest_gap_answer(data: dict):
+async def suggest_gap_answer(request: Request, data: dict):
     cfg = get_config()
     if not hmac.compare_digest(_extract_password(request, data.get("password", "")).encode(), cfg.get("admin_password", "").encode()):
         return JSONResponse({"detail": "Unauthorized"}, status_code=401)
