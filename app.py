@@ -4092,19 +4092,21 @@ def get_embed_code(request: Request, password: str = ""):
     return {"snippet": snippet, "embed_code": snippet, "db": db_name, "widget_key": widget_key}
 
 @app.post("/admin/reindex")
-async def reindex(data: dict):
+async def reindex(request: Request, data: dict):
     cfg = get_config()
     if not hmac.compare_digest(_extract_password(request, data.get("password", "")).encode(), cfg.get("admin_password", "").encode()):
         return JSONResponse({"detail": "Unauthorized"}, status_code=401)
     target = data.get("target_db", "").strip()
     try:
         if target:
-            # Temporarily switch active, reindex, restore
             prev = ACTIVE_DB_FILE.read_text(encoding="utf-8").strip() if ACTIVE_DB_FILE.exists() else ""
-            ACTIVE_DB_FILE.write_text(target, encoding="utf-8")
-            local_db = None; embeddings_model = None; _load_db_now()
-            if prev: ACTIVE_DB_FILE.write_text(prev, encoding="utf-8")
-            local_db = None; embeddings_model = None; _load_db_now()
+            try:
+                ACTIVE_DB_FILE.write_text(target, encoding="utf-8")
+                local_db = None; embeddings_model = None; _load_db_now()
+            finally:
+                # Always restore original active DB — even if reindex crashes
+                if prev: ACTIVE_DB_FILE.write_text(prev, encoding="utf-8")
+                local_db = None; embeddings_model = None; _load_db_now()
             return {"success": True, "message": f"Reindex of '{target}' complete"}
         else:
             local_db = None; embeddings_model = None; _load_db_now()
