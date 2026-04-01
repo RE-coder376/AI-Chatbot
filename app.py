@@ -5058,10 +5058,10 @@ async def crawl_site(data: dict, request: Request):
                         clean = re.sub(r'<style[^>]*>.*?</style>', ' ', clean, flags=re.DOTALL | re.I)
                         clean = re.sub(r'<[^>]+>', ' ', clean)
                         clean = re.sub(r'\s+', ' ', clean).strip()
-                        combined = f"{title_text}. {ld_text} {clean[:25000]}".strip()
+                        combined = f"{title_text}. {ld_text} {clean}".strip()
                         combined = re.sub(r'\s+', ' ', _clean_text(combined))
                         if len(combined) > 300:
-                            return combined[:30000]
+                            return combined
                         return None
                     except Exception:
                         return None
