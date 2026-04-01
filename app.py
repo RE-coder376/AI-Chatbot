@@ -4893,7 +4893,7 @@ async def crawl_site(data: dict, request: Request):
                 # Unique path per crawl run — forces Rust layer to create a fresh client.
                 # Reusing the same path hits the Rust path→client cache (stale connection)
                 # even after wiping SQLite files → "no such table: collections".
-                import time as _crawl_time
+                import time as _crawl_time, shutil
                 chroma_dir = Path(f"/dev/shm/crawl_{db_name}_{int(_crawl_time.time())}")
                 # Clean up any leftover dirs from previous runs to free /dev/shm space
                 for _old_dir in Path("/dev/shm").glob(f"crawl_{db_name}_*"):
