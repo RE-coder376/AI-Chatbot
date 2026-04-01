@@ -5222,19 +5222,33 @@ async def crawl_site(data: dict, request: Request):
                                             )
                                         except Exception:
                                             pass  # take whatever is there
-                                    # Expand accordions/collapsibles — curriculum details often hidden inside
+                                    # Expand ALL hidden content: accordions, tabs, collapsibles, show-more
                                     try:
                                         await pg.evaluate("""() => {
-                                            const triggers = document.querySelectorAll(
+                                            // 1. Accordions & collapsibles
+                                            document.querySelectorAll(
                                                 '[data-accordion], [data-toggle], .accordion-trigger, ' +
                                                 '.accordion-button, .accordion-header, summary, ' +
                                                 'details:not([open]), [aria-expanded="false"], ' +
                                                 '.faq-question, .collapse-trigger, .expandable, ' +
                                                 '[class*="accordion"], [class*="collapse"], [class*="expand"]'
-                                            );
-                                            triggers.forEach(el => { try { el.click(); } catch(e) {} });
+                                            ).forEach(el => { try { el.click(); } catch(e) {} });
+                                            // 2. Inactive tab panels (Overview/Curriculum/Syllabus tabs on course pages)
+                                            document.querySelectorAll(
+                                                '[role="tab"]:not([aria-selected="true"]), ' +
+                                                '.tab:not(.active), .nav-tab:not(.active), ' +
+                                                '[class*="tab-"]:not([class*="active"])'
+                                            ).forEach(el => { try { el.click(); } catch(e) {} });
+                                            // 3. "Show more" / "Read more" / "Load more" buttons
+                                            document.querySelectorAll('button, a').forEach(el => {
+                                                const t = (el.innerText || '').toLowerCase().trim();
+                                                if (t === 'show more' || t === 'read more' || t === 'load more' ||
+                                                    t === 'see more' || t === 'view more' || t === 'expand all') {
+                                                    try { el.click(); } catch(e) {}
+                                                }
+                                            });
                                         }""")
-                                        await asyncio.sleep(0.3)
+                                        await asyncio.sleep(0.5)
                                     except Exception:
                                         pass
                                     # Lazy-scroll: trigger scroll-loaded content
