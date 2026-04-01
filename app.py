@@ -5072,7 +5072,7 @@ async def crawl_site(data: dict, request: Request):
                         # --- Fast path: try requests first (5-10x faster, no browser overhead) ---
                         text = await _requests_extract(cur_url)
 
-                        if not text:
+                        if not text or len(text) < 300:
                             # --- Playwright path: needed for JS-rendered pages ---
                             pg = await ctx.new_page()
                             await stealth(pg)
