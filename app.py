@@ -4879,7 +4879,15 @@ async def crawl_site(data: dict, request: Request):
                 # chromadb's Rust layer caches clients by path — if crawl reuses local_db's
                 # path, the cached client (pointing to the wiped/deleted inode) causes
                 # "no such table: collections". A unique crawl prefix avoids the conflict.
-                chroma_dir = Path(f"/dev/shm/crawl_{db_name}")
+                # Unique path per crawl run — forces Rust layer to create a fresh client.
+                # Reusing the same path hits the Rust path→client cache (stale connection)
+                # even after wiping SQLite files → "no such table: collections".
+                import time as _crawl_time
+                chroma_dir = Path(f"/dev/shm/crawl_{db_name}_{int(_crawl_time.time())}")
+                # Clean up any leftover dirs from previous runs to free /dev/shm space
+                for _old_dir in Path("/dev/shm").glob(f"crawl_{db_name}_*"):
+                    if _old_dir != chroma_dir:
+                        shutil.rmtree(_old_dir, ignore_errors=True)
                 chroma_dir.mkdir(parents=True, exist_ok=True)
                 if clear_first and db_dir.exists():
                     import shutil, gc
@@ -4969,8 +4977,6 @@ async def crawl_site(data: dict, request: Request):
                 def _chroma_run(fn, *args, **kwargs):
                     return _loop.run_in_executor(_chroma_ex, lambda: fn(*args, **kwargs))
 
-                # Always wipe chroma_dir (/tmp) to start fresh — it's tmpfs, no old data
-                _wipe_chroma_dir(chroma_dir)
                 chroma_db = None
                 try:
                     chroma_db = await _chroma_run(
