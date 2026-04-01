@@ -5043,7 +5043,9 @@ async def crawl_site(data: dict, request: Request):
                         await _chroma_run(chroma_db.add_documents, chunks)
                     total_chunks += len(chunks)
 
-                PARALLEL = 8  # 8 parallel tabs — safe RAM limit (~800MB peak)
+                PARALLEL = 20  # Max safe for HF Spaces: 16GB RAM, 2 vCPU (I/O-bound, not CPU-bound)
+                # RAM: 20 tabs × ~150MB = 3GB + 2GB app = 5GB total (well within 16GB)
+                # CPU: Playwright waits on network 80% of time — parallelism wins over CPU count
                 sem = asyncio.Semaphore(PARALLEL)
                 log_queue = asyncio.Queue()
 
