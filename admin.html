@@ -596,6 +596,28 @@
     });
   });
 
+  // When user returns to tab: resume polling if a crawl was in progress
+  document.addEventListener('visibilitychange', async () => {
+    if (document.hidden) return;
+    const db_name = window._activeCrawlDb;
+    const pass    = window._activeCrawlPass;
+    if (!db_name || !pass) return;
+    // Check server — if still running, resume polling UI
+    try {
+      const r = await fetch(`${API}/admin/crawl-status?db_name=${encodeURIComponent(db_name)}&password=${encodeURIComponent(pass)}&offset=0`);
+      if (!r.ok) return;
+      const data = await r.json();
+      if (!data.running && !data.done) return;
+      // Rebuild log UI and resume poll
+      const statusEl = document.getElementById('crawl-status');
+      if (statusEl && !document.getElementById('crawl-logs')) {
+        statusEl.innerHTML = '<div style="margin-bottom:10px;">🔄 Reconnected — crawl still running...</div><div id="crawl-logs" style="font-family:monospace; font-size:10px; background:#1e293b; color:#86efac; padding:12px; border-radius:12px; max-height:200px; overflow-y:auto; line-height:1.4;"></div>';
+      }
+      const logsEl = document.getElementById('crawl-logs');
+      if (logsEl && !data.done) _pollCrawlStatus(db_name, pass, logsEl, statusEl);
+    } catch (_) {}
+  });
+
   function showStatus(id, msg, type, persistent = false) { 
     const el = document.getElementById(id + '-status'); 
     if (!el) return; 
@@ -1746,75 +1768,79 @@
     statusEl.innerHTML = '<div style="margin-bottom:10px;">🚀 Initializing...</div><div id="crawl-logs" style="font-family:monospace; font-size:10px; background:#1e293b; color:#86efac; padding:12px; border-radius:12px; max-height:200px; overflow-y:auto; line-height:1.4;"></div>';
     const logsEl = document.getElementById('crawl-logs');
 
+    // Start crawl as background task — returns immediately, crawl runs on server
     try {
-      const response = await fetch(`${API}/admin/crawl`, {
+      const startRes = await fetch(`${API}/admin/crawl`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ password: pass, url, db_name, max_pages: maxPages, embedding_model, clear_before_crawl: clearFirst, url_patterns: urlPatterns })
       });
-
-      if (!response.ok) {
-        const err = await response.json();
-        showStatus('crawl', err.detail || 'Crawl failed.', 'error');
+      if (!startRes.ok) {
+        const err = await startRes.json();
+        showStatus('crawl', err.detail || 'Crawl failed to start.', 'error');
         return;
       }
-
-      const reader = response.body.getReader();
-      const decoder = new TextDecoder();
-      
-      while (true) {
-        const { value, done } = await reader.read();
-        if (done) break;
-        
-        const chunk = decoder.decode(value);
-        const lines = chunk.split('\n');
-        
-        for (const line of lines) {
-          if (line.startsWith('data: ')) {
-            try {
-              const ev = JSON.parse(line.substring(6));
-              if (ev.msg) {
-                const log = document.createElement('div');
-                log.textContent = `> ${ev.msg}`;
-                if (ev.msg.startsWith('❌')) log.style.color = '#f87171';
-                logsEl.appendChild(log);
-                logsEl.scrollTop = logsEl.scrollHeight;
-                statusEl.firstChild.textContent = `⚙️ ${ev.msg}`;
-              }
-              if (ev.done) {
-                const lastLog = logsEl.lastChild?.textContent || '';
-                const isError = lastLog.includes('❌') || lastLog.includes('Error');
-                if (isError) {
-                  showStatus('crawl', '❌ Crawl failed — see logs above', 'error', true);
-                } else {
-                  // Fetch final chunk count + size then show sync button
-                  try {
-                    const statsRes = await fetch(`${API}/admin/db-stats?password=${encodeURIComponent(pass)}&db_name=${encodeURIComponent(db_name)}`);
-                    const statsJson = await statsRes.json();
-                    const dbStat = (statsJson.stats || []).find(s => s.name === db_name) || {};
-                    const chunkCount = dbStat.chunks ?? '?';
-                    const sizeMB = dbStat.size_mb != null ? dbStat.size_mb.toFixed(1) : '?';
-                    const statusDiv = document.getElementById('status-crawl');
-                    if (statusDiv) {
-                      statusDiv.innerHTML = `
-                        <div style="color:#4ade80;font-weight:600;margin-bottom:8px">✅ Crawl Complete!</div>
-                        <div style="color:#94a3b8;margin-bottom:12px">📦 <b style="color:#e2e8f0">${chunkCount}</b> chunks &nbsp;·&nbsp; 💾 <b style="color:#e2e8f0">${sizeMB} MB</b></div>
-                        <div id="github-sync-status" style="color:#a78bfa;font-size:13px">☁️ Syncing to GitHub automatically...</div>
-                      `;
-                      statusDiv.style.display = 'block';
-                    }
-                  } catch (_) {
-                    showStatus('crawl', '✅ Crawl & Ingestion Complete!', 'success', true);
-                  }
-                  loadDatabases();
-                }
-              }
-            } catch (e) {}
-          }
-        }
+      const startData = await startRes.json();
+      if (startData.status === 'already_running') {
+        showStatus('crawl', '⚙️ Crawl already running — polling for status...', 'loading', true);
       }
     } catch (e) {
-      showStatus('crawl', '❌ Connection lost during crawl.', 'error');
+      showStatus('crawl', '❌ Could not start crawl.', 'error');
+      return;
+    }
+
+    // Poll /admin/crawl-status every 2s — works even if tab is backgrounded or refreshed
+    window._activeCrawlDb = db_name;
+    window._activeCrawlPass = pass;
+    await _pollCrawlStatus(db_name, pass, logsEl, statusEl);
+  }
+
+  async function _pollCrawlStatus(db_name, pass, logsEl, statusEl) {
+    let offset = 0;
+    while (true) {
+      try {
+        const r = await fetch(`${API}/admin/crawl-status?db_name=${encodeURIComponent(db_name)}&password=${encodeURIComponent(pass)}&offset=${offset}`);
+        if (!r.ok) { await new Promise(res => setTimeout(res, 3000)); continue; }
+        const data = await r.json();
+        for (const msg of (data.logs || [])) {
+          const log = document.createElement('div');
+          log.textContent = `> ${msg}`;
+          if (msg.startsWith('❌')) log.style.color = '#f87171';
+          logsEl.appendChild(log);
+          logsEl.scrollTop = logsEl.scrollHeight;
+          if (statusEl.firstChild) statusEl.firstChild.textContent = `⚙️ ${msg}`;
+        }
+        offset = data.total;
+        if (data.done) {
+          window._activeCrawlDb = null;
+          const isError = data.error || (logsEl.lastChild?.textContent || '').includes('❌');
+          if (isError) {
+            showStatus('crawl', '❌ Crawl failed — see logs above', 'error', true);
+          } else {
+            try {
+              const statsRes = await fetch(`${API}/admin/db-stats?password=${encodeURIComponent(pass)}&db_name=${encodeURIComponent(db_name)}`);
+              const statsJson = await statsRes.json();
+              const dbStat = (statsJson.stats || []).find(s => s.name === db_name) || {};
+              const chunkCount = dbStat.chunks ?? '?';
+              const sizeMB = dbStat.size_mb != null ? dbStat.size_mb.toFixed(1) : '?';
+              const statusDiv = document.getElementById('status-crawl');
+              if (statusDiv) {
+                statusDiv.innerHTML = `
+                  <div style="color:#4ade80;font-weight:600;margin-bottom:8px">✅ Crawl Complete!</div>
+                  <div style="color:#94a3b8;margin-bottom:12px">📦 <b style="color:#e2e8f0">${chunkCount}</b> chunks &nbsp;·&nbsp; 💾 <b style="color:#e2e8f0">${sizeMB} MB</b></div>
+                  <div id="github-sync-status" style="color:#a78bfa;font-size:13px">☁️ Syncing to GitHub automatically...</div>
+                `;
+                statusDiv.style.display = 'block';
+              }
+            } catch (_) {
+              showStatus('crawl', '✅ Crawl & Ingestion Complete!', 'success', true);
+            }
+            loadDatabases();
+          }
+          break;
+        }
+      } catch (_) {}
+      await new Promise(res => setTimeout(res, 2000));
     }
   }
 

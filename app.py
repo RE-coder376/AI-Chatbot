@@ -4684,6 +4684,23 @@ async def delete_api_source(data: dict):
     db_cfg_file.write_text(json.dumps(existing, indent=2), encoding="utf-8")
     return {"success": True, "message": f"Deleted '{name}'"}
 
+# Per-DB crawl state for background crawl — survives tab close / SSE disconnect
+_crawl_state: dict = {}
+# Format: {db_name: {"logs": [], "done": False, "running": False, "error": False}}
+
+@app.get("/admin/crawl-status")
+async def get_crawl_status(request: Request):
+    db_name  = request.query_params.get("db_name", "").strip()
+    password = request.query_params.get("password", "")
+    offset   = int(request.query_params.get("offset", 0))
+    cfg = get_config(db_name) if db_name else get_config()
+    admin_auth(password, cfg)
+    state = _crawl_state.get(db_name, {"logs": [], "done": True, "running": False, "error": False})
+    logs  = state["logs"]
+    return JSONResponse({"logs": logs[offset:], "done": state["done"],
+                         "running": state.get("running", False),
+                         "error": state.get("error", False), "total": len(logs)})
+
 @app.post("/admin/crawl")
 async def crawl_site(data: dict, request: Request):
     db_name_auth = _extract_admin_db(request, data.get("db_name", "").strip())
@@ -5359,7 +5376,33 @@ async def crawl_site(data: dict, request: Request):
             yield _send(f"❌ Error: {e}\n{tb[:600]}")
             yield "data: {\"done\": true}\n\n"
 
-    return StreamingResponse(_stream(), media_type="text/event-stream")
+    # Run crawl as a background task — decoupled from the HTTP connection.
+    # The browser tab can close/go to background and the crawl keeps going.
+    if _crawl_state.get(db_name, {}).get("running"):
+        return JSONResponse({"status": "already_running"}, status_code=200)
+    _crawl_state[db_name] = {"logs": [], "done": False, "running": True, "error": False}
+
+    async def _bg_crawl():
+        try:
+            async for chunk in _stream():
+                if chunk.startswith("data: "):
+                    try:
+                        d = json.loads(chunk[6:].strip())
+                        if d.get("msg"):
+                            _crawl_state[db_name]["logs"].append(d["msg"])
+                        if d.get("done"):
+                            _crawl_state[db_name]["done"] = True
+                    except Exception:
+                        pass
+        except Exception as _bg_e:
+            _crawl_state[db_name]["logs"].append(f"❌ Background task error: {_bg_e}")
+            _crawl_state[db_name]["error"] = True
+        finally:
+            _crawl_state[db_name]["running"] = False
+            _crawl_state[db_name]["done"] = True
+
+    asyncio.create_task(_bg_crawl())
+    return JSONResponse({"status": "started", "db_name": db_name})
 
 @app.get("/history/{visitor_id}")
 async def get_visitor_history(visitor_id: str):
