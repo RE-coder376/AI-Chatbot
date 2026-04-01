@@ -148,8 +148,8 @@ import random
 _status = "starting"
 
 # ── GitHub Sync ────────────────────────────────────────────────────────────────
-_GITHUB_USERNAME = os.getenv("GITHUB_USERNAME", "")
-_GITHUB_REPO     = os.getenv("GITHUB_REPO", "")
+_GITHUB_USERNAME = os.getenv("GITHUB_USERNAME", "RE-coder376")
+_GITHUB_REPO     = os.getenv("GITHUB_REPO", "databases")
 _GITHUB_CLONE_DIR = Path("/tmp/chatbot-dbs")
 
 def _github_repo_url() -> str:
