@@ -5324,24 +5324,10 @@ async def crawl_site(data: dict, request: Request):
                                             } catch(e) {}
                                         }
 
-                                        // ── Remove noise elements before body extraction ──
-                                        // (script, style, cookie banners — but keep nav/sidebar/footer)
-                                        const noiseSelectors = [
-                                            'script', 'style', 'noscript',
-                                            '.cookie-banner', '.cookie-notice', '#cookie-consent',
-                                            '.chat-widget', '.intercom-frame', '#crisp-chatbox',
-                                            '[class*="cookie"]', '[id*="cookie"]',
-                                            '[class*="gdpr"]', '[id*="gdpr"]',
-                                            'iframe[title*="recaptcha"]'
-                                        ];
-                                        // Clone body to avoid mutating live DOM
-                                        const bodyClone = document.body.cloneNode(true);
-                                        for (let sel of noiseSelectors) {
-                                            bodyClone.querySelectorAll(sel).forEach(el => el.remove());
-                                        }
-
                                         // ── Full body text (includes header, nav, sidebar, main, footer) ──
-                                        const bodyText = bodyClone.innerText || bodyClone.textContent || '';
+                                        // innerText naturally skips <script>, <style>, display:none elements.
+                                        // No cloneNode — deep cloning large expanded DOMs causes timeouts.
+                                        const bodyText = document.body ? document.body.innerText : '';
 
                                         return (jsonLdText + '\\n' + bodyText).trim();
                                     }""")
@@ -5366,8 +5352,9 @@ async def crawl_site(data: dict, request: Request):
 
                         import hashlib as _hashlib
                         if len(text) > 150:
-                            # Content-level dedup: skip pages with same content (e.g. Shopify filtered collections)
-                            content_key = _hashlib.md5(re.sub(r'\s+', '', text[:400]).encode()).hexdigest()
+                            # Content-level dedup: hash full text so pages sharing a sidebar TOC but having
+                            # different main content are NOT incorrectly flagged as duplicates.
+                            content_key = _hashlib.md5(re.sub(r'\s+', '', text).encode()).hexdigest()
                             if content_key in seen_content_hashes:
                                 await log_queue.put(f"[{completed}/{len(to_crawl)}] ♻️  {cur_url[:70]} (duplicate content — skipped)")
                             else:
