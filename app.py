@@ -5413,11 +5413,13 @@ async def crawl_site(data: dict, request: Request):
                     except Exception:
                         pass
 
+            # Evict cached DB instance so next query reloads from disk
+            _db_instance_cache.pop(db_name, None)
             # Reload local_db if we just re-crawled the active DB
             active_name = ACTIVE_DB_FILE.read_text(encoding="utf-8").strip() if ACTIVE_DB_FILE.exists() else ""
             if db_name == active_name and chroma_db is not None:
                 local_db = chroma_db
-                yield _send(f"🔄 DB reloaded in memory — no restart needed.")
+            yield _send(f"🔄 DB reloaded in memory — no restart needed.")
             yield _send(f"✅ Done! {total_chunks} chunks ingested into '{db_name}'.")
             asyncio.get_event_loop().run_in_executor(None, _github_sync_upload, db_name)
             yield "data: {\"done\": true}\n\n"
