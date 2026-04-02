@@ -4732,7 +4732,7 @@ async def crawl_site(data: dict, request: Request):
 
     url             = data.get("url", "").strip().rstrip("/")
     db_name         = data.get("db_name", "").strip()
-    max_pages       = min(int(data.get("max_pages", 1000)), 5000)  # hard cap at 5000
+    max_pages       = min(int(data.get("max_pages", 2000)), 5000)  # hard cap at 5000
     clear_first     = bool(data.get("clear_before_crawl", False))
     url_patterns    = data.get("url_patterns", [])
     embedding_model = data.get("embedding_model", "bge")
@@ -5294,7 +5294,22 @@ async def crawl_site(data: dict, request: Request):
                                                 jsonLdText += ' ' + extract(data);
                                             } catch(e) {}
                                         }
-                                        // 2. Try specific content selectors (generic + Shopify + WooCommerce + common CMSes)
+                                        // 2. Extract sidebar/TOC navigation (Docusaurus, GitBook, ReadTheDocs)
+                                        // These contain book structure (Part 0, Part 1...) outside <main>
+                                        let sidebarText = '';
+                                        for (let s of [
+                                            '.theme-doc-sidebar-container', '.sidebar-container',
+                                            'nav[class*="sidebar"]', 'nav[class*="menu"]',
+                                            '.menu__list', '[class*="sidebarNav"]',
+                                            '.gitbook-sidebar', '.toc-sidebar', 'aside nav'
+                                        ]) {
+                                            let nav = document.querySelector(s);
+                                            if (nav && nav.innerText.trim().length > 100) {
+                                                sidebarText = nav.innerText.trim();
+                                                break;
+                                            }
+                                        }
+                                        // 3. Try specific content selectors (generic + Shopify + WooCommerce + common CMSes)
                                         const selectors = [
                                             'main', 'article', '.content', '#content', '#main-content',
                                             '.product-details', '#description', '.product__description',
@@ -5306,10 +5321,10 @@ async def crawl_site(data: dict, request: Request):
                                         for (let s of selectors) {
                                             let el = document.querySelector(s);
                                             if (el && el.innerText.trim().length > 80) {
-                                                return (jsonLdText + ' ' + el.innerText).trim();
+                                                return (jsonLdText + ' ' + sidebarText + ' ' + el.innerText).trim();
                                             }
                                         }
-                                        // 3. Fallback: full body text
+                                        // 4. Fallback: full body text
                                         const bodyText = document.body ? document.body.innerText : '';
                                         return (jsonLdText + ' ' + bodyText).trim();
                                     }""")
