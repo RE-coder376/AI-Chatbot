@@ -5290,12 +5290,27 @@ async def crawl_site(data: dict, request: Request):
                                             } catch(e) {}
                                         }
 
-                                        // ── Full body text (includes header, nav, sidebar, main, footer) ──
-                                        // innerText naturally skips <script>, <style>, display:none elements.
-                                        // No cloneNode — deep cloning large expanded DOMs causes timeouts.
+                                        // ── Sidebar: use textContent (captures collapsed/hidden items too) ──
+                                        // innerText skips display:none — collapsed sidebar items would be missed.
+                                        // textContent gets ALL text in DOM including collapsed nav trees.
+                                        let sidebarText = '';
+                                        for (let sel of [
+                                            '.theme-doc-sidebar-container', '.sidebar-container',
+                                            'nav[class*="sidebar"]', 'nav[class*="menu"]',
+                                            '.menu__list', '[class*="sidebarNav"]',
+                                            '.gitbook-sidebar', '.toc-sidebar', 'aside nav', 'aside'
+                                        ]) {
+                                            const el = document.querySelector(sel);
+                                            if (el) {
+                                                const t = el.textContent.replace(/\\s+/g, ' ').trim();
+                                                if (t.length > 100) { sidebarText = t; break; }
+                                            }
+                                        }
+
+                                        // ── Main body: use innerText (rendered text only, skips scripts) ──
                                         const bodyText = document.body ? document.body.innerText : '';
 
-                                        return (jsonLdText + '\\n' + bodyText).trim();
+                                        return (jsonLdText + '\\n' + sidebarText + '\\n' + bodyText).trim();
                                     }""")
                                     text = re.sub(r'\s+', ' ', _clean_text(text or "")).strip()
                                     if len(text) < 200:
