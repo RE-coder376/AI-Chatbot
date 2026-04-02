@@ -5224,40 +5224,70 @@ async def crawl_site(data: dict, request: Request):
                                             )
                                         except Exception:
                                             pass  # take whatever is there
-                                    # Expand ALL hidden content: accordions, tabs, collapsibles, show-more
+                                    # ── PHASE 1: Click / expand EVERY interactive element ──────────────
                                     try:
                                         await pg.evaluate("""() => {
-                                            // 1. Accordions & collapsibles
+                                            // Force-open ALL <details> elements (no click needed)
+                                            document.querySelectorAll('details').forEach(d => d.setAttribute('open', ''));
+
+                                            // Click ALL aria-expanded=false (sidebar trees, accordions, dropdowns)
+                                            document.querySelectorAll('[aria-expanded="false"]').forEach(el => {
+                                                try { el.click(); } catch(e) {}
+                                            });
+
+                                            // Accordion / collapsible triggers
                                             document.querySelectorAll(
-                                                '[data-accordion], [data-toggle], .accordion-trigger, ' +
-                                                '.accordion-button, .accordion-header, summary, ' +
-                                                'details:not([open]), [aria-expanded="false"], ' +
-                                                '.faq-question, .collapse-trigger, .expandable, ' +
-                                                '[class*="accordion"], [class*="collapse"], [class*="expand"]'
+                                                '.accordion-button:not(.collapsed), .accordion-button, ' +
+                                                '.accordion-trigger, .accordion-header, summary, ' +
+                                                '[data-toggle], [data-collapse], [data-expand], ' +
+                                                '.faq-question, .collapse-trigger, ' +
+                                                '[class*="accordion"]:not([class*="content"]):not([class*="body"]), ' +
+                                                '[class*="collaps"]:not([class*="content"])'
                                             ).forEach(el => { try { el.click(); } catch(e) {} });
-                                            // 2. Inactive tab panels (Overview/Curriculum/Syllabus tabs on course pages)
+
+                                            // Sidebar category toggle buttons (Docusaurus, GitBook, custom)
+                                            document.querySelectorAll(
+                                                '.menu__caret, .menu__link--sublist, ' +
+                                                '.sidebar-item-toggle, [class*="sidebar"] button, ' +
+                                                '[class*="nav-group"] button, [class*="navGroup"] button, ' +
+                                                '[class*="category"] button, [class*="treeItem"] button, ' +
+                                                '.DocSidebar button, .sidebarItemTitle'
+                                            ).forEach(el => { try { el.click(); } catch(e) {} });
+
+                                            // Nav dropdown toggles (mega menus, hamburger, dropdowns)
+                                            document.querySelectorAll(
+                                                '.dropdown-toggle, .nav-toggle, .menu-toggle, .hamburger, ' +
+                                                '[data-dropdown], [data-menu-toggle], ' +
+                                                'nav button:not([aria-expanded="true"]), ' +
+                                                '[class*="dropdown-toggle"], [class*="nav-toggle"], ' +
+                                                '[class*="menuToggle"], [class*="navToggle"]'
+                                            ).forEach(el => { try { el.click(); } catch(e) {} });
+
+                                            // Inactive tab panels
                                             document.querySelectorAll(
                                                 '[role="tab"]:not([aria-selected="true"]), ' +
-                                                '.tab:not(.active), .nav-tab:not(.active), ' +
-                                                '[class*="tab-"]:not([class*="active"])'
+                                                '.tab:not(.active):not(.tab-content), ' +
+                                                '.nav-tab:not(.active)'
                                             ).forEach(el => { try { el.click(); } catch(e) {} });
-                                            // 3. "Show more" / "Read more" / "Load more" buttons
-                                            document.querySelectorAll('button, a').forEach(el => {
-                                                const t = (el.innerText || '').toLowerCase().trim();
-                                                if (t === 'show more' || t === 'read more' || t === 'load more' ||
-                                                    t === 'see more' || t === 'view more' || t === 'expand all') {
+
+                                            // "Show more" / "Read more" / "Load more" text buttons
+                                            document.querySelectorAll('button, [role="button"], a').forEach(el => {
+                                                const t = (el.innerText || el.textContent || '').toLowerCase().trim();
+                                                if (['show more', 'read more', 'load more', 'see more',
+                                                     'view more', 'expand all', 'show all', 'view all',
+                                                     'see all', 'load all', '+ more'].includes(t)) {
                                                     try { el.click(); } catch(e) {}
                                                 }
                                             });
                                         }""")
-                                        await asyncio.sleep(0.5)
+                                        await asyncio.sleep(0.8)  # wait for animations/dynamic loads
                                     except Exception:
                                         pass
-                                    # Lazy-scroll: trigger scroll-loaded content
+                                    # Lazy-scroll: trigger scroll-loaded / infinite-scroll content
                                     try:
-                                        for _ in range(6):
+                                        for _ in range(8):
                                             await pg.evaluate("window.scrollBy(0, window.innerHeight)")
-                                            await asyncio.sleep(0.25)
+                                            await asyncio.sleep(0.2)
                                         await pg.evaluate("window.scrollTo(0, 0)")
                                     except Exception:
                                         pass
@@ -5267,10 +5297,9 @@ async def crawl_site(data: dict, request: Request):
                                     except Exception:
                                         meta_desc = ""
                                     text = await pg.evaluate("""() => {
-                                        // 1. Extract JSON-LD structured data (always present in Shopify, e-commerce sites)
+                                        // ── JSON-LD structured data (Shopify, e-commerce, schema.org) ──
                                         let jsonLdText = '';
-                                        const jsonLdScripts = document.querySelectorAll('script[type="application/ld+json"]');
-                                        for (let script of jsonLdScripts) {
+                                        for (let script of document.querySelectorAll('script[type="application/ld+json"]')) {
                                             try {
                                                 const data = JSON.parse(script.textContent);
                                                 const extract = (obj) => {
@@ -5294,39 +5323,27 @@ async def crawl_site(data: dict, request: Request):
                                                 jsonLdText += ' ' + extract(data);
                                             } catch(e) {}
                                         }
-                                        // 2. Extract sidebar/TOC navigation (Docusaurus, GitBook, ReadTheDocs)
-                                        // These contain book structure (Part 0, Part 1...) outside <main>
-                                        let sidebarText = '';
-                                        for (let s of [
-                                            '.theme-doc-sidebar-container', '.sidebar-container',
-                                            'nav[class*="sidebar"]', 'nav[class*="menu"]',
-                                            '.menu__list', '[class*="sidebarNav"]',
-                                            '.gitbook-sidebar', '.toc-sidebar', 'aside nav'
-                                        ]) {
-                                            let nav = document.querySelector(s);
-                                            if (nav && nav.innerText.trim().length > 100) {
-                                                sidebarText = nav.innerText.trim();
-                                                break;
-                                            }
-                                        }
-                                        // 3. Try specific content selectors (generic + Shopify + WooCommerce + common CMSes)
-                                        const selectors = [
-                                            'main', 'article', '.content', '#content', '#main-content',
-                                            '.product-details', '#description', '.product__description',
-                                            '.product-single__description', '[data-product-description]',
-                                            '#product-description', '.product-info', '.product__info-container',
-                                            '.rte', '.description', '.entry-content', '.page-content',
-                                            '.woocommerce-product-details__short-description', '.product_description'
+
+                                        // ── Remove noise elements before body extraction ──
+                                        // (script, style, cookie banners — but keep nav/sidebar/footer)
+                                        const noiseSelectors = [
+                                            'script', 'style', 'noscript',
+                                            '.cookie-banner', '.cookie-notice', '#cookie-consent',
+                                            '.chat-widget', '.intercom-frame', '#crisp-chatbox',
+                                            '[class*="cookie"]', '[id*="cookie"]',
+                                            '[class*="gdpr"]', '[id*="gdpr"]',
+                                            'iframe[title*="recaptcha"]'
                                         ];
-                                        for (let s of selectors) {
-                                            let el = document.querySelector(s);
-                                            if (el && el.innerText.trim().length > 80) {
-                                                return (jsonLdText + ' ' + sidebarText + ' ' + el.innerText).trim();
-                                            }
+                                        // Clone body to avoid mutating live DOM
+                                        const bodyClone = document.body.cloneNode(true);
+                                        for (let sel of noiseSelectors) {
+                                            bodyClone.querySelectorAll(sel).forEach(el => el.remove());
                                         }
-                                        // 4. Fallback: full body text
-                                        const bodyText = document.body ? document.body.innerText : '';
-                                        return (jsonLdText + ' ' + bodyText).trim();
+
+                                        // ── Full body text (includes header, nav, sidebar, main, footer) ──
+                                        const bodyText = bodyClone.innerText || bodyClone.textContent || '';
+
+                                        return (jsonLdText + '\\n' + bodyText).trim();
                                     }""")
                                     text = re.sub(r'\s+', ' ', _clean_text(text or "")).strip()
                                     if len(text) < 200:
