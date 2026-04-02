@@ -5224,70 +5224,36 @@ async def crawl_site(data: dict, request: Request):
                                             )
                                         except Exception:
                                             pass  # take whatever is there
-                                    # ── PHASE 1: Click / expand EVERY interactive element ──────────────
+                                    # Expand hidden content: accordions, tabs, show-more buttons
                                     try:
                                         await pg.evaluate("""() => {
-                                            // Force-open ALL <details> elements (no click needed)
+                                            // Force-open <details> (instant, no JS event handlers)
                                             document.querySelectorAll('details').forEach(d => d.setAttribute('open', ''));
-
-                                            // Click ALL aria-expanded=false (sidebar trees, accordions, dropdowns)
-                                            document.querySelectorAll('[aria-expanded="false"]').forEach(el => {
-                                                try { el.click(); } catch(e) {}
-                                            });
-
-                                            // Accordion / collapsible triggers
+                                            // Accordion / collapsible triggers (product FAQs, course curricula)
                                             document.querySelectorAll(
-                                                '.accordion-button:not(.collapsed), .accordion-button, ' +
-                                                '.accordion-trigger, .accordion-header, summary, ' +
-                                                '[data-toggle], [data-collapse], [data-expand], ' +
-                                                '.faq-question, .collapse-trigger, ' +
-                                                '[class*="accordion"]:not([class*="content"]):not([class*="body"]), ' +
-                                                '[class*="collaps"]:not([class*="content"])'
+                                                '.accordion-button, .accordion-trigger, .accordion-header, ' +
+                                                '[data-toggle], .faq-question, .collapse-trigger, summary'
                                             ).forEach(el => { try { el.click(); } catch(e) {} });
-
-                                            // Sidebar category toggle buttons (Docusaurus, GitBook, custom)
-                                            document.querySelectorAll(
-                                                '.menu__caret, .menu__link--sublist, ' +
-                                                '.sidebar-item-toggle, [class*="sidebar"] button, ' +
-                                                '[class*="nav-group"] button, [class*="navGroup"] button, ' +
-                                                '[class*="category"] button, [class*="treeItem"] button, ' +
-                                                '.DocSidebar button, .sidebarItemTitle'
-                                            ).forEach(el => { try { el.click(); } catch(e) {} });
-
-                                            // Nav dropdown toggles (mega menus, hamburger, dropdowns)
-                                            document.querySelectorAll(
-                                                '.dropdown-toggle, .nav-toggle, .menu-toggle, .hamburger, ' +
-                                                '[data-dropdown], [data-menu-toggle], ' +
-                                                'nav button:not([aria-expanded="true"]), ' +
-                                                '[class*="dropdown-toggle"], [class*="nav-toggle"], ' +
-                                                '[class*="menuToggle"], [class*="navToggle"]'
-                                            ).forEach(el => { try { el.click(); } catch(e) {} });
-
                                             // Inactive tab panels
                                             document.querySelectorAll(
-                                                '[role="tab"]:not([aria-selected="true"]), ' +
-                                                '.tab:not(.active):not(.tab-content), ' +
-                                                '.nav-tab:not(.active)'
+                                                '[role="tab"]:not([aria-selected="true"]), .tab:not(.active)'
                                             ).forEach(el => { try { el.click(); } catch(e) {} });
-
-                                            // "Show more" / "Read more" / "Load more" text buttons
-                                            document.querySelectorAll('button, [role="button"], a').forEach(el => {
-                                                const t = (el.innerText || el.textContent || '').toLowerCase().trim();
-                                                if (['show more', 'read more', 'load more', 'see more',
-                                                     'view more', 'expand all', 'show all', 'view all',
-                                                     'see all', 'load all', '+ more'].includes(t)) {
+                                            // "Show more" / "Load more" buttons
+                                            document.querySelectorAll('button, [role="button"]').forEach(el => {
+                                                const t = (el.innerText || '').toLowerCase().trim();
+                                                if (['show more','read more','load more','see more','view more','expand all'].includes(t)) {
                                                     try { el.click(); } catch(e) {}
                                                 }
                                             });
                                         }""")
-                                        await asyncio.sleep(0.8)  # wait for animations/dynamic loads
+                                        await asyncio.sleep(0.5)
                                     except Exception:
                                         pass
-                                    # Lazy-scroll: trigger scroll-loaded / infinite-scroll content
+                                    # Lazy-scroll: trigger scroll-loaded content
                                     try:
-                                        for _ in range(8):
+                                        for _ in range(6):
                                             await pg.evaluate("window.scrollBy(0, window.innerHeight)")
-                                            await asyncio.sleep(0.2)
+                                            await asyncio.sleep(0.25)
                                         await pg.evaluate("window.scrollTo(0, 0)")
                                     except Exception:
                                         pass
