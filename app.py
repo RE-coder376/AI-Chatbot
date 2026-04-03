@@ -5314,8 +5314,22 @@ async def crawl_site(data: dict, request: Request):
                                             }
                                         }
 
-                                        // ── Main body: innerText (rendered text, skips scripts/hidden) ──
-                                        const bodyText = document.body ? document.body.innerText : '';
+                                        // ── Main body: prefer <main>/<article> so sidebar isn't duplicated ──
+                                        // Sidebar is stored separately; body should be page-unique content only.
+                                        let bodyText = '';
+                                        const mainEl = document.querySelector('main') ||
+                                                        document.querySelector('article') ||
+                                                        document.querySelector('.content') ||
+                                                        document.querySelector('#content') ||
+                                                        document.querySelector('.post-content') ||
+                                                        document.querySelector('.entry-content') ||
+                                                        document.querySelector('.page-content');
+                                        if (mainEl && mainEl.innerText.trim().length > 100) {
+                                            bodyText = mainEl.innerText;
+                                        } else {
+                                            // Fallback: full body (sidebar text will be in here too, acceptable)
+                                            bodyText = document.body ? document.body.innerText : '';
+                                        }
 
                                         // Return as JSON so Python can handle sidebar separately
                                         return JSON.stringify({
