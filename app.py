@@ -806,6 +806,12 @@ def _keyword_rescue(q: str, db, seen: set, k: int = 5) -> list:
     # Extract: (1) uppercase acronyms, (2) capitalized proper nouns, (3) role titles
     technical = [w.strip("?.,!\"'") for w in words if (w.isupper() and len(w) >= 2) or
                  (len(w) > 1 and w[0].isupper() and not w.isupper())]
+    # Extract "Word Number" phrases like "Part 6", "Chapter 3" — searched as exact phrase
+    cleaned_words = [w.strip("?.,!\"':") for w in words]
+    for i in range(len(cleaned_words) - 1):
+        w1, w2 = cleaned_words[i], cleaned_words[i+1]
+        if len(w1) > 1 and w1[0].isupper() and w2.isdigit():
+            technical.insert(0, f"{w1} {w2}")  # "Part 6" searched first
     # Also add uppercase form of role titles found in query
     q_lower = q.lower()
     for role in _ROLE_TERMS:
