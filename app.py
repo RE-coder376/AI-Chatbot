@@ -216,20 +216,28 @@ def _github_sync_download():
                 with open(tmp_zip, "wb") as fout:
                     for chunk in r.iter_content(chunk_size=65536):
                         fout.write(chunk)
-            (DATABASES_DIR / db_name).mkdir(exist_ok=True)
+            db_extract_dir = DATABASES_DIR / db_name
+            db_extract_dir.mkdir(exist_ok=True)
             with zipfile.ZipFile(tmp_zip, "r") as z:
                 for member in z.namelist():
-                    # Skip config.json at root level — passwords/settings live in repo config
+                    # Skip config.json — passwords/settings live in repo config
                     if member in (f"{db_name}/config.json", "config.json"):
                         continue
-                    z.extract(member, DATABASES_DIR)
-                    # Fix permissions — Windows zips store 0o000 on Linux; make files rw
+                    # Strip leading db_name/ prefix if present (handle both zip formats)
+                    rel = member[len(db_name)+1:] if member.startswith(f"{db_name}/") else member
+                    if not rel:
+                        continue
+                    dest = db_extract_dir / rel
+                    dest.parent.mkdir(parents=True, exist_ok=True)
+                    if member.endswith("/"):
+                        dest.mkdir(exist_ok=True)
+                    else:
+                        with z.open(member) as src, open(dest, "wb") as dst:
+                            dst.write(src.read())
+                    # Fix permissions
                     try:
-                        extracted = DATABASES_DIR / member
-                        if extracted.is_file():
-                            extracted.chmod(0o644)
-                        elif extracted.is_dir():
-                            extracted.chmod(0o755)
+                        if dest.is_file(): dest.chmod(0o644)
+                        elif dest.is_dir(): dest.chmod(0o755)
                     except Exception:
                         pass
             tmp_zip.unlink(missing_ok=True)
