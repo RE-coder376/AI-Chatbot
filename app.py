@@ -5563,10 +5563,17 @@ async def crawl_site(data: dict, request: Request):
             # Evict cached DB instance and BM25 index so next query reloads from disk
             _db_instance_cache.pop(db_name, None)
             _bm25_cache.pop(db_name, None)
-            # Reload local_db if we just re-crawled the active DB
+            # Reload local_db if we just re-crawled the active DB.
+            # IMPORTANT: do NOT reuse chroma_db — its /dev/shm crawl dir was just deleted
+            # (shutil.rmtree above). Instead evict the stale load-dir and reload fresh from disk.
             active_name = ACTIVE_DB_FILE.read_text(encoding="utf-8").strip() if ACTIVE_DB_FILE.exists() else ""
-            if db_name == active_name and chroma_db is not None:
-                local_db = chroma_db
+            if db_name == active_name:
+                _stale_load = Path(f"/dev/shm/chroma_{db_name}")
+                if _stale_load.exists():
+                    shutil.rmtree(str(_stale_load), ignore_errors=True)
+                local_db = None
+                embeddings_model = None
+                await asyncio.to_thread(_load_db_now)
             yield _send(f"🔄 DB reloaded in memory — no restart needed.")
             yield _send(f"✅ Done! {total_chunks} chunks ingested into '{db_name}'.")
             asyncio.get_running_loop().run_in_executor(None, _github_sync_upload, db_name)
