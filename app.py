@@ -410,6 +410,7 @@ _llm_key_lock  = threading.Lock()   # prevents key-selection race under concurre
 _api_resp_cache: dict = {}      # url → (text, expiry) — Jikan response cache (10 min TTL)
 _entity_cache: dict = {}        # question_lower → extracted entity string (LRU, max 500)
 _DB_CACHE_MAX = 1  # Render free tier: 512MB RAM — only 1 extra DB instance in cache
+_bm25_cache: dict = {}  # db_name → {index, docs, metas, num_docs}
 _API_CACHE_MAX = 200            # max entries before LRU eviction
 _ENTITY_CACHE_MAX = 500
 
@@ -786,13 +787,6 @@ def expand_query(q: str) -> list:
             # If the user mentioned the concept or a synonym, add all other synonyms to the search
             expanded.extend(synonyms[:5]) # Take top 5 to keep search efficient
 
-    # 3. Structure queries: add nav-specific search term so the dedicated sidebar doc is found
-    _STRUCT_TERMS = {'parts', 'sections', 'chapters', 'topics', 'contents', 'modules',
-                     'outline', 'overview', 'curriculum', 'syllabus', 'lessons', 'units',
-                     'what are the', 'list of', 'table of contents'}
-    if any(t in q_lower for t in _STRUCT_TERMS):
-        expanded.insert(1, "site navigation structure table of contents parts sections outline")
-
     return list(dict.fromkeys(expanded)) # Unique items only
 
 _INVISIBLE_CHARS = re.compile(r'[\u200b\u200c\u200d\ufeff\u00ad\u2060]')
@@ -827,21 +821,51 @@ def _keyword_rescue(q: str, db, seen: set, k: int = 5) -> list:
                     rescue_docs.append(Document(page_content=doc_text, metadata=meta or {}))
         except Exception:
             pass
-    # Structure queries: directly fetch the site navigation/structure doc (sidebar TOC)
-    _STRUCT_TERMS = {'parts', 'sections', 'chapters', 'topics', 'contents', 'modules',
-                     'outline', 'overview', 'curriculum', 'syllabus', 'lessons', 'units'}
-    if any(t in q_lower for t in _STRUCT_TERMS):
-        try:
-            from langchain_core.documents import Document
-            raw = db._collection.get(where_document={"$contains": "SITE NAVIGATION AND STRUCTURE"}, limit=3)
-            for doc_text, meta in zip(raw.get("documents", []), raw.get("metadatas", [])):
-                key = doc_text[:100]
-                if key not in seen:
-                    seen.add(key)
-                    rescue_docs.append(Document(page_content=doc_text, metadata=meta or {}))
-        except Exception:
-            pass
     return rescue_docs
+
+def _get_bm25_index(db, db_name: str):
+    """Build or return cached BM25 index. Auto-invalidates when chunk count changes."""
+    try:
+        from rank_bm25 import BM25Okapi
+        cached = _bm25_cache.get(db_name)
+        # Cheap check: count docs first to decide if rebuild needed
+        count_data = db._collection.get(limit=1)
+        total = db._collection.count()
+        if cached and cached["num_docs"] == total:
+            return cached
+        # Load all docs and build index
+        all_data = db._collection.get(limit=total + 100, include=["documents", "metadatas"])
+        docs = all_data.get("documents") or []
+        metas = all_data.get("metadatas") or [{}] * len(docs)
+        if not docs:
+            return None
+        tokenized = [d.lower().split() for d in docs]
+        index = BM25Okapi(tokenized)
+        entry = {"index": index, "docs": docs, "metas": metas, "num_docs": len(docs)}
+        _bm25_cache[db_name] = entry
+        logger.info(f"[BM25] Index built for '{db_name}': {len(docs)} docs")
+        return entry
+    except Exception as e:
+        logger.warning(f"[BM25] Build failed for '{db_name}': {e}")
+        return None
+
+def _bm25_search(q: str, db, db_name: str, k: int = 5):
+    """BM25 keyword search — finds lexically-matching chunks that vector search misses.
+    Works for any website: structural queries, product names, exact terms, navigation content."""
+    try:
+        from langchain_core.documents import Document
+        entry = _get_bm25_index(db, db_name)
+        if not entry:
+            return []
+        scores = entry["index"].get_scores(q.lower().split())
+        top_idx = sorted(range(len(scores)), key=lambda i: scores[i], reverse=True)[:k]
+        return [
+            Document(page_content=entry["docs"][i], metadata=entry["metas"][i] or {})
+            for i in top_idx if scores[i] > 0.1
+        ]
+    except Exception as e:
+        logger.warning(f"[BM25] Search failed: {e}")
+        return []
 
 def _is_urdu_script(text: str) -> bool:
     """Check if string contains Urdu/Arabic characters."""
@@ -972,22 +996,29 @@ async def retrieve_context(q: str, db, k: int = 8, fast: bool = False, expansion
         seen.add(r.page_content[:100])
     if not _skip_chromadb and db is not None:
         loop = asyncio.get_event_loop()
-        # Run all searches IN PARALLEL — was sequential (4 × 1-2s = 4-8s), now just the slowest one
+        # Run vector searches + BM25 ALL IN PARALLEL
         _search_tasks = [
             loop.run_in_executor(None, lambda q=_clean_text(query): db.similarity_search(q, k=k))
             for query in search_queries
         ]
+        # BM25 hybrid: get active db name for cache key
+        _active_db_name = ""
         try:
-            _search_results = await asyncio.wait_for(
-                asyncio.gather(*_search_tasks, return_exceptions=True),
+            _active_db_name = ACTIVE_DB_FILE.read_text(encoding="utf-8").strip() if ACTIVE_DB_FILE.exists() else ""
+        except Exception:
+            pass
+        _bm25_task = loop.run_in_executor(None, lambda: _bm25_search(q, db, _active_db_name, k=k))
+        try:
+            _all_results = await asyncio.wait_for(
+                asyncio.gather(*_search_tasks, _bm25_task, return_exceptions=True),
                 timeout=20
             )
         except asyncio.TimeoutError:
             logger.warning("ChromaDB parallel search timed out")
-            _search_results = []
-        for idx, res in enumerate(_search_results):
+            _all_results = []
+        for idx, res in enumerate(_all_results):
             if isinstance(res, Exception):
-                logger.error(f"Retrieval error for query '{search_queries[idx] if idx < len(search_queries) else idx}': {res}")
+                logger.error(f"Retrieval error (task {idx}): {res}")
                 continue
             for r in res:
                 key = r.page_content[:100]
@@ -995,7 +1026,7 @@ async def retrieve_context(q: str, db, k: int = 8, fast: bool = False, expansion
                     seen.add(key)
                     results.append(r)
 
-    # Rescue chunks go first (exact match), similarity results fill the rest
+    # Rescue chunks go first (exact match), then vector+BM25 results
     top = (rescue_results + results)[:25]
     sources = []
     for r in top:
@@ -5477,8 +5508,9 @@ async def crawl_site(data: dict, request: Request):
                     except Exception:
                         pass
 
-            # Evict cached DB instance so next query reloads from disk
+            # Evict cached DB instance and BM25 index so next query reloads from disk
             _db_instance_cache.pop(db_name, None)
+            _bm25_cache.pop(db_name, None)
             # Reload local_db if we just re-crawled the active DB
             active_name = ACTIVE_DB_FILE.read_text(encoding="utf-8").strip() if ACTIVE_DB_FILE.exists() else ""
             if db_name == active_name and chroma_db is not None:
