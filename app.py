@@ -143,6 +143,7 @@ def _visitor_dir(db_name: str = "") -> Path:
 # Globals
 local_db = None
 embeddings_model = None
+legacy_embeddings = None
 import random
 
 _status = "starting"
@@ -411,6 +412,7 @@ _api_resp_cache: dict = {}      # url → (text, expiry) — Jikan response cach
 _entity_cache: dict = {}        # question_lower → extracted entity string (LRU, max 500)
 _DB_CACHE_MAX = 1  # Render free tier: 512MB RAM — only 1 extra DB instance in cache
 _bm25_cache: dict = {}  # db_name → {index, docs, metas, num_docs}
+_BM25_CACHE_MAX = 10   # max DB indices in memory (each can be 50-100MB for large DBs)
 _API_CACHE_MAX = 200            # max entries before LRU eviction
 _ENTITY_CACHE_MAX = 500
 
@@ -840,6 +842,8 @@ def _get_bm25_index(db, db_name: str):
         tokenized = [d.lower().split() for d in docs]
         index = BM25Okapi(tokenized)
         entry = {"index": index, "docs": docs, "metas": metas, "num_docs": len(docs)}
+        if len(_bm25_cache) >= _BM25_CACHE_MAX:
+            _bm25_cache.pop(next(iter(_bm25_cache)), None)
         _bm25_cache[db_name] = entry
         logger.info(f"[BM25] Index built for '{db_name}': {len(docs)} docs")
         return entry
@@ -993,7 +997,7 @@ async def retrieve_context(q: str, db, k: int = 15, fast: bool = False, expansio
     for r in rescue_results:
         seen.add(r.page_content[:100])
     if not _skip_chromadb and db is not None:
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         # Run vector searches + BM25 ALL IN PARALLEL
         _search_tasks = [
             loop.run_in_executor(None, lambda q=_clean_text(query): db.similarity_search(q, k=k))
@@ -1952,7 +1956,7 @@ async def _auto_scheduler():
                                 for v in raw.values():
                                     if isinstance(v, list) and v: obj = v; break
                             items = obj if isinstance(obj, list) else [obj]
-                            db = _get_db_instance(db_name)
+                            db = await asyncio.to_thread(_get_db_instance, db_name)
                             if db:
                                 from langchain_core.documents import Document as _Doc
                                 docs = [_Doc(page_content=_flatten_to_text(item).strip(),
@@ -3365,8 +3369,7 @@ async def delete_db(request: Request, password: str = Form(...), name: str = For
     password = _extract_password(request, password)
     db_name_req = name.strip().lower()
     # Accept root password OR the DB's own password (client self-delete)
-    if not admin_auth(request, password, db_name_req):
-        return JSONResponse({"detail": "Unauthorized"}, status_code=401)
+    admin_auth(password, get_config(db_name_req))
     
     db_name = name.strip().lower()
     db_path = DATABASES_DIR / db_name
@@ -4065,7 +4068,6 @@ async def ingest_text(request: Request, data: dict):
 @app.post("/admin/ingest/files")
 async def ingest_files(request: Request, password: str = Form(...), target_db: str = Form(""), files: list[UploadFile] = File(...)):
     password = _extract_password(request, password)
-    password = _extract_password(request, password)
     cfg = get_config()
     if not hmac.compare_digest(password.encode(), cfg.get("admin_password", "").encode()):
         return JSONResponse({"detail": "Unauthorized"}, status_code=401)
@@ -4591,7 +4593,7 @@ async def crawl_inspect(data: dict, request: Request):
 
             # Stream results as they complete — with keepalive pings to prevent SSE timeout
             done_count = 0
-            last_ping = asyncio.get_event_loop().time()
+            last_ping = asyncio.get_running_loop().time()
             while done_count < total_groups:
                 try:
                     pattern, urls, samples, score, reason, snippet = await asyncio.wait_for(
@@ -4848,8 +4850,10 @@ async def crawl_site(data: dict, request: Request):
             text = ""
             # --- Try requests first (fast, no DNS issues for most domains) ---
             try:
-                r = _req.get(sitemap_url, timeout=15,
-                             headers={"User-Agent": "Mozilla/5.0 (compatible; SitemapBot/1.0)"})
+                r = await asyncio.to_thread(
+                    _req.get, sitemap_url, timeout=15,
+                    headers={"User-Agent": "Mozilla/5.0 (compatible; SitemapBot/1.0)"}
+                )
                 if r.status_code == 200 and "<loc>" in r.text:
                     text = r.text
             except Exception:
@@ -5089,7 +5093,7 @@ async def crawl_site(data: dict, request: Request):
                 # access causes "no such table" errors. One thread = one connection.
                 import concurrent.futures as _cf
                 _chroma_ex = _cf.ThreadPoolExecutor(max_workers=1)
-                _loop = asyncio.get_event_loop()
+                _loop = asyncio.get_running_loop()
 
                 def _chroma_run(fn, *args, **kwargs):
                     return _loop.run_in_executor(_chroma_ex, lambda: fn(*args, **kwargs))
@@ -5546,7 +5550,7 @@ async def crawl_site(data: dict, request: Request):
                 local_db = chroma_db
             yield _send(f"🔄 DB reloaded in memory — no restart needed.")
             yield _send(f"✅ Done! {total_chunks} chunks ingested into '{db_name}'.")
-            asyncio.get_event_loop().run_in_executor(None, _github_sync_upload, db_name)
+            asyncio.get_running_loop().run_in_executor(None, _github_sync_upload, db_name)
             yield "data: {\"done\": true}\n\n"
         except Exception as e:
             import traceback
@@ -5614,7 +5618,20 @@ async def get_knowledge_gaps(request: Request, password: str = ""):
 @app.post("/handoff")
 async def human_handoff(request: Request):
     data = await request.json()
-    cfg = get_config()
+    # Use widget_key to resolve correct per-DB config (multi-tenant)
+    widget_key = request.headers.get("X-Widget-Key", data.get("widget_key", ""))
+    _db_name = ""
+    if widget_key and DATABASES_DIR.exists():
+        for _d in DATABASES_DIR.iterdir():
+            if _d.is_dir():
+                try:
+                    _wk = json.loads((_d / "config.json").read_text(encoding="utf-8")).get("widget_key", "")
+                    if _wk and _wk == widget_key:
+                        _db_name = _d.name
+                        break
+                except Exception:
+                    pass
+    cfg = get_config(_db_name)
     session_id = str(data.get("session_id", "anonymous"))[:64]
     conversation = data.get("conversation", [])
     name = str(data.get("name", "Website Visitor"))[:100]
@@ -5741,7 +5758,7 @@ async def send_notification_email(subject: str, html_body: str, cfg: dict, reply
             msg["Reply-To"] = reply_to
         msg.attach(_MIMEText(html_body, "html"))
 
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         def _send():
             with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=15) as s:
                 s.login(email, smtp_pass)
