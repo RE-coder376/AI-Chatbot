@@ -785,7 +785,14 @@ def expand_query(q: str) -> list:
         if concept in q_lower or any(s in q_lower for s in synonyms):
             # If the user mentioned the concept or a synonym, add all other synonyms to the search
             expanded.extend(synonyms[:5]) # Take top 5 to keep search efficient
-            
+
+    # 3. Structure queries: add nav-specific search term so the dedicated sidebar doc is found
+    _STRUCT_TERMS = {'parts', 'sections', 'chapters', 'topics', 'contents', 'modules',
+                     'outline', 'overview', 'curriculum', 'syllabus', 'lessons', 'units',
+                     'what are the', 'list of', 'table of contents'}
+    if any(t in q_lower for t in _STRUCT_TERMS):
+        expanded.insert(1, "site navigation structure table of contents parts sections outline")
+
     return list(dict.fromkeys(expanded)) # Unique items only
 
 _INVISIBLE_CHARS = re.compile(r'[\u200b\u200c\u200d\ufeff\u00ad\u2060]')
@@ -816,6 +823,20 @@ def _keyword_rescue(q: str, db, seen: set, k: int = 5) -> list:
             for doc_text, meta in zip(raw.get("documents", []), raw.get("metadatas", [])):
                 key = doc_text[:100]
                 if key not in seen and term in doc_text:
+                    seen.add(key)
+                    rescue_docs.append(Document(page_content=doc_text, metadata=meta or {}))
+        except Exception:
+            pass
+    # Structure queries: directly fetch the site navigation/structure doc (sidebar TOC)
+    _STRUCT_TERMS = {'parts', 'sections', 'chapters', 'topics', 'contents', 'modules',
+                     'outline', 'overview', 'curriculum', 'syllabus', 'lessons', 'units'}
+    if any(t in q_lower for t in _STRUCT_TERMS):
+        try:
+            from langchain_core.documents import Document
+            raw = db._collection.get(where_document={"$contains": "SITE NAVIGATION AND STRUCTURE"}, limit=3)
+            for doc_text, meta in zip(raw.get("documents", []), raw.get("metadatas", [])):
+                key = doc_text[:100]
+                if key not in seen:
                     seen.add(key)
                     rescue_docs.append(Document(page_content=doc_text, metadata=meta or {}))
         except Exception:
