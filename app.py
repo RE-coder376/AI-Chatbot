@@ -4002,7 +4002,7 @@ async def ingest_fetch_url(request: Request, data: dict):
     if not url:
         return JSONResponse({"detail": "No URL provided"}, status_code=400)
     json_path = data.get("json_path", "").strip()  # e.g. "data" or "results.items"
-    target_db = data.get("target_db", "").strip()
+    target_db = _validate_db_name(data.get("target_db", "").strip()) if data.get("target_db", "").strip() else ""
     try:
         req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
         with urllib.request.urlopen(req, timeout=15) as resp:
@@ -4642,8 +4642,12 @@ def get_db_stats(request: Request, password: str = ""):
                 try:
                     import sqlite3 as _sq
                     conn = _sq.connect(f"file:{sqlite_path}?mode=ro", uri=True, timeout=2)
-                    row = conn.execute("SELECT COUNT(*) FROM embeddings").fetchone()
-                    chunks = row[0] if row else 0; conn.close(); break
+                    try:
+                        row = conn.execute("SELECT COUNT(*) FROM embeddings").fetchone()
+                        chunks = row[0] if row else 0
+                    finally:
+                        conn.close()
+                    break
                 except: pass
         auto_enabled = db_cfg.get("auto_crawl_enabled", False)
         interval_m = float(db_cfg.get("crawl_interval_minutes", 60))
