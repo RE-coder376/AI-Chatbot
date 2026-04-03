@@ -828,8 +828,6 @@ def _get_bm25_index(db, db_name: str):
     try:
         from rank_bm25 import BM25Okapi
         cached = _bm25_cache.get(db_name)
-        # Cheap check: count docs first to decide if rebuild needed
-        count_data = db._collection.get(limit=1)
         total = db._collection.count()
         if cached and cached["num_docs"] == total:
             return cached
@@ -1001,13 +999,13 @@ async def retrieve_context(q: str, db, k: int = 15, fast: bool = False, expansio
             loop.run_in_executor(None, lambda q=_clean_text(query): db.similarity_search(q, k=k))
             for query in search_queries
         ]
-        # BM25 hybrid: get active db name for cache key
-        _active_db_name = ""
+        # BM25 hybrid: derive db_name from the db's persist path (correct for widget-key tenants)
+        _bm25_db_name = ""
         try:
-            _active_db_name = ACTIVE_DB_FILE.read_text(encoding="utf-8").strip() if ACTIVE_DB_FILE.exists() else ""
+            _bm25_db_name = Path(db._persist_directory).name.split("_", 1)[-1]
         except Exception:
             pass
-        _bm25_task = loop.run_in_executor(None, lambda: _bm25_search(q, db, _active_db_name, k=k))
+        _bm25_task = loop.run_in_executor(None, lambda: _bm25_search(q, db, _bm25_db_name, k=k))
         try:
             _all_results = await asyncio.wait_for(
                 asyncio.gather(*_search_tasks, _bm25_task, return_exceptions=True),
@@ -2519,7 +2517,7 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
                                  else AIMessage(content=m['content']))
         messages_mem.append(HumanMessage(content=q))
         try:
-            llm_mem, _ = get_llm()
+            llm_mem = get_fresh_llm()
             reply_mem = ""
             async with asyncio.timeout(30):
                 async for chunk in llm_mem.astream(messages_mem):
@@ -3966,7 +3964,7 @@ def _detect_format(content: str, filename: str = "") -> str:
     return "txt"
 
 @app.post("/admin/ingest/smart-text")
-async def ingest_smart_text(data: dict):
+async def ingest_smart_text(request: Request, data: dict):
     """Ingest raw text in any format — auto-detects JSON, CSV, YAML, XML, MD, TXT."""
     cfg = get_config()
     if not hmac.compare_digest(_extract_password(request, data.get("password", "")).encode(), cfg.get("admin_password", "").encode()):
@@ -3986,6 +3984,7 @@ async def ingest_smart_text(data: dict):
         docs = [Document(page_content=c, metadata={"source": source, "format": fmt}) for c in chunks]
         db.add_documents(docs)
         dest = target_db or (ACTIVE_DB_FILE.read_text(encoding="utf-8").strip() if ACTIVE_DB_FILE.exists() else "active")
+        _bm25_cache.pop(dest, None)  # invalidate stale BM25 index
         return {"success": True, "format_detected": fmt, "chunks": len(chunks),
                 "message": f"Ingested {len(chunks)} chunks ({fmt.upper()}) into '{dest}'",
                 "preview": chunks[:2]}
@@ -3993,7 +3992,7 @@ async def ingest_smart_text(data: dict):
         return JSONResponse({"detail": f"Ingest error: {str(e)}"}, status_code=500)
 
 @app.post("/admin/ingest/fetch-url")
-async def ingest_fetch_url(data: dict):
+async def ingest_fetch_url(request: Request, data: dict):
     """Fetch any JSON API URL and ingest each item as a separate chunk."""
     import urllib.request
     cfg = get_config()
@@ -4032,13 +4031,14 @@ async def ingest_fetch_url(data: dict):
                 db.add_documents([Document(page_content=text, metadata={"source": url})])
                 total_chunks += 1
         dest = target_db or "active"
+        _bm25_cache.pop(dest, None)
         return {"success": True, "items": len(items), "chunks": total_chunks,
                 "message": f"Ingested {total_chunks} items from API into '{dest}'"}
     except Exception as e:
         return JSONResponse({"detail": f"Fetch error: {str(e)}"}, status_code=500)
 
 @app.post("/admin/ingest/text")
-async def ingest_text(data: dict):
+async def ingest_text(request: Request, data: dict):
     cfg = get_config()
     if not hmac.compare_digest(_extract_password(request, data.get("password", "")).encode(), cfg.get("admin_password", "").encode()):
         return JSONResponse({"detail": "Unauthorized"}, status_code=401)
@@ -4056,6 +4056,7 @@ async def ingest_text(data: dict):
         doc_id = str(uuid.uuid4())
         db.add_documents([Document(page_content=text, metadata={"source": "manual", "id": doc_id})])
         dest = target or (ACTIVE_DB_FILE.read_text(encoding="utf-8").strip() if ACTIVE_DB_FILE.exists() else "active")
+        _bm25_cache.pop(dest, None)
         return {"success": True, "message": f"Text ingested into '{dest}' ({len(text)} chars)", "id": doc_id}
     except Exception as e:
         logger.error(f"ingest_text error: {e}")
@@ -4125,6 +4126,7 @@ async def ingest_files(request: Request, password: str = Form(...), target_db: s
             db.add_documents(docs)
             total += len(docs)
         dest = target_db or (ACTIVE_DB_FILE.read_text(encoding="utf-8").strip() if ACTIVE_DB_FILE.exists() else "active")
+        _bm25_cache.pop(dest, None)
         threading.Thread(target=_github_sync_upload, args=(dest,), daemon=True).start()
         return {"success": True, "message": f"Ingested {total} chunks into '{dest}' from {len(files)} file(s)"}
     except Exception as e:
@@ -4712,7 +4714,7 @@ def get_api_sources(request: Request, password: str = "", db_name: str = ""):
     return {"api_sources": db_cfg.get("api_sources", []), "db_name": db_name}
 
 @app.post("/admin/api-sources")
-async def save_api_source(data: dict):
+async def save_api_source(request: Request, data: dict):
     cfg = get_config()
     if not hmac.compare_digest(_extract_password(request, data.get("password", "")).encode(), cfg.get("admin_password", "").encode()):
         return JSONResponse({"detail": "Unauthorized"}, status_code=401)
@@ -4747,7 +4749,7 @@ async def save_api_source(data: dict):
     return {"success": True, "message": f"API source '{new_src['name']}' saved"}
 
 @app.post("/admin/api-sources/delete")
-async def delete_api_source(data: dict):
+async def delete_api_source(request: Request, data: dict):
     cfg = get_config()
     if not hmac.compare_digest(_extract_password(request, data.get("password", "")).encode(), cfg.get("admin_password", "").encode()):
         return JSONResponse({"detail": "Unauthorized"}, status_code=401)
@@ -5269,7 +5271,8 @@ async def crawl_site(data: dict, request: Request):
                                 await log_queue.put(f"[{completed}/{len(to_crawl)}] ⚠️  {cur_url[:70]} (PDF failed)")
                             return
 
-                        text = None  # Always use Playwright — captures every word including JS-rendered content
+                        text = ""   # Always use Playwright — captures every word including JS-rendered content
+                        title = ""  # initialized here so it's always defined even if pg.title() throws
                         if True:
                             # --- Playwright: full JS render + lazy scroll for every page ---
                             pg = await ctx.new_page()
