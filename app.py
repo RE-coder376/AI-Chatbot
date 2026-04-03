@@ -806,12 +806,6 @@ def _keyword_rescue(q: str, db, seen: set, k: int = 5) -> list:
     # Extract: (1) uppercase acronyms, (2) capitalized proper nouns, (3) role titles
     technical = [w.strip("?.,!\"'") for w in words if (w.isupper() and len(w) >= 2) or
                  (len(w) > 1 and w[0].isupper() and not w.isupper())]
-    # Extract "Word Number" phrases like "Part 6", "Chapter 3" — searched as exact phrase
-    cleaned_words = [w.strip("?.,!\"':") for w in words]
-    for i in range(len(cleaned_words) - 1):
-        w1, w2 = cleaned_words[i], cleaned_words[i+1]
-        if len(w1) > 1 and w1[0].isupper() and w2.isdigit():
-            technical.insert(0, f"{w1} {w2}")  # "Part 6" searched first
     # Also add uppercase form of role titles found in query
     q_lower = q.lower()
     for role in _ROLE_TERMS:
@@ -845,7 +839,11 @@ def _get_bm25_index(db, db_name: str):
         metas = all_data.get("metadatas") or [{}] * len(docs)
         if not docs:
             return None
-        tokenized = [d.lower().split() for d in docs]
+        def _tokenize_bm25(text):
+            tokens = text.lower().split()
+            bigrams = [f"{tokens[i]}_{tokens[i+1]}" for i in range(len(tokens) - 1)]
+            return tokens + bigrams
+        tokenized = [_tokenize_bm25(d) for d in docs]
         index = BM25Okapi(tokenized)
         entry = {"index": index, "docs": docs, "metas": metas, "num_docs": len(docs)}
         if len(_bm25_cache) >= _BM25_CACHE_MAX:
@@ -865,7 +863,9 @@ def _bm25_search(q: str, db, db_name: str, k: int = 5):
         entry = _get_bm25_index(db, db_name)
         if not entry:
             return []
-        scores = entry["index"].get_scores(q.lower().split())
+        q_tokens = q.lower().split()
+        q_bigrams = [f"{q_tokens[i]}_{q_tokens[i+1]}" for i in range(len(q_tokens) - 1)]
+        scores = entry["index"].get_scores(q_tokens + q_bigrams)
         top_idx = sorted(range(len(scores)), key=lambda i: scores[i], reverse=True)[:k]
         return [
             Document(page_content=entry["docs"][i], metadata=entry["metas"][i] or {})
