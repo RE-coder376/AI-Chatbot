@@ -913,7 +913,7 @@ async def async_intent_aware_expansion(q: str) -> list:
         logger.error(f"Intent expansion failed: {e}")
         return [q]
 
-async def retrieve_context(q: str, db, k: int = 8, fast: bool = False, expansion_task=None) -> tuple:
+async def retrieve_context(q: str, db, k: int = 15, fast: bool = False, expansion_task=None) -> tuple:
     """Multilingual Retrieval: Handles English and Urdu in the same vector space.
     Returns (context_text, doc_count, sources) so callers can cite sources.
     fast=True skips the LLM expansion step (used for sub-queries in multi-part decomposition)."""
@@ -5109,11 +5109,20 @@ async def crawl_site(data: dict, request: Request):
                 pending_pages = []
                 seen_content_hashes: set = set()
                 seen_sidebar_hashes: set = set()  # store each unique sidebar nav ONCE as standalone doc
+                page_index: list = []  # [(url, title)] — for auto site-index doc
 
                 async def _flush_pages(batch):
                     nonlocal chroma_db, total_chunks
                     chunks = []
                     for p in batch:
+                        # Navigation/structure docs: store as ONE unit so retrieval gets full structure.
+                        # Splitting a 3000-word nav doc into 400-word pieces means each piece only has
+                        # a fraction of the site structure — no single retrieval gives the full picture.
+                        if "#site-navigation" in p["url"]:
+                            full_text = _clean_text(p["text"])[:8000]  # ~2000 tokens, within embedding limit
+                            if len(full_text) > 20:
+                                chunks.append(Document(page_content=full_text, metadata={"source": p["url"]}))
+                            continue
                         words = _clean_text(p["text"]).split()
                         for j in range(0, max(1, len(words)), chunk_step):
                             chunk = " ".join(words[j:j+chunk_size])
@@ -5438,6 +5447,7 @@ async def crawl_site(data: dict, request: Request):
                                 batch_to_flush = None
                                 async with flush_lock:
                                     pending_pages.append({"url": cur_url, "text": text})
+                                    page_index.append((cur_url, title))
                                     await log_queue.put(f"[{completed}/{len(to_crawl)}] ✅ {cur_url[:70]} ({len(text)} chars)")
                                     if len(pending_pages) >= 5:
                                         batch_to_flush = pending_pages[:]
@@ -5471,6 +5481,18 @@ async def crawl_site(data: dict, request: Request):
                     if pending_pages:
                         yield _send(f"💾 Saving final batch ({len(pending_pages)} pages)...")
                         await _flush_pages(pending_pages)
+
+                # Auto site-index: one document listing every crawled page + title.
+                # This lets the bot answer "what topics do you cover" / "what pages exist"
+                # for ANY website without any hardcoding.
+                if page_index:
+                    lines = [f"- {t} : {u}" for u, t in page_index if t]
+                    site_index_text = f"SITE PAGE INDEX ({len(page_index)} pages crawled):\n" + "\n".join(lines)
+                    index_doc = Document(page_content=site_index_text[:10000],
+                                         metadata={"source": f"{base_url}#site-index"})
+                    await _chroma_run(chroma_db.add_documents, [index_doc])
+                    total_chunks += 1
+                    yield _send(f"📋 Site index stored ({len(page_index)} pages)")
 
                 await browser.close()
 
