@@ -1821,10 +1821,12 @@ def _check_config_security():
         logger.warning(f"Config security check failed: {e}")
 
 async def _auto_crawl_db(db_name: str, url: str, max_pages: int = 100) -> int:
-    """Scheduled re-crawl — only fetches URLs not seen before. Returns new chunks added."""
+    """Scheduled re-crawl — discovers new pages via sitemap, indexes only pages not seen before."""
     import httpx as _hx
     from bs4 import BeautifulSoup
-    from urllib.parse import urljoin, urlparse
+    from urllib.parse import urlparse
+    import re as _re2
+    from langchain_core.documents import Document
     db = await asyncio.to_thread(_get_db_instance, db_name)
     if not db or not url: return 0
     _crawling_dbs.add(db_name)
@@ -1832,18 +1834,31 @@ async def _auto_crawl_db(db_name: str, url: str, max_pages: int = 100) -> int:
     already_seen: set = set()
     if seen_file.exists():
         try: already_seen = set(seen_file.read_text(encoding="utf-8").strip().splitlines())
-        except Exception as e: logger.warning(f"[CRAWL] Could not load seen URLs for {db_name}: {e}")
-    visited = set(already_seen)
-    queue = [url.rstrip("/")]
-    base = urlparse(url).netloc
+        except Exception as e: logger.warning(f"[AUTO-CRAWL] Could not load seen URLs for {db_name}: {e}")
+    base = url.rstrip("/")
+    domain = urlparse(base).netloc
     new_urls, added = [], 0
+    newly_seen: list = []
     try:
-        async with _hx.AsyncClient(timeout=10, headers={"User-Agent": "Mozilla/5.0"}, follow_redirects=True) as client:
-            while queue and len(new_urls) < max_pages:
-                page_url = queue.pop(0)
-                if page_url in visited: continue
-                visited.add(page_url)
-                new_urls.append(page_url)
+        # Step 1: discover new URLs via sitemap (reliable — no link-following needed)
+        async with _hx.AsyncClient(timeout=15, headers={"User-Agent": "Mozilla/5.0"}, follow_redirects=True) as client:
+            for sm_path in ["/sitemap.xml", "/sitemap_index.xml", "/sitemap/"]:
+                try:
+                    r = await client.get(f"{base}{sm_path}")
+                    if r.status_code == 200 and "<loc>" in r.text:
+                        found = _re2.findall(r'<loc>([^<]+)</loc>', r.text)
+                        sitemap_urls = [u.strip() for u in found if urlparse(u.strip()).netloc == domain]
+                        new_urls = [u for u in sitemap_urls if u not in already_seen][:max_pages]
+                        logger.info(f"[AUTO-CRAWL] '{db_name}': {len(sitemap_urls)} sitemap URLs, {len(new_urls)} new")
+                        break
+                except Exception as e:
+                    logger.warning(f"[AUTO-CRAWL] Sitemap '{sm_path}' failed for {db_name}: {e}")
+        if not new_urls:
+            logger.info(f"[AUTO-CRAWL] '{db_name}': no new pages in sitemap")
+            return 0
+        # Step 2: fetch and index only new pages
+        async with _hx.AsyncClient(timeout=15, headers={"User-Agent": "Mozilla/5.0"}, follow_redirects=True) as client:
+            for page_url in new_urls:
                 try:
                     r = await client.get(page_url)
                     if r.status_code != 200: continue
@@ -1851,20 +1866,18 @@ async def _auto_crawl_db(db_name: str, url: str, max_pages: int = 100) -> int:
                     for tag in soup(["script","style","nav","footer","header"]): tag.decompose()
                     text = soup.get_text(separator="\n", strip=True)
                     if len(text) > 100:
-                        doc = Document(page_content=text[:2000], metadata={"source": page_url})
+                        doc = Document(page_content=text[:25000], metadata={"source": page_url})
                         await asyncio.to_thread(db.add_documents, [doc])
                         added += 1
-                    for a in soup.find_all("a", href=True):
-                        link = urljoin(page_url, a["href"]).split("?")[0].rstrip("/")
-                        if urlparse(link).netloc == base and link not in visited:
-                            queue.append(link)
-                except Exception as e: logger.warning(f"[CRAWL] Page error {page_url}: {e}")
+                    newly_seen.append(page_url)
+                except Exception as e: logger.warning(f"[AUTO-CRAWL] Page error {page_url}: {e}")
     finally:
         _crawling_dbs.discard(db_name)
-    if new_urls:
+    if newly_seen:
         try:
-            await asyncio.to_thread(seen_file.write_text, "\n".join(already_seen | set(new_urls)), "utf-8")
-        except Exception as e: logger.warning(f"[CRAWL] Could not persist seen URLs for {db_name}: {e}")
+            await asyncio.to_thread(seen_file.write_text, "\n".join(already_seen | set(newly_seen)), "utf-8")
+        except Exception as e: logger.warning(f"[AUTO-CRAWL] Could not persist seen URLs for {db_name}: {e}")
+        _bm25_cache.pop(db_name, None)
         threading.Thread(target=_github_backup_crawled_urls, args=(db_name,), daemon=True).start()
     return added
 
