@@ -5489,7 +5489,7 @@ async def crawl_site(data: dict, request: Request):
                     lines = [f"- {t} : {u}" for u, t in page_index if t]
                     site_index_text = f"SITE PAGE INDEX ({len(page_index)} pages crawled):\n" + "\n".join(lines)
                     index_doc = Document(page_content=site_index_text[:10000],
-                                         metadata={"source": f"{base_url}#site-index"})
+                                         metadata={"source": f"{base}#site-index"})
                     await _chroma_run(chroma_db.add_documents, [index_doc])
                     total_chunks += 1
                     yield _send(f"📋 Site index stored ({len(page_index)} pages)")
