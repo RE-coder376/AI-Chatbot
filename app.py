@@ -5056,6 +5056,7 @@ async def crawl_site(data: dict, request: Request):
                 chroma_write_lock = asyncio.Lock()
                 pending_pages = []
                 seen_content_hashes: set = set()
+                seen_sidebar_hashes: set = set()  # store each unique sidebar nav ONCE as standalone doc
 
                 async def _flush_pages(batch):
                     nonlocal chroma_db, total_chunks
@@ -5298,9 +5299,7 @@ async def crawl_site(data: dict, request: Request):
                                             } catch(e) {}
                                         }
 
-                                        // ── Sidebar: use textContent (captures collapsed/hidden items too) ──
-                                        // innerText skips display:none — collapsed sidebar items would be missed.
-                                        // textContent gets ALL text in DOM including collapsed nav trees.
+                                        // ── Sidebar: textContent captures collapsed/hidden nav items ──
                                         let sidebarText = '';
                                         for (let sel of [
                                             '.theme-doc-sidebar-container', '.sidebar-container',
@@ -5315,11 +5314,24 @@ async def crawl_site(data: dict, request: Request):
                                             }
                                         }
 
-                                        // ── Main body: use innerText (rendered text only, skips scripts) ──
+                                        // ── Main body: innerText (rendered text, skips scripts/hidden) ──
                                         const bodyText = document.body ? document.body.innerText : '';
 
-                                        return (jsonLdText + '\\n' + sidebarText + '\\n' + bodyText).trim();
+                                        // Return as JSON so Python can handle sidebar separately
+                                        return JSON.stringify({
+                                            sidebar: sidebarText,
+                                            body: (jsonLdText + '\\n' + bodyText).trim()
+                                        });
                                     }""")
+                                    # Parse JSON result {sidebar, body}
+                                    sidebar_raw = ""
+                                    try:
+                                        import json as _json
+                                        _parsed = _json.loads(text or "{}")
+                                        sidebar_raw = _parsed.get("sidebar", "")
+                                        text = _parsed.get("body", "")
+                                    except Exception:
+                                        pass  # text stays as raw string fallback
                                     text = re.sub(r'\s+', ' ', _clean_text(text or "")).strip()
                                     if len(text) < 200:
                                         text = f"{title}. {meta_desc}. {text}".strip()
@@ -5327,6 +5339,15 @@ async def crawl_site(data: dict, request: Request):
                                     ocr_text = await _ocr_page_images(pg)
                                     if ocr_text:
                                         text = f"{text} {ocr_text}".strip()
+                                    # Store sidebar navigation ONCE as a standalone "Site Structure" doc
+                                    if sidebar_raw and len(sidebar_raw) > 200:
+                                        import hashlib as _hlib
+                                        _sb_key = _hlib.md5(re.sub(r'\s+', '', sidebar_raw[:300]).encode()).hexdigest()
+                                        if _sb_key not in seen_sidebar_hashes:
+                                            seen_sidebar_hashes.add(_sb_key)
+                                            _sb_text = re.sub(r'\s+', ' ', sidebar_raw).strip()
+                                            async with flush_lock:
+                                                pending_pages.append({"url": f"{cur_url}#site-navigation", "text": f"SITE NAVIGATION AND STRUCTURE:\n{_sb_text}"})
                                     break
                                 except Exception as e:
                                     if attempt < 2:
