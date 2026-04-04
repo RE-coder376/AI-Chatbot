@@ -1009,12 +1009,13 @@ async def retrieve_context(q: str, db, k: int = 15, fast: bool = False, expansio
             loop.run_in_executor(None, lambda q=_clean_text(query): db.similarity_search(q, k=k))
             for query in search_queries
         ]
-        # BM25 hybrid: derive db_name from the db's persist path (correct for widget-key tenants)
-        _bm25_db_name = ""
-        try:
-            _bm25_db_name = Path(db._persist_directory).name.split("_", 1)[-1]
-        except Exception:
-            pass
+        # BM25 hybrid: use stored _db_name attr (reliable), fallback to path parse
+        _bm25_db_name = getattr(db, '_db_name', None) or ""
+        if not _bm25_db_name:
+            try:
+                _bm25_db_name = Path(db._persist_directory).name.split("_", 1)[-1]
+            except Exception:
+                pass
         _bm25_task = loop.run_in_executor(None, lambda: _bm25_search(q, db, _bm25_db_name, k=k))
         try:
             _all_results = await asyncio.wait_for(
@@ -1764,6 +1765,7 @@ def _load_db_now():
             embeddings_model = FastEmbedEmbeddings(model_name="BAAI/bge-small-en-v1.5")
         tmp_dir = _ensure_tmp_chroma(active, db_path)
         local_db = Chroma(persist_directory=str(tmp_dir), embedding_function=embeddings_model)
+        local_db._db_name = active  # stored for BM25 lookup (path may have timestamps)
         gc.collect()  # return freed memory to OS after heavy load
         _status = "ready"
 
@@ -3790,6 +3792,7 @@ def _get_db_instance(db_name: str):
         emb = embeddings_model
     tmp_dir = _ensure_tmp_chroma(db_name, db_path)
     instance = Chroma(persist_directory=str(tmp_dir), embedding_function=emb)
+    instance._db_name = db_name  # stored for BM25 lookup
     # LRU eviction — remove oldest entry when over limit
     if len(_db_instance_cache) >= _DB_CACHE_MAX:
         oldest = next(iter(_db_instance_cache))
@@ -5564,13 +5567,35 @@ async def crawl_site(data: dict, request: Request):
             _db_instance_cache.pop(db_name, None)
             _bm25_cache.pop(db_name, None)
             # Reload local_db if we just re-crawled the active DB.
-            # IMPORTANT: do NOT reuse chroma_db — its /dev/shm crawl dir was just deleted
-            # (shutil.rmtree above). Instead evict the stale load-dir and reload fresh from disk.
+            # CRITICAL: ChromaDB Rust layer caches PersistentClient by path (singleton).
+            # Reusing /dev/shm/chroma_{db} returns the OLD cached client → empty results.
+            # Fix: use a NEW unique path so the Rust layer creates a fresh client.
             active_name = ACTIVE_DB_FILE.read_text(encoding="utf-8").strip() if ACTIVE_DB_FILE.exists() else ""
-            if db_name == active_name:
-                _stale_load = Path(f"/dev/shm/chroma_{db_name}")
-                if _stale_load.exists():
-                    shutil.rmtree(str(_stale_load), ignore_errors=True)
+            if db_name == active_name and embeddings_model is not None:
+                import time as _lt
+                _new_load_path = Path(f"/dev/shm/load_{db_name}_{int(_lt.time())}")
+                # Evict ALL old load dirs for this db to free /dev/shm
+                for _old_ld in Path("/dev/shm").glob(f"load_{db_name}_*"):
+                    shutil.rmtree(str(_old_ld), ignore_errors=True)
+                for _old_ld in Path("/dev/shm").glob(f"chroma_{db_name}*"):
+                    shutil.rmtree(str(_old_ld), ignore_errors=True)
+                _new_load_path.mkdir(parents=True, exist_ok=True)
+                _db_src = DATABASES_DIR / db_name
+                for _fi in _db_src.iterdir():
+                    if _fi.name in ("config.json", "visitor_history"):
+                        continue
+                    try:
+                        if _fi.is_file():
+                            shutil.copy2(str(_fi), str(_new_load_path / _fi.name))
+                        else:
+                            shutil.copytree(str(_fi), str(_new_load_path / _fi.name), dirs_exist_ok=True)
+                    except Exception as _ce:
+                        logger.warning(f"[RELOAD] copy {_fi.name}: {_ce}")
+                from langchain_chroma import Chroma as _ReloadChroma
+                local_db = _ReloadChroma(persist_directory=str(_new_load_path), embedding_function=embeddings_model)
+                local_db._db_name = db_name  # for BM25 lookup
+                _status = "ready"
+            elif db_name == active_name:
                 local_db = None
                 await asyncio.to_thread(_load_db_now)
             yield _send(f"🔄 DB reloaded in memory — no restart needed.")
