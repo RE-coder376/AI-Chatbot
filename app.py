@@ -4828,6 +4828,7 @@ async def crawl_site(data: dict, request: Request):
         return JSONResponse({"detail": "url and db_name required"}, status_code=400)
 
     async def _stream():
+        global local_db, embeddings_model
         import urllib.parse
         import xml.etree.ElementTree as ET
         import requests as _req
@@ -5033,7 +5034,6 @@ async def crawl_site(data: dict, request: Request):
                     import shutil, gc
                     yield _send("🗑️ Attempting to clear old data...")
                     # Release global DB lock before deleting files
-                    global local_db, embeddings_model
                     if local_db is not None:
                         try:
                             try: local_db._client.reset()
