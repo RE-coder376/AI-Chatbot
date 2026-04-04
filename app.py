@@ -5033,7 +5033,7 @@ async def crawl_site(data: dict, request: Request):
                     import shutil, gc
                     yield _send("🗑️ Attempting to clear old data...")
                     # Release global DB lock before deleting files
-                    global local_db
+                    global local_db, embeddings_model
                     if local_db is not None:
                         try:
                             try: local_db._client.reset()
@@ -5572,7 +5572,6 @@ async def crawl_site(data: dict, request: Request):
                 if _stale_load.exists():
                     shutil.rmtree(str(_stale_load), ignore_errors=True)
                 local_db = None
-                embeddings_model = None
                 await asyncio.to_thread(_load_db_now)
             yield _send(f"🔄 DB reloaded in memory — no restart needed.")
             yield _send(f"✅ Done! {total_chunks} chunks ingested into '{db_name}'.")
