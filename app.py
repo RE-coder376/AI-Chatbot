@@ -5529,6 +5529,12 @@ async def crawl_site(data: dict, request: Request):
 
                 await browser.close()
 
+                # Determine BEFORE copy-back whether to keep chroma_dir alive for local_db.
+                # Using chroma_db directly (live crawl instance) is the safest reload approach:
+                # no Rust cache issues, no copy integrity issues, no WAL checkpoint race.
+                _active_now = ACTIVE_DB_FILE.read_text(encoding="utf-8").strip() if ACTIVE_DB_FILE.exists() else ""
+                _keep_for_local = (db_name == _active_now and chroma_db is not None)
+
                 # Checkpoint WAL and switch to DELETE journal mode before copying.
                 # /dev/shm is tmpfs (WAL works), but databases/ is overlayfs (WAL breaks).
                 # Converting to DELETE mode here means the copied file is WAL-free.
@@ -5558,46 +5564,27 @@ async def crawl_site(data: dict, request: Request):
                 except Exception as _cp_e:
                     yield _send(f"⚠️ Copy from /tmp failed: {_cp_e}")
                 finally:
-                    try:
-                        shutil.rmtree(str(chroma_dir), ignore_errors=True)
-                    except Exception:
-                        pass
+                    if not _keep_for_local:
+                        try:
+                            shutil.rmtree(str(chroma_dir), ignore_errors=True)
+                        except Exception:
+                            pass
 
             # Evict cached DB instance and BM25 index so next query reloads from disk
             _db_instance_cache.pop(db_name, None)
             _bm25_cache.pop(db_name, None)
             # Reload local_db if we just re-crawled the active DB.
-            # CRITICAL: ChromaDB Rust layer caches PersistentClient by path (singleton).
-            # Reusing /dev/shm/chroma_{db} returns the OLD cached client → empty results.
-            # Fix: use a NEW unique path so the Rust layer creates a fresh client.
-            active_name = ACTIVE_DB_FILE.read_text(encoding="utf-8").strip() if ACTIVE_DB_FILE.exists() else ""
-            if db_name == active_name and embeddings_model is not None:
-                import time as _lt
-                _new_load_path = Path(f"/dev/shm/load_{db_name}_{int(_lt.time())}")
-                # Evict ALL old load dirs for this db to free /dev/shm
-                for _old_ld in Path("/dev/shm").glob(f"load_{db_name}_*"):
-                    shutil.rmtree(str(_old_ld), ignore_errors=True)
-                for _old_ld in Path("/dev/shm").glob(f"chroma_{db_name}*"):
-                    shutil.rmtree(str(_old_ld), ignore_errors=True)
-                _new_load_path.mkdir(parents=True, exist_ok=True)
-                _db_src = DATABASES_DIR / db_name
-                for _fi in _db_src.iterdir():
-                    if _fi.name in ("config.json", "visitor_history"):
-                        continue
-                    try:
-                        if _fi.is_file():
-                            shutil.copy2(str(_fi), str(_new_load_path / _fi.name))
-                        else:
-                            shutil.copytree(str(_fi), str(_new_load_path / _fi.name), dirs_exist_ok=True)
-                    except Exception as _ce:
-                        logger.warning(f"[RELOAD] copy {_fi.name}: {_ce}")
-                from langchain_chroma import Chroma as _ReloadChroma
-                local_db = _ReloadChroma(persist_directory=str(_new_load_path), embedding_function=embeddings_model)
-                local_db._db_name = db_name  # for BM25 lookup
+            # Use chroma_db directly — it's the live crawl instance that successfully
+            # wrote all chunks. chroma_dir was preserved (not deleted) for this purpose.
+            if _keep_for_local:
+                # Evict stale startup load-dirs to free /dev/shm
+                for _old_d in Path("/dev/shm").glob(f"chroma_{db_name}*"):
+                    shutil.rmtree(str(_old_d), ignore_errors=True)
+                for _old_d in Path("/dev/shm").glob(f"load_{db_name}_*"):
+                    shutil.rmtree(str(_old_d), ignore_errors=True)
+                local_db = chroma_db
+                local_db._db_name = db_name
                 _status = "ready"
-            elif db_name == active_name:
-                local_db = None
-                await asyncio.to_thread(_load_db_now)
             yield _send(f"🔄 DB reloaded in memory — no restart needed.")
             yield _send(f"✅ Done! {total_chunks} chunks ingested into '{db_name}'.")
             asyncio.get_running_loop().run_in_executor(None, _github_sync_upload, db_name)
