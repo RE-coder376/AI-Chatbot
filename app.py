@@ -925,6 +925,11 @@ async def retrieve_context(q: str, db, k: int = 15, fast: bool = False, expansio
     """Multilingual Retrieval: Handles English and Urdu in the same vector space.
     Returns (context_text, doc_count, sources) so callers can cite sources.
     fast=True skips the LLM expansion step (used for sub-queries in multi-part decomposition)."""
+    try:
+        _cnt = db._collection.count() if db else 0
+        logger.info(f"[RETRIEVE] db={'set' if db else 'None'}, chunks={_cnt}, q={q[:60]}")
+    except Exception as _le:
+        logger.warning(f"[RETRIEVE] db count failed: {_le}")
     # If this DB has live API sources, skip LLM expansion — the API data is the freshness source
     if not fast:
         try:
@@ -5582,9 +5587,24 @@ async def crawl_site(data: dict, request: Request):
                     shutil.rmtree(str(_old_d), ignore_errors=True)
                 for _old_d in Path("/dev/shm").glob(f"load_{db_name}_*"):
                     shutil.rmtree(str(_old_d), ignore_errors=True)
-                local_db = chroma_db
-                local_db._db_name = db_name
-                _status = "ready"
+                # Create a fresh Chroma wrapper via default thread pool.
+                # chroma_dir is still alive (not deleted). The Rust layer reuses the
+                # same working client by path — but the new Python wrapper is NOT
+                # bound to _chroma_ex (which is about to be GC'd after _stream ends).
+                try:
+                    from langchain_chroma import Chroma as _FC
+                    _fresh = await asyncio.to_thread(
+                        _FC, persist_directory=str(chroma_dir), embedding_function=emb
+                    )
+                    _fresh._db_name = db_name
+                    local_db = _fresh
+                    _status = "ready"
+                    logger.info(f"[POST-CRAWL] local_db reloaded: {local_db._collection.count()} chunks at {chroma_dir}")
+                except Exception as _re:
+                    logger.error(f"[POST-CRAWL] fresh Chroma failed ({_re}), using chroma_db directly")
+                    local_db = chroma_db
+                    local_db._db_name = db_name
+                    _status = "ready"
             yield _send(f"🔄 DB reloaded in memory — no restart needed.")
             yield _send(f"✅ Done! {total_chunks} chunks ingested into '{db_name}'.")
             asyncio.get_running_loop().run_in_executor(None, _github_sync_upload, db_name)
