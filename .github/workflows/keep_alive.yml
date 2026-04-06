@@ -1,0 +1,16 @@
+name: Keep HF Space Alive
+
+on:
+  schedule:
+    - cron: '*/5 * * * *'  # every 5 minutes
+  workflow_dispatch:        # allow manual trigger
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping HF Space
+        run: |
+          curl -sf --max-time 60 https://hamza-naimat-ai-chatbot.hf.space/health \
+            && echo "Space is alive" \
+            || echo "Space is starting up (non-fatal)"
