@@ -831,7 +831,8 @@ def _get_bm25_index(db, db_name: str):
         from rank_bm25 import BM25Okapi
         cached = _bm25_cache.get(db_name)
         total = db._collection.count()
-        if cached and cached["num_docs"] == total:
+        # Only rebuild if chunk count changed by >50 — avoids full 131MB re-read on every auto-crawl write
+        if cached and abs(cached["num_docs"] - total) < 50:
             return cached
         # Load all docs and build index
         all_data = db._collection.get(limit=total + 100, include=["documents", "metadatas"])
@@ -1025,7 +1026,7 @@ async def retrieve_context(q: str, db, k: int = 15, fast: bool = False, expansio
         try:
             _all_results = await asyncio.wait_for(
                 asyncio.gather(*_search_tasks, _bm25_task, return_exceptions=True),
-                timeout=20
+                timeout=35
             )
         except asyncio.TimeoutError:
             logger.warning("ChromaDB parallel search timed out")
@@ -1843,8 +1844,17 @@ async def _auto_crawl_db(db_name: str, url: str, max_pages: int = 20) -> int:
     import re as _re2
     from langchain_core.documents import Document
     db = await asyncio.to_thread(_get_db_instance, db_name)
-    if db is None and db_name == _get_active_db():
-        db = local_db  # active DB lives in /dev/shm, not databases/
+    if db is None and db_name == _get_active_db() and local_db is not None:
+        # active DB lives in /dev/shm — create a SEPARATE Chroma instance for writes
+        # so the shared local_db read lock is never blocked by crawl writes
+        try:
+            from chromadb import Client as _CClient
+            from langchain_chroma import Chroma as _Chroma
+            _tmp = Path(getattr(local_db, '_persist_directory', '') or f"/dev/shm/chroma_{db_name}")
+            db = await asyncio.to_thread(lambda: _Chroma(persist_directory=str(_tmp), embedding_function=embeddings_model))
+        except Exception as _e:
+            logger.warning(f"[AUTO-CRAWL] Could not create write-db for {db_name}: {_e}")
+            db = local_db
     if not db or not url: return 0
     _crawling_dbs.add(db_name)
     seen_file = DATABASES_DIR / db_name / "crawled_urls.txt"
@@ -1910,6 +1920,7 @@ async def _auto_crawl_db(db_name: str, url: str, max_pages: int = 20) -> int:
                     doc = Document(page_content=text[:25000], metadata={"source": page_url})
                     await asyncio.to_thread(db.add_documents, [doc])
                     added += 1
+                    await asyncio.sleep(0.5)  # yield between writes so reads don't timeout
                 newly_seen.append(page_url)
             except Exception as e: logger.warning(f"[AUTO-CRAWL] Page error {page_url}: {e}")
 
