@@ -655,7 +655,7 @@ ANSWER TIER FRAMEWORK — EXECUTE THIS DECISION LOGIC BEFORE EVERY RESPONSE:
 ▸ TIER 1 — DIRECT ANSWER (use when KB contains an explicit answer):
   Condition: The retrieved KB above contains a specific, direct answer to this question.
   Action: Answer ONLY from KB text. No world knowledge. No additions. No elaboration beyond what is written.
-  Use for: prices, product names/features, stated policies, named people, specific dates, enrollment info.
+  Use for: prices, product names/features, stated policies, named people, specific dates, enrollment info, prerequisites/requirements, course/chapter content, FAQs, any explicitly stated facts or lists.
 
 ▸ TIER 2 — CONTEXTUAL INFERENCE (strict — ALL 5 conditions must be true simultaneously):
   (a) The EXACT SUBJECT of the question (specific product name / person / concept) IS explicitly named in the KB — theme similarity alone does NOT qualify.
@@ -812,10 +812,10 @@ def _keyword_rescue(q: str, db, seen: set, k: int = 5) -> list:
         if role in q_lower:
             technical.append(role.upper())  # Search for "CEO" when query has "ceo"
     rescue_docs = []
+    from langchain_core.documents import Document
     for term in technical[:3]:
         try:
             raw = db._collection.get(where_document={"$contains": term}, limit=k)
-            from langchain_core.documents import Document
             for doc_text, meta in zip(raw.get("documents", []), raw.get("metadatas", [])):
                 key = doc_text[:100]
                 if key not in seen and term in doc_text:
@@ -1506,7 +1506,7 @@ def any_key_ready() -> bool:
 # Per-model context window budgets (chars, conservative — leaves room for system prompt + history)
 _CONTEXT_CHAR_BUDGET = {
     'cerebras':  3000,   # llama3.1-8b = 8K tokens; reserve ~5K for sys prompt + 8-turn history
-    'groq':      5000,   # free-tier TPM; reserve headroom for sys prompt + history
+    'groq':     40000,   # llama-3.3-70b = 128K tokens; generous budget
     'gemini':   40000,   # gemini-2.0-flash-lite = 1M tokens; generous budget
     'sambanova':40000,   # Llama-3.3-70B = 128K tokens; generous budget
     'openai':   40000,   # gpt-4o-mini = 128K tokens; generous budget
@@ -1886,6 +1886,7 @@ async def _auto_crawl_db(db_name: str, url: str, max_pages: int = 20) -> int:
         # Step 2: fetch and index only new pages — use Playwright for JS rendering, one browser for all pages
         _browser = None
         _pw_ctx = None
+        _pending_docs = []
         try:
             from playwright.async_api import async_playwright
             _pw_ctx = await async_playwright().start()
@@ -1901,7 +1902,7 @@ async def _auto_crawl_db(db_name: str, url: str, max_pages: int = 20) -> int:
                     try:
                         _pg = await _browser.new_page()
                         await _pg.goto(page_url, wait_until="domcontentloaded", timeout=20000)
-                        await _pg.wait_for_timeout(1500)  # let JS render content
+                        await _pg.wait_for_timeout(3000)  # let JS render content
                         html = await _pg.content()
                         await _pg.close()
                         soup = BeautifulSoup(html, "html.parser")
@@ -1917,12 +1918,14 @@ async def _auto_crawl_db(db_name: str, url: str, max_pages: int = 20) -> int:
                             for tag in soup(["script","style","nav","footer","header"]): tag.decompose()
                             text = soup.get_text(separator="\n", strip=True)
                 if len(text) > 100:
-                    doc = Document(page_content=text[:25000], metadata={"source": page_url})
-                    await asyncio.to_thread(db.add_documents, [doc])
+                    _pending_docs.append(Document(page_content=text[:25000], metadata={"source": page_url}))
                     added += 1
-                    await asyncio.sleep(0.5)  # yield between writes so reads don't timeout
                 newly_seen.append(page_url)
             except Exception as e: logger.warning(f"[AUTO-CRAWL] Page error {page_url}: {e}")
+
+        # Batch write all docs at once — single HNSW lock instead of per-page, unblocks reads
+        if _pending_docs:
+            await asyncio.to_thread(db.add_documents, _pending_docs)
 
         if _browser:
             try: await _browser.close()
@@ -2180,12 +2183,30 @@ async def search_test(q: str = "goals Part 6 Building Agent Factories"):
         if not local_db:
             return {"error": "local_db is None", "status": _status, "count": 0}
         loop = asyncio.get_running_loop()
-        results = await loop.run_in_executor(None, lambda: local_db.similarity_search(q, k=3))
+        results = await loop.run_in_executor(None, lambda: local_db.similarity_search(q, k=5))
         return {
             "count": cnt,
             "db_path": getattr(local_db, '_persist_directory', 'unknown'),
             "db_name": getattr(local_db, '_db_name', 'unknown'),
             "results": [{"text": r.page_content[:300], "source": r.metadata.get("source", "")} for r in results],
+        }
+    except Exception as e:
+        import traceback
+        return {"error": str(e), "traceback": traceback.format_exc()[:600]}
+
+@app.get("/debug-context")
+async def debug_context(q: str = ""):
+    """Diagnostic: show full retrieve_context output for a query."""
+    if not q: return {"error": "provide q=..."}
+    try:
+        context, doc_count, sources = await retrieve_context(q, local_db)
+        addresses = _context_addresses_query(context, q)
+        return {
+            "doc_count": doc_count,
+            "addresses_query": addresses,
+            "context_len": len(context),
+            "context_preview": context[:2000],
+            "sources": sources,
         }
     except Exception as e:
         import traceback
