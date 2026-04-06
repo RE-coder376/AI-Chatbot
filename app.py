@@ -1505,7 +1505,7 @@ def any_key_ready() -> bool:
 
 # Per-model context window budgets (chars, conservative — leaves room for system prompt + history)
 _CONTEXT_CHAR_BUDGET = {
-    'cerebras':  3000,   # llama3.1-8b = 8K tokens; reserve ~5K for sys prompt + 8-turn history
+    'cerebras':  1500,   # llama3.1-8b = 8K tokens total; long sys prompts eat ~6K → only 1.5K safe for context
     'groq':     40000,   # llama-3.3-70b = 128K tokens; generous budget
     'gemini':   40000,   # gemini-2.0-flash-lite = 1M tokens; generous budget
     'sambanova':40000,   # Llama-3.3-70B = 128K tokens; generous budget
