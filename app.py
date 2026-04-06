@@ -5347,7 +5347,7 @@ async def crawl_site(data: dict, request: Request):
                         import pytesseract
                         from PIL import Image
                         import io as _io
-                        img_urls = await pg.evaluate("""() =>
+                        img_urls = await pg.evaluate(r"""() =>
                             Array.from(document.querySelectorAll('img'))
                                 .filter(i => i.naturalWidth > 150 && i.naturalHeight > 150)
                                 .map(i => i.src)
