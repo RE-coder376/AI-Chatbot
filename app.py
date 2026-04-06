@@ -1843,6 +1843,8 @@ async def _auto_crawl_db(db_name: str, url: str, max_pages: int = 20) -> int:
     import re as _re2
     from langchain_core.documents import Document
     db = await asyncio.to_thread(_get_db_instance, db_name)
+    if db is None and db_name == _get_active_db():
+        db = local_db  # active DB lives in /dev/shm, not databases/
     if not db or not url: return 0
     _crawling_dbs.add(db_name)
     seen_file = DATABASES_DIR / db_name / "crawled_urls.txt"
