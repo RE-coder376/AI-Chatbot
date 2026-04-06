@@ -1835,7 +1835,7 @@ def _check_config_security():
     except Exception as e:
         logger.warning(f"Config security check failed: {e}")
 
-async def _auto_crawl_db(db_name: str, url: str, max_pages: int = 100) -> int:
+async def _auto_crawl_db(db_name: str, url: str, max_pages: int = 20) -> int:
     """Scheduled re-crawl — discovers new pages via sitemap, indexes only pages not seen before."""
     import httpx as _hx
     from bs4 import BeautifulSoup
@@ -1940,7 +1940,7 @@ async def _auto_scheduler():
                                     _ct = json.loads(_crawl_sidecar.read_text(encoding="utf-8")) if _crawl_sidecar.exists() else {}
                                 except Exception:
                                     _ct = {}
-                                _ct["last_crawl_time"] = now.isoformat()
+                                _ct["last_crawl_time"] = datetime.now().isoformat()  # use completion time, not tick time
                                 _ct["last_crawl_chunks"] = chunks
                                 _crawl_sidecar.write_text(json.dumps(_ct, indent=2), encoding="utf-8")
                                 logger.info(f"[SCHEDULER] '{db_name}' crawled: +{chunks} chunks")
