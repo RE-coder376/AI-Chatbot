@@ -1784,12 +1784,14 @@ def init_systems():
     _status = "loading"
     DATABASES_DIR.mkdir(exist_ok=True)
     _status = "ready_no_db"
-    # Auto-sync from GitHub in background if GITHUB_PAT is set (restores DBs after Render redeploy)
+    # Auto-sync from GitHub in background if GITHUB_PAT is set (restores DBs after redeploy)
     if os.environ.get("GITHUB_PAT"):
         logger.info("🔄 Auto-syncing databases from GitHub in background...")
         threading.Thread(target=_startup_sync, daemon=True).start()
     else:
-        logger.info("✅ Startup complete — no GITHUB_PAT set, skipping auto-sync")
+        # No GitHub PAT — load local DB directly (dev/local environment)
+        logger.info("✅ No GITHUB_PAT — loading local DB directly...")
+        threading.Thread(target=_load_db_now, daemon=True).start()
 
 def _startup_sync():
     """Background: sync from GitHub then load the active DB."""
@@ -2124,6 +2126,26 @@ def health():
         "any_key_ready": any_key_ready(),
         "github_sync": _github_sync_result,
     }
+
+
+@app.get("/search-test")
+async def search_test(q: str = "goals Part 6 Building Agent Factories"):
+    """Diagnostic: run similarity_search directly to verify retrieval. No auth needed."""
+    try:
+        cnt = local_db._collection.count() if local_db else 0
+        if not local_db:
+            return {"error": "local_db is None", "status": _status, "count": 0}
+        loop = asyncio.get_running_loop()
+        results = await loop.run_in_executor(None, lambda: local_db.similarity_search(q, k=3))
+        return {
+            "count": cnt,
+            "db_path": getattr(local_db, '_persist_directory', 'unknown'),
+            "db_name": getattr(local_db, '_db_name', 'unknown'),
+            "results": [{"text": r.page_content[:300], "source": r.metadata.get("source", "")} for r in results],
+        }
+    except Exception as e:
+        import traceback
+        return {"error": str(e), "traceback": traceback.format_exc()[:600]}
 
 
 @app.get("/")
@@ -5540,21 +5562,21 @@ async def crawl_site(data: dict, request: Request):
                 _active_now = ACTIVE_DB_FILE.read_text(encoding="utf-8").strip() if ACTIVE_DB_FILE.exists() else ""
                 _keep_for_local = (db_name == _active_now and chroma_db is not None)
 
-                # Checkpoint WAL and switch to DELETE journal mode before copying.
-                # /dev/shm is tmpfs (WAL works), but databases/ is overlayfs (WAL breaks).
-                # Converting to DELETE mode here means the copied file is WAL-free.
+                # Checkpoint WAL on source ONLY — do NOT change journal_mode here.
+                # SQLite requires ALL connections closed before WAL→DELETE switch.
+                # chroma_db's Rust client is still open; changing mode under it causes
+                # silent failures on subsequent similarity_search calls.
                 try:
                     import sqlite3 as _sq3
                     _sq3_path = chroma_dir / "chroma.sqlite3"
                     if _sq3_path.exists():
                         _sq3_conn = _sq3.connect(str(_sq3_path))
                         _sq3_conn.execute("PRAGMA wal_checkpoint(FULL)")
-                        _sq3_conn.execute("PRAGMA journal_mode=DELETE")
                         _sq3_conn.close()
                 except Exception as _sq3_e:
                     logger.warning(f"[ChromaDB] WAL checkpoint failed (non-fatal): {_sq3_e}")
 
-                # Copy ChromaDB files from /dev/shm back to persistent db_dir
+                # Copy ChromaDB files from crawl dir back to persistent db_dir
                 yield _send("📦 Saving ChromaDB to persistent storage...")
                 try:
                     for _item in chroma_dir.iterdir():
@@ -5565,9 +5587,24 @@ async def crawl_site(data: dict, request: Request):
                             shutil.copytree(str(_item), str(_dst))
                         else:
                             shutil.copy2(str(_item), str(_dst))
+                    # Convert DESTINATION to DELETE journal mode — safe here (no other connections to db_dir).
+                    # Required for Docker overlayfs where WAL mode fails on read.
+                    _dst_sq3 = db_dir / "chroma.sqlite3"
+                    if _dst_sq3.exists():
+                        try:
+                            _dj_conn = _sq3.connect(str(_dst_sq3))
+                            _dj_conn.execute("PRAGMA wal_checkpoint(FULL)")
+                            _dj_conn.execute("PRAGMA journal_mode=DELETE")
+                            _dj_conn.close()
+                            for _wf in [db_dir / "chroma.sqlite3-wal", db_dir / "chroma.sqlite3-shm"]:
+                                try:
+                                    if _wf.exists(): _wf.unlink()
+                                except Exception: pass
+                        except Exception as _dj_e:
+                            logger.warning(f"[ChromaDB] journal_mode=DELETE on copy failed: {_dj_e}")
                     yield _send("✅ ChromaDB saved.")
                 except Exception as _cp_e:
-                    yield _send(f"⚠️ Copy from /tmp failed: {_cp_e}")
+                    yield _send(f"⚠️ Copy failed: {_cp_e}")
                 finally:
                     if not _keep_for_local:
                         try:
@@ -5582,29 +5619,23 @@ async def crawl_site(data: dict, request: Request):
             # Use chroma_db directly — it's the live crawl instance that successfully
             # wrote all chunks. chroma_dir was preserved (not deleted) for this purpose.
             if _keep_for_local:
-                # Evict stale startup load-dirs to free /dev/shm
+                # Delete crawl dir — we reload from the persisted copy in db_dir.
+                # Using _load_db_now (standard startup path) avoids two failure modes:
+                # 1. chroma_db's Rust client is per-thread; _fresh in a new thread
+                #    hits "no such table" on similarity_search (cross-thread SQLite).
+                # 2. Reusing chroma_dir path after journal_mode change confuses the
+                #    Rust PersistentClient singleton cache.
+                shutil.rmtree(str(chroma_dir), ignore_errors=True)
+                # Evict stale load-dirs so _ensure_tmp_chroma copies fresh from db_dir
                 for _old_d in Path("/dev/shm").glob(f"chroma_{db_name}*"):
                     shutil.rmtree(str(_old_d), ignore_errors=True)
                 for _old_d in Path("/dev/shm").glob(f"load_{db_name}_*"):
                     shutil.rmtree(str(_old_d), ignore_errors=True)
-                # Create a fresh Chroma wrapper via default thread pool.
-                # chroma_dir is still alive (not deleted). The Rust layer reuses the
-                # same working client by path — but the new Python wrapper is NOT
-                # bound to _chroma_ex (which is about to be GC'd after _stream ends).
-                try:
-                    from langchain_chroma import Chroma as _FC
-                    _fresh = await asyncio.to_thread(
-                        _FC, persist_directory=str(chroma_dir), embedding_function=emb
-                    )
-                    _fresh._db_name = db_name
-                    local_db = _fresh
-                    _status = "ready"
-                    logger.info(f"[POST-CRAWL] local_db reloaded: {local_db._collection.count()} chunks at {chroma_dir}")
-                except Exception as _re:
-                    logger.error(f"[POST-CRAWL] fresh Chroma failed ({_re}), using chroma_db directly")
-                    local_db = chroma_db
-                    local_db._db_name = db_name
-                    _status = "ready"
+                # Reload via standard startup path — same as server boot, known to work
+                local_db = None
+                await asyncio.to_thread(_load_db_now)
+                _cnt_after = local_db._collection.count() if local_db else 0
+                logger.info(f"[POST-CRAWL] local_db reloaded from disk: {_cnt_after} chunks")
             yield _send(f"🔄 DB reloaded in memory — no restart needed.")
             yield _send(f"✅ Done! {total_chunks} chunks ingested into '{db_name}'.")
             asyncio.get_running_loop().run_in_executor(None, _github_sync_upload, db_name)
