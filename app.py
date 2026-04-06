@@ -1871,21 +1871,52 @@ async def _auto_crawl_db(db_name: str, url: str, max_pages: int = 20) -> int:
         if not new_urls:
             logger.info(f"[AUTO-CRAWL] '{db_name}': no new pages in sitemap")
             return 0
-        # Step 2: fetch and index only new pages
-        async with _hx.AsyncClient(timeout=15, headers={"User-Agent": "Mozilla/5.0"}, follow_redirects=True) as client:
-            for page_url in new_urls:
-                try:
-                    r = await client.get(page_url)
-                    if r.status_code != 200: continue
-                    soup = BeautifulSoup(r.text, "html.parser")
-                    for tag in soup(["script","style","nav","footer","header"]): tag.decompose()
-                    text = soup.get_text(separator="\n", strip=True)
-                    if len(text) > 100:
-                        doc = Document(page_content=text[:25000], metadata={"source": page_url})
-                        await asyncio.to_thread(db.add_documents, [doc])
-                        added += 1
-                    newly_seen.append(page_url)
-                except Exception as e: logger.warning(f"[AUTO-CRAWL] Page error {page_url}: {e}")
+        # Step 2: fetch and index only new pages — use Playwright for JS rendering, one browser for all pages
+        _browser = None
+        _pw_ctx = None
+        try:
+            from playwright.async_api import async_playwright
+            _pw_ctx = await async_playwright().start()
+            _browser = await _pw_ctx.chromium.launch(headless=True, args=["--no-sandbox","--disable-dev-shm-usage"])
+            logger.info(f"[AUTO-CRAWL] Playwright browser launched for '{db_name}'")
+        except Exception as _pw_start_e:
+            logger.warning(f"[AUTO-CRAWL] Playwright unavailable, falling back to httpx: {_pw_start_e}")
+
+        for page_url in new_urls:
+            try:
+                text = ""
+                if _browser:
+                    try:
+                        _pg = await _browser.new_page()
+                        await _pg.goto(page_url, wait_until="domcontentloaded", timeout=20000)
+                        await _pg.wait_for_timeout(1500)  # let JS render content
+                        html = await _pg.content()
+                        await _pg.close()
+                        soup = BeautifulSoup(html, "html.parser")
+                        for tag in soup(["script","style","nav","footer","header"]): tag.decompose()
+                        text = soup.get_text(separator="\n", strip=True)
+                    except Exception as _pe:
+                        logger.warning(f"[AUTO-CRAWL] Playwright page error {page_url}: {_pe}")
+                if not text:  # fallback to httpx if Playwright failed or unavailable
+                    async with _hx.AsyncClient(timeout=15, headers={"User-Agent": "Mozilla/5.0"}, follow_redirects=True) as _cl:
+                        r = await _cl.get(page_url)
+                        if r.status_code == 200:
+                            soup = BeautifulSoup(r.text, "html.parser")
+                            for tag in soup(["script","style","nav","footer","header"]): tag.decompose()
+                            text = soup.get_text(separator="\n", strip=True)
+                if len(text) > 100:
+                    doc = Document(page_content=text[:25000], metadata={"source": page_url})
+                    await asyncio.to_thread(db.add_documents, [doc])
+                    added += 1
+                newly_seen.append(page_url)
+            except Exception as e: logger.warning(f"[AUTO-CRAWL] Page error {page_url}: {e}")
+
+        if _browser:
+            try: await _browser.close()
+            except Exception: pass
+        if _pw_ctx:
+            try: await _pw_ctx.stop()
+            except Exception: pass
     finally:
         _crawling_dbs.discard(db_name)
     if newly_seen:
