@@ -352,22 +352,6 @@
           <button onclick="syncFromGithub()" style="width:auto;margin:0;padding:6px 16px;font-size:12px;background:#6366f1;">☁️ Sync from GitHub</button>
         </div>
       </div>
-      <!-- Auto-Sync Overview: compact table shown above DB list -->
-      <div id="sync-overview" style="margin-bottom:18px;display:none;">
-        <div style="font-size:12px;font-weight:800;color:var(--text-muted);text-transform:uppercase;margin-bottom:8px;">⏰ Auto-Sync Status — All Databases</div>
-        <table id="sync-overview-table" style="width:100%;border-collapse:collapse;font-size:12px;">
-          <thead>
-            <tr style="border-bottom:2px solid var(--border);color:var(--text-muted);">
-              <th style="text-align:left;padding:6px 8px;font-weight:700;">Database</th>
-              <th style="text-align:left;padding:6px 8px;font-weight:700;">Status</th>
-              <th style="text-align:left;padding:6px 8px;font-weight:700;">Interval</th>
-              <th style="text-align:left;padding:6px 8px;font-weight:700;">Last Crawl</th>
-              <th style="text-align:left;padding:6px 8px;font-weight:700;">Next Crawl</th>
-            </tr>
-          </thead>
-          <tbody id="sync-overview-body"></tbody>
-        </table>
-      </div>
       <div id="db-list"></div>
       <div id="db-status" class="status-msg"></div>
     </div>
@@ -900,36 +884,7 @@
     const statsMap = {};
     (statsData.stats || []).forEach(s => statsMap[s.name] = s);
 
-    // ── Auto-Sync Overview table (master admin only) ────────────────────────
     const isClient = document.body.classList.contains('client-mode');
-    const overviewEl = document.getElementById('sync-overview');
-    const overviewBody = document.getElementById('sync-overview-body');
-    if (overviewEl && overviewBody) {
-      overviewEl.style.display = '';
-      const allDbs = statsData.stats || [];
-      overviewBody.innerHTML = allDbs.map(st => {
-        const hasCrawl = st.auto_crawl_enabled && st.crawl_url;
-        const hasApi = (st.api_sources||[]).length > 0;
-        const intervalM = st.crawl_interval_minutes || 60;
-        const intervalLabel = intervalM < 60 ? `${intervalM}m` : `${(intervalM/60).toFixed(intervalM%60===0?0:1)}h`;
-        const statusDot = hasCrawl ? `<span style="color:#10b981;font-weight:700;">● crawl</span>${hasApi?' <span style="color:#6366f1;">+API</span>':''}` : hasApi ? `<span style="color:#6366f1;font-weight:700;">● API only</span>` : `<span style="color:#9ca3af;">○ off</span>`;
-        const lastCrawl = st.last_crawl_time ? new Date(st.last_crawl_time).toLocaleString() : '—';
-        const nextTs = st.next_crawl_ts || '';
-        const isCrawling = st.is_crawling || false;
-        const nextCell = isCrawling
-          ? `<span style="color:#f59e0b;">🔄 in progress</span>`
-          : hasCrawl
-            ? `<span id="ov-next-${st.name}" data-ts="${nextTs}">${nextTs ? '⏱ computing...' : '⚡ due now'}</span>`
-            : '—';
-        return `<tr style="border-bottom:1px solid var(--border);">
-          <td style="padding:6px 8px;font-weight:700;">${st.name}</td>
-          <td style="padding:6px 8px;">${statusDot}</td>
-          <td style="padding:6px 8px;">${hasCrawl ? intervalLabel : '—'}</td>
-          <td style="padding:6px 8px;color:var(--text-muted);">${lastCrawl}</td>
-          <td style="padding:6px 8px;">${nextCell}</td>
-        </tr>`;
-      }).join('') || '<tr><td colspan="5" style="padding:10px;color:var(--text-muted);">No databases found.</td></tr>';
-    }
     const sessionDb = localStorage.getItem('adminDb') || '—';
     document.getElementById('active-ingest-db').textContent = sessionDb;
     const sel = document.getElementById('ingest-target-db');
@@ -1023,19 +978,6 @@
           el.textContent = `⏭ Next: in ${Math.floor(secs/3600)}h ${Math.floor((secs%3600)/60)}m`;
         }
       });
-      // Overview table countdowns (compact format)
-      document.querySelectorAll('[id^="ov-next-"]').forEach(el => {
-        const ts = el.dataset.ts;
-        if (!ts) return;
-        const secs = Math.round((new Date(ts) - Date.now()) / 1000);
-        if (isNaN(secs) || secs <= 0) {
-          el.textContent = '⚡ due now';
-        } else if (secs < 3600) {
-          el.textContent = `${Math.floor(secs/60)}m ${secs%60}s`;
-        } else {
-          el.textContent = `${Math.floor(secs/3600)}h ${Math.floor((secs%3600)/60)}m`;
-        }
-      });
     }, 1000);
     // Re-fetch db-stats every 60s to update next_crawl_ts after crawls complete
     if (_crawlStatsRefreshTimer) clearInterval(_crawlStatsRefreshTimer);
@@ -1044,14 +986,9 @@
         const res = await fetch(`${API}/admin/db-stats`, { headers: authHeaders() });
         if (!res.ok) return;
         const data = await res.json();
-        const stats = data.stats || [];
-        stats.forEach(st => {
-          // Update DB-list countdown
+        (data.stats || []).forEach(st => {
           const el = document.getElementById(`next-crawl-${st.name}`);
           if (el && el.dataset.crawling !== '1' && st.next_crawl_ts) el.dataset.ts = st.next_crawl_ts;
-          // Update overview table countdown
-          const ovEl = document.getElementById(`ov-next-${st.name}`);
-          if (ovEl && st.next_crawl_ts) ovEl.dataset.ts = st.next_crawl_ts;
         });
       } catch(e) { /* silent */ }
     }, 60000);
