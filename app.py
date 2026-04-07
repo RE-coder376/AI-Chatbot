@@ -1975,15 +1975,25 @@ async def _auto_scheduler():
                             logger.info(f"[SCHEDULER] Auto-crawling '{db_name}'...")
                             try:
                                 chunks = await _auto_crawl_db(db_name, db_cfg["crawl_url"])
-                                # Write crawl timestamps to sidecar — never overwrite user config
+                                # Write crawl timestamps to sidecar + persist to config.json (survives GitHub sync/restart)
+                                _now_iso = datetime.now().isoformat()
                                 _crawl_sidecar = db_dir / "_crawl_times.json"
                                 try:
                                     _ct = json.loads(_crawl_sidecar.read_text(encoding="utf-8")) if _crawl_sidecar.exists() else {}
                                 except Exception:
                                     _ct = {}
-                                _ct["last_crawl_time"] = datetime.now().isoformat()  # use completion time, not tick time
+                                _ct["last_crawl_time"] = _now_iso
                                 _ct["last_crawl_chunks"] = chunks
                                 _crawl_sidecar.write_text(json.dumps(_ct, indent=2), encoding="utf-8")
+                                # Also persist to config.json so HF Space restarts don't show "due"
+                                try:
+                                    _cfg_path = db_dir / "config.json"
+                                    _cfg_data = json.loads(_cfg_path.read_text(encoding="utf-8")) if _cfg_path.exists() else {}
+                                    _cfg_data["last_crawl_time"] = _now_iso
+                                    _cfg_data["last_crawl_chunks"] = chunks
+                                    _cfg_path.write_text(json.dumps(_cfg_data, indent=2), encoding="utf-8")
+                                except Exception as _ce:
+                                    logger.warning(f"[SCHEDULER] Could not persist crawl time to config: {_ce}")
                                 logger.info(f"[SCHEDULER] '{db_name}' crawled: +{chunks} chunks")
                             except Exception as e:
                                 logger.error(f"[SCHEDULER] Crawl error '{db_name}': {e}")
