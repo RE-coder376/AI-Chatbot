@@ -4764,8 +4764,7 @@ def get_db_stats(request: Request, password: str = ""):
     if not DATABASES_DIR.exists(): return {"stats": []}
     for db_dir in sorted(DATABASES_DIR.iterdir(), key=lambda x: x.name):
         if not db_dir.is_dir(): continue
-        # Per-DB client: only return their own DB's stats
-        if not is_root and db_dir.name != client_db: continue
+        if not is_root and db_dir.name != client_db: continue  # client sees only their DB
         db_cfg = {}
         cfg_file = db_dir / "config.json"
         if cfg_file.exists():
