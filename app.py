@@ -4743,13 +4743,29 @@ async def crawl_inspect(data: dict, request: Request):
 @app.get("/admin/db-stats")
 def get_db_stats(request: Request, password: str = ""):
     password = _extract_password(request, password)
-    cfg = get_config()
-    if not hmac.compare_digest(password.encode(), cfg.get("admin_password", "").encode()):
-        return JSONResponse({"detail": "Unauthorized"}, status_code=401)
+    root_cfg = get_config()
+    root_pw = os.getenv("ADMIN_PASSWORD", "") or root_cfg.get("admin_password", "") or ""
+    is_root = root_pw and hmac.compare_digest(password.encode(), root_pw.encode())
+    # For per-DB passwords: check if the X-Admin-DB header's DB password matches
+    client_db = _extract_admin_db(request)
+    if not is_root:
+        if client_db:
+            db_cfg_path = DATABASES_DIR / client_db / "config.json"
+            db_cfg_data = {}
+            if db_cfg_path.exists():
+                try: db_cfg_data = json.loads(db_cfg_path.read_text(encoding="utf-8"))
+                except: pass
+            db_pw = db_cfg_data.get("admin_password", "") or ""
+            if not (db_pw and hmac.compare_digest(password.encode(), db_pw.encode())):
+                return JSONResponse({"detail": "Unauthorized"}, status_code=401)
+        else:
+            return JSONResponse({"detail": "Unauthorized"}, status_code=401)
     stats = []
     if not DATABASES_DIR.exists(): return {"stats": []}
     for db_dir in sorted(DATABASES_DIR.iterdir(), key=lambda x: x.name):
         if not db_dir.is_dir(): continue
+        # Per-DB client: only return their own DB's stats
+        if not is_root and db_dir.name != client_db: continue
         db_cfg = {}
         cfg_file = db_dir / "config.json"
         if cfg_file.exists():
