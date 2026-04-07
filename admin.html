@@ -904,7 +904,7 @@
     const isClient = document.body.classList.contains('client-mode');
     const overviewEl = document.getElementById('sync-overview');
     const overviewBody = document.getElementById('sync-overview-body');
-    if (!isClient && overviewEl && overviewBody) {
+    if (overviewEl && overviewBody) {
       overviewEl.style.display = '';
       const allDbs = statsData.stats || [];
       overviewBody.innerHTML = allDbs.map(st => {
@@ -929,8 +929,6 @@
           <td style="padding:6px 8px;">${nextCell}</td>
         </tr>`;
       }).join('') || '<tr><td colspan="5" style="padding:10px;color:var(--text-muted);">No databases found.</td></tr>';
-    } else if (overviewEl) {
-      overviewEl.style.display = 'none';
     }
     const sessionDb = localStorage.getItem('adminDb') || '—';
     document.getElementById('active-ingest-db').textContent = sessionDb;
