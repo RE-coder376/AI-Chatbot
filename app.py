@@ -1973,27 +1973,34 @@ async def _auto_scheduler():
                             except Exception as e: logger.debug(f"[SCHEDULER] Crawl interval parse ({db_dir.name}): {e}")
                         if due:
                             logger.info(f"[SCHEDULER] Auto-crawling '{db_name}'...")
+                            # Write timestamp NOW (start of crawl) so interval resets immediately
+                            # — prevents "due now" on all DBs while a long crawl is in progress
+                            _now_iso = datetime.now().isoformat()
+                            try:
+                                _crawl_sidecar_pre = db_dir / "_crawl_times.json"
+                                _ct_pre = json.loads(_crawl_sidecar_pre.read_text(encoding="utf-8")) if _crawl_sidecar_pre.exists() else {}
+                                _ct_pre["last_crawl_time"] = _now_iso
+                                _crawl_sidecar_pre.write_text(json.dumps(_ct_pre, indent=2), encoding="utf-8")
+                                _cfg_path_pre = db_dir / "config.json"
+                                _cfg_data_pre = json.loads(_cfg_path_pre.read_text(encoding="utf-8")) if _cfg_path_pre.exists() else {}
+                                _cfg_data_pre["last_crawl_time"] = _now_iso
+                                _cfg_path_pre.write_text(json.dumps(_cfg_data_pre, indent=2), encoding="utf-8")
+                            except Exception as _pre_e:
+                                logger.warning(f"[SCHEDULER] Pre-crawl timestamp write failed: {_pre_e}")
                             try:
                                 chunks = await _auto_crawl_db(db_name, db_cfg["crawl_url"])
-                                # Write crawl timestamps to sidecar + persist to config.json (survives GitHub sync/restart)
-                                _now_iso = datetime.now().isoformat()
-                                _crawl_sidecar = db_dir / "_crawl_times.json"
+                                # Update chunk count only (timestamp already written at crawl start)
                                 try:
+                                    _crawl_sidecar = db_dir / "_crawl_times.json"
                                     _ct = json.loads(_crawl_sidecar.read_text(encoding="utf-8")) if _crawl_sidecar.exists() else {}
-                                except Exception:
-                                    _ct = {}
-                                _ct["last_crawl_time"] = _now_iso
-                                _ct["last_crawl_chunks"] = chunks
-                                _crawl_sidecar.write_text(json.dumps(_ct, indent=2), encoding="utf-8")
-                                # Also persist to config.json so HF Space restarts don't show "due"
-                                try:
+                                    _ct["last_crawl_chunks"] = chunks
+                                    _crawl_sidecar.write_text(json.dumps(_ct, indent=2), encoding="utf-8")
                                     _cfg_path = db_dir / "config.json"
                                     _cfg_data = json.loads(_cfg_path.read_text(encoding="utf-8")) if _cfg_path.exists() else {}
-                                    _cfg_data["last_crawl_time"] = _now_iso
                                     _cfg_data["last_crawl_chunks"] = chunks
                                     _cfg_path.write_text(json.dumps(_cfg_data, indent=2), encoding="utf-8")
                                 except Exception as _ce:
-                                    logger.warning(f"[SCHEDULER] Could not persist crawl time to config: {_ce}")
+                                    logger.warning(f"[SCHEDULER] Could not update chunk count: {_ce}")
                                 logger.info(f"[SCHEDULER] '{db_name}' crawled: +{chunks} chunks")
                             except Exception as e:
                                 logger.error(f"[SCHEDULER] Crawl error '{db_name}': {e}")
