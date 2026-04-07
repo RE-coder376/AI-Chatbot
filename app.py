@@ -256,19 +256,25 @@ def _github_sync_download():
                 except Exception as e: logger.warning(f"[GH-SYNC] Background sync failed for {asset['name']}: {e}")
         if other_assets:
             threading.Thread(target=_bg_sync_rest, daemon=True).start()
-        # Restore crawled_urls.txt for each DB (backed up separately, not in zip)
-        for asset in [a for a in assets if a["name"].startswith("crawled_urls_") and a["name"].endswith(".txt")]:
-            db_n = asset["name"][len("crawled_urls_"):-len(".txt")]
-            db_dir = DATABASES_DIR / db_n
-            if not db_dir.exists(): continue
-            try:
-                asset_url = f"https://api.github.com/repos/{_GITHUB_USERNAME}/{_GITHUB_REPO}/releases/assets/{asset['id']}"
-                r = _req.get(asset_url, headers=headers, timeout=60)
-                if r.status_code == 200:
-                    (db_dir / "crawled_urls.txt").write_bytes(r.content)
-                    logger.info(f"[GH-SYNC] ✅ crawled_urls.txt restored for {db_n}")
-            except Exception as e:
-                logger.warning(f"[GH-SYNC] crawled_urls restore failed for {db_n}: {e}")
+        # Restore crawled_urls.txt and crawl_times.json for each DB (backed up to Contents API)
+        for db_dir in sorted(DATABASES_DIR.iterdir()):
+            if not db_dir.is_dir(): continue
+            db_n = db_dir.name
+            for fname, dest in [
+                (f"crawled_urls_{db_n}.txt", "crawled_urls.txt"),
+                (f"crawl_times_{db_n}.json", "_crawl_times.json"),
+            ]:
+                try:
+                    r = _req.get(
+                        f"https://api.github.com/repos/{_GITHUB_USERNAME}/{_GITHUB_REPO}/contents/{fname}",
+                        headers=headers, timeout=30)
+                    if r.status_code == 200:
+                        import base64 as _b64
+                        raw = _b64.b64decode(r.json().get("content", "").replace("\n",""))
+                        (db_dir / dest).write_bytes(raw)
+                        logger.info(f"[GH-SYNC] ✅ {dest} restored for {db_n}")
+                except Exception as e:
+                    logger.warning(f"[GH-SYNC] {dest} restore failed for {db_n}: {e}")
         _github_sync_result = {"status": "ok", "detail": f"{len(zip_assets)} DBs restored"}
         logger.info("[GH-SYNC] ✅ All databases restored from GitHub")
         # Set active DB: ACTIVE_DB env var > first available DB
@@ -313,6 +319,34 @@ def _github_backup_crawled_urls(db_name: str):
             logger.warning(f"[GH-SYNC] crawled_urls backup failed: {r2.status_code}")
     except Exception as e:
         logger.warning(f"[GH-SYNC] crawled_urls backup error: {e}")
+
+def _github_backup_crawl_times(db_name: str):
+    """Upload _crawl_times.json to GitHub Contents API so timestamp survives HF Space restarts."""
+    import requests as _req
+    pat = os.environ.get("GITHUB_PAT", "").strip()
+    if not pat: return
+    times_file = DATABASES_DIR / db_name / "_crawl_times.json"
+    if not times_file.exists(): return
+    try:
+        content_b64 = __import__("base64").b64encode(times_file.read_bytes()).decode()
+        api_hdr = {"Authorization": f"token {pat}", "User-Agent": "chatbot-sync"}
+        api_url = f"https://api.github.com/repos/{_GITHUB_USERNAME}/{_GITHUB_REPO}/contents/crawl_times_{db_name}.json"
+        sha = None
+        try:
+            r = _req.get(api_url, headers=api_hdr, timeout=10)
+            if r.status_code == 200:
+                sha = r.json().get("sha")
+        except Exception: pass
+        payload = {"message": f"crawl-times: {db_name} {datetime.now().strftime('%Y-%m-%d %H:%M')}",
+                   "content": content_b64}
+        if sha: payload["sha"] = sha
+        r2 = _req.put(api_url, json=payload, headers=api_hdr, timeout=30)
+        if r2.status_code in (200, 201):
+            logger.info(f"[GH-SYNC] ✅ crawl_times_{db_name}.json backed up")
+        else:
+            logger.warning(f"[GH-SYNC] crawl_times backup failed: {r2.status_code}")
+    except Exception as e:
+        logger.warning(f"[GH-SYNC] crawl_times backup error: {e}")
 
 def _github_sync_upload(db_name: str):
     """Zip DB and upload to GitHub Releases as an asset (supports files >100MB).
@@ -1985,6 +2019,8 @@ async def _auto_scheduler():
                                 _cfg_data_pre = json.loads(_cfg_path_pre.read_text(encoding="utf-8")) if _cfg_path_pre.exists() else {}
                                 _cfg_data_pre["last_crawl_time"] = _now_iso
                                 _cfg_path_pre.write_text(json.dumps(_cfg_data_pre, indent=2), encoding="utf-8")
+                                # Back up to GitHub so timestamp survives HF Space restarts
+                                threading.Thread(target=_github_backup_crawl_times, args=(db_name,), daemon=True).start()
                             except Exception as _pre_e:
                                 logger.warning(f"[SCHEDULER] Pre-crawl timestamp write failed: {_pre_e}")
                             try:
@@ -3522,8 +3558,9 @@ def get_analytics(request: Request, password: str = ""):
     password = _extract_password(request, password)
     db_name = _extract_admin_db(request)
     cfg = get_config(db_name)
-    if not hmac.compare_digest(password.encode(), cfg.get("admin_password", "").encode()): return JSONResponse({"detail": "Unauthorized"}, status_code=401)
-    
+    try: admin_auth(password, cfg)
+    except HTTPException: return JSONResponse({"detail": "Unauthorized"}, status_code=401)
+
     data = {"total": 0, "history": [], "questions": {}}
     af = _analytics_file(db_name)
     if af.exists():
@@ -3572,8 +3609,8 @@ def analytics_charts(request: Request, password: str = ""):
     password = _extract_password(request, password)
     db_name = _extract_admin_db(request)
     cfg = get_config(db_name)
-    if not hmac.compare_digest(password.encode(), cfg.get("admin_password", "").encode()):
-        return JSONResponse({"detail": "Unauthorized"}, status_code=401)
+    try: admin_auth(password, cfg)
+    except HTTPException: return JSONResponse({"detail": "Unauthorized"}, status_code=401)
 
     from collections import defaultdict, Counter
     from datetime import timedelta
