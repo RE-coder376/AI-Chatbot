@@ -1504,14 +1504,8 @@ def any_key_ready() -> bool:
         return True  # assume ready if check fails
 
 # Per-model context window budgets (chars, conservative — leaves room for system prompt + history)
-_CONTEXT_CHAR_BUDGET = {
-    'cerebras':  1500,   # llama3.1-8b = 8K tokens total; long sys prompts eat ~6K → only 1.5K safe for context
-    'groq':     40000,   # llama-3.3-70b = 128K tokens; generous budget
-    'gemini':   40000,   # gemini-2.0-flash-lite = 1M tokens; generous budget
-    'sambanova':40000,   # Llama-3.3-70B = 128K tokens; generous budget
-    'openai':   40000,   # gpt-4o-mini = 128K tokens; generous budget
-    'mistral':  40000,   # Mistral Large = 128K tokens; generous budget
-}
+# Cerebras llama3.1-8b has a hard 8K token limit; skip it when context is large
+_CEREBRAS_MAX_CONTEXT_CHARS = 1500
 
 def _peek_provider() -> str:
     """Return the provider string of the healthiest available key (without creating LLM object)."""
@@ -2761,10 +2755,9 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
         yield "data: {\"type\": \"done\"}\n\n"
         return
 
-    # ── Context cap — per-model budget (prevent context_length_exceeded) ─────
-    _budget = _CONTEXT_CHAR_BUDGET.get(_peek_provider(), 12000)
-    if len(context) > _budget:
-        context = context[:_budget]
+    # ── Cerebras only: cap context to avoid 8K token hard limit ──────────────
+    if _peek_provider() == 'cerebras' and len(context) > _CEREBRAS_MAX_CONTEXT_CHARS:
+        context = context[:_CEREBRAS_MAX_CONTEXT_CHARS]
 
     sys_msg = get_system_prompt(cfg, context, doc_count, is_urdu=is_urdu)
     if page_url:
@@ -3038,10 +3031,9 @@ async def chat(request: Request):
         if _fast_resp:
             return JSONResponse({"answer": _fast_resp, "sources": sources[:3]})
 
-        # ── Context cap — per-model budget (same as streaming path) ─────────
-        _budget = _CONTEXT_CHAR_BUDGET.get(_peek_provider(), 12000)
-        if len(context) > _budget:
-            context = context[:_budget]
+        # ── Cerebras only: cap context to avoid 8K token hard limit ──────────
+        if _peek_provider() == 'cerebras' and len(context) > _CEREBRAS_MAX_CONTEXT_CHARS:
+            context = context[:_CEREBRAS_MAX_CONTEXT_CHARS]
 
         sys_msg = get_system_prompt(cfg, context, doc_count)
         messages = [SystemMessage(content=sys_msg)]
