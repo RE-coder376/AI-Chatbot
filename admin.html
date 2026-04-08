@@ -710,6 +710,14 @@
       const prev = JSON.parse(localStorage.getItem('adminDbHistory') || '[]');
       dl.innerHTML = prev.map(n => `<option value="${n}">`).join('');
     }
+    // Auto-login if credentials saved from previous session
+    const savedPass = localStorage.getItem('adminPass');
+    const savedDb   = localStorage.getItem('adminDb');
+    if (savedPass && savedDb) {
+      document.getElementById('master-pass').value = savedPass;
+      document.getElementById('admin-db').value    = savedDb;
+      unlockSystem();
+    }
   });
 
   function toggle(id) {

@@ -3506,7 +3506,8 @@ async def set_active_db(request: Request, password: str = Form(...), name: str =
 async def create_db(request: Request, password: str = Form(...), name: str = Form(...), db_password: str = Form("")):
     password = _extract_password(request, password)
     cfg = get_config()
-    if not hmac.compare_digest(password.encode(), cfg.get("admin_password", "").encode()): return JSONResponse({"detail": "Unauthorized"}, status_code=401)
+    try: admin_auth(password, cfg)
+    except HTTPException: return JSONResponse({"detail": "Unauthorized"}, status_code=401)
     db_name = name.strip().lower()
     db_path = DATABASES_DIR / db_name
     db_path.mkdir(parents=True, exist_ok=True)
