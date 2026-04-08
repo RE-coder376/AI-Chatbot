@@ -2113,6 +2113,40 @@ async def _prewarm_intro_questions():
     except Exception as e:
         logger.warning(f"Intro question pre-warm failed: {e}")
 
+def _init_crawl_timestamps():
+    """On startup: for any auto-crawl DB with a stale/missing timestamp, write 'now' to the
+    sidecar so the countdown shows correctly immediately instead of 'due now'."""
+    if not DATABASES_DIR.exists(): return
+    now_iso = datetime.now().isoformat()
+    for db_dir in DATABASES_DIR.iterdir():
+        if not db_dir.is_dir(): continue
+        cfg_file = db_dir / "config.json"
+        if not cfg_file.exists(): continue
+        try:
+            db_cfg = json.loads(cfg_file.read_text(encoding="utf-8"))
+        except Exception: continue
+        if not db_cfg.get("auto_crawl_enabled"): continue
+        sidecar = db_dir / "_crawl_times.json"
+        try:
+            ct = json.loads(sidecar.read_text(encoding="utf-8")) if sidecar.exists() else {}
+        except Exception:
+            ct = {}
+        last_str = ct.get("last_crawl_time") or db_cfg.get("last_crawl_time", "")
+        # If timestamp is missing or older than 24h, reset to now so countdown starts fresh
+        is_stale = True
+        if last_str:
+            try:
+                age_h = (datetime.now() - datetime.fromisoformat(last_str)).total_seconds() / 3600
+                is_stale = age_h > 24
+            except Exception: pass
+        if is_stale:
+            ct["last_crawl_time"] = now_iso
+            try:
+                sidecar.write_text(json.dumps(ct, indent=2), encoding="utf-8")
+                logger.info(f"[STARTUP] Reset stale crawl timestamp for '{db_dir.name}'")
+            except Exception as e:
+                logger.warning(f"[STARTUP] Could not reset timestamp for {db_dir.name}: {e}")
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # These can be slow on Windows/large DBs; run in threads to let FastAPI bind to port 8000 immediately
@@ -2120,6 +2154,7 @@ async def lifespan(app: FastAPI):
     asyncio.create_task(asyncio.to_thread(_load_key_health))
     asyncio.create_task(asyncio.to_thread(init_systems))
     asyncio.create_task(asyncio.to_thread(_cleanup_old_data))
+    asyncio.create_task(asyncio.to_thread(_init_crawl_timestamps))
     asyncio.create_task(_auto_scheduler())
     asyncio.create_task(_prewarm_intro_questions())
     yield
