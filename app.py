@@ -1820,12 +1820,16 @@ def init_systems():
     else:
         # No GitHub PAT — load local DB directly (dev/local environment)
         logger.info("✅ No GITHUB_PAT — loading local DB directly...")
-        threading.Thread(target=_load_db_now, daemon=True).start()
+        def _local_init():
+            _load_db_now()
+            _init_crawl_timestamps()
+        threading.Thread(target=_local_init, daemon=True).start()
 
 def _startup_sync():
     """Background: sync from GitHub then load the active DB."""
     _github_sync_download()
     _load_db_now()
+    _init_crawl_timestamps()  # must run AFTER DBs are downloaded
 
 def _cleanup_old_data(retention_days: int = 90):
     """Delete visitor history and CSAT entries older than retention_days."""
@@ -2154,7 +2158,6 @@ async def lifespan(app: FastAPI):
     asyncio.create_task(asyncio.to_thread(_load_key_health))
     asyncio.create_task(asyncio.to_thread(init_systems))
     asyncio.create_task(asyncio.to_thread(_cleanup_old_data))
-    asyncio.create_task(asyncio.to_thread(_init_crawl_timestamps))
     asyncio.create_task(_auto_scheduler())
     asyncio.create_task(_prewarm_intro_questions())
     yield
