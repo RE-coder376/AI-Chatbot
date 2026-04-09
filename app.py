@@ -5149,12 +5149,55 @@ async def crawl_site(data: dict, request: Request):
                         break
 
                 raw_sitemap_count = len(sitemap_urls)
-                if sitemap_urls:
-                    pass
-                else:
-                    yield _send("⚠️  No sitemap — crawling seed URL only")
-                    sitemap_urls = [url]
-                    raw_sitemap_count = 1
+                # If sitemap has few/no URLs → BFS link-following spider
+                spider_threshold = 50
+                if len(sitemap_urls) < spider_threshold:
+                    yield _send(f"🕷️ Sitemap has {len(sitemap_urls)} URL(s) — running BFS link spider...")
+                    import httpx as _hx_spider
+                    from bs4 import BeautifulSoup as _BS_spider
+                    seeds = sitemap_urls if sitemap_urls else [url]
+                    _visited_norm = set(_normalize_url(u) for u in seeds)
+                    _frontier = list(seeds)
+                    _spider_urls = list(seeds)
+                    _spider_limit = max_pages if max_pages > 0 else 99999
+
+                    async def _extract_links_fast(page_url):
+                        try:
+                            async with _hx_spider.AsyncClient(timeout=10, headers={"User-Agent": ua}, follow_redirects=True) as _cl:
+                                _r = await _cl.get(page_url)
+                                if _r.status_code != 200: return []
+                                _soup = _BS_spider(_r.text, "html.parser")
+                                _links = []
+                                for _a in _soup.find_all("a", href=True):
+                                    _href = urllib.parse.urljoin(page_url, _a["href"])
+                                    _href = _href.split("#")[0].split("?")[0].rstrip("/")
+                                    if _href.startswith("http") and _strip_www(_href).startswith(base_nowww):
+                                        _links.append(_href)
+                                return _links
+                        except Exception:
+                            return []
+
+                    _batch = 20
+                    while _frontier and len(_spider_urls) < _spider_limit:
+                        _chunk = _frontier[:_batch]
+                        _frontier = _frontier[_batch:]
+                        _results = await asyncio.gather(*[_extract_links_fast(u) for u in _chunk])
+                        _new = 0
+                        for _lnks in _results:
+                            for _lnk in _lnks:
+                                _n = _normalize_url(_lnk)
+                                if _n not in _visited_norm:
+                                    _visited_norm.add(_n)
+                                    _spider_urls.append(_lnk)
+                                    _frontier.append(_lnk)
+                                    _new += 1
+                                    if len(_spider_urls) >= _spider_limit: break
+                            if len(_spider_urls) >= _spider_limit: break
+                        yield _send(f"🕷️  Found {len(_spider_urls)} URLs (frontier: {len(_frontier)})...")
+
+                    sitemap_urls = _spider_urls
+                    raw_sitemap_count = len(sitemap_urls)
+                    yield _send(f"✅ BFS spider done: {len(sitemap_urls)} URLs discovered")
 
                 # Deduplicate (strip anchors, query params, locale prefixes)
                 seen_norm = set()
