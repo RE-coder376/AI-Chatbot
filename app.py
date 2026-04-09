@@ -2714,8 +2714,8 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
             f"history below. Be brief and friendly. Do NOT say you don't know if the "
             f"information was clearly stated by the user in the history.")]
         for m in history[-8:]:
-            messages_mem.append(HumanMessage(content=m['content']) if m['role']=='user'
-                                 else AIMessage(content=m['content']))
+            if m.get('role') == 'user': messages_mem.append(HumanMessage(content=m['content']))
+            elif m.get('role') == 'assistant': messages_mem.append(AIMessage(content=m['content']))
         messages_mem.append(HumanMessage(content=q))
         try:
             llm_mem = get_fresh_llm()
@@ -2891,7 +2891,9 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
 
     messages = [SystemMessage(content=sys_msg)]
 
-    for m in history[-8:]: messages.append(HumanMessage(content=m['content']) if m['role']=='user' else AIMessage(content=m['content']))
+    for m in history[-8:]:
+        if m.get('role') == 'user': messages.append(HumanMessage(content=m['content']))
+        elif m.get('role') == 'assistant': messages.append(AIMessage(content=m['content']))
     messages.append(HumanMessage(content=q))
     
     # Fast-fail if ALL keys are on cooldown — no point looping through 30
@@ -3128,7 +3130,9 @@ async def chat(request: Request):
 
         sys_msg = get_system_prompt(cfg, context, doc_count, user_lang=user_lang)
         messages = [SystemMessage(content=sys_msg)]
-        for m in hist[-2:]: messages.append(HumanMessage(content=m['content']) if m['role']=='user' else AIMessage(content=m['content']))
+        for m in hist[-2:]:
+            if m.get('role') == 'user': messages.append(HumanMessage(content=m['content']))
+            elif m.get('role') == 'assistant': messages.append(AIMessage(content=m['content']))
         messages.append(HumanMessage(content=q))
 
         # Fast-fail if all keys are on cooldown
@@ -3168,19 +3172,19 @@ async def chat(request: Request):
 
 # --- FAQ HELPERS ---
 
-def _faq_file() -> Path:
-    active = ACTIVE_DB_FILE.read_text(encoding="utf-8").strip() if ACTIVE_DB_FILE.exists() else ""
+def _faq_file(db_name: str = "") -> Path:
+    active = db_name or (ACTIVE_DB_FILE.read_text(encoding="utf-8").strip() if ACTIVE_DB_FILE.exists() else "")
     return DATABASES_DIR / active / "faqs.json" if active else Path("faqs.json")
 
-def _load_faqs() -> list:
-    f = _faq_file()
+def _load_faqs(db_name: str = "") -> list:
+    f = _faq_file(db_name)
     if f.exists():
         try: return json.loads(f.read_text(encoding="utf-8"))
-        except: pass
+        except Exception as e: logger.warning(f"_load_faqs: could not parse {f}: {e}")
     return []
 
-def _save_faqs(faqs: list):
-    f = _faq_file()
+def _save_faqs(faqs: list, db_name: str = ""):
+    f = _faq_file(db_name)
     f.parent.mkdir(parents=True, exist_ok=True)
     f.write_text(json.dumps(faqs, indent=2), encoding="utf-8")
 
@@ -3209,32 +3213,34 @@ async def get_faqs(password: str, request: Request):
     db_name = _extract_admin_db(request)
     cfg = get_config(db_name)
     admin_auth(password, cfg)
-    return JSONResponse({"faqs": _load_faqs()})
+    return JSONResponse({"faqs": _load_faqs(db_name)})
 
 @app.post("/admin/faqs")
 async def add_faq(request: Request):
     data = await request.json()
-    cfg = get_config()
+    db_name = _extract_admin_db(request)
+    cfg = get_config(db_name)
     admin_auth(_extract_password(request, data.get("password", "")), cfg)
     q = data.get("question", "").strip()
     a = data.get("answer", "").strip()
     if not q or not a:
         raise HTTPException(status_code=400, detail="Both question and answer are required.")
-    faqs = _load_faqs()
+    faqs = _load_faqs(db_name)
     faq_id = str(int(time.time() * 1000))
     faq = {"id": faq_id, "question": q, "answer": a}
     faqs.append(faq)
-    _save_faqs(faqs)
+    _save_faqs(faqs, db_name)
     _embed_faq(faq)
     return JSONResponse({"success": True, "id": faq_id})
 
 @app.delete("/admin/faqs/{faq_id}")
 async def delete_faq(faq_id: str, password: str, request: Request):
     password = _extract_password(request, password)
-    cfg = get_config()
+    db_name = _extract_admin_db(request)
+    cfg = get_config(db_name)
     admin_auth(password, cfg)
-    faqs = [f for f in _load_faqs() if f["id"] != faq_id]
-    _save_faqs(faqs)
+    faqs = [f for f in _load_faqs(db_name) if f["id"] != faq_id]
+    _save_faqs(faqs, db_name)
     _delete_faq_from_db(faq_id)
     return JSONResponse({"success": True})
 
@@ -3478,8 +3484,10 @@ async def clear_db_data(request: Request, password: str = Form(...), name: str =
             pass
     # Re-init active DB so in-memory handle points to fresh empty DB
     if name == active_name:
+        global embeddings_model
         local_db = None
-        local_db = None; embeddings_model = None; _load_db_now()
+        embeddings_model = None
+        threading.Thread(target=_load_db_now, daemon=True).start()
     threading.Thread(target=_github_sync_upload, args=(name,), daemon=True).start()
     return {"success": True, "message": f"All knowledge chunks cleared from '{name}'."}
 
@@ -3517,7 +3525,7 @@ async def set_active_db(request: Request, password: str = Form(...), name: str =
     else:
         # No root password configured (single-tenant / local dev) — accept any valid DB password
         found = False
-        for db_dir in DATABASES_DIR.iterdir():
+        for db_dir in (DATABASES_DIR.iterdir() if DATABASES_DIR.exists() else []):
             if not db_dir.is_dir(): continue
             cfg_path = db_dir / "config.json"
             if not cfg_path.exists(): continue
@@ -4373,18 +4381,22 @@ async def reindex(request: Request, data: dict):
     except HTTPException: return JSONResponse({"detail": "Unauthorized"}, status_code=401)
     target = data.get("target_db", "").strip()
     try:
+        global embeddings_model
         if target:
             prev = ACTIVE_DB_FILE.read_text(encoding="utf-8").strip() if ACTIVE_DB_FILE.exists() else ""
             try:
                 ACTIVE_DB_FILE.write_text(target, encoding="utf-8")
-                local_db = None; embeddings_model = None; _load_db_now()
+                local_db = None; embeddings_model = None
+                await asyncio.to_thread(_load_db_now)
             finally:
                 # Always restore original active DB — even if reindex crashes
                 if prev: ACTIVE_DB_FILE.write_text(prev, encoding="utf-8")
-                local_db = None; embeddings_model = None; _load_db_now()
+                local_db = None; embeddings_model = None
+                await asyncio.to_thread(_load_db_now)
             return {"success": True, "message": f"Reindex of '{target}' complete"}
         else:
-            local_db = None; embeddings_model = None; _load_db_now()
+            local_db = None; embeddings_model = None
+            await asyncio.to_thread(_load_db_now)
             return {"success": True, "message": "Reindex complete"}
     except Exception as e:
         return JSONResponse({"detail": f"Reindex error: {str(e)}"}, status_code=500)
