@@ -1489,7 +1489,13 @@ def _validate_db_name(name: str) -> str:
 def admin_auth(password: str, cfg: dict):
     """Accept if password matches ADMIN_PASSWORD env var (super-admin) OR the DB's own admin_password."""
     root_pw = os.getenv("ADMIN_PASSWORD", "") or ""
-    db_pw   = cfg.get("admin_password", "") or ""
+    if not root_pw:
+        # Locally (no env var), read raw config.json — NOT the overlaid cfg which has DB password
+        try:
+            root_pw = json.loads(CONFIG_FILE.read_text(encoding="utf-8-sig")).get("admin_password", "") or ""
+        except Exception:
+            pass
+    db_pw = cfg.get("admin_password", "") or ""
     if root_pw and hmac.compare_digest(password.encode(), root_pw.encode()):
         return  # super-admin
     if db_pw and hmac.compare_digest(password.encode(), db_pw.encode()):
@@ -1510,12 +1516,6 @@ def _extract_admin_db(request: Request, fallback: str = "") -> str:
           or request.query_params.get("db_name", "")
           or fallback)
     return db.strip() or _get_active_db()
-
-def _check_csrf(request: Request):
-    """Raise 403 if X-CSRF-Token header is missing or invalid."""
-    token = request.headers.get("X-CSRF-Token", "")
-    if not token or token not in _csrf_tokens:
-        raise HTTPException(status_code=403, detail="Invalid or missing CSRF token")
 
 def any_key_ready() -> bool:
     """Fast check: returns True if at least one key is off cooldown."""
@@ -1625,7 +1625,6 @@ def get_fresh_llm():
                 max_retries=0,
                 max_output_tokens=512,
                 timeout=8,
-                transport="rest",
             )
         elif provider == 'cerebras':
             return _CompatChatOpenAI(
@@ -3249,8 +3248,8 @@ async def debug_retrieve(request: Request):
     except Exception:
         return JSONResponse({"detail": "Invalid JSON"}, status_code=400)
     cfg = get_config()
-    if not hmac.compare_digest(_extract_password(request, data.get("password", "")).encode(), cfg.get("admin_password", "").encode()):
-        return JSONResponse({"detail": "Unauthorized"}, status_code=401)
+    try: admin_auth(_extract_password(request, data.get("password", "")), cfg)
+    except HTTPException: return JSONResponse({"detail": "Unauthorized"}, status_code=401)
     question = data.get("question", "").strip()
     if not question:
         return JSONResponse({"detail": "question required"}, status_code=400)
@@ -3356,7 +3355,8 @@ async def save_ops(request: Request, data: dict = None):
     db_name = _extract_admin_db(request)
     cfg = get_config(db_name)
     password = _extract_password(request, data.get("password", ""))
-    if not hmac.compare_digest(password.encode(), cfg.get("admin_password", "").encode()): return JSONResponse({"detail": "Unauthorized"}, status_code=401)
+    try: admin_auth(password, cfg)
+    except HTTPException: return JSONResponse({"detail": "Unauthorized"}, status_code=401)
     updates = {k: data[k] for k in ("contact_email", "whatsapp_number", "async_contact_url", "hours", "always_open", "sender_email", "smtp_password", "smtp_host", "smtp_port") if k in data}
     save_db_config(updates, db_name)
     return {"success": True, "message": "Operational settings saved to active DB."}
@@ -3367,7 +3367,8 @@ async def update_branding(request: Request, data: dict = None):
     db_name = _extract_admin_db(request)
     cfg = get_config(db_name)
     password = _extract_password(request, data.get("password", ""))
-    if not hmac.compare_digest(password.encode(), cfg.get("admin_password", "").encode()): return JSONResponse({"detail": "Unauthorized"}, status_code=401)
+    try: admin_auth(password, cfg)
+    except HTTPException: return JSONResponse({"detail": "Unauthorized"}, status_code=401)
     updates = {k: v for k, v in data.items() if k not in ("password", "db_name")}
     save_db_config(updates, db_name)
     _intro_q_cache.pop(db_name, None)  # invalidate so new quick_replies take effect immediately
@@ -3378,7 +3379,8 @@ async def get_embedding_model(request: Request, password: str = "", db_name: str
     password = _extract_password(request, password)
     active = _extract_admin_db(request, db_name)
     cfg = get_config(active)
-    if not hmac.compare_digest(password.encode(), cfg.get("admin_password", "").encode()): return JSONResponse({"detail": "Unauthorized"}, status_code=401)
+    try: admin_auth(password, cfg)
+    except HTTPException: return JSONResponse({"detail": "Unauthorized"}, status_code=401)
     db_cfg_file = DATABASES_DIR / active / "config.json"
     db_cfg = {}
     if db_cfg_file.exists():
@@ -3392,7 +3394,8 @@ async def set_embedding_model(request: Request, data: dict = None):
     db_name = _extract_admin_db(request, data.get("db_name", ""))
     cfg = get_config(db_name)
     password = _extract_password(request, data.get("password", ""))
-    if not hmac.compare_digest(password.encode(), cfg.get("admin_password", "").encode()): return JSONResponse({"detail": "Unauthorized"}, status_code=401)
+    try: admin_auth(password, cfg)
+    except HTTPException: return JSONResponse({"detail": "Unauthorized"}, status_code=401)
     model = data.get("embedding_model", "bge")
     if model not in ("bge", "minilm"):
         return JSONResponse({"detail": "Invalid model. Use 'bge' or 'minilm'."}, status_code=400)
@@ -3446,9 +3449,9 @@ def get_databases(request: Request, password: str = ""):
 @app.post("/admin/databases/clear-data")
 async def clear_db_data(request: Request, password: str = Form(...), name: str = Form(...)):
     password = _extract_password(request, password)
-    password = _extract_password(request, password)
     cfg = get_config()
-    if not hmac.compare_digest(password.encode(), cfg.get("admin_password", "").encode()): return JSONResponse({"detail": "Unauthorized"}, status_code=401)
+    try: admin_auth(password, cfg)
+    except HTTPException: return JSONResponse({"detail": "Unauthorized"}, status_code=401)
     name = _validate_db_name(name)
     db_path = DATABASES_DIR / name
     if not db_path.exists(): return JSONResponse({"detail": "DB not found"}, status_code=404)
@@ -3546,7 +3549,8 @@ async def create_db(request: Request, password: str = Form(...), name: str = For
     cfg = get_config()
     try: admin_auth(password, cfg)
     except HTTPException: return JSONResponse({"detail": "Unauthorized"}, status_code=401)
-    db_name = name.strip().lower()
+    try: db_name = _validate_db_name(name.lower())
+    except HTTPException: return JSONResponse({"detail": "Invalid database name"}, status_code=400)
     db_path = DATABASES_DIR / db_name
     db_path.mkdir(parents=True, exist_ok=True)
     # Write per-DB config with admin_password so client can log in immediately
@@ -3565,11 +3569,12 @@ async def create_db(request: Request, password: str = Form(...), name: str = For
 @app.post("/admin/delete-db")
 async def delete_db(request: Request, password: str = Form(...), name: str = Form(...)):
     password = _extract_password(request, password)
-    db_name_req = name.strip().lower()
+    try: db_name_req = _validate_db_name(name.lower())
+    except HTTPException: return JSONResponse({"detail": "Invalid database name"}, status_code=400)
     # Accept root password OR the DB's own password (client self-delete)
     admin_auth(password, get_config(db_name_req))
-    
-    db_name = name.strip().lower()
+
+    db_name = db_name_req
     db_path = DATABASES_DIR / db_name
     
     # If we're deleting the active DB, clear the handle
@@ -3866,7 +3871,8 @@ async def audit_api_sources(base_url: str = "http://localhost:8000"):
 async def test_identity_endpoint(request: Request, password: str = ""):
     password = _extract_password(request, password)
     cfg = get_config()
-    if not hmac.compare_digest(password.encode(), cfg.get("admin_password", "").encode()): return JSONResponse({"detail": "Unauthorized"}, status_code=401)
+    try: admin_auth(password, cfg)
+    except HTTPException: return JSONResponse({"detail": "Unauthorized"}, status_code=401)
     bu = str(request.base_url).rstrip("/")
     return {"results": [await audit_identity(cfg, bu), await audit_jailbreak(cfg, bu), await audit_prompt_injection(cfg, bu)]}
 
@@ -3874,7 +3880,8 @@ async def test_identity_endpoint(request: Request, password: str = ""):
 async def test_knowledge_endpoint(request: Request, password: str = ""):
     password = _extract_password(request, password)
     cfg = get_config()
-    if not hmac.compare_digest(password.encode(), cfg.get("admin_password", "").encode()): return JSONResponse({"detail": "Unauthorized"}, status_code=401)
+    try: admin_auth(password, cfg)
+    except HTTPException: return JSONResponse({"detail": "Unauthorized"}, status_code=401)
     bu = str(request.base_url).rstrip("/")
     return {"results": [await audit_db_connected(), await audit_live_api(bu), await audit_year_query(bu), await audit_airing_query()]}
 
@@ -3882,7 +3889,8 @@ async def test_knowledge_endpoint(request: Request, password: str = ""):
 async def test_safety_endpoint(request: Request, password: str = ""):
     password = _extract_password(request, password)
     cfg = get_config()
-    if not hmac.compare_digest(password.encode(), cfg.get("admin_password", "").encode()): return JSONResponse({"detail": "Unauthorized"}, status_code=401)
+    try: admin_auth(password, cfg)
+    except HTTPException: return JSONResponse({"detail": "Unauthorized"}, status_code=401)
     bu = str(request.base_url).rstrip("/")
     return {"results": [await audit_scope_guard(bu), await audit_hallucination(bu), await audit_rate_limit(bu)]}
 
@@ -3890,7 +3898,8 @@ async def test_safety_endpoint(request: Request, password: str = ""):
 async def test_live_endpoint(request: Request, password: str = ""):
     password = _extract_password(request, password)
     cfg = get_config()
-    if not hmac.compare_digest(password.encode(), cfg.get("admin_password", "").encode()): return JSONResponse({"detail": "Unauthorized"}, status_code=401)
+    try: admin_auth(password, cfg)
+    except HTTPException: return JSONResponse({"detail": "Unauthorized"}, status_code=401)
     bu = str(request.base_url).rstrip("/")
     return {"results": [await audit_live_api(bu), await audit_year_query(bu), await audit_airing_query()]}
 
@@ -3898,7 +3907,8 @@ async def test_live_endpoint(request: Request, password: str = ""):
 async def test_admin_endpoint(request: Request, password: str = ""):
     password = _extract_password(request, password)
     cfg = get_config()
-    if not hmac.compare_digest(password.encode(), cfg.get("admin_password", "").encode()): return JSONResponse({"detail": "Unauthorized"}, status_code=401)
+    try: admin_auth(password, cfg)
+    except HTTPException: return JSONResponse({"detail": "Unauthorized"}, status_code=401)
     bu = str(request.base_url).rstrip("/")
     return {"results": [await audit_admin_auth(bu), await audit_db_stats(bu), await audit_api_sources(bu)]}
 
@@ -3906,7 +3916,8 @@ async def test_admin_endpoint(request: Request, password: str = ""):
 async def run_detailed_tests(request: Request, password: str = ""):
     password = _extract_password(request, password)
     cfg = get_config()
-    if not hmac.compare_digest(password.encode(), cfg.get("admin_password", "").encode()): return JSONResponse({"detail": "Unauthorized"}, status_code=401)
+    try: admin_auth(password, cfg)
+    except HTTPException: return JSONResponse({"detail": "Unauthorized"}, status_code=401)
     bu = str(request.base_url).rstrip("/")
     return {"results": await run_behavioral_suite(cfg, bu)}
 
@@ -4170,8 +4181,8 @@ def _detect_format(content: str, filename: str = "") -> str:
 async def ingest_smart_text(request: Request, data: dict):
     """Ingest raw text in any format — auto-detects JSON, CSV, YAML, XML, MD, TXT."""
     cfg = get_config()
-    if not hmac.compare_digest(_extract_password(request, data.get("password", "")).encode(), cfg.get("admin_password", "").encode()):
-        return JSONResponse({"detail": "Unauthorized"}, status_code=401)
+    try: admin_auth(_extract_password(request, data.get("password", "")), cfg)
+    except HTTPException: return JSONResponse({"detail": "Unauthorized"}, status_code=401)
     content = data.get("content", "").strip()
     if not content:
         return JSONResponse({"detail": "No content provided"}, status_code=400)
@@ -4199,8 +4210,8 @@ async def ingest_fetch_url(request: Request, data: dict):
     """Fetch any JSON API URL and ingest each item as a separate chunk."""
     import urllib.request
     cfg = get_config()
-    if not hmac.compare_digest(_extract_password(request, data.get("password", "")).encode(), cfg.get("admin_password", "").encode()):
-        return JSONResponse({"detail": "Unauthorized"}, status_code=401)
+    try: admin_auth(_extract_password(request, data.get("password", "")), cfg)
+    except HTTPException: return JSONResponse({"detail": "Unauthorized"}, status_code=401)
     url = data.get("url", "").strip()
     if not url:
         return JSONResponse({"detail": "No URL provided"}, status_code=400)
@@ -4243,8 +4254,8 @@ async def ingest_fetch_url(request: Request, data: dict):
 @app.post("/admin/ingest/text")
 async def ingest_text(request: Request, data: dict):
     cfg = get_config()
-    if not hmac.compare_digest(_extract_password(request, data.get("password", "")).encode(), cfg.get("admin_password", "").encode()):
-        return JSONResponse({"detail": "Unauthorized"}, status_code=401)
+    try: admin_auth(_extract_password(request, data.get("password", "")), cfg)
+    except HTTPException: return JSONResponse({"detail": "Unauthorized"}, status_code=401)
     text = data.get("text", "").strip()
     if not text:
         return JSONResponse({"detail": "No text provided"}, status_code=400)
@@ -4269,8 +4280,8 @@ async def ingest_text(request: Request, data: dict):
 async def ingest_files(request: Request, password: str = Form(...), target_db: str = Form(""), files: list[UploadFile] = File(...)):
     password = _extract_password(request, password)
     cfg = get_config()
-    if not hmac.compare_digest(password.encode(), cfg.get("admin_password", "").encode()):
-        return JSONResponse({"detail": "Unauthorized"}, status_code=401)
+    try: admin_auth(password, cfg)
+    except HTTPException: return JSONResponse({"detail": "Unauthorized"}, status_code=401)
     try:
         from langchain_core.documents import Document
         db = _get_db_instance(target_db) if target_db else local_db
@@ -4358,8 +4369,8 @@ def get_embed_code(request: Request, password: str = ""):
 @app.post("/admin/reindex")
 async def reindex(request: Request, data: dict):
     cfg = get_config()
-    if not hmac.compare_digest(_extract_password(request, data.get("password", "")).encode(), cfg.get("admin_password", "").encode()):
-        return JSONResponse({"detail": "Unauthorized"}, status_code=401)
+    try: admin_auth(_extract_password(request, data.get("password", "")), cfg)
+    except HTTPException: return JSONResponse({"detail": "Unauthorized"}, status_code=401)
     target = data.get("target_db", "").strip()
     try:
         if target:
@@ -4444,8 +4455,8 @@ CRAWL_PATTERN_RULES = [
 async def crawl_inspect(data: dict, request: Request):
     """Stage 1 of Smart Crawl: fetch sitemap, group URLs by pattern, LLM-rate each group."""
     cfg = get_config()
-    if not hmac.compare_digest(_extract_password(request, data.get("password", "")).encode(), cfg.get("admin_password", "").encode()):
-        return JSONResponse({"detail": "Unauthorized"}, status_code=401)
+    try: admin_auth(_extract_password(request, data.get("password", "")), cfg)
+    except HTTPException: return JSONResponse({"detail": "Unauthorized"}, status_code=401)
     url = data.get("url", "").strip().rstrip("/")
     if not url:
         return JSONResponse({"detail": "url required"}, status_code=400)
@@ -4923,8 +4934,8 @@ async def set_crawl_schedule(request: Request, data: dict = None):
 def get_api_sources(request: Request, password: str = "", db_name: str = ""):
     password = _extract_password(request, password)
     cfg = get_config()
-    if not hmac.compare_digest(password.encode(), cfg.get("admin_password", "").encode()):
-        return JSONResponse({"detail": "Unauthorized"}, status_code=401)
+    try: admin_auth(password, cfg)
+    except HTTPException: return JSONResponse({"detail": "Unauthorized"}, status_code=401)
     if not db_name:
         db_name = ACTIVE_DB_FILE.read_text(encoding="utf-8").strip() if ACTIVE_DB_FILE.exists() else ""
     db_cfg_file = DATABASES_DIR / db_name / "config.json"
@@ -4937,8 +4948,8 @@ def get_api_sources(request: Request, password: str = "", db_name: str = ""):
 @app.post("/admin/api-sources")
 async def save_api_source(request: Request, data: dict):
     cfg = get_config()
-    if not hmac.compare_digest(_extract_password(request, data.get("password", "")).encode(), cfg.get("admin_password", "").encode()):
-        return JSONResponse({"detail": "Unauthorized"}, status_code=401)
+    try: admin_auth(_extract_password(request, data.get("password", "")), cfg)
+    except HTTPException: return JSONResponse({"detail": "Unauthorized"}, status_code=401)
     db_name = data.get("db_name", "").strip()
     if not db_name:
         db_name = ACTIVE_DB_FILE.read_text(encoding="utf-8").strip() if ACTIVE_DB_FILE.exists() else ""
@@ -4972,8 +4983,8 @@ async def save_api_source(request: Request, data: dict):
 @app.post("/admin/api-sources/delete")
 async def delete_api_source(request: Request, data: dict):
     cfg = get_config()
-    if not hmac.compare_digest(_extract_password(request, data.get("password", "")).encode(), cfg.get("admin_password", "").encode()):
-        return JSONResponse({"detail": "Unauthorized"}, status_code=401)
+    try: admin_auth(_extract_password(request, data.get("password", "")), cfg)
+    except HTTPException: return JSONResponse({"detail": "Unauthorized"}, status_code=401)
     db_name = data.get("db_name", "").strip()
     if not db_name:
         db_name = ACTIVE_DB_FILE.read_text(encoding="utf-8").strip() if ACTIVE_DB_FILE.exists() else ""
@@ -5961,8 +5972,8 @@ async def human_handoff(request: Request):
 @app.post("/admin/knowledge-gaps/suggest")
 async def suggest_gap_answer(request: Request, data: dict):
     cfg = get_config()
-    if not hmac.compare_digest(_extract_password(request, data.get("password", "")).encode(), cfg.get("admin_password", "").encode()):
-        return JSONResponse({"detail": "Unauthorized"}, status_code=401)
+    try: admin_auth(_extract_password(request, data.get("password", "")), cfg)
+    except HTTPException: return JSONResponse({"detail": "Unauthorized"}, status_code=401)
     question = str(data.get("question", "")).strip()
     if not question:
         return JSONResponse({"detail": "No question"}, status_code=400)

@@ -263,7 +263,7 @@
     clearTimeout(proactiveTimer);
     if (proactiveSent) return;
     proactiveTimer = setTimeout(() => {
-      if (proactiveSent || history.length > 0) return;
+      if (proactiveSent) return;
       proactiveSent = true;
       addMessage("Still there? Feel free to ask me anything — I'm here to help!", 'bot');
     }, 60000);
@@ -448,6 +448,8 @@
     sessionId = crypto.randomUUID();
     localStorage.setItem('chat_session_id', sessionId);
     messagesEl.innerHTML = '<div class="message bot"><div class="bubble">Hi! How can I help you today?</div></div>';
+    proactiveSent = false;
+    resetProactiveTimer();
   }
 </script>
 </body>
