@@ -5147,31 +5147,36 @@ async def crawl_site(data: dict, request: Request):
                 spider_threshold = 50
                 if len(sitemap_urls) < spider_threshold:
                     yield _send(f"🕷️ Sitemap has {len(sitemap_urls)} URL(s) — running BFS link spider...")
-                    import httpx as _hx_spider
                     from bs4 import BeautifulSoup as _BS_spider
                     seeds = sitemap_urls if sitemap_urls else [url]
                     _visited_norm = set(_normalize_url(u) for u in seeds)
                     _frontier = list(seeds)
                     _spider_urls = list(seeds)
                     _spider_limit = max_pages if max_pages > 0 else 99999
+                    _bfs_sem = asyncio.Semaphore(6)  # 6 Playwright pages in parallel during BFS
 
                     async def _extract_links_fast(page_url):
+                        """Use Playwright so JS-rendered nav links (React/Vue/PHP SPAs) are visible."""
                         try:
-                            async with _hx_spider.AsyncClient(timeout=10, headers={"User-Agent": ua}, follow_redirects=True) as _cl:
-                                _r = await _cl.get(page_url)
-                                if _r.status_code != 200: return []
-                                _soup = _BS_spider(_r.text, "html.parser")
-                                _links = []
-                                for _a in _soup.find_all("a", href=True):
-                                    _href = urllib.parse.urljoin(page_url, _a["href"])
-                                    _href = _href.split("#")[0].split("?")[0].rstrip("/")
-                                    if _href.startswith("http") and _strip_www(_href).startswith(base_nowww):
-                                        _links.append(_href)
-                                return _links
+                            async with _bfs_sem:
+                                _pg = await ctx.new_page()
+                                try:
+                                    await _pg.goto(page_url, wait_until="domcontentloaded", timeout=12000)
+                                    _hrefs = await _pg.eval_on_selector_all(
+                                        "a[href]", "els => els.map(e => e.href)"
+                                    )
+                                finally:
+                                    await _pg.close()
+                            _links = []
+                            for _href in _hrefs:
+                                _href = _href.split("#")[0].split("?")[0].rstrip("/")
+                                if _href.startswith("http") and _strip_www(_href).startswith(base_nowww):
+                                    _links.append(_href)
+                            return _links
                         except Exception:
                             return []
 
-                    _batch = 20
+                    _batch = 6  # matches BFS semaphore
                     while _frontier and len(_spider_urls) < _spider_limit:
                         _chunk = _frontier[:_batch]
                         _frontier = _frontier[_batch:]
