@@ -3941,15 +3941,9 @@ def _get_db_instance(db_name: str):
         try: db_cfg = json.loads(db_cfg_file.read_text(encoding="utf-8-sig"))
         except: pass
     emb_setting = db_cfg.get("embedding_model", "bge")
-    
-    if emb_setting == "bge":
-        try:
-            from langchain_huggingface import HuggingFaceEmbeddings
-            emb = HuggingFaceEmbeddings(model_name="BAAI/bge-base-en-v1.5")
-        except ImportError:
-            logger.warning("[DB] sentence-transformers not installed, falling back to fastembed for BGE DB")
-            emb = embeddings_model
-    elif emb_setting == "minilm_old":
+
+    if emb_setting == "minilm_old":
+        # Legacy DBs indexed with all-MiniLM-L6-v2 (384-dim)
         if legacy_embeddings is None:
             try:
                 from langchain_huggingface import HuggingFaceEmbeddings
@@ -3959,8 +3953,9 @@ def _get_db_instance(db_name: str):
                 globals()["legacy_embeddings"] = embeddings_model
         emb = legacy_embeddings
     else:
-        # Default to the primary multilingual model
-        emb = embeddings_model
+        # All other DBs (bge, multilingual, unset) — crawler always writes bge-small-en-v1.5 (384-dim)
+        # so we must query with the same model. bge-base-en-v1.5 is 768-dim and would mismatch.
+        emb = embeddings_model  # FastEmbed BAAI/bge-small-en-v1.5, 384-dim
     tmp_dir = _ensure_tmp_chroma(db_name, db_path)
     instance = Chroma(persist_directory=str(tmp_dir), embedding_function=emb)
     instance._db_name = db_name  # stored for BM25 lookup
