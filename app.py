@@ -55,13 +55,6 @@ class _CompatChatOpenAI(_BaseChatOpenAI):
         return payload
 from langchain_chroma import Chroma
 
-# SendGrid Imports
-try:
-    from sendgrid import SendGridAPIClient
-    from sendgrid.helpers.mail import Mail
-except ImportError:
-    pass
-
 logging.basicConfig(level=logging.INFO, format="[SERVER] %(message)s")
 logger = logging.getLogger(__name__)
 load_dotenv()
@@ -1872,7 +1865,6 @@ async def _auto_crawl_db(db_name: str, url: str, max_pages: int = 20) -> int:
     import httpx as _hx
     from bs4 import BeautifulSoup
     from urllib.parse import urlparse
-    import re as _re2
     from langchain_core.documents import Document
     db = await asyncio.to_thread(_get_db_instance, db_name)
     if db is None and db_name == _get_active_db() and local_db is not None:
@@ -1904,7 +1896,7 @@ async def _auto_crawl_db(db_name: str, url: str, max_pages: int = 20) -> int:
                 try:
                     r = await client.get(f"{base}{sm_path}")
                     if r.status_code == 200 and "<loc>" in r.text:
-                        found = _re2.findall(r'<loc>([^<]+)</loc>', r.text)
+                        found = re.findall(r'<loc>([^<]+)</loc>', r.text)
                         sitemap_urls = [u.strip() for u in found if urlparse(u.strip()).netloc == domain]
                         new_urls = [u for u in sitemap_urls if u not in already_seen][:max_pages]
                         logger.info(f"[AUTO-CRAWL] '{db_name}': {len(sitemap_urls)} sitemap URLs, {len(new_urls)} new")
@@ -2257,44 +2249,6 @@ def health():
         "any_key_ready": any_key_ready(),
         "github_sync": _github_sync_result,
     }
-
-
-@app.get("/search-test")
-async def search_test(q: str = "goals Part 6 Building Agent Factories"):
-    """Diagnostic: run similarity_search directly to verify retrieval. No auth needed."""
-    try:
-        cnt = local_db._collection.count() if local_db else 0
-        if not local_db:
-            return {"error": "local_db is None", "status": _status, "count": 0}
-        loop = asyncio.get_running_loop()
-        results = await loop.run_in_executor(None, lambda: local_db.similarity_search(q, k=5))
-        return {
-            "count": cnt,
-            "db_path": getattr(local_db, '_persist_directory', 'unknown'),
-            "db_name": getattr(local_db, '_db_name', 'unknown'),
-            "results": [{"text": r.page_content[:300], "source": r.metadata.get("source", "")} for r in results],
-        }
-    except Exception as e:
-        import traceback
-        return {"error": str(e), "traceback": traceback.format_exc()[:600]}
-
-@app.get("/debug-context")
-async def debug_context(q: str = ""):
-    """Diagnostic: show full retrieve_context output for a query."""
-    if not q: return {"error": "provide q=..."}
-    try:
-        context, doc_count, sources = await retrieve_context(q, local_db)
-        addresses = _context_addresses_query(context, q)
-        return {
-            "doc_count": doc_count,
-            "addresses_query": addresses,
-            "context_len": len(context),
-            "context_preview": context[:2000],
-            "sources": sources,
-        }
-    except Exception as e:
-        import traceback
-        return {"error": str(e), "traceback": traceback.format_exc()[:600]}
 
 
 @app.get("/")
@@ -4150,11 +4104,10 @@ def _smart_convert(content: str, fmt: str) -> list:
 
     elif fmt in ("md", "markdown"):
         # Strip markdown syntax, split by headers/paragraphs
-        import re as _re
-        text = _re.sub(r'^#{1,6}\s+', '', content, flags=_re.MULTILINE)
-        text = _re.sub(r'\*\*(.+?)\*\*', r'\1', text)
-        text = _re.sub(r'\[(.+?)\]\(.+?\)', r'\1', text)
-        text = _re.sub(r'`{1,3}[^`]*`{1,3}', '', text)
+        text = re.sub(r'^#{1,6}\s+', '', content, flags=re.MULTILINE)
+        text = re.sub(r'\*\*(.+?)\*\*', r'\1', text)
+        text = re.sub(r'\[(.+?)\]\(.+?\)', r'\1', text)
+        text = re.sub(r'`{1,3}[^`]*`{1,3}', '', text)
         paras = [p.strip() for p in text.split("\n\n") if len(p.strip()) > 20]
         chunks = paras if paras else [text.strip()]
 
@@ -5051,7 +5004,6 @@ async def crawl_site(data: dict, request: Request):
         import urllib.parse
         import xml.etree.ElementTree as ET
         import requests as _req
-        import random
         from langchain_core.documents import Document
         from langchain_chroma import Chroma
 
