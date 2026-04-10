@@ -1533,6 +1533,8 @@ def any_key_ready() -> bool:
 # Per-model context window budgets (chars, conservative — leaves room for system prompt + history)
 # Cerebras llama3.1-8b has a hard 8K token limit; skip it when context is large
 _CEREBRAS_MAX_CONTEXT_CHARS = 1500
+# Groq free tier returns HTTP 413 when request payload is too large (~50k chars context)
+_GROQ_MAX_CONTEXT_CHARS = 20000
 
 def _peek_provider() -> str:
     """Return the provider string of the healthiest available key (without creating LLM object)."""
@@ -2799,9 +2801,12 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
         yield "data: {\"type\": \"done\"}\n\n"
         return
 
-    # ── Cerebras only: cap context to avoid 8K token hard limit ──────────────
-    if _peek_provider() == 'cerebras' and len(context) > _CEREBRAS_MAX_CONTEXT_CHARS:
+    # Cap context per provider to avoid payload limits
+    _prov = _peek_provider()
+    if _prov == 'cerebras' and len(context) > _CEREBRAS_MAX_CONTEXT_CHARS:
         context = context[:_CEREBRAS_MAX_CONTEXT_CHARS]
+    elif _prov == 'groq' and len(context) > _GROQ_MAX_CONTEXT_CHARS:
+        context = context[:_GROQ_MAX_CONTEXT_CHARS]
 
     sys_msg = get_system_prompt(cfg, context, doc_count, is_urdu=is_urdu, user_lang=user_lang)
     if page_url:
@@ -3078,9 +3083,12 @@ async def chat(request: Request):
         if _fast_resp:
             return JSONResponse({"answer": _fast_resp, "sources": sources[:3]})
 
-        # ── Cerebras only: cap context to avoid 8K token hard limit ──────────
-        if _peek_provider() == 'cerebras' and len(context) > _CEREBRAS_MAX_CONTEXT_CHARS:
+        # Cap context per provider to avoid payload limits
+        _prov2 = _peek_provider()
+        if _prov2 == 'cerebras' and len(context) > _CEREBRAS_MAX_CONTEXT_CHARS:
             context = context[:_CEREBRAS_MAX_CONTEXT_CHARS]
+        elif _prov2 == 'groq' and len(context) > _GROQ_MAX_CONTEXT_CHARS:
+            context = context[:_GROQ_MAX_CONTEXT_CHARS]
 
         sys_msg = get_system_prompt(cfg, context, doc_count, user_lang=user_lang)
         messages = [SystemMessage(content=sys_msg)]
@@ -4898,7 +4906,8 @@ async def set_crawl_schedule(request: Request, data: dict = None):
 @app.get("/admin/api-sources")
 def get_api_sources(request: Request, password: str = "", db_name: str = ""):
     password = _extract_password(request, password)
-    cfg = get_config()
+    db_name = _extract_admin_db(request, db_name)
+    cfg = get_config(db_name)
     try: admin_auth(password, cfg)
     except HTTPException: return JSONResponse({"detail": "Unauthorized"}, status_code=401)
     if not db_name:
@@ -5860,12 +5869,17 @@ async def crawl_site(data: dict, request: Request):
     return JSONResponse({"status": "started", "db_name": db_name})
 
 @app.get("/history/{visitor_id}")
-async def get_visitor_history(visitor_id: str):
+async def get_visitor_history(visitor_id: str, request: Request):
     import urllib.parse
     decoded = urllib.parse.unquote(visitor_id)
     if ".." in decoded or "/" in decoded or "\\" in decoded:
         raise HTTPException(status_code=400, detail="Invalid visitor ID")
-    f = _visitor_dir() / f"{visitor_id[:64]}.json"
+    # Scope lookup to the DB matching the widget key — prevents cross-tenant history reads
+    widget_key = (request.headers.get("X-Widget-Key", "") or "").strip()
+    db_name = ""
+    if widget_key and widget_key not in ("null", "undefined"):
+        db_name = _get_db_for_widget_key(widget_key) or ""
+    f = _visitor_dir(db_name) / f"{visitor_id[:64]}.json"
     if not f.exists():
         return JSONResponse([])
     try:
