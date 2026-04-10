@@ -2802,10 +2802,17 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
         return
 
     # Cap context per provider to avoid payload limits
+    # Use _peek_provider() for primary choice; also check if ANY groq key exists in pool
+    # because the retry loop may rotate to groq even if peek said another provider first
     _prov = _peek_provider()
+    try:
+        _all_keys = json.loads(KEYS_FILE.read_text(encoding="utf-8")) if KEYS_FILE.exists() else []
+        _has_groq = any(k.get('provider') == 'groq' for k in _all_keys if k.get('status') == 'active')
+    except Exception:
+        _has_groq = False
     if _prov == 'cerebras' and len(context) > _CEREBRAS_MAX_CONTEXT_CHARS:
         context = context[:_CEREBRAS_MAX_CONTEXT_CHARS]
-    elif _prov == 'groq' and len(context) > _GROQ_MAX_CONTEXT_CHARS:
+    elif (_has_groq or _prov == 'groq') and len(context) > _GROQ_MAX_CONTEXT_CHARS:
         context = context[:_GROQ_MAX_CONTEXT_CHARS]
 
     sys_msg = get_system_prompt(cfg, context, doc_count, is_urdu=is_urdu, user_lang=user_lang)
@@ -3085,9 +3092,14 @@ async def chat(request: Request):
 
         # Cap context per provider to avoid payload limits
         _prov2 = _peek_provider()
+        try:
+            _all_keys2 = json.loads(KEYS_FILE.read_text(encoding="utf-8")) if KEYS_FILE.exists() else []
+            _has_groq2 = any(k.get('provider') == 'groq' for k in _all_keys2 if k.get('status') == 'active')
+        except Exception:
+            _has_groq2 = False
         if _prov2 == 'cerebras' and len(context) > _CEREBRAS_MAX_CONTEXT_CHARS:
             context = context[:_CEREBRAS_MAX_CONTEXT_CHARS]
-        elif _prov2 == 'groq' and len(context) > _GROQ_MAX_CONTEXT_CHARS:
+        elif (_has_groq2 or _prov2 == 'groq') and len(context) > _GROQ_MAX_CONTEXT_CHARS:
             context = context[:_GROQ_MAX_CONTEXT_CHARS]
 
         sys_msg = get_system_prompt(cfg, context, doc_count, user_lang=user_lang)
@@ -4149,14 +4161,14 @@ def _detect_format(content: str, filename: str = "") -> str:
 @app.post("/admin/ingest/smart-text")
 async def ingest_smart_text(request: Request, data: dict):
     """Ingest raw text in any format — auto-detects JSON, CSV, YAML, XML, MD, TXT."""
-    cfg = get_config()
+    target_db = (data.get("target_db", "") or "").strip()
+    cfg = get_config(target_db) if target_db else get_config()
     try: admin_auth(_extract_password(request, data.get("password", "")), cfg)
     except HTTPException: return JSONResponse({"detail": "Unauthorized"}, status_code=401)
     content = data.get("content", "").strip()
     if not content:
         return JSONResponse({"detail": "No content provided"}, status_code=400)
     fmt = data.get("format") or _detect_format(content)
-    target_db = data.get("target_db", "").strip()
     source = data.get("source", f"manual-{fmt}-ingest")
     try:
         from langchain_core.documents import Document
@@ -4178,14 +4190,14 @@ async def ingest_smart_text(request: Request, data: dict):
 async def ingest_fetch_url(request: Request, data: dict):
     """Fetch any JSON API URL and ingest each item as a separate chunk."""
     import urllib.request
-    cfg = get_config()
+    target_db = _validate_db_name(data.get("target_db", "").strip()) if data.get("target_db", "").strip() else ""
+    cfg = get_config(target_db) if target_db else get_config()
     try: admin_auth(_extract_password(request, data.get("password", "")), cfg)
     except HTTPException: return JSONResponse({"detail": "Unauthorized"}, status_code=401)
     url = data.get("url", "").strip()
     if not url:
         return JSONResponse({"detail": "No URL provided"}, status_code=400)
     json_path = data.get("json_path", "").strip()  # e.g. "data" or "results.items"
-    target_db = _validate_db_name(data.get("target_db", "").strip()) if data.get("target_db", "").strip() else ""
     try:
         req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
         with urllib.request.urlopen(req, timeout=15) as resp:
@@ -4222,7 +4234,8 @@ async def ingest_fetch_url(request: Request, data: dict):
 
 @app.post("/admin/ingest/text")
 async def ingest_text(request: Request, data: dict):
-    cfg = get_config()
+    target = (data.get("target_db", "") or "").strip()
+    cfg = get_config(target) if target else get_config()
     try: admin_auth(_extract_password(request, data.get("password", "")), cfg)
     except HTTPException: return JSONResponse({"detail": "Unauthorized"}, status_code=401)
     text = data.get("text", "").strip()
@@ -4230,7 +4243,6 @@ async def ingest_text(request: Request, data: dict):
         return JSONResponse({"detail": "No text provided"}, status_code=400)
     if len(text) > 10_000_000:  # 10MB limit
         return JSONResponse({"detail": "Text too large (max 10MB)"}, status_code=413)
-    target = data.get("target_db", "").strip()
     try:
         from langchain_core.documents import Document
         db = _get_db_instance(target) if target else local_db
@@ -4921,12 +4933,12 @@ def get_api_sources(request: Request, password: str = "", db_name: str = ""):
 
 @app.post("/admin/api-sources")
 async def save_api_source(request: Request, data: dict):
-    cfg = get_config()
-    try: admin_auth(_extract_password(request, data.get("password", "")), cfg)
-    except HTTPException: return JSONResponse({"detail": "Unauthorized"}, status_code=401)
-    db_name = data.get("db_name", "").strip()
+    db_name = (data.get("db_name", "") or "").strip()
     if not db_name:
         db_name = ACTIVE_DB_FILE.read_text(encoding="utf-8").strip() if ACTIVE_DB_FILE.exists() else ""
+    cfg = get_config(db_name) if db_name else get_config()
+    try: admin_auth(_extract_password(request, data.get("password", "")), cfg)
+    except HTTPException: return JSONResponse({"detail": "Unauthorized"}, status_code=401)
     raw_kw = data.get("keywords", "")
     kw_list = [k.strip() for k in (raw_kw if isinstance(raw_kw, list) else raw_kw.split(",")) if k.strip()]
     new_src = {
@@ -4956,12 +4968,12 @@ async def save_api_source(request: Request, data: dict):
 
 @app.post("/admin/api-sources/delete")
 async def delete_api_source(request: Request, data: dict):
-    cfg = get_config()
-    try: admin_auth(_extract_password(request, data.get("password", "")), cfg)
-    except HTTPException: return JSONResponse({"detail": "Unauthorized"}, status_code=401)
-    db_name = data.get("db_name", "").strip()
+    db_name = (data.get("db_name", "") or "").strip()
     if not db_name:
         db_name = ACTIVE_DB_FILE.read_text(encoding="utf-8").strip() if ACTIVE_DB_FILE.exists() else ""
+    cfg = get_config(db_name) if db_name else get_config()
+    try: admin_auth(_extract_password(request, data.get("password", "")), cfg)
+    except HTTPException: return JSONResponse({"detail": "Unauthorized"}, status_code=401)
     name = data.get("name", "").strip()
     db_cfg_file = DATABASES_DIR / db_name / "config.json"
     if not db_cfg_file.exists():
