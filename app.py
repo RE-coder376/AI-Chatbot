@@ -5156,24 +5156,26 @@ async def crawl_site(data: dict, request: Request):
                     _bfs_sem = asyncio.Semaphore(6)  # 6 Playwright pages in parallel during BFS
 
                     async def _extract_links_fast(page_url):
-                        """Use Playwright so JS-rendered nav links (React/Vue/PHP SPAs) are visible."""
+                        """Playwright renders page fully then BeautifulSoup extracts all links."""
                         try:
                             async with _bfs_sem:
                                 _pg = await ctx.new_page()
                                 try:
-                                    await _pg.goto(page_url, wait_until="domcontentloaded", timeout=12000)
-                                    _hrefs = await _pg.eval_on_selector_all(
-                                        "a[href]", "els => els.map(e => e.href)"
-                                    )
+                                    await _pg.goto(page_url, wait_until="load", timeout=15000)
+                                    await _pg.wait_for_timeout(800)  # let JS nav menus render
+                                    _html = await _pg.content()
                                 finally:
                                     await _pg.close()
+                            _soup = _BS_spider(_html, "html.parser")
                             _links = []
-                            for _href in _hrefs:
+                            for _a in _soup.find_all("a", href=True):
+                                _href = urllib.parse.urljoin(page_url, _a["href"])
                                 _href = _href.split("#")[0].split("?")[0].rstrip("/")
                                 if _href.startswith("http") and _strip_www(_href).startswith(base_nowww):
                                     _links.append(_href)
                             return _links
-                        except Exception:
+                        except Exception as _bfs_e:
+                            logger.warning(f"[BFS] link extract failed {page_url}: {_bfs_e}")
                             return []
 
                     _batch = 6  # matches BFS semaphore
