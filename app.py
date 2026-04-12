@@ -3925,6 +3925,23 @@ def _ensure_tmp_chroma(db_name: str, src_path: Path) -> Path:
     return tmp_path
 
 
+def _get_or_create_db(db_name: str):
+    """Return Chroma instance for db_name, creating it fresh if no chroma.sqlite3 exists yet."""
+    existing = _get_db_instance(db_name) if db_name else None
+    if existing:
+        return existing
+    # No existing DB — create a new empty one so ingest can populate it
+    if not db_name:
+        return local_db  # fall back to active DB
+    db_path = DATABASES_DIR / db_name
+    db_path.mkdir(parents=True, exist_ok=True)
+    from langchain_chroma import Chroma
+    tmp_dir = _ensure_tmp_chroma(db_name, db_path)
+    instance = Chroma(persist_directory=str(tmp_dir), embedding_function=embeddings_model)
+    instance._db_name = db_name
+    _db_instance_cache[db_name] = instance
+    return instance
+
 def _get_db_instance(db_name: str):
     """Return a Chroma instance for any DB (not just active). Cached per db_name."""
     if db_name in _db_instance_cache:
@@ -4167,7 +4184,7 @@ async def ingest_smart_text(request: Request, data: dict):
     source = data.get("source", f"manual-{fmt}-ingest")
     try:
         from langchain_core.documents import Document
-        db = _get_db_instance(target_db) if target_db else local_db
+        db = _get_or_create_db(target_db) if target_db else (local_db or _get_or_create_db(_get_active_db()))
         if not db: return JSONResponse({"detail": "No KB found"}, status_code=503)
         chunks = _smart_convert(content, fmt)
         if not chunks: return JSONResponse({"detail": "No usable content extracted"}, status_code=400)
@@ -4212,7 +4229,7 @@ async def ingest_fetch_url(request: Request, data: dict):
         # If it's a list, ingest each item separately; otherwise ingest as one chunk
         items = obj if isinstance(obj, list) else [obj]
         from langchain_core.documents import Document
-        db = _get_db_instance(target_db) if target_db else local_db
+        db = _get_or_create_db(target_db) if target_db else (local_db or _get_or_create_db(_get_active_db()))
         if not db: return JSONResponse({"detail": "No KB found"}, status_code=503)
         total_chunks = 0
         for item in items:
@@ -4240,7 +4257,7 @@ async def ingest_text(request: Request, data: dict):
         return JSONResponse({"detail": "Text too large (max 10MB)"}, status_code=413)
     try:
         from langchain_core.documents import Document
-        db = _get_db_instance(target) if target else local_db
+        db = _get_or_create_db(target) if target else (local_db or _get_or_create_db(_get_active_db()))
         if not db:
             return JSONResponse({"detail": "No knowledge base found"}, status_code=503)
         doc_id = str(uuid.uuid4())
@@ -4260,7 +4277,7 @@ async def ingest_files(request: Request, password: str = Form(...), target_db: s
     except HTTPException: return JSONResponse({"detail": "Unauthorized"}, status_code=401)
     try:
         from langchain_core.documents import Document
-        db = _get_db_instance(target_db) if target_db else local_db
+        db = _get_or_create_db(target_db) if target_db else (local_db or _get_or_create_db(_get_active_db()))
         if not db:
             return JSONResponse({"detail": "No knowledge base found"}, status_code=503)
         total = 0
