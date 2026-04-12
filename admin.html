@@ -159,8 +159,7 @@
     <input type="text" style="display:none" tabindex="-1" autocomplete="username" aria-hidden="true"/>
     <input type="password" style="display:none" tabindex="-1" autocomplete="current-password" aria-hidden="true"/>
     <label style="margin-top:0;">Client DB Name</label>
-    <input type="text" id="admin-db" placeholder="e.g. agentfactory" style="margin-bottom:8px;" autocomplete="one-time-code" autocorrect="off" spellcheck="false" readonly list="db-names-list" onkeydown="if(event.key==='Enter') unlockSystem()" onfocus="this.removeAttribute('readonly')" onblur="if(!this.value)this.setAttribute('readonly','')"/>
-    <datalist id="db-names-list"></datalist>
+    <input type="text" id="admin-db" placeholder="e.g. agentfactory" style="margin-bottom:8px;" autocomplete="off" autocorrect="off" spellcheck="false" readonly onkeydown="if(event.key==='Enter') unlockSystem()" onfocus="this.removeAttribute('readonly')" onblur="if(!this.value)this.setAttribute('readonly','')"/>
     <label>Admin Password</label>
     <div style="display:flex; gap:12px;">
       <div style="position:relative; flex:1;">
@@ -655,8 +654,6 @@
       // Save DB name to this browser's local history for dropdown
       const hist = JSON.parse(localStorage.getItem('adminDbHistory') || '[]');
       if (!hist.includes(db)) { hist.unshift(db); localStorage.setItem('adminDbHistory', JSON.stringify(hist.slice(0, 10))); }
-      const dl = document.getElementById('db-names-list');
-      if (dl) dl.innerHTML = JSON.parse(localStorage.getItem('adminDbHistory') || '[]').map(n => `<option value="${n}">`).join('');
       // Fetch CSRF token for state-changing requests
       const csrfResp = await fetch(`${API}/admin/csrf-token`, { headers: { 'Authorization': `Bearer ${pass}`, 'X-Admin-DB': db } });
       if (csrfResp.ok) {
@@ -708,12 +705,6 @@
     // Clear volatile session state only (credentials stay in localStorage)
     sessionStorage.removeItem('clientMode');
     sessionStorage.removeItem('csrfToken');
-    // Populate DB name dropdown from login history
-    const dl = document.getElementById('db-names-list');
-    if (dl) {
-      const prev = JSON.parse(localStorage.getItem('adminDbHistory') || '[]');
-      dl.innerHTML = prev.map(n => `<option value="${n}">`).join('');
-    }
     // Auto-login if credentials saved from previous session
     const savedPass = localStorage.getItem('adminPass');
     const savedDb   = localStorage.getItem('adminDb');
