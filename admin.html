@@ -159,12 +159,12 @@
     <input type="text" style="display:none" tabindex="-1" autocomplete="username" aria-hidden="true"/>
     <input type="password" style="display:none" tabindex="-1" autocomplete="current-password" aria-hidden="true"/>
     <label style="margin-top:0;">Client DB Name</label>
-    <input type="text" id="admin-db" placeholder="e.g. agentfactory" style="margin-bottom:8px;" autocomplete="off" autocorrect="off" spellcheck="false" readonly list="db-names-list" onkeydown="if(event.key==='Enter') unlockSystem()" onfocus="this.removeAttribute('readonly')" onblur="if(!this.value)this.setAttribute('readonly','')"/>
+    <input type="text" id="admin-db" placeholder="e.g. agentfactory" style="margin-bottom:8px;" autocomplete="one-time-code" autocorrect="off" spellcheck="false" readonly list="db-names-list" onkeydown="if(event.key==='Enter') unlockSystem()" onfocus="this.removeAttribute('readonly')" onblur="if(!this.value)this.setAttribute('readonly','')"/>
     <datalist id="db-names-list"></datalist>
     <label>Admin Password</label>
     <div style="display:flex; gap:12px;">
       <div style="position:relative; flex:1;">
-        <input type="password" id="master-pass" placeholder="Your admin password" style="width:100%; padding-right:44px;" autocomplete="off" readonly onkeydown="if(event.key==='Enter') unlockSystem()" onfocus="this.removeAttribute('readonly')"/>
+        <input type="password" id="master-pass" placeholder="Your admin password" style="width:100%; padding-right:44px;" autocomplete="new-password" readonly onkeydown="if(event.key==='Enter') unlockSystem()" onfocus="this.removeAttribute('readonly')"/>
         <button type="button" onclick="togglePassVis()" style="position:absolute;right:10px;top:50%;transform:translateY(-50%);background:none;border:none;cursor:pointer;padding:0;margin:0;width:auto;color:#94a3b8;" id="eye-btn">
           <svg id="eye-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
         </button>
@@ -679,6 +679,7 @@
         }
       }
       document.body.classList.remove('locked');
+      document.querySelector('.auth-section').style.display = 'none';
       showStatus('auth', `Logged into: ${db}`, 'success');
       loadServerData(data);
       loadOpsData(data.config_full || data);
@@ -720,6 +721,14 @@
       document.getElementById('master-pass').value = savedPass;
       document.getElementById('admin-db').value    = savedDb;
       unlockSystem();
+    } else {
+      // Clear any browser-autofilled values (fires after browser fills ~200ms)
+      setTimeout(() => {
+        const dbEl = document.getElementById('admin-db');
+        const passEl = document.getElementById('master-pass');
+        if (document.activeElement !== dbEl) dbEl.value = '';
+        if (document.activeElement !== passEl) passEl.value = '';
+      }, 200);
     }
   });
 
