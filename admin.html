@@ -722,13 +722,18 @@
       document.getElementById('admin-db').value    = savedDb;
       unlockSystem();
     } else {
-      // Clear any browser-autofilled values (fires after browser fills ~200ms)
-      setTimeout(() => {
+      // Aggressively clear browser autofill — Chrome ignores autocomplete on HTTPS.
+      // Poll every 200ms for 3s; stop once user starts typing.
+      let _afN = 0;
+      const _afT = setInterval(() => {
         const dbEl = document.getElementById('admin-db');
         const passEl = document.getElementById('master-pass');
-        if (document.activeElement !== dbEl) dbEl.value = '';
-        if (document.activeElement !== passEl) passEl.value = '';
+        if (document.activeElement !== dbEl && !dbEl._userTyped) dbEl.value = '';
+        if (document.activeElement !== passEl && !passEl._userTyped) passEl.value = '';
+        if (++_afN >= 15) clearInterval(_afT);
       }, 200);
+      document.getElementById('admin-db').addEventListener('input', e => { e.target._userTyped = true; clearInterval(_afT); });
+      document.getElementById('master-pass').addEventListener('input', e => { e.target._userTyped = true; });
     }
   });
 
