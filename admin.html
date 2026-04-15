@@ -568,12 +568,16 @@
 </div>
 
 <script>
-  // Dynamically inject auth inputs so Chrome's autofill scanner never sees them in static HTML
+  // Dynamically inject auth inputs with random name attributes each load.
+  // Chrome matches saved credentials by URL + field name — randomising name
+  // makes it impossible for Chrome to match any stored credential.
   (function() {
+    const _r = Math.random().toString(36).slice(2, 9);
     const dbC = document.getElementById('admin-db-container');
     if (dbC) {
       const inp = document.createElement('input');
-      inp.type = 'text'; inp.id = 'admin-db'; inp.style.cssText = 'width:100%;';
+      inp.type = 'text'; inp.id = 'admin-db'; inp.name = 'x_' + _r + '_a';
+      inp.style.cssText = 'width:100%;';
       inp.setAttribute('autocomplete', 'off'); inp.setAttribute('autocorrect', 'off');
       inp.setAttribute('spellcheck', 'false'); inp.setAttribute('autocapitalize', 'none');
       inp.addEventListener('keydown', e => { if (e.key === 'Enter') unlockSystem(); });
@@ -582,7 +586,8 @@
     const pwC = document.getElementById('master-pass-container');
     if (pwC) {
       const inp = document.createElement('input');
-      inp.type = 'password'; inp.id = 'master-pass'; inp.style.cssText = 'width:100%; padding-right:44px;';
+      inp.type = 'password'; inp.id = 'master-pass'; inp.name = 'x_' + _r + '_b';
+      inp.style.cssText = 'width:100%; padding-right:44px;';
       inp.setAttribute('autocomplete', 'off');
       inp.addEventListener('keydown', e => { if (e.key === 'Enter') unlockSystem(); });
       pwC.appendChild(inp);
