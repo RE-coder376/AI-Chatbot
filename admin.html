@@ -832,7 +832,7 @@
     const pass = document.getElementById('master-pass').value;
     const r = await fetch(`${API}/admin/ingest/text`, {
       method: 'POST', headers: {...authHeaders(), 'Content-Type': 'application/json'},
-      body: JSON.stringify({password: pass, text: ta.value.trim()})
+      body: JSON.stringify({password: pass, text: ta.value.trim(), target_db: localStorage.getItem('adminDb') || ''})
     });
     const d = await r.json();
     showStatus('stats', d.success ? 'Added to KB!' : (d.detail || 'Failed'), d.success ? 'success' : 'error');
