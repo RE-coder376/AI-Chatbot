@@ -661,9 +661,9 @@
     return { 'Authorization': `Bearer ${pass}`, 'X-CSRF-Token': csrf, 'X-Admin-DB': db };
   }
 
-  function unlockSystem() {
-    const pass = document.getElementById('master-pass').value;
-    const db   = document.getElementById('admin-db').value.trim();
+  function unlockSystem(passArg, dbArg) {
+    const pass = passArg || document.getElementById('master-pass').value;
+    const db   = dbArg   || document.getElementById('admin-db').value.trim();
     if (!pass) return showStatus('auth', 'Password required.', 'error');
     if (!db)   return showStatus('auth', 'DB name required.', 'error');
     if (pass.length < 6) return showStatus('auth', 'Password too short (min 6 chars).', 'error');
@@ -731,9 +731,7 @@
     const savedPass = localStorage.getItem('adminPass');
     const savedDb   = localStorage.getItem('adminDb');
     if (savedPass && savedDb) {
-      document.getElementById('master-pass').value = savedPass;
-      document.getElementById('admin-db').value    = savedDb;
-      unlockSystem();
+      unlockSystem(savedPass, savedDb);
     }
   });
 
