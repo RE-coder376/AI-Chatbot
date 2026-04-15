@@ -9,10 +9,10 @@
   "bot_name": "Babyfy Assistant",
   "business_name": "Babyfy",
   "topics": "baby toys, kids products, educational toys, RC cars, baby gear",
-  "auto_crawl_enabled": true,
-  "crawl_interval_minutes": 5.0,
+  "auto_crawl_enabled": false,
+  "crawl_interval_minutes": 1440.0,
   "crawl_url": "https://babyfy.pk/",
-  "last_crawl_time": "2026-03-24T02:45:43.998080",
+  "last_crawl_time": "2026-04-15T08:20:37.563925",
   "last_crawl_chunks": 0,
   "admin_password": "babyfy"
 }

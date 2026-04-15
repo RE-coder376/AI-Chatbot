@@ -7,8 +7,8 @@
   "sendgrid_keys": [],
   "branding": {},
   "crawl_url": "https://thestationerycompany.pk",
-  "auto_crawl_enabled": true,
-  "crawl_interval_minutes": 5.0,
-  "last_crawl_time": "2026-03-24T02:44:00.099763",
+  "auto_crawl_enabled": false,
+  "crawl_interval_minutes": 1440.0,
+  "last_crawl_time": "2026-04-15T08:20:42.092579",
   "last_crawl_chunks": 0
 }

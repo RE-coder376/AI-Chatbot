@@ -961,7 +961,7 @@ async def retrieve_context(q: str, db, k: int = 15, fast: bool = False, expansio
     # If this DB has live API sources, skip LLM expansion — the API data is the freshness source
     if not fast:
         try:
-            _adb = ACTIVE_DB_FILE.read_text(encoding="utf-8").strip() if ACTIVE_DB_FILE.exists() else ""
+            _adb = getattr(db, '_db_name', '') or (ACTIVE_DB_FILE.read_text(encoding="utf-8").strip() if ACTIVE_DB_FILE.exists() else "")
             if _adb and json.loads((DATABASES_DIR / _adb / "config.json").read_text()).get("api_sources"):
                 fast = True
         except Exception:
@@ -999,7 +999,7 @@ async def retrieve_context(q: str, db, k: int = 15, fast: bool = False, expansio
     # skip keyword rescue + similarity search — Jikan live data is the sole source.
     _skip_chromadb = False
     try:
-        _adb2 = ACTIVE_DB_FILE.read_text(encoding="utf-8").strip() if ACTIVE_DB_FILE.exists() else ""
+        _adb2 = getattr(db, '_db_name', '') or (ACTIVE_DB_FILE.read_text(encoding="utf-8").strip() if ACTIVE_DB_FILE.exists() else "")
         if _adb2:
             _adb2_srcs = json.loads((DATABASES_DIR / _adb2 / "config.json").read_text()).get("api_sources", [])
             _ql2 = q.lower()
@@ -1093,7 +1093,7 @@ async def retrieve_context(q: str, db, k: int = 15, fast: bool = False, expansio
         re.I)
     try:
         import urllib.parse as _up, httpx as _hx
-        active_db_name = ACTIVE_DB_FILE.read_text(encoding="utf-8").strip() if ACTIVE_DB_FILE.exists() else ""
+        active_db_name = getattr(db, '_db_name', '') or (ACTIVE_DB_FILE.read_text(encoding="utf-8").strip() if ACTIVE_DB_FILE.exists() else "")
         if active_db_name:
             db_cfg_file = DATABASES_DIR / active_db_name / "config.json"
             if db_cfg_file.exists():
@@ -3182,7 +3182,7 @@ def _delete_faq_from_db(faq_id: str):
         logger.error(f"FAQ delete from DB error: {e}")
 
 @app.get("/admin/faqs")
-async def get_faqs(password: str, request: Request):
+async def get_faqs(request: Request, password: str = ""):
     password = _extract_password(request, password)
     db_name = _extract_admin_db(request)
     cfg = get_config(db_name)
@@ -3852,7 +3852,8 @@ async def audit_api_sources(base_url: str = "http://localhost:8000"):
 @app.get("/admin/test/identity")
 async def test_identity_endpoint(request: Request, password: str = ""):
     password = _extract_password(request, password)
-    cfg = get_config()
+    db_name = _extract_admin_db(request)
+    cfg = get_config(db_name) if db_name else get_config()
     try: admin_auth(password, cfg)
     except HTTPException: return JSONResponse({"detail": "Unauthorized"}, status_code=401)
     bu = str(request.base_url).rstrip("/")
@@ -3861,7 +3862,7 @@ async def test_identity_endpoint(request: Request, password: str = ""):
 @app.get("/admin/test/knowledge")
 async def test_knowledge_endpoint(request: Request, password: str = ""):
     password = _extract_password(request, password)
-    cfg = get_config()
+    db_name = _extract_admin_db(request); cfg = get_config(db_name) if db_name else get_config()
     try: admin_auth(password, cfg)
     except HTTPException: return JSONResponse({"detail": "Unauthorized"}, status_code=401)
     bu = str(request.base_url).rstrip("/")
@@ -3870,7 +3871,7 @@ async def test_knowledge_endpoint(request: Request, password: str = ""):
 @app.get("/admin/test/safety")
 async def test_safety_endpoint(request: Request, password: str = ""):
     password = _extract_password(request, password)
-    cfg = get_config()
+    db_name = _extract_admin_db(request); cfg = get_config(db_name) if db_name else get_config()
     try: admin_auth(password, cfg)
     except HTTPException: return JSONResponse({"detail": "Unauthorized"}, status_code=401)
     bu = str(request.base_url).rstrip("/")
@@ -3879,7 +3880,7 @@ async def test_safety_endpoint(request: Request, password: str = ""):
 @app.get("/admin/test/live")
 async def test_live_endpoint(request: Request, password: str = ""):
     password = _extract_password(request, password)
-    cfg = get_config()
+    db_name = _extract_admin_db(request); cfg = get_config(db_name) if db_name else get_config()
     try: admin_auth(password, cfg)
     except HTTPException: return JSONResponse({"detail": "Unauthorized"}, status_code=401)
     bu = str(request.base_url).rstrip("/")
@@ -4264,6 +4265,20 @@ async def ingest_text(request: Request, data: dict):
         db.add_documents([Document(page_content=text, metadata={"source": "manual", "id": doc_id})])
         dest = target or (ACTIVE_DB_FILE.read_text(encoding="utf-8").strip() if ACTIVE_DB_FILE.exists() else "active")
         _bm25_cache.pop(dest, None)
+        # Copy-back from /tmp to persistent databases/ so chunk count reflects on disk
+        try:
+            _tmp_src = Path(f"/tmp/chroma_{dest}")
+            _db_dst = DATABASES_DIR / dest
+            if _tmp_src.exists() and _db_dst.exists():
+                for _itm in _tmp_src.iterdir():
+                    _d = _db_dst / _itm.name
+                    if _itm.is_dir():
+                        if _d.exists(): shutil.rmtree(str(_d))
+                        shutil.copytree(str(_itm), str(_d))
+                    else:
+                        shutil.copy2(str(_itm), str(_d))
+        except Exception as _cb_e:
+            logger.warning(f"ingest copy-back failed (non-fatal): {_cb_e}")
         return {"success": True, "message": f"Text ingested into '{dest}' ({len(text)} chars)", "id": doc_id}
     except Exception as e:
         logger.error(f"ingest_text error: {e}")
@@ -4344,8 +4359,19 @@ def get_embed_code(request: Request, password: str = ""):
     db_name = _extract_admin_db(request, "")
     cfg = get_config(db_name) if db_name else get_config()
     admin_auth(password, cfg)
-    host = str(request.base_url).rstrip("/")
+    host = str(request.base_url).rstrip("/").replace("http://", "https://")
     widget_key = cfg.get("widget_key", "")
+    # Auto-generate widget_key if missing
+    if not widget_key and db_name:
+        widget_key = str(uuid.uuid4())
+        _db_cfg_path = DATABASES_DIR / db_name / "config.json"
+        try:
+            _db_cfg = json.loads(_db_cfg_path.read_text(encoding="utf-8")) if _db_cfg_path.exists() else {}
+            _db_cfg["widget_key"] = widget_key
+            _atomic_write_json(_db_cfg_path, _db_cfg)
+            _widget_key_cache[widget_key] = db_name
+        except Exception as _wk_e:
+            logger.warning(f"Could not persist widget_key for {db_name}: {_wk_e}")
     primary = cfg.get("branding", {}).get("primary_color", "#6366f1") if isinstance(cfg.get("branding"), dict) else "#6366f1"
     snippet = (
         f'<!-- {cfg.get("bot_name","AI")} Chat Widget -->\n'
