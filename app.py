@@ -3022,7 +3022,7 @@ async def chat(request: Request):
                     yield chunk
             except Exception as _se:
                 logger.error(f"chat_stream_generator crashed: {_se}", exc_info=True)
-                yield f"data: {json.dumps({'type':'chunk','content':f'Error: {type(_se).__name__}: {str(_se)[:200]}'})}\n\n"
+                yield f"data: {json.dumps({'type':'chunk','content':'I ran into an issue. Please try again in a moment.'})}\n\n"
                 yield f"data: {json.dumps({'type':'metadata','capture_lead':False,'sources':[]})}\n\n"
                 yield "data: {\"type\": \"done\"}\n\n"
         return StreamingResponse(
