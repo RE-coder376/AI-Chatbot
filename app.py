@@ -3218,6 +3218,7 @@ async def add_faq(request: Request):
     faqs.append(faq)
     _save_faqs(faqs, db_name)
     _embed_faq(faq)
+    threading.Thread(target=_github_sync_upload, args=(db_name,), daemon=True).start()
     return JSONResponse({"success": True, "id": faq_id})
 
 @app.delete("/admin/faqs/{faq_id}")
@@ -3229,6 +3230,7 @@ async def delete_faq(faq_id: str, password: str, request: Request):
     faqs = [f for f in _load_faqs(db_name) if f["id"] != faq_id]
     _save_faqs(faqs, db_name)
     _delete_faq_from_db(faq_id)
+    threading.Thread(target=_github_sync_upload, args=(db_name,), daemon=True).start()
     return JSONResponse({"success": True})
 
 # --- UNIVERSAL ADMIN ---
@@ -4976,6 +4978,7 @@ async def set_crawl_schedule(request: Request, data: dict = None):
         "crawl_url": data.get("crawl_url", existing.get("crawl_url", "")),
     })
     db_cfg_file.write_text(json.dumps(existing, indent=2), encoding="utf-8")
+    threading.Thread(target=_github_sync_upload, args=(db_name,), daemon=True).start()
     return {"success": True, "message": f"Schedule saved for '{db_name}'"}
 
 @app.get("/admin/api-sources")
@@ -5027,6 +5030,7 @@ async def save_api_source(request: Request, data: dict):
     sources.append(new_src)
     existing["api_sources"] = sources
     db_cfg_file.write_text(json.dumps(existing, indent=2), encoding="utf-8")
+    threading.Thread(target=_github_sync_upload, args=(db_name,), daemon=True).start()
     return {"success": True, "message": f"API source '{new_src['name']}' saved"}
 
 @app.post("/admin/api-sources/delete")
@@ -5048,6 +5052,7 @@ async def delete_api_source(request: Request, data: dict):
         return JSONResponse({"detail": "Config file corrupt, cannot modify"}, status_code=500)
     existing["api_sources"] = [s for s in existing.get("api_sources", []) if s["name"] != name]
     db_cfg_file.write_text(json.dumps(existing, indent=2), encoding="utf-8")
+    threading.Thread(target=_github_sync_upload, args=(db_name,), daemon=True).start()
     return {"success": True, "message": f"Deleted '{name}'"}
 
 # Per-DB crawl state for background crawl — survives tab close / SSE disconnect
