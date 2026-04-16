@@ -581,13 +581,16 @@ def _mark_key_failed(api_key: str, error_str: str):
                     if failed_provider:
                         cascaded = 0
                         for entry in all_keys:
-                            if entry.get("provider") == failed_provider and entry.get("key") != api_key:
-                                k = entry.get("key", "")
-                                if k and not _key_org_map.get(k):
+                            k = entry.get("key", "")
+                            if not k or k == api_key:
+                                continue
+                            # Only cascade to keys explicitly in the same org
+                            if entry.get("org") == org_id:
+                                if not _key_org_map.get(k):
                                     _key_org_map[k] = org_id
                                     cascaded += 1
                         if cascaded:
-                            logger.warning(f"Org {org_id} TPD — cascaded to {cascaded} same-provider keys")
+                            logger.warning(f"Org {org_id} TPD — cascaded to {cascaded} explicitly same-org keys")
             except Exception as _ce:
                 logger.warning(f"TPD cascade failed: {_ce}")
             logger.warning(f"Org {org_id} TPD exhausted — cooldown until midnight UTC")
@@ -1619,6 +1622,11 @@ def get_fresh_llm():
                 actives.append({"key": v, "provider": prov, "label": f"Env {prov}"})
 
         if not actives: return None
+
+        # Pre-load org membership from keys.json 'org' field (no need to wait for a failure)
+        for k in actives:
+            if k.get("org") and not _key_org_map.get(k["key"]):
+                _key_org_map[k["key"]] = k["org"]
 
         now = time.time()
 
