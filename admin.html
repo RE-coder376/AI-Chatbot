@@ -578,32 +578,72 @@
 </div>
 
 <script>
-  // Autofill prevention: Chrome autofills type="password" fields based on URL + field position.
-  // Fix: DB field uses type="search" (Chrome never autofills passwords into search inputs).
-  //      Password field uses type="text" + CSS -webkit-text-security:disc — renders as dots
-  //      but Chrome's credential manager ignores non-password-type fields.
+  // AUTOFILL NUCLEAR FIX: Use contenteditable divs — Chrome's credential manager ONLY
+  // targets <input> elements. contenteditable is immune to all browser autofill.
+  let _rawPassword = '';
+
+  function _updatePassDisplay() {
+    const disp = document.getElementById('master-pass-display');
+    const hidden = document.getElementById('master-pass');
+    if (disp && disp.dataset.showing !== '1') disp.textContent = '●'.repeat(_rawPassword.length);
+    else if (disp) disp.textContent = _rawPassword;
+    if (hidden) hidden.value = _rawPassword;
+  }
+
+  function _handlePassKeydown(e) {
+    if (e.key === 'Enter') { e.preventDefault(); unlockSystem(); return; }
+    if (e.key === 'Backspace') { e.preventDefault(); _rawPassword = _rawPassword.slice(0, -1); _updatePassDisplay(); return; }
+    if (e.key === 'Delete') { e.preventDefault(); _rawPassword = ''; _updatePassDisplay(); return; }
+    if (e.key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey) { e.preventDefault(); _rawPassword += e.key; _updatePassDisplay(); }
+  }
+
   (function() {
-    const _r = Math.random().toString(36).slice(2, 9);
+    const inputStyle = 'width:100%;border:1.5px solid #e2e8f0;border-radius:10px;padding:10px 14px;font-size:14px;outline:none;min-height:42px;line-height:20px;cursor:text;background:#fff;color:#1e293b;box-sizing:border-box;';
+
+    // DB field — contenteditable div
     const dbC = document.getElementById('admin-db-container');
     if (dbC) {
-      const inp = document.createElement('input');
-      inp.type = 'search'; inp.id = 'admin-db'; inp.name = 'x_' + _r + '_a';
-      inp.style.cssText = 'width:100%;';
-      inp.setAttribute('autocomplete', 'off'); inp.setAttribute('autocorrect', 'off');
-      inp.setAttribute('spellcheck', 'false'); inp.setAttribute('autocapitalize', 'none');
-      inp.addEventListener('keydown', e => { if (e.key === 'Enter') unlockSystem(); });
-      dbC.appendChild(inp);
+      const div = document.createElement('div');
+      div.id = 'admin-db'; div.contentEditable = 'true';
+      div.style.cssText = inputStyle;
+      div.setAttribute('role', 'textbox'); div.setAttribute('aria-label', 'Database name');
+      // Expose .value so all existing code that reads admin-db.value still works
+      Object.defineProperty(div, 'value', {
+        get() { return this.textContent.trim(); },
+        set(v) { this.textContent = v; },
+        configurable: true
+      });
+      div.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); unlockSystem(); } });
+      div.addEventListener('paste', e => {
+        e.preventDefault();
+        const t = (e.clipboardData || window.clipboardData).getData('text/plain').split('\n')[0].trim();
+        div.textContent = t;
+      });
+      div.addEventListener('focus', () => div.style.borderColor = '#6366f1');
+      div.addEventListener('blur', () => div.style.borderColor = '#e2e8f0');
+      dbC.appendChild(div);
     }
+
+    // Password field — contenteditable div with bullet masking
     const pwC = document.getElementById('master-pass-container');
     if (pwC) {
-      const inp = document.createElement('input');
-      // type="text" prevents Chrome from matching this field with saved passwords;
-      // -webkit-text-security:disc makes it render as bullet dots (password-style visually).
-      inp.type = 'text'; inp.id = 'master-pass'; inp.name = 'x_' + _r + '_b';
-      inp.style.cssText = 'width:100%; padding-right:36px; -webkit-text-security:disc;';
-      inp.setAttribute('autocomplete', 'off');
-      inp.addEventListener('keydown', e => { if (e.key === 'Enter') unlockSystem(); });
-      pwC.appendChild(inp);
+      const disp = document.createElement('div');
+      disp.id = 'master-pass-display'; disp.contentEditable = 'true';
+      disp.style.cssText = inputStyle + 'padding-right:36px;font-size:20px;letter-spacing:3px;';
+      disp.setAttribute('role', 'textbox'); disp.setAttribute('aria-label', 'Password');
+      disp.addEventListener('keydown', _handlePassKeydown);
+      disp.addEventListener('paste', e => {
+        e.preventDefault();
+        const t = (e.clipboardData || window.clipboardData).getData('text/plain');
+        _rawPassword += t; _updatePassDisplay();
+      });
+      disp.addEventListener('focus', () => disp.style.borderColor = '#6366f1');
+      disp.addEventListener('blur', () => disp.style.borderColor = '#e2e8f0');
+      pwC.appendChild(disp);
+      // Hidden input keeps the .value API working for all existing code
+      const hidden = document.createElement('input');
+      hidden.type = 'hidden'; hidden.id = 'master-pass'; hidden.value = '';
+      pwC.appendChild(hidden);
     }
   })();
 
@@ -675,8 +715,11 @@
   }
 
   function unlockSystem(passArg, dbArg) {
-    const pass = passArg || document.getElementById('master-pass').value;
-    const db   = dbArg   || document.getElementById('admin-db').value.trim();
+    // Auto-login path: sync _rawPassword + hidden input so subsequent .value reads work
+    if (passArg) { _rawPassword = passArg; const h = document.getElementById('master-pass'); if (h) h.value = passArg; }
+    const pass = passArg || _rawPassword;
+    const dbEl = document.getElementById('admin-db');
+    const db   = dbArg   || (dbEl ? dbEl.value : '') || '';
     if (!pass) return showStatus('auth', 'Password required.', 'error');
     if (!db)   return showStatus('auth', 'DB name required.', 'error');
     if (pass.length < 6) return showStatus('auth', 'Password too short (min 6 chars).', 'error');
@@ -725,15 +768,18 @@
   }
 
   function togglePassVis() {
-    const inp = document.getElementById('master-pass');
+    const disp = document.getElementById('master-pass-display');
     const icon = document.getElementById('eye-icon');
-    const hidden = inp.style.webkitTextSecurity === 'disc' || inp.style.cssText.includes('-webkit-text-security:disc');
-    if (hidden) {
-      inp.style.webkitTextSecurity = 'none';
-      icon.innerHTML = '<path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/>';
-    } else {
-      inp.style.webkitTextSecurity = 'disc';
+    if (!disp) return;
+    const showing = disp.dataset.showing === '1';
+    if (showing) {
+      disp.dataset.showing = '0'; disp.style.fontSize = '20px'; disp.style.letterSpacing = '3px';
+      disp.textContent = '●'.repeat(_rawPassword.length);
       icon.innerHTML = '<path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/>';
+    } else {
+      disp.dataset.showing = '1'; disp.style.fontSize = '14px'; disp.style.letterSpacing = 'normal';
+      disp.textContent = _rawPassword;
+      icon.innerHTML = '<path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/>';
     }
   }
 
