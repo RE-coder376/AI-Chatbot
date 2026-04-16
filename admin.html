@@ -155,17 +155,27 @@
 
   <!-- Master Unlock -->
   <div class="auth-section">
-    <label style="margin-top:0;">Client DB Name</label>
-    <div id="admin-db-container" style="margin-bottom:8px;"></div>
-    <label>Admin Password</label>
-    <div style="display:flex; gap:12px;">
-      <div style="position:relative; flex:1;" id="master-pass-container"></div>
-        <button type="button" onclick="togglePassVis()" style="position:absolute;right:10px;top:50%;transform:translateY(-50%);background:none;border:none;cursor:pointer;padding:0;margin:0;width:auto;color:#94a3b8;" id="eye-btn">
-          <svg id="eye-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
-        </button>
-      </div>
-      <button onclick="unlockSystem()" style="width:auto; margin:0; padding:0 40px;">Verify & Unlock</button>
+    <div style="text-align:center; margin-bottom:20px;">
+      <div style="font-size:28px; margin-bottom:6px;">🔐</div>
+      <div style="font-size:16px; font-weight:700; color:var(--text-main);">Admin Access</div>
+      <div style="font-size:12px; color:var(--text-muted); margin-top:2px;">Enter your database name and password to continue</div>
     </div>
+    <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px; margin-bottom:12px;">
+      <div>
+        <label style="font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:0.06em; color:var(--text-muted);">Database Name</label>
+        <div id="admin-db-container" style="margin-top:5px;"></div>
+      </div>
+      <div>
+        <label style="font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:0.06em; color:var(--text-muted);">Password</label>
+        <div style="position:relative; margin-top:5px;">
+          <div id="master-pass-container"></div>
+          <button type="button" onclick="togglePassVis()" id="eye-btn" style="position:absolute;right:10px;top:50%;transform:translateY(-50%);background:none;border:none;cursor:pointer;padding:0;margin:0;width:auto;color:#94a3b8;">
+            <svg id="eye-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+          </button>
+        </div>
+      </div>
+    </div>
+    <button onclick="unlockSystem()" style="width:100%; margin:0;">Verify &amp; Unlock</button>
     <div id="auth-status" class="status-msg"></div>
   </div>
 
@@ -568,15 +578,16 @@
 </div>
 
 <script>
-  // Dynamically inject auth inputs with random name attributes each load.
-  // Chrome matches saved credentials by URL + field name — randomising name
-  // makes it impossible for Chrome to match any stored credential.
+  // Autofill prevention: Chrome autofills type="password" fields based on URL + field position.
+  // Fix: DB field uses type="search" (Chrome never autofills passwords into search inputs).
+  //      Password field uses type="text" + CSS -webkit-text-security:disc — renders as dots
+  //      but Chrome's credential manager ignores non-password-type fields.
   (function() {
     const _r = Math.random().toString(36).slice(2, 9);
     const dbC = document.getElementById('admin-db-container');
     if (dbC) {
       const inp = document.createElement('input');
-      inp.type = 'text'; inp.id = 'admin-db'; inp.name = 'x_' + _r + '_a';
+      inp.type = 'search'; inp.id = 'admin-db'; inp.name = 'x_' + _r + '_a';
       inp.style.cssText = 'width:100%;';
       inp.setAttribute('autocomplete', 'off'); inp.setAttribute('autocorrect', 'off');
       inp.setAttribute('spellcheck', 'false'); inp.setAttribute('autocapitalize', 'none');
@@ -586,8 +597,10 @@
     const pwC = document.getElementById('master-pass-container');
     if (pwC) {
       const inp = document.createElement('input');
-      inp.type = 'password'; inp.id = 'master-pass'; inp.name = 'x_' + _r + '_b';
-      inp.style.cssText = 'width:100%; padding-right:44px;';
+      // type="text" prevents Chrome from matching this field with saved passwords;
+      // -webkit-text-security:disc makes it render as bullet dots (password-style visually).
+      inp.type = 'text'; inp.id = 'master-pass'; inp.name = 'x_' + _r + '_b';
+      inp.style.cssText = 'width:100%; padding-right:36px; -webkit-text-security:disc;';
       inp.setAttribute('autocomplete', 'off');
       inp.addEventListener('keydown', e => { if (e.key === 'Enter') unlockSystem(); });
       pwC.appendChild(inp);
@@ -714,11 +727,12 @@
   function togglePassVis() {
     const inp = document.getElementById('master-pass');
     const icon = document.getElementById('eye-icon');
-    if (inp.type === 'password') {
-      inp.type = 'text';
+    const hidden = inp.style.webkitTextSecurity === 'disc' || inp.style.cssText.includes('-webkit-text-security:disc');
+    if (hidden) {
+      inp.style.webkitTextSecurity = 'none';
       icon.innerHTML = '<path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/>';
     } else {
-      inp.type = 'password';
+      inp.style.webkitTextSecurity = 'disc';
       icon.innerHTML = '<path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/>';
     }
   }
