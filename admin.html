@@ -1150,6 +1150,14 @@
       const sessionDb = localStorage.getItem('adminDb') || '';
       const dbTxt = sessionDb ? `✅ Managing: ${sessionDb}` : (h.status === 'ready' ? `✅ Server ready` : `⚠️ ${h.status}`);
       el.innerHTML = `<span style="margin-right:16px">${dbTxt}</span><span>${keyTxt}</span>`;
+      // Re-sync active DB if server restarted and active_db drifted (client mode: their DB; owner: their chosen DB)
+      if (sessionDb && h.active_db && h.active_db !== sessionDb) {
+        const pass = localStorage.getItem('adminPass') || '';
+        if (pass) {
+          const sf = new FormData(); sf.append('password', pass); sf.append('name', sessionDb);
+          fetch(`${API}/admin/databases/set-active`, { method: 'POST', headers: authHeaders(), body: sf }).catch(() => {});
+        }
+      }
     }).catch(() => { el.innerHTML = '⚠️ Server unreachable'; });
   }
 
