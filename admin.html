@@ -126,7 +126,6 @@
   body.client-mode #card-crawl,
   body.client-mode #card-db,
   body.client-mode #owner-only-ops,
-  body.client-mode #owner-only-smtp,
   body.client-mode #owner-only-api,
   body.client-mode #owner-only-create,
   body.client-mode #owner-only-brand,
@@ -246,13 +245,11 @@
       <label>Async Contact URL (Lead Form/Calendar)</label>
       <input type="text" id="ops-async-url" placeholder="https://calendly.com/your-team"/>
 
-      <div id="owner-only-smtp">
       <h3 style="font-size:12px;font-weight:800;color:var(--text-muted);margin:24px 0 12px;text-transform:uppercase;">📧 Email Notifications (Gmail)</h3>
       <div class="grid-2">
         <div><label>Gmail App Password</label><input type="password" id="ops-smtp-password" placeholder="xxxx xxxx xxxx xxxx" autocomplete="off"/></div>
       </div>
       <p style="font-size:11px;color:var(--text-muted);margin-top:4px;">The contact email above will self-send lead notifications. · <a href="https://myaccount.google.com/apppasswords" target="_blank" style="color:var(--primary)">Get Gmail App Password ↗</a></p>
-      </div>
       
       <label style="margin-top:24px;">Weekly Business Hours (UTC)</label>
       <div style="display:flex; align-items:center; gap:10px; margin-bottom:12px;">
