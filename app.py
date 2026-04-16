@@ -2499,6 +2499,8 @@ async def _comparative_retrieve(q: str, db) -> tuple:
 
 
 async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "", page_url: str = "", page_title: str = "", request: Request = None, cfg: dict = None, tenant_db=None, db_name: str = "") -> AsyncGenerator[str, None]:
+    # SSE comment — keeps HF Space proxy alive during retrieval (proxy closes idle connections)
+    yield ": keep-alive\n\n"
     # Lazy-load model on first request — but don't block the stream (model download ~2min on Render)
     if local_db is None and _status not in ("ready_no_db",):
         if _status != "loading":
@@ -3012,10 +3014,19 @@ async def chat(request: Request):
     asyncio.get_running_loop().run_in_executor(None, log_interaction, q, visitor_id, tenant_db_name)
 
     if stream:
+        async def _safe_stream():
+            try:
+                async for chunk in chat_stream_generator(q, hist, visitor_id, page_url, page_title,
+                                                         request=request, cfg=tenant_cfg,
+                                                         tenant_db=tenant_db_instance, db_name=tenant_db_name):
+                    yield chunk
+            except Exception as _se:
+                logger.error(f"chat_stream_generator crashed: {_se}", exc_info=True)
+                yield f"data: {json.dumps({'type':'chunk','content':'Something went wrong. Please try again.'})}\n\n"
+                yield f"data: {json.dumps({'type':'metadata','capture_lead':False,'sources':[]})}\n\n"
+                yield "data: {\"type\": \"done\"}\n\n"
         return StreamingResponse(
-            chat_stream_generator(q, hist, visitor_id, page_url, page_title,
-                                  request=request, cfg=tenant_cfg,
-                                  tenant_db=tenant_db_instance, db_name=tenant_db_name),
+            _safe_stream(),
             media_type="text/event-stream",
             headers={"X-Accel-Buffering": "no", "Cache-Control": "no-cache"}
         )
