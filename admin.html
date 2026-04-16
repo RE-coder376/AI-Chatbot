@@ -702,8 +702,8 @@
     el.className = 'status-msg status-' + type; 
     el.style.display = 'block'; 
     if (el._timeout) clearTimeout(el._timeout);
-    if (type !== 'loading' && !persistent) {
-      el._timeout = setTimeout(() => { el.style.display = 'none'; }, 8000); 
+    if (type === 'success' && !persistent) {
+      el._timeout = setTimeout(() => { el.style.display = 'none'; }, 8000);
     }
   }
 
