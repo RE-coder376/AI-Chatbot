@@ -562,13 +562,35 @@ def _mark_key_failed(api_key: str, error_str: str):
         cooldown_until = midnight.timestamp() + 120  # +2min buffer
         logger.warning(f"Key ...{api_key[-4:]} TPD exhausted — cooldown until midnight UTC")
 
-        # Extract org ID and cooldown only THIS key's org — no cascade to other keys
+        # Extract org ID and cascade cooldown to ALL same-provider keys
         org_match = re.search(r'organization\s+[`\']?(org_\w+)[`\']?', error_str)
         if org_match:
             org_id = org_match.group(1)
             _key_org_map[api_key] = org_id
             _org_cooldown[org_id] = cooldown_until
-            logger.warning(f"Org {org_id} TPD exhausted — only this key mapped, no cascade")
+            # Cascade: map ALL same-provider keys to this org so they're skipped immediately
+            # (avoids retrying 7 keys one-by-one before reaching Cerebras/Gemini)
+            try:
+                failed_provider = None
+                if KEYS_FILE.exists():
+                    all_keys = json.loads(KEYS_FILE.read_text(encoding="utf-8"))
+                    for entry in all_keys:
+                        if entry.get("key") == api_key:
+                            failed_provider = entry.get("provider", "groq")
+                            break
+                    if failed_provider:
+                        cascaded = 0
+                        for entry in all_keys:
+                            if entry.get("provider") == failed_provider and entry.get("key") != api_key:
+                                k = entry.get("key", "")
+                                if k and not _key_org_map.get(k):
+                                    _key_org_map[k] = org_id
+                                    cascaded += 1
+                        if cascaded:
+                            logger.warning(f"Org {org_id} TPD — cascaded to {cascaded} same-provider keys")
+            except Exception as _ce:
+                logger.warning(f"TPD cascade failed: {_ce}")
+            logger.warning(f"Org {org_id} TPD exhausted — cooldown until midnight UTC")
         else:
             # Non-Groq key (Gemini/OpenAI) — only cool this specific key, no org cascade
             logger.warning(f"Key ...{api_key[-4:]} daily quota exhausted — per-key cooldown until midnight UTC")
