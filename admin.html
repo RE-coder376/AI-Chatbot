@@ -784,15 +784,11 @@
   }
 
   document.addEventListener('DOMContentLoaded', () => {
-    // Clear volatile session state only (credentials stay in localStorage)
+    // Clear all session state on page load — require explicit login every time
     sessionStorage.removeItem('clientMode');
     sessionStorage.removeItem('csrfToken');
-    // Auto-login if credentials saved from previous session
-    const savedPass = localStorage.getItem('adminPass');
-    const savedDb   = localStorage.getItem('adminDb');
-    if (savedPass && savedDb) {
-      unlockSystem(savedPass, savedDb);
-    }
+    localStorage.removeItem('adminPass');
+    localStorage.removeItem('adminDb');
   });
 
   function toggle(id) {
