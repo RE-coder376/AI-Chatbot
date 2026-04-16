@@ -18,7 +18,7 @@ dbs = [d for d in DATABASES_DIR.iterdir() if d.is_dir()]
 print(f"Found {len(dbs)} DB(s): {[d.name for d in dbs]}\n")
 
 for db_path in dbs:
-    print(f"── {db_path.name} ──")
+    print(f"-- {db_path.name} --")
     client = chromadb.PersistentClient(path=str(db_path))
     collections = client.list_collections()
 
@@ -43,7 +43,7 @@ for db_path in dbs:
 
         print(f"  Embedding {len(docs)} docs in parallel...", flush=True)
         # parallel=0 uses all CPU cores
-        vectors = list(model.embed(docs, batch_size=BATCH_SIZE, parallel=0))
+        vectors = list(model.embed(docs, batch_size=BATCH_SIZE))
 
         client.delete_collection(col_name)
         new_col = client.create_collection(col_name)

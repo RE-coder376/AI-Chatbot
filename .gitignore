@@ -8,6 +8,7 @@ active_db.txt
 
 # Local Databases & Cache
 databases/
+!databases/*/config.json
 db/
 schemas/
 *.sqlite3
