@@ -508,6 +508,16 @@ KEY_HEALTH_FILE = Path("key_health.json")
 _key_status: Dict[str, dict] = {}
 _key_org_map: Dict[str, str] = {}   # api_key -> org_id (populated from 429 errors)
 _org_cooldown: Dict[str, float] = {} # org_id -> cooldown_until timestamp
+_key_rpm_window: Dict[str, deque] = {}  # api_key -> deque of request timestamps (last 60s)
+# Soft RPM limits — rotate before hitting the real limit (leaves ~5 req buffer)
+_KEY_RPM_SOFT_LIMIT: Dict[str, int] = {
+    "groq": 25,        # real limit ~30/min
+    "gemini": 12,      # real limit ~15/min
+    "cerebras": 25,
+    "sambanova": 25,
+    "mistral": 25,
+    "openai": 25,
+}
 
 def _load_key_health():
     """Load persisted key cooldowns from disk on startup."""
@@ -1597,6 +1607,13 @@ def get_fresh_llm():
             org_id = _key_org_map.get(k['key'])
             if org_id and now < _org_cooldown.get(org_id, 0):
                 return (-1, 0, random.random())
+            # Proactive RPM check — skip key if it's near its per-minute limit
+            prov = k.get('provider', 'groq')
+            soft_limit = _KEY_RPM_SOFT_LIMIT.get(prov, 25)
+            rpm_dq = _key_rpm_window.get(k['key'], deque())
+            recent_reqs = sum(1 for t in rpm_dq if now - t < 60)
+            if recent_reqs >= soft_limit:
+                return (-1, 0, random.random())
             tokens = s.get("tokens", 6000)
             return (tokens, -s.get("last_used", 0), random.random())
 
@@ -1609,6 +1626,11 @@ def get_fresh_llm():
             status = _key_status.get(key_val, {"tokens": 6000, "requests": 14400, "last_used": 0})
             status["last_used"] = now
             _key_status[key_val] = status
+            # Track RPM — append timestamp, trim entries older than 60s
+            rpm_dq = _key_rpm_window.setdefault(key_val, deque())
+            rpm_dq.append(now)
+            while rpm_dq and now - rpm_dq[0] > 60:
+                rpm_dq.popleft()
 
         if provider == 'openai':
             from langchain_openai import ChatOpenAI
