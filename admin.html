@@ -722,7 +722,6 @@
     const db   = dbArg   || (dbEl ? dbEl.value : '') || '';
     if (!pass) return showStatus('auth', 'Password required.', 'error');
     if (!db)   return showStatus('auth', 'DB name required.', 'error');
-    if (pass.length < 6) return showStatus('auth', 'Password too short (min 6 chars).', 'error');
     showStatus('auth', 'Authenticating...', 'loading');
     fetch(`${API}/admin/branding`, { headers: { 'Authorization': `Bearer ${pass}`, 'X-Admin-DB': db } }).then(async r => {
       if (!r.ok) { localStorage.removeItem('adminPass'); sessionStorage.removeItem('csrfToken'); localStorage.removeItem('adminDb'); showStatus('auth', 'Denied. Wrong password or DB name.', 'error'); return; }

@@ -44,5 +44,6 @@
   "crawl_url": "https://agentfactory.panaversity.org",
   "last_crawl_time": "2026-04-15T13:53:11.957369",
   "last_crawl_chunks": 0,
-  "api_sources": []
+  "api_sources": [],
+  "widget_key": "85081d5b-8faa-4fad-8971-884a71b039db"
 }

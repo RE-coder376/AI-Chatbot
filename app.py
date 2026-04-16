@@ -2265,15 +2265,15 @@ def health():
 
 @app.get("/")
 def serve_ui():
-    return FileResponse("chat.html")
+    return FileResponse("chat.html", headers={"Cache-Control": "no-cache, no-store, must-revalidate"})
 
 @app.get("/admin")
 def serve_admin():
-    return FileResponse("admin.html")
+    return FileResponse("admin.html", headers={"Cache-Control": "no-cache, no-store, must-revalidate"})
 
 @app.get("/widget-chat")
 def serve_widget():
-    return FileResponse("widget_chat.html")
+    return FileResponse("widget_chat.html", headers={"Cache-Control": "no-cache, no-store, must-revalidate"})
 
 @app.get("/widget.js")
 async def serve_widget_js(request: Request):
@@ -5168,6 +5168,9 @@ async def crawl_site(data: dict, request: Request):
             parsed     = urllib.parse.urlparse(url)
             base       = f"{parsed.scheme}://{parsed.netloc}"
             base_nowww = _strip_www(base)
+            # If seed URL has a non-root path, restrict sitemap + BFS to that path prefix
+            _seed_path = parsed.path.rstrip('/')
+            _crawl_prefix = (base_nowww + _seed_path) if (_seed_path and _seed_path != '/') else base_nowww
 
             pages = []
             async with async_playwright() as pw:
@@ -5202,7 +5205,7 @@ async def crawl_site(data: dict, request: Request):
                 sitemap_urls = []
                 for sitemap_url_try in sitemap_candidates[:5]:
                     yield _send(f"🔍 Fetching sitemap: {sitemap_url_try.split('/')[-1]} ...")
-                    sitemap_urls = await _fetch_sitemap(ctx, sitemap_url_try, base_nowww)
+                    sitemap_urls = await _fetch_sitemap(ctx, sitemap_url_try, _crawl_prefix)
                     errors = [u for u in sitemap_urls if u.startswith("__SITEMAP_ERR__")]
                     sitemap_urls = [u for u in sitemap_urls if not u.startswith("__SITEMAP_ERR__")]
                     if sitemap_urls:
@@ -5251,7 +5254,7 @@ async def crawl_site(data: dict, request: Request):
                             for _a in _soup.find_all("a", href=True):
                                 _href = urllib.parse.urljoin(page_url, _a["href"])
                                 _href = _href.split("#")[0].split("?")[0].rstrip("/")
-                                if _href.startswith("http") and _strip_www(_href).startswith(base_nowww):
+                                if _href.startswith("http") and _strip_www(_href).startswith(_crawl_prefix):
                                     _links.append(_href)
                             return _links
                         except Exception as _bfs_e:
@@ -5894,14 +5897,14 @@ async def crawl_site(data: dict, request: Request):
                     yield _send(f"⚠️ Copy failed: {_cp_e}")
                 finally:
                     if not _keep_for_local:
+                        # Evict cache BEFORE rmtree so Python drops refs + releases
+                        # SQLite file locks (prevents stale tmp dirs on Windows)
+                        _db_instance_cache.pop(db_name, None)
+                        _bm25_cache.pop(db_name, None)
                         try:
                             shutil.rmtree(str(chroma_dir), ignore_errors=True)
                         except Exception:
                             pass
-
-            # Evict cached DB instance and BM25 index so next query reloads from disk
-            _db_instance_cache.pop(db_name, None)
-            _bm25_cache.pop(db_name, None)
             # Reload local_db if we just re-crawled the active DB.
             # Use chroma_db directly — it's the live crawl instance that successfully
             # wrote all chunks. chroma_dir was preserved (not deleted) for this purpose.
