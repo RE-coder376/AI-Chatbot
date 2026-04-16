@@ -5222,13 +5222,27 @@ async def crawl_site(data: dict, request: Request):
                     _bfs_sem = asyncio.Semaphore(6)  # 6 Playwright pages in parallel during BFS
 
                     async def _extract_links_fast(page_url):
-                        """Playwright renders page fully then BeautifulSoup extracts all links."""
+                        """Playwright renders page fully (with stealth) then extracts all links."""
                         try:
                             async with _bfs_sem:
                                 _pg = await ctx.new_page()
+                                await stealth(_pg)
                                 try:
-                                    await _pg.goto(page_url, wait_until="load", timeout=15000)
-                                    await _pg.wait_for_timeout(800)  # let JS nav menus render
+                                    await _pg.goto(page_url, wait_until="domcontentloaded", timeout=20000)
+                                    # Wait for body text to appear (handles JS-rendered nav)
+                                    try:
+                                        await _pg.wait_for_function(
+                                            "document.body && document.body.innerText.trim().length > 100",
+                                            timeout=3000
+                                        )
+                                    except Exception:
+                                        pass
+                                    # Scroll to trigger lazy-loaded nav/footer links
+                                    try:
+                                        await _pg.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                                        await _pg.wait_for_timeout(600)
+                                    except Exception:
+                                        pass
                                     _html = await _pg.content()
                                 finally:
                                     await _pg.close()
