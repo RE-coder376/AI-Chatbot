@@ -2565,6 +2565,7 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
     if cfg is None:
         cfg = get_config(db_name=db_name or _get_active_db())
     _local_db = tenant_db if tenant_db is not None else local_db
+    _is_api_only = (not cfg.get("crawl_url", "")) and bool(cfg.get("api_sources"))
     user_lang = detect_language(q)
     intent    = classify_intent(q)
     is_urdu   = user_lang in ("Urdu Script", "Roman Urdu")
