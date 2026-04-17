@@ -1080,11 +1080,31 @@ async def retrieve_context(q: str, db, k: int = 15, fast: bool = False, expansio
     # Seed seen with rescued chunks so similarity doesn't duplicate them
     for r in rescue_results:
         seen.add(r.page_content[:100])
+
+    # ── Price-constraint filter (e-commerce DBs with price metadata) ──────────
+    _price_filter = None
+    _max_price = None
+    _price_match = re.search(
+        r'(?:under|below|less\s+than|max(?:imum)?|budget\s+of|within)\s+\$?([\d,]+)',
+        q, re.I
+    )
+    if _price_match:
+        try:
+            _max_price = float(_price_match.group(1).replace(',', ''))
+            # Only apply if DB has price metadata (check first chunk)
+            _sample = db._collection.get(limit=1, include=["metadatas"]) if db else None
+            if _sample and _sample.get("metadatas") and _sample["metadatas"][0].get("price") is not None:
+                _price_filter = {"price": {"$lte": _max_price}}
+                k = max(k, 25)  # Retrieve more when filtering by price
+                logger.info(f"[PRICE-FILTER] Applied max_price={_max_price} filter")
+        except Exception as _pfe:
+            logger.warning(f"[PRICE-FILTER] Failed to apply: {_pfe}")
+
     if not _skip_chromadb and db is not None:
         loop = asyncio.get_running_loop()
         # Run vector searches + BM25 ALL IN PARALLEL
         _search_tasks = [
-            loop.run_in_executor(None, lambda q=_clean_text(query): db.similarity_search(q, k=k))
+            loop.run_in_executor(None, lambda q=_clean_text(query), f=_price_filter: db.similarity_search(q, k=k, filter=f))
             for query in search_queries
         ]
         # BM25 hybrid: use stored _db_name attr (reliable), fallback to path parse
@@ -1110,8 +1130,20 @@ async def retrieve_context(q: str, db, k: int = 15, fast: bool = False, expansio
             for r in res:
                 key = r.page_content[:100]
                 if key not in seen:
+                    # Post-filter: drop chunks that exceed price constraint
+                    if _price_filter and _max_price is not None:
+                        _chunk_price = r.metadata.get("price") if r.metadata else None
+                        if _chunk_price is not None and _chunk_price > _max_price:
+                            continue
                     seen.add(key)
                     results.append(r)
+
+    # Also apply price filter to rescue results
+    if _price_filter and _max_price is not None:
+        rescue_results = [
+            r for r in rescue_results
+            if not (r.metadata and r.metadata.get("price") is not None and r.metadata["price"] > _max_price)
+        ]
 
     # Rescue chunks go first (exact match), then vector+BM25 results
     top = (rescue_results + results)[:25]
