@@ -872,6 +872,82 @@ def _clean_text(text: str) -> str:
 _ROLE_TERMS = {"ceo", "cto", "coo", "cfo", "cpo", "vp", "founder", "author", "director",
                "president", "chairman", "head", "lead", "chief"}
 
+# ── Product spec extraction regexes (used by smart chunker) ──────────────────
+_PROD_PRICE_RE  = re.compile(r'\$(\d[\d,]*\.?\d*)')
+_PROD_SPEC_RE   = re.compile(r'\b(?:processor|cpu|ram|memory|storage|ssd|hdd|gpu|graphics|display|battery|os|android|windows|linux|screen)\b', re.I)
+_PROD_SPLIT_RE  = re.compile(r'\$(\d[\d,]*\.?\d*)\s+([A-Z][A-Za-z0-9 \(\)\-\.]+?(?:,[^\$]{10,400}?))(?=\s*\$|\s*\Z)', re.S)
+_FAQ_SPLIT_RE   = re.compile(r'(?m)^(?=(?:Q:|Question:|How |What |Why |When |Where |Who |Can |Do |Is |Are |Does |Should ))', re.I)
+
+def _smart_chunk_page(text: str, url: str, chunk_size: int = 400, chunk_step: int = 320) -> list:
+    """
+    Smart page chunker. Three modes, tried in order:
+      1. Product page  — $PRICE + spec keywords → one Document per product, price metadata
+      2. FAQ page      — Q&A or heading sections → one Document per section
+      3. Generic       — existing word-based sliding window (unchanged fallback)
+    Returns list[Document]. Never raises.
+    """
+    clean = _clean_text(text)
+    docs  = []
+
+    # ── Mode 1: product page ──────────────────────────────────────────────────
+    if len(_PROD_PRICE_RE.findall(clean)) >= 1 and _PROD_SPEC_RE.search(clean):
+        products = []
+        for m in _PROD_SPLIT_RE.finditer(clean):
+            price_str = m.group(1).replace(',', '')
+            try:   price_num = float(price_str)
+            except: continue
+            raw       = m.group(2).strip()
+            comma_idx = raw.find(',')
+            name      = raw[:comma_idx].strip() if comma_idx > 0 else raw
+            specs     = raw[comma_idx+1:].strip() if comma_idx > 0 else ''
+            # Strip breadcrumb prefix "Dell Inspiron... Dell Inspiron 15"
+            name = re.sub(r'^[^\s]+(?:\s+[^\s]+){0,3}\.{2,}\s+', '', name).strip()
+            name = re.sub(r'\s+reviews?\s*$', '', name, flags=re.I).strip()
+            if not name or len(name) < 3:
+                continue
+            products.append((price_num, f"${price_str}", name, specs))
+
+        if len(products) >= 1:
+            for price_num, price_label, name, specs in products:
+                lines = [f"Product: {name}", f"Price: {price_label}"]
+                # Tag dedicated GPU laptops for gaming retrieval
+                if re.search(r'geforce|gtx|rtx|radeon\s+r[579x]|radeon\s+rx', specs, re.I):
+                    lines.append("Category: gaming laptop, dedicated GPU")
+                for part in [s.strip() for s in specs.split(',')]:
+                    pl = part.lower()
+                    if   re.search(r'geforce|nvidia|radeon|amd\s+r|gtx|rtx|mx\d', pl):      lines.append(f"GPU: {part}")
+                    elif re.search(r'\d+\s*gb(?:\s+ram)?$|\bddr\b', pl):                     lines.append(f"RAM: {part}")
+                    elif re.search(r'\d+\s*(?:gb|tb)\s+(?:ssd|hdd|emmc)|\d+\s*tb\b', pl):  lines.append(f"Storage: {part}")
+                    elif re.search(r'core\s+i\d|celeron|pentium|ryzen|athlon|snapdragon', pl): lines.append(f"Processor: {part}")
+                    elif re.search(r'windows|linux|dos|macos|android|chrome\s*os', pl):       lines.append(f"OS: {part}")
+                    elif re.search(r'\d+\.?\d*"\s*(?:hd|fhd|uhd|ips|touch)?|(?:hd|fhd|uhd|ips)\s+display', pl): lines.append(f"Display: {part}")
+                if specs:
+                    lines.append(f"Full specs: {name}, {specs}")
+                docs.append(Document(page_content="\n".join(lines),
+                                     metadata={"source": url, "price": price_num}))
+            if docs:
+                return docs
+
+    # ── Mode 2: FAQ / section page ────────────────────────────────────────────
+    sections = _FAQ_SPLIT_RE.split(clean)
+    if len(sections) >= 3:
+        for sec in sections:
+            sec = sec.strip()
+            if len(sec) > 40:
+                docs.append(Document(page_content=sec[:2000], metadata={"source": url}))
+        if docs:
+            return docs
+
+    # ── Mode 3: generic word-split (existing behaviour — unchanged) ───────────
+    words = clean.split()
+    for j in range(0, max(1, len(words)), chunk_step):
+        chunk = " ".join(words[j:j + chunk_size])
+        if len(chunk) > 20:
+            docs.append(Document(page_content=chunk, metadata={"source": url}))
+        if j + chunk_size >= len(words):
+            break
+    return docs
+
 def _keyword_rescue(q: str, db, seen: set, k: int = 5) -> list:
     """Find chunks that exactly contain technical terms (acronyms, proper nouns) missing from vector results."""
     words = q.split()
@@ -5583,13 +5659,9 @@ async def crawl_site(data: dict, request: Request):
                             if len(full_text) > 20:
                                 chunks.append(Document(page_content=full_text, metadata={"source": p["url"]}))
                             continue
-                        words = _clean_text(p["text"]).split()
-                        for j in range(0, max(1, len(words)), chunk_step):
-                            chunk = " ".join(words[j:j+chunk_size])
-                            if len(chunk) > 20:
-                                chunks.append(Document(page_content=chunk, metadata={"source": p["url"]}))
-                            if j + chunk_size >= len(words):
-                                break
+                        chunks.extend(
+                            _smart_chunk_page(p["text"], p["url"], chunk_size, chunk_step)
+                        )
                     if not chunks:
                         return
                     async with chroma_write_lock:
