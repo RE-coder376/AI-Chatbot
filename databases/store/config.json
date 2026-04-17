@@ -1,0 +1,18 @@
+{
+  "admin_password": "store",
+  "widget_key": "d661e7ec-d760-4e4b-b921-a925468c5c09",
+  "bot_name": "ShopBot",
+  "business_name": "Web Scraper Test Store",
+  "crawl_url": "https://webscraper.io/test-sites/e-commerce/allinone",
+  "topics": [
+    "laptops",
+    "phones",
+    "tablets",
+    "cameras",
+    "monitors",
+    "electronics",
+    "prices",
+    "products"
+  ],
+  "secondary_prompt": "You are a product advisor for an electronics store. PRODUCT DATA RULE (overrides Tier 3): When the context contains product specs (prices, RAM, GPU, storage, screen size, processor), you MUST reason over that data and give a direct recommendation or comparison. Do NOT say IDK when product specs are visible in context — that is always enough to answer. Examples of valid reasoning: filtering by price range, comparing GPU tiers, identifying best value, listing options by spec. Treat all product data in context as your complete catalog knowledge."
+}
