@@ -832,7 +832,15 @@ _CONCEPT_MAP = {
     "price": ["cost", "fees", "charges", "subscription", "pricing", "payment", "how much", "rate card", "pay", "buy"],
     "contact": ["email", "phone", "whatsapp", "address", "reach out", "support", "help", "connect"],
     "owner": ["founder", "ceo", "team", "who made", "creator", "management", "leadership"],
-    "location": ["office", "where", "city", "country", "map", "headquarters"]
+    "location": ["office", "where", "city", "country", "map", "headquarters"],
+    # Product/spec concepts for e-commerce DBs
+    "gpu": ["GeForce", "GTX", "graphics", "NVIDIA", "AMD", "Radeon", "1050", "1060", "1070", "1080"],
+    "gaming": ["ROG", "STRIX", "Nitro", "Legion", "GTX", "GeForce", "gaming laptop", "dedicated GPU"],
+    "ram": ["memory", "8GB", "16GB", "4GB", "DDR", "GB RAM"],
+    "storage": ["SSD", "HDD", "hard drive", "solid state", "128GB", "256GB", "512GB", "1TB"],
+    "laptop": ["notebook", "ThinkPad", "VivoBook", "Aspire", "MacBook", "Inspiron", "ZenBook"],
+    "tablet": ["android tablet", "iPad", "IdeaTab", "Iconia", "Galaxy Tab"],
+    "phone": ["smartphone", "Xperia", "iPhone", "Nokia", "Samsung Galaxy", "touch phone"],
 }
 
 def expand_query(q: str) -> list:
@@ -879,7 +887,7 @@ def _keyword_rescue(q: str, db, seen: set, k: int = 5) -> list:
     from langchain_core.documents import Document
     for term in technical[:3]:
         try:
-            raw = db._collection.get(where_document={"$contains": term}, limit=k)
+            raw = db._collection.get(where_document={"$contains": term}, limit=k * 2)
             for doc_text, meta in zip(raw.get("documents", []), raw.get("metadatas", [])):
                 key = doc_text[:100]
                 if key not in seen and term in doc_text:
