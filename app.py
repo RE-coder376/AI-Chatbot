@@ -4115,12 +4115,16 @@ async def run_detailed_tests(request: Request, password: str = ""):
 
 def _ensure_tmp_chroma(db_name: str, src_path: Path) -> Path:
     """Copy ChromaDB from overlayfs → /tmp (tmpfs) to avoid SQLite WAL mode failures on Docker.
-    On Windows this is unnecessary (no overlayfs) — use src_path directly."""
+    On Windows this is unnecessary (no overlayfs) — use src_path directly.
+    Falls back to src_path if src has no DB yet (GH sync still running) or tmp copy is corrupt."""
     import sys as _sys, shutil as _shutil
     if _sys.platform == "win32":
         return src_path  # No WAL fix needed on Windows
+    # If source has no sqlite3 yet (GH sync still downloading), use src directly
+    if not (src_path / "chroma.sqlite3").exists():
+        return src_path
     tmp_path = Path(f"/dev/shm/chroma_{db_name}")
-    if not (tmp_path / "chroma.sqlite3").exists() and (src_path / "chroma.sqlite3").exists():
+    if not (tmp_path / "chroma.sqlite3").exists():
         tmp_path.mkdir(parents=True, exist_ok=True)
         for item in src_path.iterdir():
             if item.name in ("config.json", "visitor_history"):
@@ -4133,6 +4137,14 @@ def _ensure_tmp_chroma(db_name: str, src_path: Path) -> Path:
             except Exception as _e:
                 logger.warning(f"[ChromaDB] copy {item.name} → /tmp failed: {_e}")
         logger.info(f"[ChromaDB] Copied {db_name} → /dev/shm/chroma_{db_name} (overlayfs WAL fix)")
+    # Validate tmp — if corrupt (no collection), wipe and use src directly
+    try:
+        import chromadb as _cdb
+        _cdb.PersistentClient(path=str(tmp_path)).get_collection("langchain")
+    except Exception:
+        logger.warning(f"[ChromaDB] tmp for {db_name} is corrupt — wiping, using src directly")
+        _shutil.rmtree(str(tmp_path), ignore_errors=True)
+        return src_path
     return tmp_path
 
 
