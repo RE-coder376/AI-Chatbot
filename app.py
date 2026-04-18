@@ -239,14 +239,20 @@ def _github_sync_download():
             tmp_zip.unlink(missing_ok=True)
             logger.info(f"[GH-SYNC] ✅ {db_name} restored")
 
-        # Download active DB first so startup is fast, then rest in background
+        # Download active DB first, then small DBs (<5MB), then large ones in background
         env_db = os.environ.get("ACTIVE_DB", "").strip()
         active_asset = next((a for a in zip_assets if a["name"][:-4] == env_db), None)
         other_assets = [a for a in zip_assets if a != active_asset]
+        # Split: small DBs download immediately after active, large ones go to background
+        small_assets = [a for a in other_assets if a.get("size", 0) < 5 * 1024 * 1024]
+        large_assets  = [a for a in other_assets if a.get("size", 0) >= 5 * 1024 * 1024]
         if active_asset:
             _download_zip(active_asset)
+        for asset in small_assets:  # store, mal, buffer etc. — download immediately
+            try: _download_zip(asset)
+            except Exception as e: logger.warning(f"[GH-SYNC] Small DB sync failed for {asset['name']}: {e}")
         def _bg_sync_rest():
-            for asset in other_assets:
+            for asset in large_assets:
                 try: _download_zip(asset)
                 except Exception as e: logger.warning(f"[GH-SYNC] Background sync failed for {asset['name']}: {e}")
         if other_assets:
