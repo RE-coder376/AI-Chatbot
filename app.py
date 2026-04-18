@@ -4114,8 +4114,11 @@ async def run_detailed_tests(request: Request, password: str = ""):
 
 
 def _ensure_tmp_chroma(db_name: str, src_path: Path) -> Path:
-    """Copy ChromaDB from overlayfs → /tmp (tmpfs) to avoid SQLite WAL mode failures on Docker."""
-    import shutil as _shutil
+    """Copy ChromaDB from overlayfs → /tmp (tmpfs) to avoid SQLite WAL mode failures on Docker.
+    On Windows this is unnecessary (no overlayfs) — use src_path directly."""
+    import sys as _sys, shutil as _shutil
+    if _sys.platform == "win32":
+        return src_path  # No WAL fix needed on Windows
     tmp_path = Path(f"/dev/shm/chroma_{db_name}")
     if not (tmp_path / "chroma.sqlite3").exists() and (src_path / "chroma.sqlite3").exists():
         tmp_path.mkdir(parents=True, exist_ok=True)
