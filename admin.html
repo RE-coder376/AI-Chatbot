@@ -1325,8 +1325,13 @@
       } 
     };
     showStatus('brand', 'Pushing Changes...', 'loading');
-    const res = await fetch(`${API}/admin/branding`, { method: "POST", headers: {...authHeaders(), "Content-Type": "application/json"}, body:JSON.stringify(payload) });
-    const d = await res.json(); showStatus('brand', d.message || d.error, d.success ? 'success' : 'error');
+    try {
+      const res = await fetch(`${API}/admin/branding`, { method: "POST", headers: {...authHeaders(), "Content-Type": "application/json"}, body:JSON.stringify(payload) });
+      const d = await res.json();
+      showStatus('brand', d.message || d.detail || d.error || 'Unknown error', d.success ? 'success' : 'error');
+    } catch(e) {
+      showStatus('brand', 'Network error — server may be restarting. Try again in 30 seconds.', 'error');
+    }
   }
 
   function updatePreview() {
