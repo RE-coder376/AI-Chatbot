@@ -1275,7 +1275,7 @@ async def retrieve_context(q: str, db, k: int = 15, fast: bool = False, expansio
         loop = asyncio.get_running_loop()
         # Run vector searches + BM25 ALL IN PARALLEL
         # smart_search: use scored search for EmbeddingsFilter (threshold drops weak chunks)
-        _score_threshold = 0.25 if "smart_search" in _features else 0.0
+        _score_threshold = 0.15 if "smart_search" in _features else 0.0
         if _score_threshold > 0:
             def _scored_search(q_=None, f=None):
                 pairs = db.similarity_search_with_relevance_scores(q_, k=k, filter=f)
@@ -2664,17 +2664,17 @@ def classify_intent(q: str) -> str:
     words = set(re.findall(r'\b\w+\b', ql))
     if words & _COMPLAINT_WORDS or len(re.findall(r'[A-Z]{5,}', q)) >= 2:
         return "complaint"
-    # 3. Multi-part — 2+ question marks, or explicit additive connectors
+    # 3. Comparative — checked BEFORE multi_part so "difference between X? which one?" → comparative
+    if re.search(r'\b(vs\.?|versus|compare|comparison|difference between|which is better|better than|v/s|which one is|who has more|more popular|higher rating|higher score|or which)\b', ql):
+        return "comparative"
+    # "X or Y" with quality/rating words → comparative
+    if re.search(r'\b(or)\b', ql) and re.search(r'\b(better|good|best|rating|score|popular|recommend|watch|prefer|worse|stronger|weaker|winner)\b', ql):
+        return "comparative"
+    # 4. Multi-part — 2+ question marks, or explicit additive connectors
     if len(re.findall(r'\?', q)) >= 2:
         return "multi_part"
     if re.search(r'\b(also|additionally|as well as|and also|furthermore)\b', ql):
         return "multi_part"
-    # 4. Comparative
-    if re.search(r'\b(vs\.?|versus|compare|comparison|difference between|which is better|better than|v/s|which one is|who has more|more popular|higher rating|higher score|or which)\b', ql):
-        return "comparative"
-    # "X or Y" with quality/rating words → comparative
-    if re.search(r'\b(or)\b', ql) and re.search(r'\b(better|good|best|rating|score|popular|recommend|watch|prefer|worse|worse|stronger|weaker|winner|winner)\b', ql):
-        return "comparative"
     # 5. Negation
     if _NEGATION_RE.search(ql):
         return "negation"
@@ -3638,6 +3638,8 @@ def get_branding(request: Request, password: str = ""):
         "bot_name":        cfg.get("bot_name"),
         "business_name":   cfg.get("business_name"),
         "branding":        cfg.get("branding", {}),
+        "secondary_prompt": cfg.get("secondary_prompt", ""),
+        "quick_replies":   cfg.get("quick_replies", []),
         "contact_email":   cfg.get("contact_email", ""),
         "whatsapp_number": cfg.get("whatsapp_number", ""),
         "async_contact_url": cfg.get("async_contact_url", ""),
