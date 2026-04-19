@@ -595,9 +595,9 @@
       // Visual feedback
       btn.classList.add(rating === 1 ? "voted-up" : "voted-down");
       btn.disabled = true;
-      // Disable the other button too
       const sibling = btn.parentElement.querySelector(`.feedback-btn:not(.voted-up):not(.voted-down)`);
       if (sibling) sibling.disabled = true;
+      setTimeout(() => { if (row) row.style.display = "none"; }, 1500);
     } catch (e) { /* silent */ }
   }
 

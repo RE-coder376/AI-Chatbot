@@ -3246,7 +3246,7 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
                 break
             continue
 
-    lead_keywords = ["price", "buy", "contact", "hire", "cost", "appointment", "book a", "book an", "demo", "pricing", "sales", "consultation", "order", "quote", "budget", "enterprise"]
+    lead_keywords = ["contact", "hire", "appointment", "book a", "book an", "demo", "sales", "consultation", "quote", "enterprise", "get in touch", "reach out", "speak to someone", "talk to someone"]
     is_lead = any(kw in q.lower() for kw in lead_keywords)
 
     if success:
