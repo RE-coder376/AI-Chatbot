@@ -221,6 +221,7 @@ def _github_sync_download():
                             continue
                     # Strip leading db_name/ prefix if present (handle both zip formats)
                     rel = member[len(db_name)+1:] if member.startswith(f"{db_name}/") else member
+                    rel = rel.replace("\\", "/")  # normalize Windows backslash paths
                     if not rel:
                         continue
                     dest = db_extract_dir / rel
@@ -364,8 +365,9 @@ def _github_sync_upload(db_name: str):
             for f in db_path.rglob("*"):
                 if not f.is_file(): continue
                 rel = f.relative_to(db_path)
-                if str(rel).startswith("visitor_history"): continue
-                z.write(f, rel)
+                rel_str = str(rel).replace("\\", "/")  # normalize for Linux extraction
+                if rel_str.startswith("visitor_history"): continue
+                z.write(f, rel_str)
         file_size = tmp_zip.stat().st_size
         logger.info(f"[GH-SYNC] {db_name}.zip → {file_size/1024/1024:.1f}MB")
         api_hdr = {"Authorization": f"token {pat}", "User-Agent": "chatbot-sync"}
