@@ -410,10 +410,14 @@ def _github_sync_upload(db_name: str):
         _req.delete(f"https://api.github.com/repos/{_GITHUB_USERNAME}/{_GITHUB_REPO}/releases/assets/{new_asset_id}", headers=api_hdr, timeout=30)
         if final_up.status_code in (200, 201):
             logger.info(f"[GH-SYNC] ✅ {db_name} uploaded ({file_size/1024/1024:.1f}MB)")
+            _github_sync_result["last_upload"] = f"{db_name} ok"
         else:
+            msg = f"{db_name} upload failed {final_up.status_code}"
             logger.error(f"[GH-SYNC] Final rename-upload failed {final_up.status_code}: {final_up.text[:200]}")
+            _github_sync_result["upload_error"] = msg
     except Exception as e:
         logger.error(f"[GH-SYNC] Upload error: {e}")
+        _github_sync_result["upload_error"] = f"{db_name}: {e}"
     finally:
         tmp_zip.unlink(missing_ok=True)
 
@@ -1721,7 +1725,7 @@ def get_config(db_name: str = ""):
 
 def save_config(config):
     """Save non-sensitive global settings to root config only."""
-    CONFIG_FILE.write_text(json.dumps(config, indent=2), encoding="utf-8")
+    _atomic_write_json(CONFIG_FILE, config)
 
 def save_db_config(updates: dict, db_name: str = ""):
     """Save branding/ops overrides to the specified (or active) DB's config.json only."""
@@ -1737,7 +1741,7 @@ def save_db_config(updates: dict, db_name: str = ""):
     # Never overwrite existing non-empty values with empty strings
     safe_updates = {k: v for k, v in updates.items() if v != "" or existing.get(k, "") == ""}
     existing.update(safe_updates)
-    db_cfg_file.write_text(json.dumps(existing, indent=2), encoding="utf-8")
+    _atomic_write_json(db_cfg_file, existing)
     threading.Thread(target=_github_sync_upload, args=(active,), daemon=True).start()
 
 def _atomic_write_json(path: Path, data) -> None:
@@ -3507,22 +3511,24 @@ def _save_faqs(faqs: list, db_name: str = ""):
     f.parent.mkdir(parents=True, exist_ok=True)
     f.write_text(json.dumps(faqs, indent=2), encoding="utf-8")
 
-def _embed_faq(faq: dict):
-    """Embed a FAQ Q&A pair into the active ChromaDB."""
-    if not local_db: return
+def _embed_faq(faq: dict, db_name: str = ""):
+    """Embed a FAQ Q&A pair into the correct ChromaDB (per-tenant or active)."""
+    db = (_db_instance_cache.get(db_name) or _get_db_instance(db_name)) if db_name else local_db
+    if not db: return
     try:
         from langchain.schema import Document
         text = f"Q: {faq['question']}\nA: {faq['answer']}"
         doc = Document(page_content=text, metadata={"source": "faq", "faq_id": faq["id"]})
-        local_db.add_documents([doc])
+        db.add_documents([doc])
     except Exception as e:
         logger.error(f"FAQ embed error: {e}")
 
-def _delete_faq_from_db(faq_id: str):
+def _delete_faq_from_db(faq_id: str, db_name: str = ""):
     """Remove a FAQ document from ChromaDB by faq_id metadata."""
-    if not local_db: return
+    db = (_db_instance_cache.get(db_name) or _get_db_instance(db_name)) if db_name else local_db
+    if not db: return
     try:
-        local_db._collection.delete(where={"faq_id": faq_id})
+        db._collection.delete(where={"faq_id": faq_id})
     except Exception as e:
         logger.error(f"FAQ delete from DB error: {e}")
 
@@ -3549,7 +3555,7 @@ async def add_faq(request: Request):
     faq = {"id": faq_id, "question": q, "answer": a}
     faqs.append(faq)
     _save_faqs(faqs, db_name)
-    _embed_faq(faq)
+    _embed_faq(faq, db_name)
     threading.Thread(target=_github_sync_upload, args=(db_name,), daemon=True).start()
     return JSONResponse({"success": True, "id": faq_id})
 
@@ -3561,7 +3567,7 @@ async def delete_faq(faq_id: str, password: str, request: Request):
     admin_auth(password, cfg)
     faqs = [f for f in _load_faqs(db_name) if f["id"] != faq_id]
     _save_faqs(faqs, db_name)
-    _delete_faq_from_db(faq_id)
+    _delete_faq_from_db(faq_id, db_name)
     threading.Thread(target=_github_sync_upload, args=(db_name,), daemon=True).start()
     return JSONResponse({"success": True})
 
@@ -6427,14 +6433,16 @@ async def human_handoff(request: Request):
 
 @app.post("/admin/knowledge-gaps/suggest")
 async def suggest_gap_answer(request: Request, data: dict):
-    cfg = get_config()
+    db_name = _extract_admin_db(request)
+    cfg = get_config(db_name)
     try: admin_auth(_extract_password(request, data.get("password", "")), cfg)
     except HTTPException: return JSONResponse({"detail": "Unauthorized"}, status_code=401)
     question = str(data.get("question", "")).strip()
     if not question:
         return JSONResponse({"detail": "No question"}, status_code=400)
 
-    context, doc_count, _ = await retrieve_context(question, local_db, k=5)
+    db_inst = _db_instance_cache.get(db_name) or (_get_db_instance(db_name) if db_name else local_db) or local_db
+    context, doc_count, _ = await retrieve_context(question, db_inst, k=5)
     biz = cfg.get("business_name", "our business")
 
     prompt = f"""You are helping build a knowledge base for {biz}.
@@ -6577,12 +6585,15 @@ async def test_email_endpoint(request: Request, password: str = ""):
         return JSONResponse({"success": False, "message": "Email failed. Check server logs for errors."}, status_code=500)
 
 @app.post("/submit-lead")
-async def submit_lead(data: dict):
+async def submit_lead(request: Request, data: dict):
     """Save lead data to leads.json and send email notification with failover."""
     try:
         logger.debug(f"Received /submit-lead request")
         LEADS_FILE = Path("leads.json")
-        cfg = get_config()
+        # Resolve per-tenant config via widget_key (or X-Widget-Key header)
+        wk = (data.get("widget_key", "") or request.headers.get("X-Widget-Key", "")).strip()
+        tenant_db = _get_db_for_widget_key(wk) if wk else ""
+        cfg = get_config(tenant_db) if tenant_db else get_config()
         
         entry = {
             "name":      data.get("name", ""),
