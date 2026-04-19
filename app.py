@@ -1280,16 +1280,21 @@ async def retrieve_context(q: str, db, k: int = 15, fast: bool = False, expansio
     if not _skip_chromadb and db is not None:
         loop = asyncio.get_running_loop()
         # Run vector searches + BM25 ALL IN PARALLEL
-        # smart_search: use scored search for EmbeddingsFilter (threshold drops weak chunks)
+        # smart_search: threshold on original query only — HyDE/variants bypass it.
+        # Reason: original query may use colloquial language (low sim) while HyDE is
+        # LLM-generated catalog text (trusted) — filtering HyDE drops semantically
+        # correct results (e.g. convertible laptops when user says "flip/tablet").
         _score_threshold = 0.15 if "smart_search" in _features else 0.0
         if _score_threshold > 0:
             def _scored_search(q_=None, f=None):
                 pairs = db.similarity_search_with_relevance_scores(q_, k=k, filter=f)
                 return [doc for doc, score in pairs if score >= _score_threshold]
-            _search_tasks = [
-                loop.run_in_executor(None, lambda q=_clean_text(query), f=_price_filter: _scored_search(q, f))
-                for query in search_queries
-            ]
+            _search_tasks = []
+            for _sq_idx, _sq in enumerate(search_queries):
+                if _sq_idx == 0:  # original query — apply threshold
+                    _search_tasks.append(loop.run_in_executor(None, lambda q=_clean_text(_sq), f=_price_filter: _scored_search(q, f)))
+                else:  # HyDE + variants — no threshold (LLM-generated catalog text, trusted)
+                    _search_tasks.append(loop.run_in_executor(None, lambda q=_clean_text(_sq), f=_price_filter: db.similarity_search(q, k=k, filter=f)))
         else:
             _search_tasks = [
                 loop.run_in_executor(None, lambda q=_clean_text(query), f=_price_filter: db.similarity_search(q, k=k, filter=f))
