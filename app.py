@@ -1643,15 +1643,21 @@ def _run_in_bg(fn, *args):
     except RuntimeError:
         fn(*args)  # no running loop (e.g. tests) — call directly
 
+_gaps_lock: dict = {}   # db_name → threading.Lock
+_visitor_lock: dict = {}  # visitor_id[:16] → threading.Lock
+
 def log_knowledge_gap(q: str, db_name: str = ""):
     try:
-        gf = _gaps_file(db_name or _get_active_db())
-        data = []
-        if gf.exists():
-            try: data = json.loads(gf.read_text(encoding="utf-8"))
-            except Exception as e: logger.warning(f"Knowledge gaps file corrupt: {e}")
-        data.append({"question": q, "timestamp": datetime.now().isoformat()})
-        gf.write_text(json.dumps(data[-500:], indent=2), encoding="utf-8")
+        _db = db_name or _get_active_db()
+        gf = _gaps_file(_db)
+        lock = _gaps_lock.setdefault(_db, threading.Lock())
+        with lock:
+            data = []
+            if gf.exists():
+                try: data = json.loads(gf.read_text(encoding="utf-8"))
+                except Exception as e: logger.warning(f"Knowledge gaps file corrupt: {e}")
+            data.append({"question": q, "timestamp": datetime.now().isoformat()})
+            _atomic_write_json(gf, data[-500:])
     except Exception as e:
         logger.error(f"log_knowledge_gap failed: {e}")
 
@@ -1659,12 +1665,15 @@ def save_visitor_turn(visitor_id: str, role: str, content: str, db_name: str = "
     if not visitor_id: return
     try:
         f = _visitor_dir(db_name or _get_active_db()) / f"{visitor_id[:64]}.json"
-        turns = []
-        if f.exists():
-            try: turns = json.loads(f.read_text(encoding="utf-8"))
-            except Exception as e: logger.warning(f"Visitor history corrupt ({visitor_id[:8]}): {e}")
-        turns.append({"role": role, "content": content, "t": datetime.now().isoformat()})
-        f.write_text(json.dumps(turns[-40:], indent=2), encoding="utf-8")
+        lock_key = visitor_id[:16]
+        lock = _visitor_lock.setdefault(lock_key, threading.Lock())
+        with lock:
+            turns = []
+            if f.exists():
+                try: turns = json.loads(f.read_text(encoding="utf-8"))
+                except Exception as e: logger.warning(f"Visitor history corrupt ({visitor_id[:8]}): {e}")
+            turns.append({"role": role, "content": content, "t": datetime.now().isoformat()})
+            _atomic_write_json(f, turns[-40:])
     except Exception as e:
         logger.error(f"save_visitor_turn failed: {e}")
 
@@ -2253,6 +2262,24 @@ async def _auto_crawl_db(db_name: str, url: str, max_pages: int = 20) -> int:
             await asyncio.to_thread(seen_file.write_text, "\n".join(already_seen | set(newly_seen)), "utf-8")
         except Exception as e: logger.warning(f"[AUTO-CRAWL] Could not persist seen URLs for {db_name}: {e}")
         _bm25_cache.pop(db_name, None)
+        # Copy /dev/shm back to databases/ so new docs survive restart
+        _shm_path = Path(f"/dev/shm/chroma_{db_name}")
+        _db_dst = DATABASES_DIR / db_name
+        if _shm_path.exists() and _db_dst.exists():
+            try:
+                def _copy_back():
+                    for _itm in _shm_path.iterdir():
+                        _d = _db_dst / _itm.name
+                        if _itm.is_dir():
+                            if _d.exists(): shutil.rmtree(str(_d))
+                            shutil.copytree(str(_itm), str(_d))
+                        else:
+                            shutil.copy2(str(_itm), str(_d))
+                await asyncio.to_thread(_copy_back)
+                logger.info(f"[AUTO-CRAWL] Copy-back to databases/{db_name} done")
+            except Exception as _cb_e:
+                logger.warning(f"[AUTO-CRAWL] Copy-back failed (non-fatal): {_cb_e}")
+        threading.Thread(target=_github_sync_upload, args=(db_name,), daemon=True).start()
         threading.Thread(target=_github_backup_crawled_urls, args=(db_name,), daemon=True).start()
     return added
 
@@ -2452,7 +2479,7 @@ app = FastAPI(lifespan=lifespan)
 app.add_middleware(CORSMiddleware,
     allow_origins=["*"],
     allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
-    allow_headers=["Content-Type", "Authorization", "X-Widget-Key"]
+    allow_headers=["Content-Type", "Authorization", "X-Widget-Key", "X-Admin-DB", "X-CSRF-Token"]
 )
 
 @app.middleware("http")
@@ -2498,7 +2525,8 @@ async def rate_and_error_middleware(request: Request, call_next):
             if not check_rate_limit(ip, _chat_rate, limit=20):
                 return JSONResponse({"detail": "Too many requests. Slow down."}, status_code=429)
         elif path.startswith("/admin") or path.startswith("/debug"):
-            pass  # admin is password-protected — no rate limit needed
+            if not check_rate_limit(ip, _admin_rate, limit=30):  # 30 req/min per IP
+                return JSONResponse({"detail": "Too many requests."}, status_code=429)
         response = await call_next(request)
         response.headers["Server"] = "Server"  # suppress uvicorn version leak
         return response
@@ -3783,6 +3811,10 @@ async def clear_db_data(request: Request, password: str = Form(...), name: str =
         local_db = None
         embeddings_model = None
         threading.Thread(target=_load_db_now, daemon=True).start()
+    # Clear stale in-memory caches for this DB
+    _intro_q_cache.pop(name, None)
+    _bm25_cache.pop(name, None)
+    _db_instance_cache.pop(name, None)
     threading.Thread(target=_github_sync_upload, args=(name,), daemon=True).start()
     return {"success": True, "message": f"All knowledge chunks cleared from '{name}'."}
 
@@ -3893,6 +3925,13 @@ async def delete_db(request: Request, password: str = Form(...), name: str = For
         for i in range(3):
             try:
                 await asyncio.to_thread(shutil.rmtree, db_path)
+                # Evict stale caches for deleted DB
+                _widget_key_cache_copy = {k: v for k, v in _widget_key_cache.items() if v != db_name}
+                _widget_key_cache.clear()
+                _widget_key_cache.update(_widget_key_cache_copy)
+                _intro_q_cache.pop(db_name, None)
+                _bm25_cache.pop(db_name, None)
+                _db_instance_cache.pop(db_name, None)
                 threading.Thread(target=_github_sync_delete, args=(db_name,), daemon=True).start()
                 return {"success": True, "message": f"Repository '{db_name}' purged."}
             except Exception as e:
@@ -4522,7 +4561,7 @@ def _detect_format(content: str, filename: str = "") -> str:
 @app.post("/admin/ingest/smart-text")
 async def ingest_smart_text(request: Request, data: dict):
     """Ingest raw text in any format — auto-detects JSON, CSV, YAML, XML, MD, TXT."""
-    target_db = (data.get("target_db", "") or "").strip()
+    target_db = _validate_db_name((data.get("target_db", "") or "").strip()) if (data.get("target_db", "") or "").strip() else ""
     cfg = get_config(target_db) if target_db else get_config()
     try: admin_auth(_extract_password(request, data.get("password", "")), cfg)
     except HTTPException: return JSONResponse({"detail": "Unauthorized"}, status_code=401)
@@ -4595,7 +4634,7 @@ async def ingest_fetch_url(request: Request, data: dict):
 
 @app.post("/admin/ingest/text")
 async def ingest_text(request: Request, data: dict):
-    target = (data.get("target_db", "") or "").strip()
+    target = _validate_db_name((data.get("target_db", "") or "").strip()) if (data.get("target_db", "") or "").strip() else ""
     cfg = get_config(target) if target else get_config()
     try: admin_auth(_extract_password(request, data.get("password", "")), cfg)
     except HTTPException: return JSONResponse({"detail": "Unauthorized"}, status_code=401)
@@ -4635,7 +4674,8 @@ async def ingest_text(request: Request, data: dict):
 @app.post("/admin/ingest/files")
 async def ingest_files(request: Request, password: str = Form(...), target_db: str = Form(""), files: list[UploadFile] = File(...)):
     password = _extract_password(request, password)
-    cfg = get_config()
+    target_db = _validate_db_name(target_db.strip()) if target_db.strip() else ""
+    cfg = get_config(target_db) if target_db else get_config()
     try: admin_auth(password, cfg)
     except HTTPException: return JSONResponse({"detail": "Unauthorized"}, status_code=401)
     try:
@@ -5298,7 +5338,7 @@ async def set_crawl_schedule(request: Request, data: dict = None):
         "crawl_interval_minutes": float(data.get("interval_minutes", 60)),
         "crawl_url": data.get("crawl_url", existing.get("crawl_url", "")),
     })
-    db_cfg_file.write_text(json.dumps(existing, indent=2), encoding="utf-8")
+    _atomic_write_json(db_cfg_file, existing)
     threading.Thread(target=_github_sync_upload, args=(db_name,), daemon=True).start()
     return {"success": True, "message": f"Schedule saved for '{db_name}'"}
 
@@ -5660,7 +5700,21 @@ async def crawl_site(data: dict, request: Request):
                 yield _send(f"📋 {len(to_crawl)} unique pages to crawl...")
 
                 # --- Embedding model: always bge-small (384-dim) to match the loader ---
-                emb = embeddings_model  # FastEmbed bge-small-en-v1.5 (384-dim)
+                emb = embeddings_model
+                if emb is None:
+                    # Active DB is api-only → embeddings_model was never loaded; load on-demand.
+                    yield _send("🧠 Loading embedding model...")
+                    try:
+                        from fastembed import TextEmbedding as _TE_crawl
+                        _fe_crawl = _TE_crawl("BAAI/bge-small-en-v1.5")
+                        class _FEWrap:
+                            def embed_documents(self, texts): return [list(v) for v in _fe_crawl.embed(texts)]
+                            def embed_query(self, text): return list(next(_fe_crawl.embed([text])))
+                        emb = _FEWrap()
+                    except Exception as _emb_e:
+                        yield _send(f"❌ Could not load embedding model: {_emb_e}")
+                        yield "data: {\"done\": true}\n\n"
+                        return
                 yield _send("🧠 Using BGE-Small / FastEmbed (384-dim)")
 
                 db_dir = DATABASES_DIR / db_name
@@ -6274,7 +6328,10 @@ async def crawl_site(data: dict, request: Request):
                     try:
                         d = json.loads(chunk[6:].strip())
                         if d.get("msg"):
-                            _crawl_state[db_name]["logs"].append(d["msg"])
+                            logs = _crawl_state[db_name]["logs"]
+                            logs.append(d["msg"])
+                            if len(logs) > 500:  # cap memory use for long crawls
+                                _crawl_state[db_name]["logs"] = logs[-500:]
                         if d.get("done"):
                             _crawl_state[db_name]["done"] = True
                     except Exception:
@@ -6414,12 +6471,13 @@ async def submit_csat(data: dict):
     entry = {"session_id": session_id, "rating": rating, "comment": comment,
              "timestamp": datetime.now().isoformat()}
     cf = _csat_file()
-    data_list = []
-    if cf.exists():
-        try: data_list = json.loads(cf.read_text(encoding="utf-8"))
-        except: pass
-    data_list.append(entry)
-    cf.write_text(json.dumps(data_list[-1000:], indent=2), encoding="utf-8")
+    with _analytics_lock:
+        data_list = []
+        if cf.exists():
+            try: data_list = json.loads(cf.read_text(encoding="utf-8"))
+            except: pass
+        data_list.append(entry)
+        _atomic_write_json(cf, data_list[-1000:])
     return {"ok": True}
 
 @app.post("/feedback")
@@ -6433,12 +6491,13 @@ async def feedback(data: dict):
             "timestamp": datetime.now().isoformat(),
         }
         ff = _feedback_file()
-        existing = []
-        if ff.exists():
-            try: existing = json.loads(ff.read_text(encoding="utf-8"))
-            except: pass
-        existing.append(entry)
-        ff.write_text(json.dumps(existing, indent=2), encoding="utf-8")
+        with _analytics_lock:
+            existing = []
+            if ff.exists():
+                try: existing = json.loads(ff.read_text(encoding="utf-8"))
+                except: pass
+            existing.append(entry)
+            _atomic_write_json(ff, existing)
         return {"success": True}
     except Exception as e:
         return JSONResponse({"detail": str(e)}, status_code=500)
@@ -6451,9 +6510,11 @@ async def send_notification_email(subject: str, html_body: str, cfg: dict, reply
 
     email = cfg.get("contact_email", "")
     smtp_pass = cfg.get("smtp_password", "")
+    smtp_host = cfg.get("smtp_host", "smtp.gmail.com")
+    smtp_port = int(cfg.get("smtp_port", 465))
 
     if not email or not smtp_pass:
-        logger.warning("Gmail SMTP not configured — missing contact_email or smtp_password")
+        logger.warning("SMTP not configured — missing contact_email or smtp_password")
         return False
 
     try:
@@ -6467,7 +6528,12 @@ async def send_notification_email(subject: str, html_body: str, cfg: dict, reply
 
         loop = asyncio.get_running_loop()
         def _send():
-            with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=15) as s:
+            if smtp_port == 465:
+                ctx = smtplib.SMTP_SSL(smtp_host, smtp_port, timeout=15)
+            else:
+                ctx = smtplib.SMTP(smtp_host, smtp_port, timeout=15)
+                ctx.starttls()
+            with ctx as s:
                 s.login(email, smtp_pass)
                 s.sendmail(email, email, msg.as_string())
         await loop.run_in_executor(None, _send)
@@ -6494,9 +6560,11 @@ async def send_lead_email(lead_data: dict, cfg: dict):
     )
 
 @app.get("/test-email")
-async def test_email_endpoint():
-    """Manually trigger a test email to verify SendGrid configuration."""
+async def test_email_endpoint(request: Request, password: str = ""):
+    """Manually trigger a test email to verify SMTP configuration."""
     cfg = get_config()
+    try: admin_auth(_extract_password(request, password), cfg)
+    except HTTPException: return JSONResponse({"detail": "Unauthorized"}, status_code=401)
     test_data = {
         "name": "TEST USER",
         "email": "test@example.com",
@@ -6535,8 +6603,9 @@ async def submit_lead(data: dict):
             except Exception as e: 
                 logger.error(f"DEBUG: Error loading leads.json: {e}")
         
-        existing.append(entry)
-        LEADS_FILE.write_text(json.dumps(existing, indent=2), encoding="utf-8")
+        with _analytics_lock:
+            existing.append(entry)
+            _atomic_write_json(LEADS_FILE, existing)
         # Trigger Email Notification
         asyncio.create_task(send_lead_email(entry, cfg))
         

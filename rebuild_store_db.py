@@ -169,6 +169,10 @@ def make_chunk(p):
     _dedicated_gpu = bool(re.search(r'geforce|gtx|rtx|radeon\s+r[579]|radeon\s+rx', gpu.lower()) if gpu else False)
     _has_ssd = any(re.search(r'ssd', s.lower()) for s in stor)
 
+    # Extract VRAM for GPU ranking (e.g. "GTX 1050 Ti 4GB" → "4")
+    _vram_m = re.search(r'(\d+)\s*gb', gpu.lower()) if gpu else None
+    _vram_gb = int(_vram_m.group(1)) if _vram_m else 0
+
     lines = [f"Product: {name}",
              f"Price: {price}"]
     if cpu:   lines.append(f"Processor: {cpu}")
@@ -182,10 +186,14 @@ def make_chunk(p):
     # ── Attribute normalization tags (same as _smart_chunk_page in app.py) ──────
     _tags = []
     if _dedicated_gpu:
-        _tags.append("gaming laptop dedicated GPU")
+        # Include actual GPU name so embeddings distinguish GTX 1050 Ti 4GB vs 2GB
+        _tags.append(f"gaming laptop dedicated GPU {gpu.strip()}")
     if re.search(r'\btouch\b', disp, re.I) or re.search(r'\btouch\b', name, re.I):
         _tags.append("touchscreen display")
-    if re.search(r'2\s*in\s*1|360|yoga|spin\b', name, re.I):
+    # Check both name AND specs — "2in1" marker often lives in specs string, not just name
+    # Also match hyphenated "2-in-1" via [\s-]* between tokens
+    _combined = f"{name} {specs}"
+    if re.search(r'2[\s-]*in[\s-]*1|360|yoga|spin\b', _combined, re.I):
         _tags.append("convertible 2-in-1 laptop")
     if _has_ssd:
         _tags.append("fast SSD storage")
