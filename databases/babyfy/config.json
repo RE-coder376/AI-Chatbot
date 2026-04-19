@@ -14,5 +14,8 @@
   "crawl_url": "https://babyfy.pk/",
   "last_crawl_time": "2026-04-15T08:20:37.563925",
   "last_crawl_chunks": 0,
-  "admin_password": "babyfy"
+  "admin_password": "babyfy",
+  "features": [
+    "smart_search"
+  ]
 }

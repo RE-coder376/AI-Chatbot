@@ -10,5 +10,8 @@
   "auto_crawl_enabled": false,
   "crawl_interval_minutes": 1440.0,
   "last_crawl_time": "2026-04-15T08:20:42.092579",
-  "last_crawl_chunks": 0
+  "last_crawl_chunks": 0,
+  "features": [
+    "smart_search"
+  ]
 }
