@@ -879,32 +879,40 @@ _ROLE_TERMS = {"ceo", "cto", "coo", "cfo", "cpo", "vp", "founder", "author", "di
                "president", "chairman", "head", "lead", "chief"}
 
 # ── smart_search feature: HyDE + MultiQueryRetriever in one LLM call ─────────
-async def _smart_search_expand(q: str) -> tuple:
+async def _smart_search_expand(q: str, history: list = None) -> tuple:
     """
-    Combined HyDE + MultiQuery (LangChain MultiQueryRetriever pattern) in a
-    single LLM call — works for ANY product domain (electronics, fashion, baby, etc).
-
+    Combined HyDE + MultiQuery + History-Aware in one LLM call.
+    History-Aware: if query is ambiguous (short/pronouns) and history exists,
+    the LLM resolves it using prior context before generating HyDE + variants.
     Returns (hyde_text: str, variants: list[str])
-      hyde_text  — hypothetical product listing (HyDE): bridges query→document vocab gap
-      variants   — 2 alternative query phrasings (MultiQuery): covers different user wordings
-
-    One LLM call instead of two = half the token cost, same parallel latency.
     """
     try:
         llm = get_fresh_llm()
         if not llm:
-            return q, []
+            return "", []
+
+        # Build history context string (last 2 turns only — keep tokens low)
+        hist_ctx = ""
+        if history:
+            recent = history[-2:] if len(history) >= 2 else history
+            hist_ctx = "\n".join(
+                f"{'Customer' if m.get('role')=='user' else 'Bot'}: {m.get('content','')[:120]}"
+                for m in recent
+            )
+
+        system_msg = (
+            "You are a product search assistant helping retrieve items from a product catalog.\n"
+            + (f"Recent conversation:\n{hist_ctx}\n\n" if hist_ctx else "")
+            + "Given the customer's latest query, output EXACTLY 3 lines:\n"
+            "LINE 1 (HyDE): A 2-sentence hypothetical product listing with exact spec terms and "
+            "technical keywords that would match the customer's need. Use catalog language "
+            "(e.g. 'Touch display', 'GeForce GTX', 'Windows 10 Home', 'fast SSD storage').\n"
+            "LINE 2: Alternative phrasing of the query using different words/synonyms.\n"
+            "LINE 3: Another alternative phrasing from a different angle.\n"
+            "Output ONLY these 3 lines. No labels, no preamble."
+        )
         res = await asyncio.wait_for(llm.ainvoke([
-            SystemMessage(content=(
-                "You are a product search assistant helping retrieve items from a product catalog.\n"
-                "Given a customer query, output EXACTLY 3 lines:\n"
-                "LINE 1 (HyDE): A 2-sentence hypothetical product listing with exact spec terms, "
-                "feature names, and technical keywords that would perfectly match the customer's need. "
-                "Use catalog language (e.g. 'Touch display', 'GeForce GTX', 'Windows 10 Home').\n"
-                "LINE 2 (variant): Alternative phrasing of the query using different words/synonyms.\n"
-                "LINE 3 (variant): Another alternative phrasing from a different angle.\n"
-                "Output ONLY these 3 lines. No labels, no preamble, no explanation."
-            )),
+            SystemMessage(content=system_msg),
             HumanMessage(content=q)
         ]), timeout=8)
         lines = [l.strip() for l in res.content.strip().split("\n") if l.strip()]
@@ -1127,7 +1135,7 @@ async def async_intent_aware_expansion(q: str) -> list:
         logger.error(f"Intent expansion failed: {e}")
         return [q]
 
-async def retrieve_context(q: str, db, k: int = 15, fast: bool = False, expansion_task=None) -> tuple:
+async def retrieve_context(q: str, db, k: int = 15, fast: bool = False, expansion_task=None, history: list = None) -> tuple:
     """Multilingual Retrieval: Handles English and Urdu in the same vector space.
     Returns (context_text, doc_count, sources) so callers can cite sources.
     fast=True skips the LLM expansion step (used for sub-queries in multi-part decomposition)."""
@@ -1160,8 +1168,8 @@ async def retrieve_context(q: str, db, k: int = 15, fast: bool = False, expansio
 
     _ss_task = None
     if "smart_search" in _features:
-        # Fire combined HyDE + MultiQuery (LangChain pattern) in parallel — 1 LLM call
-        _ss_task = asyncio.create_task(_smart_search_expand(q))
+        # Fire combined HyDE + MultiQuery in parallel — passes history for context-aware HyDE
+        _ss_task = asyncio.create_task(_smart_search_expand(q, history=history))
 
     # 2. Add LLM-based intent expansion — skip for api DBs and smart_search DBs (_smart_search_expand replaces it)
     if not fast and "smart_search" not in _features:
@@ -1266,10 +1274,21 @@ async def retrieve_context(q: str, db, k: int = 15, fast: bool = False, expansio
     if not _skip_chromadb and db is not None:
         loop = asyncio.get_running_loop()
         # Run vector searches + BM25 ALL IN PARALLEL
-        _search_tasks = [
-            loop.run_in_executor(None, lambda q=_clean_text(query), f=_price_filter: db.similarity_search(q, k=k, filter=f))
-            for query in search_queries
-        ]
+        # smart_search: use scored search for EmbeddingsFilter (threshold drops weak chunks)
+        _score_threshold = 0.25 if "smart_search" in _features else 0.0
+        if _score_threshold > 0:
+            def _scored_search(q_=None, f=None):
+                pairs = db.similarity_search_with_relevance_scores(q_, k=k, filter=f)
+                return [doc for doc, score in pairs if score >= _score_threshold]
+            _search_tasks = [
+                loop.run_in_executor(None, lambda q=_clean_text(query), f=_price_filter: _scored_search(q, f))
+                for query in search_queries
+            ]
+        else:
+            _search_tasks = [
+                loop.run_in_executor(None, lambda q=_clean_text(query), f=_price_filter: db.similarity_search(q, k=k, filter=f))
+                for query in search_queries
+            ]
         # BM25 hybrid: use stored _db_name attr (reliable), fallback to path parse
         _bm25_db_name = getattr(db, '_db_name', None) or ""
         if not _bm25_db_name:
@@ -3034,10 +3053,10 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
             _early_expansion_task.cancel()
             context, doc_count, sources = await _decompose_and_retrieve(q, _local_db)
         else:
-            context, doc_count, sources = await retrieve_context(q, _local_db, expansion_task=_early_expansion_task)
+            context, doc_count, sources = await retrieve_context(q, _local_db, expansion_task=_early_expansion_task, history=history)
     else:
         # API-only DB (no ChromaDB) — still run retrieve_context for live API fetch
-        context, doc_count, sources = await retrieve_context(q, None, expansion_task=_early_expansion_task)
+        context, doc_count, sources = await retrieve_context(q, None, expansion_task=_early_expansion_task, history=history)
 
     # ── Sparse KB guard — skip for api-only DBs (no KB, LLM uses training knowledge) ──
     if not _is_api_only and not _context_addresses_query(context, q):
@@ -3193,6 +3212,22 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
 
     if success:
         cleaned = _strip_source_leaks("".join(response_buffer), kb_context=context)
+        # ── Light answer validator (smart_search DBs) — code-based, zero LLM cost ──
+        # Catches hallucinated product features absent from retrieved context
+        if "smart_search" in set(cfg.get("features", [])):
+            _ctx_lower = context.lower()
+            _ans_lower = cleaned.lower()
+            _halluc = False
+            if re.search(r'\btouch\s*screen\b|\btouch\s+display\b', _ans_lower) and "touch" not in _ctx_lower:
+                _halluc = True
+            if re.search(r'\bwindows\b', _ans_lower) and "windows" not in _ctx_lower:
+                _halluc = True
+            if re.search(r'\bandroid\b', _ans_lower) and "android" not in _ctx_lower:
+                _halluc = True
+            if _halluc:
+                logger.warning(f"[Validator] Potential hallucination detected — answer claims feature absent from context")
+                cleaned = ("I don't have specific details about that in my knowledge base right now. "
+                           "Could you rephrase or ask about a specific product by name?")
         if visitor_id: _run_in_bg(save_visitor_turn, visitor_id, "assistant", cleaned, db_name)
         yield f"data: {json.dumps({'type': 'chunk', 'content': cleaned})}\n\n"
         # Suppress sources and log gap if LLM indicated it doesn't have the info
