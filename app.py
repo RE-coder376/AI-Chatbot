@@ -2662,7 +2662,7 @@ def classify_intent(q: str) -> str:
         return "small_talk"
     # 2. Complaint / emotional — skip FAQ, go to empathy + escalation
     words = set(re.findall(r'\b\w+\b', ql))
-    if words & _COMPLAINT_WORDS or len(re.findall(r'[A-Z]{5,}', q)) >= 1:
+    if words & _COMPLAINT_WORDS or len(re.findall(r'[A-Z]{5,}', q)) >= 2:
         return "complaint"
     # 3. Multi-part — 2+ question marks, or explicit additive connectors
     if len(re.findall(r'\?', q)) >= 2:
