@@ -878,59 +878,43 @@ def _clean_text(text: str) -> str:
 _ROLE_TERMS = {"ceo", "cto", "coo", "cfo", "cpo", "vp", "founder", "author", "director",
                "president", "chairman", "head", "lead", "chief"}
 
-# ── smart_search feature: synonym map for product vocabulary bridging ─────────
-_SS_SYNONYMS = {
-    "touchscreen":  ["Touch display", "FHD Touch", "IPS Touch"],
-    "touch screen": ["Touch display", "FHD Touch", "IPS Touch"],
-    "gaming":       ["GeForce GTX", "RTX", "dedicated GPU"],
-    "gaming laptop":["GeForce GTX", "RTX", "dedicated GPU"],
-    "convertible":  ["2in1", "Yoga", "Spin", "360"],
-    "2 in 1":       ["2in1", "convertible", "Yoga"],
-    "lightweight":  ["slim", "ultrabook", "thin"],
-    "fast storage": ["SSD", "NVMe", "solid state"],
-    "windows":      ["Windows 10", "Windows 11", "Windows Home"],
-    "android":      ["Android OS", "Android tablet"],
-    "long battery": ["mAh", "battery life"],
-    "budget":       ["affordable", "value", "low price"],
-    "camera":       ["megapixel", "MP", "lens"],
-}
+# ── smart_search feature: HyDE + MultiQueryRetriever in one LLM call ─────────
+async def _smart_search_expand(q: str) -> tuple:
+    """
+    Combined HyDE + MultiQuery (LangChain MultiQueryRetriever pattern) in a
+    single LLM call — works for ANY product domain (electronics, fashion, baby, etc).
 
-def _product_smart_queries(q: str) -> list:
-    """Multi-query: expand with product-spec synonyms. Zero latency, no LLM."""
-    ql = q.lower()
-    extras = []
-    for user_term, spec_terms in _SS_SYNONYMS.items():
-        if user_term in ql:
-            expanded = re.sub(re.escape(user_term), spec_terms[0], q, flags=re.I, count=1)
-            if expanded != q and expanded not in extras:
-                extras.append(expanded)
-            if len(spec_terms) > 1:
-                raw_q = f"{spec_terms[1]} {q}"
-                if raw_q not in extras:
-                    extras.append(raw_q)
-    return extras[:3]
+    Returns (hyde_text: str, variants: list[str])
+      hyde_text  — hypothetical product listing (HyDE): bridges query→document vocab gap
+      variants   — 2 alternative query phrasings (MultiQuery): covers different user wordings
 
-async def _hyde_product_query(q: str) -> str:
-    """HyDE: generate a hypothetical product listing to bridge vocab gap."""
+    One LLM call instead of two = half the token cost, same parallel latency.
+    """
     try:
         llm = get_fresh_llm()
         if not llm:
-            return q
+            return q, []
         res = await asyncio.wait_for(llm.ainvoke([
             SystemMessage(content=(
-                "You are a product catalog assistant. Given a customer question, write a short "
-                "product listing (2-3 sentences) with exact specs and technical terms that would "
-                "perfectly match what the customer wants. Include numbers, feature names, OS names, "
-                "and spec keywords. No preamble, no explanation — just the product description."
+                "You are a product search assistant helping retrieve items from a product catalog.\n"
+                "Given a customer query, output EXACTLY 3 lines:\n"
+                "LINE 1 (HyDE): A 2-sentence hypothetical product listing with exact spec terms, "
+                "feature names, and technical keywords that would perfectly match the customer's need. "
+                "Use catalog language (e.g. 'Touch display', 'GeForce GTX', 'Windows 10 Home').\n"
+                "LINE 2 (variant): Alternative phrasing of the query using different words/synonyms.\n"
+                "LINE 3 (variant): Another alternative phrasing from a different angle.\n"
+                "Output ONLY these 3 lines. No labels, no preamble, no explanation."
             )),
             HumanMessage(content=q)
         ]), timeout=8)
-        text = res.content.strip()
-        logger.info(f"[HyDE] {text[:120]}")
-        return text
+        lines = [l.strip() for l in res.content.strip().split("\n") if l.strip()]
+        hyde_text = lines[0] if lines else ""
+        variants  = [l for l in lines[1:3] if l and l.lower() != q.lower()]
+        logger.info(f"[SmartSearch] hyde={hyde_text[:80]} | variants={variants}")
+        return hyde_text, variants
     except Exception as e:
-        logger.warning(f"[HyDE] failed: {e}")
-        return q
+        logger.warning(f"[SmartSearch] expand failed: {e}")
+        return "", []
 
 # ── Product spec extraction regexes (used by smart chunker) ──────────────────
 _PROD_PRICE_RE  = re.compile(r'\$(\d[\d,]*\.?\d*)')
@@ -1174,19 +1158,14 @@ async def retrieve_context(q: str, db, k: int = 15, fast: bool = False, expansio
         except Exception:
             pass
 
-    _hyde_task = None
+    _ss_task = None
     if "smart_search" in _features:
-        # Multi-query: product synonym expansion (instant, no LLM)
-        for _sq in _product_smart_queries(q):
-            if _sq not in search_queries:
-                search_queries.append(_sq)
-        # HyDE: fire in parallel — resolved below before ChromaDB search
-        _hyde_task = asyncio.create_task(_hyde_product_query(q))
+        # Fire combined HyDE + MultiQuery (LangChain pattern) in parallel — 1 LLM call
+        _ss_task = asyncio.create_task(_smart_search_expand(q))
 
-    # 2. Add LLM-based intent expansion (smart) — skip for sub-queries, api DBs, and smart_search DBs (HyDE replaces it)
+    # 2. Add LLM-based intent expansion — skip for api DBs and smart_search DBs (_smart_search_expand replaces it)
     if not fast and "smart_search" not in _features:
         if expansion_task is not None:
-            # Reuse the pre-fired concurrent task (saves 2-5s on critical path)
             try:
                 intent_vars = await asyncio.wait_for(asyncio.shield(expansion_task), timeout=6)
             except (asyncio.TimeoutError, Exception):
@@ -1196,17 +1175,23 @@ async def retrieve_context(q: str, db, k: int = 15, fast: bool = False, expansio
         for v in intent_vars:
             if v not in search_queries:
                 search_queries.append(v)
-        search_queries = search_queries[:2]  # cap: 2 searches on shared-CPU Render (0.1 vCPU); more = slower due to thread contention
+        search_queries = search_queries[:2]
 
-    # Await HyDE result and merge (runs in parallel — minimal added latency)
-    if _hyde_task is not None:
+    # Await smart_search expand result and merge
+    if _ss_task is not None:
         try:
-            _hyde_q = await asyncio.wait_for(asyncio.shield(_hyde_task), timeout=8)
-            if _hyde_q and _hyde_q not in search_queries:
-                search_queries.insert(1, _hyde_q)  # second priority after original
-        except Exception as _he:
-            logger.warning(f"[HyDE] merge failed: {_he}")
-        search_queries = search_queries[:4]  # smart_search gets up to 4 parallel searches
+            _ss_result = await asyncio.wait_for(asyncio.shield(_ss_task), timeout=8)
+            _hyde_text, _variants = _ss_result if isinstance(_ss_result, tuple) else ("", [])
+            # HyDE text goes second (after original query — highest priority)
+            if _hyde_text and _hyde_text not in search_queries:
+                search_queries.insert(1, _hyde_text)
+            # MultiQuery variants appended after
+            for _v in _variants:
+                if _v and _v not in search_queries:
+                    search_queries.append(_v)
+        except Exception as _sse:
+            logger.warning(f"[SmartSearch] merge failed: {_sse}")
+        search_queries = search_queries[:4]  # original + hyde + 2 variants
 
     logger.debug(f"Expanded queries: {search_queries}")
     
