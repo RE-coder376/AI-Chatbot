@@ -171,16 +171,30 @@ def make_chunk(p):
 
     lines = [f"Product: {name}",
              f"Price: {price}"]
-    if _dedicated_gpu:
-        lines.append("Category: gaming laptop, dedicated GPU")
     if cpu:   lines.append(f"Processor: {cpu}")
     if ram:   lines.append(f"RAM: {ram}")
     if stor:  lines.append(f"Storage: {', '.join(stor)}")
     if gpu:   lines.append(f"GPU: {gpu}")
     if disp:  lines.append(f"Display: {disp}")
     if os_:   lines.append(f"OS: {os_}")
-    # Add full spec line for anything we missed
     lines.append(f"Full specs: {name}, {specs}" if specs else f"Full specs: {name}")
+
+    # ── Attribute normalization tags (same as _smart_chunk_page in app.py) ──────
+    _tags = []
+    if _dedicated_gpu:
+        _tags.append("gaming laptop dedicated GPU")
+    if re.search(r'\btouch\b', disp, re.I) or re.search(r'\btouch\b', name, re.I):
+        _tags.append("touchscreen display")
+    if re.search(r'2\s*in\s*1|360|yoga|spin\b', name, re.I):
+        _tags.append("convertible 2-in-1 laptop")
+    if _has_ssd:
+        _tags.append("fast SSD storage")
+    if re.search(r'windows', os_, re.I):
+        _tags.append("Windows laptop")
+    if re.search(r'android', os_, re.I):
+        _tags.append("Android device")
+    if _tags:
+        lines.append("Features: " + ", ".join(_tags))
 
     return "\n".join(lines)
 
