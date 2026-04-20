@@ -1148,6 +1148,11 @@ async def retrieve_context(q: str, db, k: int = 15, fast: bool = False, expansio
     try:
         _cnt = db._collection.count() if db else 0
         logger.info(f"[RETRIEVE] db={'set' if db else 'None'}, chunks={_cnt}, q={q[:60]}")
+        # Small product catalog: retrieve everything for complete recall.
+        # Prevents non-deterministic answers caused by vector search missing products.
+        # 500 products × ~200 chars = ~100K chars max — capped by context budget downstream.
+        if _cnt > 0 and _cnt <= 500:
+            k = _cnt
     except Exception as _le:
         logger.warning(f"[RETRIEVE] db count failed: {_le}")
     # If this DB has live API sources, skip LLM expansion — the API data is the freshness source
