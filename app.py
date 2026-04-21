@@ -195,6 +195,16 @@ def _github_sync_download():
                 KEYS_FILE.write_bytes(r.content)
                 logger.info("[GH-SYNC] ✅ keys.json restored")
                 break
+        # Download active_db.txt early (before zip downloads) so priority logic below uses the saved value
+        try:
+            import base64 as _b64
+            r = _req.get(f"https://api.github.com/repos/{_GITHUB_USERNAME}/{_GITHUB_REPO}/contents/active_db.txt", headers=api_hdr, timeout=10)
+            if r.status_code == 200:
+                raw = _b64.b64decode(r.json().get("content", "").replace("\n",""))
+                ACTIVE_DB_FILE.write_bytes(raw)
+                logger.info(f"[GH-SYNC] ✅ active_db.txt restored ({raw.decode().strip()})")
+        except Exception as e:
+            logger.warning(f"[GH-SYNC] active_db.txt restore failed: {e}")
         if not zip_assets:
             logger.warning("[GH-SYNC] No zip assets found in release")
             return
@@ -285,10 +295,11 @@ def _github_sync_download():
         # 3. Alphabetically first available DB
         env_db = os.environ.get("ACTIVE_DB", "").strip()
         current = ACTIVE_DB_FILE.read_text(encoding="utf-8").strip() if ACTIVE_DB_FILE.exists() else ""
-        if env_db and (DATABASES_DIR / env_db).exists():
-            chosen = env_db  # deployment env var always wins
-        elif current and (DATABASES_DIR / current).exists():
-            chosen = current  # preserve admin-panel switch across restarts
+        # Priority: 1. file (admin switch, restored from GitHub above) 2. env var 3. alphabetical
+        if current and (DATABASES_DIR / current).exists():
+            chosen = current
+        elif env_db and (DATABASES_DIR / env_db).exists():
+            chosen = env_db
         else:
             available = sorted(d.name for d in DATABASES_DIR.iterdir() if d.is_dir())
             chosen = available[0] if available else ""
@@ -356,6 +367,27 @@ def _github_backup_crawl_times(db_name: str):
             logger.warning(f"[GH-SYNC] crawl_times backup failed: {r2.status_code}")
     except Exception as e:
         logger.warning(f"[GH-SYNC] crawl_times backup error: {e}")
+
+def _github_upload_active_db(db_name: str):
+    """Upload active_db.txt to GitHub Contents API so it persists across HF restarts."""
+    import requests as _req, base64 as _b64
+    pat = os.environ.get("GITHUB_PAT", "").strip()
+    if not pat: return
+    hdrs = {"Authorization": f"token {pat}", "User-Agent": "chatbot-sync"}
+    content = _b64.b64encode(db_name.encode()).decode()
+    sha = None
+    try:
+        r = _req.get(f"https://api.github.com/repos/{_GITHUB_USERNAME}/{_GITHUB_REPO}/contents/active_db.txt", headers=hdrs, timeout=10)
+        if r.status_code == 200: sha = r.json().get("sha")
+    except Exception: pass
+    payload = {"message": f"chore: active DB → {db_name}", "content": content}
+    if sha: payload["sha"] = sha
+    try:
+        r = _req.put(f"https://api.github.com/repos/{_GITHUB_USERNAME}/{_GITHUB_REPO}/contents/active_db.txt", headers=hdrs, json=payload, timeout=15)
+        if r.status_code in (200, 201): logger.info(f"[GH-SYNC] ✅ active_db.txt uploaded ({db_name})")
+        else: logger.warning(f"[GH-SYNC] active_db.txt upload failed: {r.status_code}")
+    except Exception as e:
+        logger.warning(f"[GH-SYNC] active_db.txt upload error: {e}")
 
 def _github_sync_upload(db_name: str):
     """Zip DB and upload to GitHub Releases as an asset (supports files >100MB).
@@ -4038,6 +4070,7 @@ async def set_active_db(request: Request, password: str = Form(...), name: str =
     if current == name:
         return {"success": True, "message": f"{name} is already the active DB."}
     ACTIVE_DB_FILE.write_text(name, encoding="utf-8")
+    threading.Thread(target=_github_upload_active_db, args=(name,), daemon=True).start()
     global local_db, embeddings_model
     local_db = None
     embeddings_model = None
