@@ -4166,6 +4166,7 @@ async def rename_db(request: Request, password: str = Form(...), old_name: str =
     active = ACTIVE_DB_FILE.read_text(encoding="utf-8").strip() if ACTIVE_DB_FILE.exists() else ""
     if active == old:
         ACTIVE_DB_FILE.write_text(new, encoding="utf-8")
+        threading.Thread(target=_github_upload_active_db, args=(new,), daemon=True).start()
         local_db = None
     # Evict caches for old name
     _widget_key_cache_copy = {k: v for k, v in _widget_key_cache.items() if v != old}
