@@ -337,7 +337,7 @@
   }
   document.addEventListener("visibilitychange", () => { if (!document.hidden) _checkBotChanged(); });
   window.addEventListener("focus", _checkBotChanged);
-  setInterval(_checkBotChanged, 10000);
+  setInterval(_checkBotChanged, 3000);
 
   // Load branding config
   fetch(`${API_URL}/config`).then(r => r.json()).then(cfg => {
