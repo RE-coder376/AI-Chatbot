@@ -3888,7 +3888,7 @@ async def save_ops(request: Request, data: dict = None):
     password = _extract_password(request, data.get("password", ""))
     try: admin_auth(password, cfg)
     except HTTPException: return JSONResponse({"detail": "Unauthorized"}, status_code=401)
-    updates = {k: data[k] for k in ("contact_email", "whatsapp_number", "async_contact_url", "hours", "always_open", "sender_email", "smtp_password", "smtp_host", "smtp_port") if k in data}
+    updates = {k: data[k] for k in ("contact_email", "whatsapp_number", "async_contact_url", "hours", "always_open", "sender_email", "smtp_password", "smtp_host", "smtp_port", "admin_password") if k in data}
     save_db_config(updates, db_name)
     return {"success": True, "message": "Operational settings saved to active DB."}
 
@@ -4172,6 +4172,9 @@ async def rename_db(request: Request, password: str = Form(...), old_name: str =
     _widget_key_cache.clear(); _widget_key_cache.update(_widget_key_cache_copy)
     _intro_q_cache.pop(old, None); _bm25_cache.pop(old, None); _db_instance_cache.pop(old, None)
     _product_db_cache.pop(old, None)
+    # Upload new zip to GitHub, delete old zip
+    threading.Thread(target=_github_sync_upload, args=(new,), daemon=True).start()
+    threading.Thread(target=_github_sync_delete, args=(old,), daemon=True).start()
     return {"success": True, "message": f"Renamed '{old}' → '{new}'."}
 
 @app.get("/admin/analytics")
