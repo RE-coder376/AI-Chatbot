@@ -1191,8 +1191,9 @@
       const sessionDb = localStorage.getItem('adminDb') || '';
       const dbTxt = sessionDb ? `✅ Managing: ${sessionDb}` : (h.status === 'ready' ? `✅ Server ready` : `⚠️ ${h.status}`);
       el.innerHTML = `<span style="margin-right:16px">${dbTxt}</span><span>${keyTxt}</span>`;
-      // Re-sync active DB if server restarted and active_db drifted (client mode: their DB; owner: their chosen DB)
-      if (sessionDb && h.active_db && h.active_db !== sessionDb) {
+      // Re-sync active DB only for client mode (clients cannot switch; owners may intentionally switch)
+      const isClientMode = sessionStorage.getItem('clientMode') === '1';
+      if (isClientMode && sessionDb && h.active_db && h.active_db !== sessionDb) {
         const pass = localStorage.getItem('adminPass') || '';
         if (pass) {
           const sf = new FormData(); sf.append('password', pass); sf.append('name', sessionDb);
