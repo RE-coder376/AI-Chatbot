@@ -329,11 +329,15 @@
     fetch(`${API_URL}/config`).then(r => r.json()).then(cfg => {
       const name = cfg.bot_name || "";
       if (_activeBotName && name && name !== _activeBotName) {
-        newChat();
-        // Reload branding for new bot
+        // Update routing key and contact info for new DB
+        widgetKey       = cfg.widget_key || "";
+        contactEmail    = cfg.contact_email || "";
+        contactWhatsApp = cfg.whatsapp_number || "";
+        // Reload branding
         document.getElementById("header-title").textContent = cfg.header_title || (cfg.branding||{}).header_title || "Support";
         document.getElementById("header-subtitle").textContent = cfg.header_subtitle || (cfg.branding||{}).header_subtitle || "Ready to assist";
         document.getElementById("welcome-msg").textContent = cfg.welcome_message || (cfg.branding||{}).welcome_message || "Hi! How can I help you today?";
+        newChat();
       }
       _activeBotName = name || _activeBotName;
     }).catch(() => {});
