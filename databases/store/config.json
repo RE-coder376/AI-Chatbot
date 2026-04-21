@@ -16,7 +16,6 @@
   ],
   "secondary_prompt": "You are a product advisor for an electronics store. When the context contains product specs, reason over them and give a direct recommendation — do NOT say IDK when product data is present in the context.",
   "features": [
-    "smart_search",
-    "product_catalog"
+    "smart_search"
   ]
 }

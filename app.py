@@ -652,7 +652,27 @@ def check_rate_limit(ip: str, store: dict, limit: int, window: int = 60) -> bool
 
 FEEDBACK_FILE = FEEDBACK_FILE_GLOBAL  # alias — use _feedback_file() for per-DB access
 
-def get_system_prompt(cfg, context, doc_count: int = 0, is_urdu: bool = False, user_lang: str = "English"):
+_product_db_cache: dict[str, bool] = {}  # db_name → is_product_db (stable per collection)
+
+def _check_is_product_db(db, db_name: str = "") -> bool:
+    """Return True if the DB collection has product metadata (price/ram_gb/gpu_vram_gb).
+    Result cached per db_name so the sample query runs at most once per DB."""
+    if db_name and db_name in _product_db_cache:
+        return _product_db_cache[db_name]
+    result = False
+    if db:
+        try:
+            sample = db._collection.get(limit=1, include=["metadatas"])
+            if sample and sample.get("metadatas") and sample["metadatas"][0]:
+                m = sample["metadatas"][0]
+                result = m.get("price") is not None or m.get("ram_gb") is not None or m.get("gpu_vram_gb") is not None
+        except Exception:
+            pass
+    if db_name:
+        _product_db_cache[db_name] = result
+    return result
+
+def get_system_prompt(cfg, context, doc_count: int = 0, is_urdu: bool = False, user_lang: str = "English", is_product_db: bool = False):
     bot_name = cfg.get("bot_name", "AI Assistant")
     biz_name = cfg.get("business_name", "the company")
     topics = cfg.get("topics", "general information")
@@ -698,10 +718,9 @@ def get_system_prompt(cfg, context, doc_count: int = 0, is_urdu: bool = False, u
     if secondary_prompt.strip():
         sec_section = f"\n\nDOMAIN-SPECIFIC MANDATES (Expert Runbook for {biz_name}):\n{secondary_prompt.strip()}\n"
 
-    # Product catalog rules — injected for any DB with "product_catalog" in features
-    _features_list = cfg.get("features", [])
+    # Product catalog rules — auto-injected when DB has product metadata (price/ram/gpu fields)
     _product_catalog_section = ""
-    if "product_catalog" in _features_list:
+    if is_product_db:
         _product_catalog_section = """
 
 PRODUCT CATALOG RULES — MANDATORY for every product response:
@@ -3273,7 +3292,8 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
     elif (_has_groq or _prov == 'groq') and len(context) > _GROQ_MAX_CONTEXT_CHARS:
         context = context[:_GROQ_MAX_CONTEXT_CHARS]
 
-    sys_msg = get_system_prompt(cfg, context, doc_count, is_urdu=is_urdu, user_lang=user_lang)
+    sys_msg = get_system_prompt(cfg, context, doc_count, is_urdu=is_urdu, user_lang=user_lang,
+                                is_product_db=_check_is_product_db(_local_db, db_name))
     if page_url:
         sys_msg = f"[Page context: user is on '{page_title or page_url}' — {page_url}]\n\n" + sys_msg
     # Card instruction: LLM can emit [CARD]title|description|url[/CARD] for specific course/product results
@@ -3586,7 +3606,8 @@ async def chat(request: Request):
         elif (_has_groq2 or _prov2 == 'groq') and len(context) > _GROQ_MAX_CONTEXT_CHARS:
             context = context[:_GROQ_MAX_CONTEXT_CHARS]
 
-        sys_msg = get_system_prompt(cfg, context, doc_count, user_lang=user_lang)
+        sys_msg = get_system_prompt(cfg, context, doc_count, user_lang=user_lang,
+                                    is_product_db=_check_is_product_db(tenant_db_instance, tenant_db_name))
         messages = [SystemMessage(content=sys_msg)]
         for m in hist[-2:]:
             if m.get('role') == 'user': messages.append(HumanMessage(content=m['content']))
