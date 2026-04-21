@@ -329,6 +329,7 @@
     fetch(`${API_URL}/config`).then(r => r.json()).then(cfg => {
       const name = cfg.bot_name || "";
       if (_activeBotName && name && name !== _activeBotName) {
+        localStorage.setItem("chat_session_id", crypto.randomUUID());
         window.location.reload();
       }
       _activeBotName = name || _activeBotName;
