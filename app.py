@@ -279,10 +279,17 @@ def _github_sync_download():
                     logger.warning(f"[GH-SYNC] {dest} restore failed for {db_n}: {e}")
         _github_sync_result = {"status": "ok", "detail": f"{len(zip_assets)} DBs restored"}
         logger.info("[GH-SYNC] ✅ All databases restored from GitHub")
-        # Set active DB: ACTIVE_DB env var > first available DB
+        # Set active DB priority:
+        # 1. ACTIVE_DB env var (explicit deployment override — always wins)
+        # 2. Existing active_db.txt if it points to a valid DB (preserves admin-panel switches)
+        # 3. Alphabetically first available DB
         env_db = os.environ.get("ACTIVE_DB", "").strip()
-        chosen = env_db if env_db and (DATABASES_DIR / env_db).exists() else ""
-        if not chosen:
+        current = ACTIVE_DB_FILE.read_text(encoding="utf-8").strip() if ACTIVE_DB_FILE.exists() else ""
+        if env_db and (DATABASES_DIR / env_db).exists():
+            chosen = env_db  # deployment env var always wins
+        elif current and (DATABASES_DIR / current).exists():
+            chosen = current  # preserve admin-panel switch across restarts
+        else:
             available = sorted(d.name for d in DATABASES_DIR.iterdir() if d.is_dir())
             chosen = available[0] if available else ""
         if chosen:
