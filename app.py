@@ -698,6 +698,23 @@ def get_system_prompt(cfg, context, doc_count: int = 0, is_urdu: bool = False, u
     if secondary_prompt.strip():
         sec_section = f"\n\nDOMAIN-SPECIFIC MANDATES (Expert Runbook for {biz_name}):\n{secondary_prompt.strip()}\n"
 
+    # Product catalog rules — injected for any DB with "product_catalog" in features
+    _features_list = cfg.get("features", [])
+    _product_catalog_section = ""
+    if "product_catalog" in _features_list:
+        _product_catalog_section = """
+
+PRODUCT CATALOG RULES — MANDATORY for every product response:
+1. SPEC ISOLATION: Each product block in the context is self-contained. Before stating any spec (GPU, RAM, OS, storage, price) for a product, verify that exact value appears in THAT product's own context block. If not found there, omit the product entirely.
+2. VARIANT RULE: The same model may appear at multiple prices with different specs. Treat each price+spec combination as a completely separate product. Never merge or share specs between variants.
+3. BUDGET RULE: When user states a budget, ONLY list products at or below that price. NEVER mention over-budget products. If nothing fits, say so clearly.
+4. COMPLETENESS RULE: Scan the ENTIRE context top to bottom. Count every product meeting the criteria. List ALL of them — never stop after finding 1 or 2.
+5. FILTER RULE: Only include a product if ALL user-stated criteria are met independently against that product's own data. Failing any single criterion = excluded.
+6. RANKING RULE: For "best/highest/most powerful" queries, read the relevant numeric spec from EACH product's own data block, then rank accordingly. Never assume a spec without seeing it.
+7. FEATURE RULE: Only claim a product has a feature (touchscreen, SSD, Windows, 4G, convertible) if that exact feature word appears in that product's own context block. IPS alone ≠ touchscreen. No assumptions.
+8. COMPARISON RULE: When user asks to compare variants of the same model, list EVERY variant found in context as a separate numbered entry with its full spec breakdown and price. Never merge them or say IDK if variants are present in context.
+9. NO MATCH RULE: If zero products meet ALL criteria after scanning the full context, explicitly say "No products in our catalog match all your criteria" and offer the closest alternatives if any exist."""
+
     # For API-only DBs: inject AFTER the Tier framework so it wins over "NEVER use world knowledge"
     _api_expert_note = ""
     if _is_api_only:
@@ -782,7 +799,7 @@ ANSWER TIER FRAMEWORK — EXECUTE THIS DECISION LOGIC BEFORE EVERY RESPONSE:
    Is there something about {topics} I can help you with?"
    This rule overrides ALL other instructions. You are NOT a general assistant.
    NEVER output the out-of-scope answer alongside or after the redirect. Output ONLY the redirect message.
-"""
+{_product_catalog_section}"""
 
 def detect_language(text: str) -> str:
     """Simple heuristic for language detection to assist the LLM."""
@@ -994,8 +1011,10 @@ def _smart_chunk_page(text: str, url: str, chunk_size: int = 400, chunk_step: in
                     elif re.search(r'\d+\.?\d*"\s*(?:hd|fhd|uhd|ips|touch)?|(?:hd|fhd|uhd|ips)\s+display', pl): lines.append(f"Display: {part}")
                 if specs:
                     lines.append(f"Full specs: {name}, {specs}")
-                docs.append(Document(page_content="\n".join(lines),
-                                     metadata={"source": url, "price": price_num}))
+                _prod_text = "\n".join(lines)
+                _prod_meta = {"source": url, "price": price_num}
+                _prod_meta.update(_extract_product_metadata(_prod_text))
+                docs.append(Document(page_content=_prod_text, metadata=_prod_meta))
             if docs:
                 return docs
 
@@ -1141,6 +1160,39 @@ async def async_intent_aware_expansion(q: str) -> list:
         logger.error(f"Intent expansion failed: {e}")
         return [q]
 
+def _extract_product_metadata(text: str) -> dict:
+    """Parse product-catalog chunk text into structured ChromaDB metadata fields."""
+    meta = {}
+    pm = re.search(r'Price:\s*\$?([\d,]+\.?\d*)', text)
+    if pm:
+        try: meta['price'] = float(pm.group(1).replace(',', ''))
+        except: pass
+    rm = re.search(r'RAM:\s*(\d+)\s*GB', text, re.I)
+    if rm:
+        try: meta['ram_gb'] = int(rm.group(1))
+        except: pass
+    gm = re.search(r'GPU:[^\n]*?(\d+)\s*GB', text, re.I)
+    if gm:
+        try: meta['gpu_vram_gb'] = int(gm.group(1)); meta['has_gpu'] = 1
+        except: pass
+    else:
+        meta['has_gpu'] = 0
+    meta['has_touch'] = 1 if re.search(r'Display:[^\n]*\bTouch\b', text) else 0
+    meta['is_convertible'] = 1 if re.search(r'\bconvertible\b', text, re.I) else 0
+    meta['has_ssd'] = 1 if re.search(r'\bSSD\b', text) else 0
+    return meta
+
+def _enrich_docs_metadata(docs: list) -> list:
+    """Auto-detect product catalog chunks and enrich with structured metadata."""
+    for doc in docs:
+        if re.search(r'^Product:\s+\S', doc.page_content, re.M):
+            extracted = _extract_product_metadata(doc.page_content)
+            if doc.metadata:
+                doc.metadata.update(extracted)
+            else:
+                doc.metadata = extracted
+    return docs
+
 async def retrieve_context(q: str, db, k: int = 15, fast: bool = False, expansion_task=None, history: list = None) -> tuple:
     """Multilingual Retrieval: Handles English and Urdu in the same vector space.
     Returns (context_text, doc_count, sources) so callers can cite sources.
@@ -1263,24 +1315,64 @@ async def retrieve_context(q: str, db, k: int = 15, fast: bool = False, expansio
     for r in rescue_results:
         seen.add(r.page_content[:100])
 
-    # ── Price-constraint filter (e-commerce DBs with price metadata) ──────────
-    _price_filter = None
+    # ── Product catalog metadata filter ──────────────────────────────────────
+    # Detects structured product chunks (has price metadata) and builds a
+    # combined ChromaDB WHERE filter from query constraints — done in Python,
+    # NOT by the LLM. This is the industry-standard approach for product RAG.
+    _combined_filter = None
     _max_price = None
-    _price_match = re.search(
-        r'(?:under|below|less\s+than|max(?:imum)?|budget\s+of|within)\s+\$?([\d,]+)',
-        q, re.I
-    )
-    if _price_match:
-        try:
-            _max_price = float(_price_match.group(1).replace(',', ''))
-            # Only apply if DB has price metadata (check first chunk)
-            _sample = db._collection.get(limit=1, include=["metadatas"]) if db else None
-            if _sample and _sample.get("metadatas") and _sample["metadatas"][0].get("price") is not None:
-                _price_filter = {"price": {"$lte": _max_price}}
-                k = max(k, 25)  # Retrieve more when filtering by price
-                logger.info(f"[PRICE-FILTER] Applied max_price={_max_price} filter")
-        except Exception as _pfe:
-            logger.warning(f"[PRICE-FILTER] Failed to apply: {_pfe}")
+    _has_product_meta = False
+    try:
+        _sample = db._collection.get(limit=1, include=["metadatas"]) if db else None
+        if _sample and _sample.get("metadatas") and _sample["metadatas"][0].get("price") is not None:
+            _has_product_meta = True
+    except Exception as _pfe:
+        logger.warning(f"[META-FILTER] Sample check failed: {_pfe}")
+
+    if _has_product_meta:
+        _meta_conds = []
+        _required_flags = {}   # boolean fields required post-retrieval
+        _ram_min_req = None    # RAM minimum for post-filter
+        # Price
+        _pm = re.search(r'(?:under|below|less\s+than|max(?:imum)?|budget\s+of|within)\s+\$?([\d,]+)', q, re.I)
+        if _pm:
+            try:
+                _max_price = float(_pm.group(1).replace(',', ''))
+                _meta_conds.append({"price": {"$lte": _max_price}})
+            except: pass
+        # RAM minimum
+        _rm = re.search(r'(?:at\s+least\s+|minimum\s+)?(\d+)\s*gb\s+(?:ram|memory)', q, re.I)
+        if _rm:
+            try:
+                _ram_min_req = int(_rm.group(1))
+                _meta_conds.append({"ram_gb": {"$gte": _ram_min_req}})
+            except: pass
+        # Touchscreen
+        if re.search(r'\btouch(?:screen)?\b', q, re.I):
+            _meta_conds.append({"has_touch": {"$eq": 1}})
+            _required_flags['has_touch'] = 1
+        # Convertible/flip/tablet
+        if re.search(r'\b(flip|convertible|2.in.1|tablet\s+mode|handwriting|stylus)\b', q, re.I):
+            _meta_conds.append({"is_convertible": {"$eq": 1}})
+            _required_flags['is_convertible'] = 1
+        # SSD — filter positively or negatively based on query intent
+        _ssd_negated = re.search(r"(?:no|without|don.t\s+(?:need|want)|not\s+(?:need|want))\s+(?:an?\s+)?ssd", q, re.I)
+        if re.search(r'\bssd\b', q, re.I):
+            if _ssd_negated:
+                # User explicitly doesn't want SSD — filter for HDD-only products
+                _meta_conds.append({"has_ssd": {"$eq": 0}})
+                _required_flags['has_ssd'] = 0
+            else:
+                _meta_conds.append({"has_ssd": {"$eq": 1}})
+                _required_flags['has_ssd'] = 1
+        # Gaming (dedicated GPU)
+        if re.search(r'\bgaming\b', q, re.I):
+            _meta_conds.append({"has_gpu": {"$eq": 1}})
+            _required_flags['has_gpu'] = 1
+        if _meta_conds:
+            _combined_filter = _meta_conds[0] if len(_meta_conds) == 1 else {"$and": _meta_conds}
+            k = max(k, 60)
+            logger.info(f"[META-FILTER] {_combined_filter}")
 
     if not _skip_chromadb and db is not None:
         loop = asyncio.get_running_loop()
@@ -1297,12 +1389,12 @@ async def retrieve_context(q: str, db, k: int = 15, fast: bool = False, expansio
             _search_tasks = []
             for _sq_idx, _sq in enumerate(search_queries):
                 if _sq_idx == 0:  # original query — apply threshold
-                    _search_tasks.append(loop.run_in_executor(None, lambda q=_clean_text(_sq), f=_price_filter: _scored_search(q, f)))
+                    _search_tasks.append(loop.run_in_executor(None, lambda q=_clean_text(_sq), f=_combined_filter: _scored_search(q, f)))
                 else:  # HyDE + variants — no threshold (LLM-generated catalog text, trusted)
-                    _search_tasks.append(loop.run_in_executor(None, lambda q=_clean_text(_sq), f=_price_filter: db.similarity_search(q, k=k, filter=f)))
+                    _search_tasks.append(loop.run_in_executor(None, lambda q=_clean_text(_sq), f=_combined_filter: db.similarity_search(q, k=k, filter=f)))
         else:
             _search_tasks = [
-                loop.run_in_executor(None, lambda q=_clean_text(query), f=_price_filter: db.similarity_search(q, k=k, filter=f))
+                loop.run_in_executor(None, lambda q=_clean_text(query), f=_combined_filter: db.similarity_search(q, k=k, filter=f))
                 for query in search_queries
             ]
         # BM25 hybrid: use stored _db_name attr (reliable), fallback to path parse
@@ -1329,22 +1421,52 @@ async def retrieve_context(q: str, db, k: int = 15, fast: bool = False, expansio
                 key = r.page_content[:100]
                 if key not in seen:
                     # Post-filter: drop chunks that exceed price constraint
-                    if _price_filter and _max_price is not None:
+                    if _max_price is not None:
                         _chunk_price = r.metadata.get("price") if r.metadata else None
                         if _chunk_price is not None and _chunk_price > _max_price:
                             continue
                     seen.add(key)
                     results.append(r)
 
-    # Also apply price filter to rescue results
-    if _price_filter and _max_price is not None:
-        rescue_results = [
-            r for r in rescue_results
-            if not (r.metadata and r.metadata.get("price") is not None and r.metadata["price"] > _max_price)
-        ]
+    # ── Product catalog: post-filter BEFORE cap — applied to ALL results ────
+    # Must run before [:25] cap so keyword rescue doesn't crowd out filtered hits.
+    _combined_before_cap = rescue_results + results
+    if _has_product_meta and (_required_flags or _ram_min_req is not None or _max_price is not None):
+        _post_filtered = []
+        for r in _combined_before_cap:
+            _rm2 = r.metadata or {}
+            # Boolean flags: e.g. is_convertible=1, has_ssd=1
+            if any(_rm2.get(_fk) != _fv for _fk, _fv in _required_flags.items()):
+                continue
+            # RAM minimum
+            if _ram_min_req is not None:
+                _rval = _rm2.get('ram_gb')
+                if _rval is not None and _rval < _ram_min_req:
+                    continue
+            # Price max
+            if _max_price is not None:
+                _pval = _rm2.get('price')
+                if _pval is not None and _pval > _max_price:
+                    continue
+            _post_filtered.append(r)
+        top = _post_filtered[:25]
+        logger.info(f"[META-FILTER] post-filter: {len(top)} chunks remain")
+    else:
+        top = _combined_before_cap[:25]
 
-    # Rescue chunks go first (exact match), then vector+BM25 results
-    top = (rescue_results + results)[:25]
+    # ── Product catalog: dedup + GPU ranking ─────────────────────────────────
+    if _has_product_meta:
+        # Dedup: same product+price should appear only once
+        _dedup_seen, _deduped = set(), []
+        for r in top:
+            _pk = (str(r.metadata.get('price', '')) + r.page_content[:60]) if r.metadata else r.page_content[:80]
+            if _pk not in _dedup_seen:
+                _dedup_seen.add(_pk)
+                _deduped.append(r)
+        top = _deduped
+        # For "best gaming / highest VRAM" queries: sort by GPU VRAM descending in Python
+        if re.search(r'\bbest\b.*\bgaming\b|\bhighest\b.*\b(?:gpu|vram)\b|\bmost\s+powerful\b', q, re.I):
+            top.sort(key=lambda r: r.metadata.get('gpu_vram_gb', 0) if r.metadata else 0, reverse=True)
     sources = []
     for r in top:
         src = r.metadata.get("source", "")
@@ -1877,22 +1999,25 @@ def get_fresh_llm():
 
         now = time.time()
 
+        _PROV_TIER = {'groq': 4, 'gemini': 4, 'sambanova': 3, 'mistral': 3, 'openai': 3, 'cerebras': 1}
+
         def key_health_score(k):
             s = _key_status.get(k['key'], {})
             if now < s.get("cooldown_until", 0):
-                return (-1, 0, random.random())
+                return (-1, 0, 0, random.random())
             org_id = _key_org_map.get(k['key'])
             if org_id and now < _org_cooldown.get(org_id, 0):
-                return (-1, 0, random.random())
+                return (-1, 0, 0, random.random())
             # Proactive RPM check — skip key if it's near its per-minute limit
             prov = k.get('provider', 'groq')
             soft_limit = _KEY_RPM_SOFT_LIMIT.get(prov, 25)
             rpm_dq = _key_rpm_window.get(k['key'], deque())
             recent_reqs = sum(1 for t in rpm_dq if now - t < 60)
             if recent_reqs >= soft_limit:
-                return (-1, 0, random.random())
+                return (-1, 0, 0, random.random())
+            tier = _PROV_TIER.get(prov, 2)
             tokens = s.get("tokens", 6000)
-            return (tokens, -s.get("last_used", 0), random.random())
+            return (tier, tokens, -s.get("last_used", 0), random.random())
 
         with _llm_key_lock:
             healthiest = sorted(actives, key=key_health_score, reverse=True)
