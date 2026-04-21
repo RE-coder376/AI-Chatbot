@@ -583,20 +583,49 @@
   // AUTOFILL NUCLEAR FIX: Use contenteditable divs — Chrome's credential manager ONLY
   // targets <input> elements. contenteditable is immune to all browser autofill.
   let _rawPassword = '';
+  let _rawCursor = 0;
 
   function _updatePassDisplay() {
     const disp = document.getElementById('master-pass-display');
     const hidden = document.getElementById('master-pass');
-    if (disp && disp.dataset.showing !== '1') disp.textContent = '●'.repeat(_rawPassword.length);
-    else if (disp) disp.textContent = _rawPassword;
+    const text = (disp && disp.dataset.showing !== '1') ? '●'.repeat(_rawPassword.length) : _rawPassword;
+    if (disp) {
+      disp.textContent = text;
+      if (document.activeElement === disp) {
+        try {
+          const range = document.createRange();
+          const sel = window.getSelection();
+          const pos = Math.min(_rawCursor, text.length);
+          if (disp.firstChild) { range.setStart(disp.firstChild, pos); } else { range.setStart(disp, 0); }
+          range.collapse(true); sel.removeAllRanges(); sel.addRange(range);
+        } catch(ex) {}
+      }
+    }
     if (hidden) hidden.value = _rawPassword;
   }
 
   function _handlePassKeydown(e) {
     if (e.key === 'Enter') { e.preventDefault(); unlockSystem(); return; }
-    if (e.key === 'Backspace') { e.preventDefault(); _rawPassword = _rawPassword.slice(0, -1); _updatePassDisplay(); return; }
-    if (e.key === 'Delete') { e.preventDefault(); _rawPassword = ''; _updatePassDisplay(); return; }
-    if (e.key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey) { e.preventDefault(); _rawPassword += e.key; _updatePassDisplay(); }
+    if (e.key === 'Backspace') {
+      e.preventDefault();
+      if (_rawCursor > 0) { _rawPassword = _rawPassword.slice(0, _rawCursor - 1) + _rawPassword.slice(_rawCursor); _rawCursor--; }
+      _updatePassDisplay(); return;
+    }
+    if (e.key === 'Delete') {
+      e.preventDefault();
+      if (_rawCursor < _rawPassword.length) { _rawPassword = _rawPassword.slice(0, _rawCursor) + _rawPassword.slice(_rawCursor + 1); }
+      else { _rawPassword = ''; _rawCursor = 0; }
+      _updatePassDisplay(); return;
+    }
+    if (e.key === 'ArrowLeft') { e.preventDefault(); if (_rawCursor > 0) _rawCursor--; _updatePassDisplay(); return; }
+    if (e.key === 'ArrowRight') { e.preventDefault(); if (_rawCursor < _rawPassword.length) _rawCursor++; _updatePassDisplay(); return; }
+    if (e.key === 'Home') { e.preventDefault(); _rawCursor = 0; _updatePassDisplay(); return; }
+    if (e.key === 'End') { e.preventDefault(); _rawCursor = _rawPassword.length; _updatePassDisplay(); return; }
+    if (e.key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey) {
+      e.preventDefault();
+      _rawPassword = _rawPassword.slice(0, _rawCursor) + e.key + _rawPassword.slice(_rawCursor);
+      _rawCursor++; _updatePassDisplay();
+    }
   }
 
   (function() {
@@ -637,7 +666,12 @@
       disp.addEventListener('paste', e => {
         e.preventDefault();
         const t = (e.clipboardData || window.clipboardData).getData('text/plain');
-        _rawPassword += t; _updatePassDisplay();
+        _rawPassword = _rawPassword.slice(0, _rawCursor) + t + _rawPassword.slice(_rawCursor);
+        _rawCursor += t.length; _updatePassDisplay();
+      });
+      disp.addEventListener('mouseup', () => {
+        const sel = window.getSelection();
+        if (sel && sel.rangeCount) _rawCursor = Math.min(sel.getRangeAt(0).startOffset, _rawPassword.length);
       });
       disp.addEventListener('focus', () => disp.style.borderColor = '#6366f1');
       disp.addEventListener('blur', () => disp.style.borderColor = '#e2e8f0');
@@ -1006,7 +1040,14 @@
           </div>
           <div class="db-actions">
             ${!isClient ? (db.active ? `<span style="font-size:11px;color:#10b981;font-weight:700;padding:6px 12px;">✓ Active</span>` : `<button class="outline" onclick="setActiveDb('${db.name}')" style="width:auto;margin:0;padding:6px 12px;font-size:11px;">Set Test Active</button>`) : ''}
-            <button class="danger" onclick="deleteDb('${db.name}')" style="width:auto;margin:0;padding:6px 12px;font-size:11px;">Delete</button>
+            <div style="position:relative;display:inline-block;">
+              <button class="outline" onclick="toggleDbMenu('${db.name}',event)" style="width:auto;margin:0;padding:6px 12px;font-size:11px;">Edit ▾</button>
+              <div id="db-menu-${db.name}" style="display:none;position:absolute;right:0;top:100%;background:#fff;border:1.5px solid #e2e8f0;border-radius:10px;box-shadow:0 4px 16px rgba(0,0,0,0.12);z-index:200;min-width:175px;overflow:hidden;margin-top:4px;">
+                <div onclick="renameDb('${db.name}')" style="padding:9px 16px;cursor:pointer;font-size:13px;color:#1e293b;" onmouseover="this.style.background='#f8fafc'" onmouseout="this.style.background=''">✏️ Change Name</div>
+                <div onclick="changeDbPass('${db.name}')" style="padding:9px 16px;cursor:pointer;font-size:13px;color:#1e293b;border-top:1px solid #f1f5f9;" onmouseover="this.style.background='#f8fafc'" onmouseout="this.style.background=''">🔑 Change Password</div>
+                <div onclick="deleteDb('${db.name}')" style="padding:9px 16px;cursor:pointer;font-size:13px;color:#ef4444;border-top:1px solid #f1f5f9;" onmouseover="this.style.background='#fff8f8'" onmouseout="this.style.background=''">🗑 Delete</div>
+              </div>
+            </div>
           </div>
         </div>
         <div class="db-details" id="details-${db.name}">
@@ -1167,7 +1208,7 @@
     showStatus('db', `Switching to ${name}...`, 'loading');
     const res = await fetch(`${API}/admin/databases/set-active`, { method:"POST", headers: authHeaders(), body:f });
     const d = await res.json();
-    showStatus('db', (d.message || d.detail) + ' — refresh the chat page to start fresh.', d.success ? 'success' : 'error');
+    showStatus('db', d.success ? `✅ Switched to ${name}. Backend loading (~30s) — refresh chat after 30s.` : (d.message || d.detail), d.success ? 'success' : 'error');
     clearBrandingFields();
     // Reload branding from the new active DB
     const br = await fetch(`${API}/admin/branding`, { headers: authHeaders() });
@@ -1211,15 +1252,53 @@
     showStatus('db', d.message || d.detail, d.success ? 'success' : 'error');
     loadDatabases();
   }
-  async function deleteDb(name) { 
+  async function deleteDb(name) {
+    document.querySelectorAll('[id^="db-menu-"]').forEach(m => m.style.display = 'none');
     if (!await showConfirm('Delete Database', `Permanently delete "${name}" and all its data? This cannot be undone.`, 'Delete', true)) return;
-    const pass = document.getElementById('master-pass').value; 
-    const f = new FormData(); f.append("password", pass); f.append("name", name); 
+    const pass = document.getElementById('master-pass').value;
+    const f = new FormData(); f.append("password", pass); f.append("name", name);
     showStatus('db', `Purging ${name}...`, 'loading');
-    const res = await fetch(`${API}/admin/delete-db`, { method:"POST", headers: authHeaders(), body:f }); 
+    const res = await fetch(`${API}/admin/delete-db`, { method:"POST", headers: authHeaders(), body:f });
     const d = await res.json();
     showStatus('db', d.message || d.detail, d.success ? 'success' : 'error');
     loadDatabases();
+  }
+
+  function toggleDbMenu(name, e) {
+    e.stopPropagation();
+    const menu = document.getElementById(`db-menu-${name}`);
+    const isOpen = menu.style.display !== 'none';
+    document.querySelectorAll('[id^="db-menu-"]').forEach(m => m.style.display = 'none');
+    if (!isOpen) menu.style.display = 'block';
+  }
+  document.addEventListener('click', () => document.querySelectorAll('[id^="db-menu-"]').forEach(m => m.style.display = 'none'));
+
+  async function renameDb(oldName) {
+    document.querySelectorAll('[id^="db-menu-"]').forEach(m => m.style.display = 'none');
+    const newName = prompt(`New name for "${oldName}":`, oldName);
+    if (!newName || newName.trim() === oldName) return;
+    const pass = document.getElementById('master-pass').value;
+    const f = new FormData(); f.append("password", pass); f.append("old_name", oldName); f.append("new_name", newName.trim());
+    showStatus('db', `Renaming ${oldName} → ${newName.trim()}...`, 'loading');
+    const res = await fetch(`${API}/admin/rename-db`, { method:"POST", headers: authHeaders(), body:f });
+    const d = await res.json();
+    showStatus('db', d.message || d.detail, d.success ? 'success' : 'error');
+    loadDatabases();
+  }
+
+  async function changeDbPass(dbName) {
+    document.querySelectorAll('[id^="db-menu-"]').forEach(m => m.style.display = 'none');
+    const newPass = prompt(`New admin password for "${dbName}":`);
+    if (!newPass || !newPass.trim()) return;
+    const pass = document.getElementById('master-pass').value;
+    showStatus('db', `Updating password for ${dbName}...`, 'loading');
+    const res = await fetch(`${API}/admin/save-config`, {
+      method: "POST",
+      headers: { ...authHeaders(), 'X-Admin-DB': dbName, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ admin_password: newPass.trim() })
+    });
+    const d = await res.json();
+    showStatus('db', d.message || d.detail, d.success ? 'success' : 'error');
   }
 
   async function clearDbData(name) {

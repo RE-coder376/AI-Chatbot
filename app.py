@@ -4109,6 +4109,38 @@ async def delete_db(request: Request, password: str = Form(...), name: str = For
                 await asyncio.sleep(1)
     return {"success": False, "message": "Repository not found."}
 
+@app.post("/admin/rename-db")
+async def rename_db(request: Request, password: str = Form(...), old_name: str = Form(...), new_name: str = Form(...)):
+    password = _extract_password(request, password)
+    try: old = _validate_db_name(old_name.lower().strip())
+    except HTTPException: return JSONResponse({"detail": "Invalid source name"}, status_code=400)
+    try: new = _validate_db_name(new_name.lower().strip())
+    except HTTPException: return JSONResponse({"detail": "Invalid target name"}, status_code=400)
+    admin_auth(password, get_config(old))
+    if old == new: return {"success": False, "message": "Names are identical."}
+    src = DATABASES_DIR / old
+    dst = DATABASES_DIR / new
+    if not src.exists(): return {"success": False, "message": f"'{old}' not found."}
+    if dst.exists(): return {"success": False, "message": f"'{new}' already exists."}
+    import shutil
+    try:
+        await asyncio.to_thread(shutil.copytree, src, dst)
+        await asyncio.to_thread(shutil.rmtree, src)
+    except Exception as e:
+        return JSONResponse({"detail": f"Rename failed: {e}"}, status_code=500)
+    # Update active_db.txt if we renamed the active DB
+    global local_db
+    active = ACTIVE_DB_FILE.read_text(encoding="utf-8").strip() if ACTIVE_DB_FILE.exists() else ""
+    if active == old:
+        ACTIVE_DB_FILE.write_text(new, encoding="utf-8")
+        local_db = None
+    # Evict caches for old name
+    _widget_key_cache_copy = {k: v for k, v in _widget_key_cache.items() if v != old}
+    _widget_key_cache.clear(); _widget_key_cache.update(_widget_key_cache_copy)
+    _intro_q_cache.pop(old, None); _bm25_cache.pop(old, None); _db_instance_cache.pop(old, None)
+    _product_db_cache.pop(old, None)
+    return {"success": True, "message": f"Renamed '{old}' → '{new}'."}
+
 @app.get("/admin/analytics")
 def get_analytics(request: Request, password: str = ""):
     password = _extract_password(request, password)
