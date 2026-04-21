@@ -1279,10 +1279,9 @@
     if (!newName || newName.trim() === oldName) return;
     const pass = document.getElementById('master-pass').value;
     const f = new FormData(); f.append("password", pass); f.append("old_name", oldName); f.append("new_name", newName.trim());
-    showStatus('db', `Renaming ${oldName} → ${newName.trim()}...`, 'loading');
     const res = await fetch(`${API}/admin/rename-db`, { method:"POST", headers: authHeaders(), body:f });
     const d = await res.json();
-    showStatus('db', d.message || d.detail, d.success ? 'success' : 'error');
+    alert(d.message || d.detail || (res.ok ? 'Renamed.' : 'Failed.'));
     loadDatabases();
   }
 
@@ -1291,14 +1290,13 @@
     const newPass = prompt(`New admin password for "${dbName}":`);
     if (!newPass || !newPass.trim()) return;
     const pass = document.getElementById('master-pass').value;
-    showStatus('db', `Updating password for ${dbName}...`, 'loading');
-    const res = await fetch(`${API}/admin/save-config`, {
+    const res = await fetch(`${API}/admin/ops`, {
       method: "POST",
       headers: { ...authHeaders(), 'X-Admin-DB': dbName, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ admin_password: newPass.trim() })
+      body: JSON.stringify({ password: pass, admin_password: newPass.trim() })
     });
     const d = await res.json();
-    showStatus('db', d.message || d.detail, d.success ? 'success' : 'error');
+    alert(d.message || d.detail || (res.ok ? `Password updated for ${dbName}.` : 'Update failed.'));
   }
 
   async function clearDbData(name) {
