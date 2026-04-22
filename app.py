@@ -6513,10 +6513,19 @@ async def crawl_site(data: dict, request: Request):
                                 await log_queue.put(f"[{completed}/{len(to_crawl)}] ⚠️  {cur_url[:70]} (PDF failed)")
                             return
 
-                        text = ""   # Always use Playwright — captures every word including JS-rendered content
-                        title = ""  # initialized here so it's always defined even if pg.title() throws
-                        if True:
-                            # --- Playwright: full JS render + lazy scroll for every page ---
+                        text = ""
+                        title = ""
+                        # Fast path: try httpx first (Shopify/WordPress server-render fine without browser).
+                        # Falls through to Playwright only if httpx returns < 300 chars.
+                        try:
+                            _fast_text = await _requests_extract(cur_url)
+                            if _fast_text and len(_fast_text) >= 300:
+                                text = _fast_text
+                                title = cur_url.rstrip("/").split("/")[-1].replace("-", " ").title()
+                        except Exception:
+                            pass
+                        if len(text) < 300:
+                            # --- Playwright: full JS render + lazy scroll ---
                             pg = await ctx.new_page()
                             await stealth(pg)
                             for attempt in range(3):
