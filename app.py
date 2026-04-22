@@ -340,6 +340,16 @@ def _github_backup_crawled_urls(db_name: str):
     except Exception as e:
         logger.warning(f"[GH-SYNC] crawled_urls backup error: {e}")
 
+def _write_crawl_status(db_name: str, status: str):
+    """Write last_crawl_status ('success'/'failed') to _crawl_times.json sidecar."""
+    try:
+        sidecar = DATABASES_DIR / db_name / "_crawl_times.json"
+        data = json.loads(sidecar.read_text(encoding="utf-8")) if sidecar.exists() else {}
+        data["last_crawl_status"] = status
+        sidecar.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    except Exception as e:
+        logger.warning(f"[CRAWL-STATUS] Could not write status for {db_name}: {e}")
+
 def _github_backup_crawl_times(db_name: str):
     """Upload _crawl_times.json to GitHub Contents API so timestamp survives HF Space restarts."""
     import requests as _req
@@ -2560,8 +2570,10 @@ async def _auto_scheduler():
                                 except Exception as _ce:
                                     logger.warning(f"[SCHEDULER] Could not update chunk count: {_ce}")
                                 logger.info(f"[SCHEDULER] '{db_name}' crawled: +{chunks} chunks")
+                                _write_crawl_status(db_name, "success")
                             except Exception as e:
                                 logger.error(f"[SCHEDULER] Crawl error '{db_name}': {e}")
+                                _write_crawl_status(db_name, "failed")
 
                     # ── API sources polling ───────────────────────────────
                     # last_fetch stored in sidecar to avoid corrupting config.json
@@ -4137,6 +4149,11 @@ async def delete_db(request: Request, password: str = Form(...), name: str = For
     
     if db_path.exists():
         import shutil
+        # Release any cached ChromaDB handles BEFORE rmtree to avoid file locks
+        _db_instance_cache.pop(db_name, None)
+        _bm25_cache.pop(db_name, None)
+        gc.collect()
+        await asyncio.sleep(0.2)
         for i in range(3):
             try:
                 await asyncio.to_thread(shutil.rmtree, db_path)
@@ -5496,30 +5513,24 @@ async def crawl_inspect(data: dict, request: Request):
     return StreamingResponse(_stream(), media_type="text/event-stream")
 
 
-def _compute_db_health(chunks: int, last_crawl: str, auto_enabled: bool, interval_m: float) -> dict:
-    """Return {level, label, reason} for a DB's health status."""
+def _compute_db_health(chunks: int, last_crawl: str, auto_enabled: bool, interval_m: float, last_crawl_status: str) -> dict:
+    """Return {level, label, reason} based on crawl status and recency — not chunk count."""
     if chunks == 0:
-        return {"level": "empty", "label": "Empty", "reason": "No knowledge base data — crawl required"}
-    if chunks < 100:
-        return {"level": "critical", "label": "Critical", "reason": f"Only {chunks:,} chunks — too low to be useful"}
-    age_warn = False
-    age_reason = ""
+        return {"level": "empty", "label": "Empty", "reason": "Never crawled — no data yet"}
+    if last_crawl_status == "failed":
+        return {"level": "critical", "label": "Error", "reason": "Last crawl failed — check crawl URL or site availability"}
     if auto_enabled and last_crawl:
         try:
-            age_days = (datetime.now() - datetime.fromisoformat(last_crawl)).days
-            threshold = max(3, int(interval_m * 3 / 1440))  # 3× interval in days, min 3
-            if age_days > threshold:
-                age_warn = True
-                age_reason = f"last crawl {age_days}d ago"
+            age_mins = (datetime.now() - datetime.fromisoformat(last_crawl)).total_seconds() / 60
+            if age_mins > interval_m * 2:
+                age_h = int(age_mins // 60)
+                age_label = f"{age_h}h ago" if age_h > 0 else f"{int(age_mins)}m ago"
+                return {"level": "warning", "label": "Stale", "reason": f"Auto-crawl overdue — last ran {age_label}"}
         except Exception:
             pass
-    if chunks < 300:
-        reason = f"{chunks:,} chunks (low)"
-        if age_reason: reason += f" — {age_reason}"
-        return {"level": "warning", "label": "Low", "reason": reason}
-    if age_warn:
-        return {"level": "warning", "label": "Stale", "reason": f"{chunks:,} chunks — {age_reason}"}
-    return {"level": "healthy", "label": "Healthy", "reason": f"{chunks:,} chunks"}
+    if last_crawl:
+        return {"level": "healthy", "label": "OK", "reason": f"Last crawl succeeded · {chunks:,} chunks"}
+    return {"level": "healthy", "label": "OK", "reason": f"{chunks:,} chunks · no auto-crawl configured"}
 
 @app.get("/admin/db-stats")
 def get_db_stats(request: Request, password: str = ""):
@@ -5573,6 +5584,7 @@ def get_db_stats(request: Request, password: str = ""):
         except Exception:
             _sc_data = {}
         last_crawl = _sc_data.get("last_crawl_time") or db_cfg.get("last_crawl_time", "")
+        last_crawl_status = _sc_data.get("last_crawl_status") or db_cfg.get("last_crawl_status", "")
         next_crawl_ts = ""
         if last_crawl and auto_enabled:
             try:
@@ -5592,7 +5604,7 @@ def get_db_stats(request: Request, password: str = ""):
             "crawl_interval_minutes": interval_m,
             "crawl_url": db_cfg.get("crawl_url", ""),
             "api_sources": db_cfg.get("api_sources", []),
-            "health": _compute_db_health(chunks, last_crawl, auto_enabled, interval_m),
+            "health": _compute_db_health(chunks, last_crawl, auto_enabled, interval_m, last_crawl_status),
         })
     return {"stats": stats}
 
@@ -6583,12 +6595,14 @@ async def crawl_site(data: dict, request: Request):
                 logger.info(f"[POST-CRAWL] local_db reloaded from disk: {_cnt_after} chunks")
             yield _send(f"🔄 DB reloaded in memory — no restart needed.")
             yield _send(f"✅ Done! {total_chunks} chunks ingested into '{db_name}'.")
+            _write_crawl_status(db_name, "success")
             asyncio.get_running_loop().run_in_executor(None, _github_sync_upload, db_name)
             yield "data: {\"done\": true}\n\n"
         except Exception as e:
             import traceback
             tb = traceback.format_exc()
             logger.error(f"[CRAWL] ❌ {db_name}: {e}\n{tb[:800]}")
+            _write_crawl_status(db_name, "failed")
             yield _send(f"❌ Error: {e}\n{tb[:600]}")
             yield "data: {\"done\": true}\n\n"
 
