@@ -1503,13 +1503,21 @@
       const res = await fetch(`${API}${endpoint}`, { headers: authHeaders() });
       const data = await res.json();
       
-      const newRows = (data.results || []).map(r => `
+      const newRows = (data.results || []).map(r => {
+        const fixId = `fix-${Math.random().toString(36).slice(2)}`;
+        const fixHtml = r.fix ? `
+          <div style="margin-top:5px;">
+            <span onclick="document.getElementById('${fixId}').style.display=document.getElementById('${fixId}').style.display==='none'?'block':'none'"
+                  style="cursor:pointer;font-size:10px;color:#d97706;font-weight:600;user-select:none;">💡 How to fix ▾</span>
+            <div id="${fixId}" style="display:none;margin-top:4px;font-size:10px;color:#92400e;background:#fffbeb;border:1px solid #fcd34d;border-radius:6px;padding:7px 10px;line-height:1.5;">${r.fix}</div>
+          </div>` : '';
+        return `
         <tr class="audit-row-new">
           <td style="font-weight:700;">${r.name}</td>
           <td><span class="badge badge-${r.status.toLowerCase()}">${r.status}</span></td>
-          <td style="font-size:11px; line-height:1.4; color:var(--text-main);">${r.desc}</td>
-        </tr>
-      `).join('');
+          <td style="font-size:11px; line-height:1.4; color:var(--text-main);">${r.desc}${fixHtml}</td>
+        </tr>`;
+      }).join('');
 
       if (type === 'all') {
         body.innerHTML = newRows;
