@@ -1501,15 +1501,42 @@ async def retrieve_context(q: str, db, k: int = 15, fast: bool = False, expansio
             except Exception:
                 pass
         _bm25_task = loop.run_in_executor(None, lambda: _bm25_search(q, db, _bm25_db_name, k=k))
+        # Policy injection: secondary search for shipping/discount/return docs when query is policy-related.
+        # Runs in parallel — zero latency overhead. Prepended to context so never crowded out by product chunks.
+        _POLICY_Q_RE = re.compile(
+            r'\b(ship|deliver|return|refund|exchang|policy|policies|discount|bulk|warranty|repair|'
+            r'track|cod|cash.?on.?delivery|free.?deliver|minimum.?order|charges?|fees?|international)\b',
+            re.I
+        )
+        _policy_task = None
+        if _POLICY_Q_RE.search(q):
+            _policy_task = loop.run_in_executor(
+                None, lambda: db.similarity_search(
+                    "shipping delivery return policy discount rules refund charges", k=5
+                )
+            )
+            logger.debug(f"[POLICY-INJECT] Triggered for: {q[:60]}")
         try:
+            _gather_tasks = [*_search_tasks, _bm25_task] + ([_policy_task] if _policy_task else [])
             _all_results = await asyncio.wait_for(
-                asyncio.gather(*_search_tasks, _bm25_task, return_exceptions=True),
+                asyncio.gather(*_gather_tasks, return_exceptions=True),
                 timeout=35
             )
         except asyncio.TimeoutError:
             logger.warning("ChromaDB parallel search timed out")
             _all_results = []
-        for idx, res in enumerate(_all_results):
+        # Split results: last slot is policy_task (if fired), rest are main search results
+        _n_main = len(_search_tasks) + 1  # search tasks + bm25
+        _main_results = _all_results[:_n_main]
+        _policy_results_raw = _all_results[_n_main] if _policy_task and len(_all_results) > _n_main else []
+        policy_results = []
+        if not isinstance(_policy_results_raw, Exception):
+            for _pr in _policy_results_raw:
+                _pk = _pr.page_content[:100]
+                if _pk not in seen:
+                    seen.add(_pk)
+                    policy_results.append(_pr)
+        for idx, res in enumerate(_main_results):
             if isinstance(res, Exception):
                 logger.error(f"Retrieval error (task {idx}): {res}")
                 continue
@@ -1526,7 +1553,8 @@ async def retrieve_context(q: str, db, k: int = 15, fast: bool = False, expansio
 
     # ── Product catalog: post-filter BEFORE cap — applied to ALL results ────
     # Must run before [:25] cap so keyword rescue doesn't crowd out filtered hits.
-    _combined_before_cap = rescue_results + results
+    # policy_results prepended so they always appear in context for policy queries.
+    _combined_before_cap = policy_results + rescue_results + results
     if _has_product_meta and (_required_flags or _ram_min_req is not None or _max_price is not None):
         _post_filtered = []
         for r in _combined_before_cap:
