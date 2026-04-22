@@ -6773,6 +6773,10 @@ async def crawl_site(data: dict, request: Request):
                 # Copy ChromaDB files from crawl dir back to persistent db_dir
                 yield _send("📦 Saving ChromaDB to persistent storage...")
                 try:
+                    # If clear was requested, wipe db_dir NOW (after crawl, no open connections)
+                    # This is safer than pre-crawl clear which can fail on locked SQLite files
+                    if clear_first:
+                        _wipe_chroma_dir(db_dir)
                     for _item in chroma_dir.iterdir():
                         _dst = db_dir / _item.name
                         if _item.is_dir():
