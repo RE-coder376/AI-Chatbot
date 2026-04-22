@@ -287,6 +287,20 @@ def _github_sync_download():
                         logger.info(f"[GH-SYNC] ✅ {dest} restored for {db_n}")
                 except Exception as e:
                     logger.warning(f"[GH-SYNC] {dest} restore failed for {db_n}: {e}")
+        # Enforce deleted_dbs.txt — remove DB folders that were deleted (even if config.json is baked into Docker image)
+        try:
+            import base64 as _b64d, shutil as _sh
+            _del_r = _req.get(f"https://api.github.com/repos/{_GITHUB_USERNAME}/{_GITHUB_REPO}/contents/deleted_dbs.txt",
+                              headers=api_hdr, timeout=10)
+            if _del_r.status_code == 200:
+                _deleted_names = set(_b64d.b64decode(_del_r.json().get("content","").replace("\n","")).decode("utf-8").splitlines())
+                for _dn in _deleted_names:
+                    _dn = _dn.strip()
+                    if _dn and (DATABASES_DIR / _dn).exists():
+                        _sh.rmtree(str(DATABASES_DIR / _dn))
+                        logger.info(f"[GH-SYNC] Removed deleted DB '{_dn}' from local disk")
+        except Exception as _del_e:
+            logger.warning(f"[GH-SYNC] deleted_dbs.txt cleanup failed: {_del_e}")
         _github_sync_result = {"status": "ok", "detail": f"{len(zip_assets)} DBs restored"}
         logger.info("[GH-SYNC] ✅ All databases restored from GitHub")
         # Set active DB priority:
@@ -490,6 +504,26 @@ def _github_sync_delete(db_name: str):
                 logger.info(f"[GH-SYNC] Deleted {db_name}.zip from GitHub releases")
                 deleted = True
                 break
+        # Add to deleted_dbs.txt in Contents API — prevents resurrection on HF restart
+        # (Docker image has databases/*/config.json baked in; deleted list overrides that)
+        try:
+            import base64 as _b64
+            _del_fname = "deleted_dbs.txt"
+            _del_url = f"https://api.github.com/repos/{_GITHUB_USERNAME}/{_GITHUB_REPO}/contents/{_del_fname}"
+            _dr = _req.get(_del_url, headers=api_hdr, timeout=10)
+            _existing_del = set()
+            _del_sha = None
+            if _dr.status_code == 200:
+                _del_sha = _dr.json().get("sha")
+                _existing_del = set(_b64.b64decode(_dr.json().get("content","").replace("\n","")).decode("utf-8").splitlines())
+            _existing_del.add(db_name)
+            _new_content = "\n".join(sorted(_existing_del))
+            _del_payload = {"message": f"delete: add {db_name}", "content": _b64.b64encode(_new_content.encode()).decode()}
+            if _del_sha: _del_payload["sha"] = _del_sha
+            _req.put(_del_url, json=_del_payload, headers=api_hdr, timeout=15)
+            logger.info(f"[GH-SYNC] Added {db_name} to deleted_dbs.txt")
+        except Exception as _de:
+            logger.warning(f"[GH-SYNC] Could not update deleted_dbs.txt: {_de}")
         # Also remove crawl_times and crawled_urls from Contents API so they can't restore the deleted DB
         for fname in [f"crawl_times_{db_name}.json", f"crawled_urls_{db_name}.txt"]:
             try:
@@ -1509,13 +1543,16 @@ async def retrieve_context(q: str, db, k: int = 15, fast: bool = False, expansio
             re.I
         )
         _policy_task = None
-        if _POLICY_Q_RE.search(q):
+        # Fire policy search when: (a) query explicitly mentions policy terms, OR
+        # (b) DB is a product/retail catalog (_has_product_meta) — covers "Deli Punch shipping?"
+        # type queries where the user asks about a product but the answer lives in a policy chunk.
+        if _POLICY_Q_RE.search(q) or _has_product_meta:
             _policy_task = loop.run_in_executor(
                 None, lambda: db.similarity_search(
                     "shipping delivery return policy discount rules refund charges", k=5
                 )
             )
-            logger.debug(f"[POLICY-INJECT] Triggered for: {q[:60]}")
+            logger.debug(f"[POLICY-INJECT] Triggered (product_meta={_has_product_meta}) for: {q[:60]}")
         try:
             _gather_tasks = [*_search_tasks, _bm25_task] + ([_policy_task] if _policy_task else [])
             _all_results = await asyncio.wait_for(
@@ -4222,6 +4259,24 @@ async def create_db(request: Request, password: str = Form(...), name: str = For
             db_cfg_path.write_text(json.dumps(existing, indent=2), encoding="utf-8")
         except Exception: pass
     threading.Thread(target=_github_sync_upload, args=(db_name,), daemon=True).start()
+    # Remove from deleted_dbs.txt if re-creating a previously-deleted DB
+    def _undelete_db(name):
+        try:
+            import requests as _req2, base64 as _b64u
+            _pat2 = os.environ.get("GITHUB_PAT", "").strip()
+            if not _pat2: return
+            _hdr2 = {"Authorization": f"token {_pat2}", "User-Agent": "chatbot-sync"}
+            _url2 = f"https://api.github.com/repos/{_GITHUB_USERNAME}/{_GITHUB_REPO}/contents/deleted_dbs.txt"
+            _r2 = _req2.get(_url2, headers=_hdr2, timeout=10)
+            if _r2.status_code != 200: return
+            _sha2 = _r2.json().get("sha")
+            _names = set(_b64u.b64decode(_r2.json().get("content","").replace("\n","")).decode().splitlines())
+            if name not in _names: return
+            _names.discard(name)
+            _new2 = "\n".join(sorted(_names))
+            _req2.put(_url2, json={"message": f"restore: remove {name}", "content": _b64u.b64encode(_new2.encode()).decode(), "sha": _sha2}, headers=_hdr2, timeout=15)
+        except Exception as _ue: logger.warning(f"[GH-SYNC] undelete {name}: {_ue}")
+    threading.Thread(target=_undelete_db, args=(db_name,), daemon=True).start()
     return {"success": True, "message": f"Repository '{db_name}' initialized and ready."}
 
 @app.post("/admin/delete-db")
