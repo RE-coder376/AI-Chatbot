@@ -6507,8 +6507,8 @@ async def crawl_site(data: dict, request: Request):
                                     if len(pending_pages) >= 5:
                                         batch = pending_pages[:]
                                         pending_pages.clear()
-                                        await log_queue.put(f"💾 Saving batch (5 pages, {total_chunks} so far)...")
                                         await _flush_pages(batch)
+                                        await log_queue.put(f"💾 Saved batch (5 pages, {total_chunks} total so far)")
                             else:
                                 await log_queue.put(f"[{completed}/{len(to_crawl)}] ⚠️  {cur_url[:70]} (PDF failed)")
                             return
@@ -6699,8 +6699,8 @@ async def crawl_site(data: dict, request: Request):
                                         pending_pages.clear()
                                 # Embed OUTSIDE the lock so other crawl tasks can proceed
                                 if batch_to_flush:
-                                    await log_queue.put(f"💾 Saving batch ({len(batch_to_flush)} pages, {total_chunks} so far)...")
                                     await _flush_pages(batch_to_flush)
+                                    await log_queue.put(f"💾 Saved batch ({len(batch_to_flush)} pages, {total_chunks} total so far)")
                         else:
                             await log_queue.put(f"[{completed}/{len(to_crawl)}] ⏭️  {cur_url[:70]} ({len(text)} chars - TOO SHORT)")
 
