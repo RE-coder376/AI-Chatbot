@@ -2572,7 +2572,10 @@ async def _auto_crawl_db(db_name: str, url: str, max_pages: int = 20) -> int:
                         html = await _pg.content()
                         await _pg.close()
                         soup = BeautifulSoup(html, "html.parser")
-                        for tag in soup(["script","style","nav","footer","header"]): tag.decompose()
+                        # Keep footer/header — e-commerce sites put shipping/return policy there.
+                        # Only remove script/style (non-content) and display:none elements.
+                        for tag in soup(["script","style"]): tag.decompose()
+                        for tag in soup.find_all(style=lambda s: s and "display:none" in s.replace(" ","")): tag.decompose()
                         text = soup.get_text(separator="\n", strip=True)
                     except Exception as _pe:
                         logger.warning(f"[AUTO-CRAWL] Playwright page error {page_url}: {_pe}")
@@ -2581,7 +2584,8 @@ async def _auto_crawl_db(db_name: str, url: str, max_pages: int = 20) -> int:
                         r = await _cl.get(page_url)
                         if r.status_code == 200:
                             soup = BeautifulSoup(r.text, "html.parser")
-                            for tag in soup(["script","style","nav","footer","header"]): tag.decompose()
+                            for tag in soup(["script","style"]): tag.decompose()
+                            for tag in soup.find_all(style=lambda s: s and "display:none" in s.replace(" ","")): tag.decompose()
                             text = soup.get_text(separator="\n", strip=True)
                 if len(text) > 100:
                     # Delete stale chunks for this URL before re-adding (no duplicate buildup)
