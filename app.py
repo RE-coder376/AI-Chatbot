@@ -2395,11 +2395,21 @@ def _check_config_security():
         logger.warning(f"Config security check failed: {e}")
 
 async def _auto_crawl_db(db_name: str, url: str, max_pages: int = 20) -> int:
-    """Scheduled re-crawl — discovers new pages via sitemap, indexes only pages not seen before."""
+    """Scheduled re-crawl — refreshes all sitemap pages (or BFS if no sitemap) for the DB."""
     import httpx as _hx
     from bs4 import BeautifulSoup
-    from urllib.parse import urlparse
+    from urllib.parse import urlparse, urljoin
     from langchain_core.documents import Document
+    global embeddings_model
+    # Ensure embeddings model is loaded — needed even if active DB is API-only
+    if embeddings_model is None:
+        try:
+            from langchain_community.embeddings.fastembed import FastEmbedEmbeddings
+            embeddings_model = FastEmbedEmbeddings(model_name="BAAI/bge-small-en-v1.5")
+            logger.info("[AUTO-CRAWL] Loaded FastEmbed for non-active DB crawl")
+        except Exception as _emb_e:
+            logger.warning(f"[AUTO-CRAWL] Could not load embeddings model: {_emb_e}")
+            return 0
     db = await asyncio.to_thread(_get_db_instance, db_name)
     if db is None and db_name == _get_active_db() and local_db is not None:
         # active DB lives in /dev/shm — create a SEPARATE Chroma instance for writes
@@ -2423,6 +2433,10 @@ async def _auto_crawl_db(db_name: str, url: str, max_pages: int = 20) -> int:
     domain = urlparse(base).netloc
     crawl_urls, added = [], 0
     newly_seen: list = []
+    def _domain_match(u_netloc: str, ref: str) -> bool:
+        """True if netloc matches ref, ignoring www. prefix."""
+        return u_netloc.lstrip("www.") == ref.lstrip("www.")
+
     try:
         # Step 1: discover URLs via sitemap — crawl ALL (not just new) for content refresh
         async with _hx.AsyncClient(timeout=15, headers={"User-Agent": "Mozilla/5.0"}, follow_redirects=True) as client:
@@ -2431,15 +2445,44 @@ async def _auto_crawl_db(db_name: str, url: str, max_pages: int = 20) -> int:
                     r = await client.get(f"{base}{sm_path}")
                     if r.status_code == 200 and "<loc>" in r.text:
                         found = re.findall(r'<loc>([^<]+)</loc>', r.text)
-                        sitemap_urls = [u.strip() for u in found if urlparse(u.strip()).netloc == domain]
+                        candidate = [u.strip() for u in found if _domain_match(urlparse(u.strip()).netloc, domain)]
+                        # If all locs are XML files, it's a sitemap index — expand sub-sitemaps
+                        if candidate and all(u.endswith(".xml") for u in candidate):
+                            expanded = []
+                            for sub_url in candidate[:10]:
+                                try:
+                                    sr = await client.get(sub_url)
+                                    if sr.status_code == 200 and "<loc>" in sr.text:
+                                        sub_found = re.findall(r'<loc>([^<]+)</loc>', sr.text)
+                                        expanded += [u.strip() for u in sub_found if _domain_match(urlparse(u.strip()).netloc, domain) and not u.strip().endswith(".xml")]
+                                except Exception: pass
+                            candidate = expanded if expanded else candidate
+                        sitemap_urls = candidate
                         crawl_urls = sitemap_urls[:max_pages]
                         new_count = len([u for u in crawl_urls if u not in already_seen])
                         logger.info(f"[AUTO-CRAWL] '{db_name}': {len(sitemap_urls)} sitemap URLs — refreshing {len(crawl_urls)} ({new_count} new)")
                         break
                 except Exception as e:
                     logger.warning(f"[AUTO-CRAWL] Sitemap '{sm_path}' failed for {db_name}: {e}")
+        # Fallback: no sitemap — BFS from homepage (1 level deep)
         if not crawl_urls:
-            logger.info(f"[AUTO-CRAWL] '{db_name}': sitemap empty or unreachable — skipping")
+            logger.info(f"[AUTO-CRAWL] '{db_name}': no sitemap — falling back to BFS from {url}")
+            try:
+                async with _hx.AsyncClient(timeout=15, headers={"User-Agent": "Mozilla/5.0"}, follow_redirects=True) as client:
+                    r = await client.get(url)
+                    if r.status_code == 200:
+                        soup = BeautifulSoup(r.text, "html.parser")
+                        bfs_urls = [url]  # always include homepage
+                        for a in soup.find_all("a", href=True):
+                            href = urljoin(url, a["href"]).split("#")[0].rstrip("/")
+                            if _domain_match(urlparse(href).netloc, domain) and href not in bfs_urls:
+                                bfs_urls.append(href)
+                        crawl_urls = bfs_urls[:max_pages]
+                        logger.info(f"[AUTO-CRAWL] '{db_name}': BFS found {len(crawl_urls)} URLs from homepage")
+            except Exception as _bfs_e:
+                logger.warning(f"[AUTO-CRAWL] BFS fallback failed for {db_name}: {_bfs_e}")
+        if not crawl_urls:
+            logger.info(f"[AUTO-CRAWL] '{db_name}': no URLs found — skipping")
             return 0
         # Step 2: fetch and re-index all pages — Playwright for JS rendering, one browser for all
         _browser = None
@@ -2562,7 +2605,7 @@ async def _auto_scheduler():
                             try:
                                 due = now >= datetime.fromisoformat(last_str) + timedelta(minutes=interval_m)
                             except Exception as e: logger.debug(f"[SCHEDULER] Crawl interval parse ({db_dir.name}): {e}")
-                        if due:
+                        if due and db_name not in _crawling_dbs:
                             logger.info(f"[SCHEDULER] Auto-crawling '{db_name}'...")
                             # Write timestamp NOW (start of crawl) so interval resets immediately
                             # — prevents "due now" on all DBs while a long crawl is in progress
@@ -5695,7 +5738,7 @@ def get_db_stats(request: Request, password: str = ""):
             "name": db_dir.name,
             "chunks": chunks,
             "last_crawl_time": last_crawl,
-            "last_crawl_chunks": db_cfg.get("last_crawl_chunks", 0),
+            "last_crawl_chunks": _sc_data.get("last_crawl_chunks") or db_cfg.get("last_crawl_chunks", 0),
             "next_crawl_ts": next_crawl_ts,
             "is_crawling": db_dir.name in _crawling_dbs,
             "auto_crawl_enabled": auto_enabled,
