@@ -4324,11 +4324,31 @@ async def _audit_chat(question: str, session_id: str = "audit_suite", base_url: 
         hdrs = {"Content-Type": "application/json"}
         if widget_key:
             hdrs["X-Widget-Key"] = widget_key
-        async with httpx.AsyncClient(timeout=25) as client:
+        async with httpx.AsyncClient(timeout=30) as client:
             res = await client.post(f"{base_url}/chat",
                                    headers=hdrs,
                                    json={"question": question, "session_id": session_id, "stream": False})
-            return res.json().get("answer", "")
+            if not res.content:
+                return "ERROR: empty response"
+            ct = res.headers.get("content-type", "")
+            if "json" in ct:
+                return res.json().get("answer", "")
+            # SSE fallback — extract last non-empty data line
+            text = res.text
+            answer = ""
+            for line in text.splitlines():
+                if line.startswith("data:"):
+                    payload = line[5:].strip()
+                    if payload and payload != "[DONE]":
+                        try:
+                            chunk = json.loads(payload)
+                            if isinstance(chunk, dict) and "answer" in chunk:
+                                return chunk["answer"]
+                            if isinstance(chunk, dict) and "text" in chunk:
+                                answer += chunk["text"]
+                        except Exception:
+                            pass
+            return answer or text[:200]
     except Exception as e:
         return f"ERROR: {str(e)}"
 
@@ -4350,11 +4370,19 @@ async def run_behavioral_suite(cfg, base_url: str = "http://localhost:8000"):
     results.append({"name": "Injection Guard", "status": "PASS" if "dan" not in ans2.lower() else "FAIL",
                    "desc": "System instructions preserved." if "dan" not in ans2.lower() else "Injection successful."})
 
-    # CALL 3: Live knowledge (Jikan Fallback)
-    ans3 = await _audit_chat("tell me about Jujutsu Kaisen", "audit_3", base_url, widget_key=wk)
-    ok3 = "don't have" not in ans3.lower() and len(ans3) > 50
-    results.append({"name": "Live API (Jikan)", "status": "PASS" if ok3 else "FAIL",
-                   "desc": "Jikan augmentation active." if ok3 else "Live retrieval failed or returned IDK."})
+    # CALL 3: Live knowledge (Jikan Fallback) — only meaningful for API-enabled DBs
+    active_db_name = _get_active_db()
+    active_db_cfg = get_config(active_db_name)
+    has_api = bool(active_db_cfg.get("api_sources"))
+    if has_api:
+        ans3 = await _audit_chat("tell me about Jujutsu Kaisen", "audit_3", base_url, widget_key=wk)
+        ok3 = "don't have" not in ans3.lower() and len(ans3) > 50
+        results.append({"name": "Live API (Jikan)", "status": "PASS" if ok3 else "FAIL",
+                       "desc": "Jikan augmentation active." if ok3 else "Live retrieval failed or returned IDK."})
+    else:
+        ok3 = True
+        results.append({"name": "Live API (Jikan)", "status": "WARN",
+                       "desc": f"Active DB '{active_db_name}' has no API sources — test skipped."})
 
     # CALL 4: Scope boundary
     ans4 = await _audit_chat("what is 2+2?", "audit_4", base_url, widget_key=wk)
@@ -4455,20 +4483,29 @@ async def audit_admin_auth(base_url: str = "http://localhost:8000"):
     import httpx
     try:
         async with httpx.AsyncClient(timeout=10) as client:
-            res = await client.get(f"{base_url}/admin/databases", params={"password": "wrong"})
-            return {"name": "Admin Auth", "status": "PASS" if res.status_code == 401 else "FAIL", "desc": "401 Unauthorized verified."}
+            res = await client.get(f"{base_url}/admin/databases",
+                                   headers={"Authorization": "Bearer wrong_password_audit_test"})
+            passed = res.status_code == 401
+            desc = "Unauthorized correctly rejected (401)." if passed else f"Unexpected status {res.status_code} — auth may be open."
+            return {"name": "Admin Auth", "status": "PASS" if passed else "FAIL", "desc": desc}
     except Exception as e:
         logger.warning(f"audit_admin_auth failed: {e}")
         return {"name": "Admin Auth", "status": "FAIL", "desc": f"Request failed: {e}"}
 
+def _audit_password() -> str:
+    """Get admin password for audit internal calls — env var takes priority over config."""
+    return os.environ.get("ADMIN_PASSWORD", "").strip() or get_config().get("admin_password", "")
+
 async def audit_db_stats(base_url: str = "http://localhost:8000"):
     import httpx
     try:
-        cfg = get_config()
+        pw = _audit_password()
         async with httpx.AsyncClient(timeout=10) as client:
-            res = await client.get(f"{base_url}/admin/db-stats", params={"password": cfg.get("admin_password")})
+            res = await client.get(f"{base_url}/admin/db-stats",
+                                   headers={"Authorization": f"Bearer {pw}"})
             ok = res.status_code == 200 and "next_crawl_ts" in res.text
-            return {"name": "DB Stats", "status": "PASS" if ok else "FAIL", "desc": "Crawl scheduling info present."}
+            desc = "Crawl scheduling data returned." if ok else f"Status {res.status_code} — check admin password."
+            return {"name": "DB Stats", "status": "PASS" if ok else "FAIL", "desc": desc}
     except Exception as e:
         logger.warning(f"audit_db_stats failed: {e}")
         return {"name": "DB Stats", "status": "FAIL", "desc": f"Request failed: {e}"}
@@ -4476,12 +4513,14 @@ async def audit_db_stats(base_url: str = "http://localhost:8000"):
 async def audit_api_sources(base_url: str = "http://localhost:8000"):
     import httpx
     try:
-        cfg = get_config()
+        pw = _audit_password()
         active_db = _get_active_db()
         async with httpx.AsyncClient(timeout=10) as client:
-            res = await client.get(f"{base_url}/admin/api-sources", params={"password": cfg.get("admin_password"), "db_name": active_db})
+            res = await client.get(f"{base_url}/admin/api-sources",
+                                   headers={"Authorization": f"Bearer {pw}", "X-Admin-DB": active_db})
             ok = res.status_code == 200 and "sources" in res.text.lower()
-            return {"name": "API Sources", "status": "PASS" if ok else "FAIL", "desc": "API sources endpoint reachable."}
+            desc = "API sources endpoint returned data." if ok else f"Status {res.status_code}."
+            return {"name": "API Sources", "status": "PASS" if ok else "FAIL", "desc": desc}
     except Exception as e:
         logger.warning(f"audit_api_sources failed: {e}")
         return {"name": "API Sources", "status": "FAIL", "desc": f"Request failed: {e}"}

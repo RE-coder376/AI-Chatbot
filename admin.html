@@ -102,7 +102,6 @@
     .spinner { display: inline-block; width: 14px; height: 14px; border: 2px solid rgba(255,255,255,0.3); border-top-color: #fff; border-radius: 50%; animation: spin 0.8s linear infinite; margin-right: 8px; }
     @keyframes spin { to { transform: rotate(360deg); } }
 
-    #watchdog-chat { display: none; margin-top: 24px; border: 1.5px solid var(--border); border-radius: 16px; padding: 20px; background: #fff; }
   /* ── Custom Confirm Modal ── */
   #confirm-overlay {
     display: none; position: fixed; inset: 0; background: rgba(15,23,42,0.55);
@@ -520,22 +519,6 @@
           <tbody id="audit-body"></tbody>
         </table>
         
-        <!-- Post-Audit Actions -->
-        <div style="display:flex; gap:12px; margin-top:24px; padding-top:24px; border-top:2px solid var(--border);">
-          <div id="audit-resolve" style="display:none; flex:1;">
-            <button onclick="triggerHealer()" style="background:#dc2626; margin:0;">🛠️ Trigger Full System Healer</button>
-          </div>
-          <button onclick="openHealerChat()" class="secondary" style="width:auto; margin:0; flex:1;">💬 Talk to Watchdog</button>
-        </div>
-      </div>
-      
-      <div id="healer-report" style="display:none; margin-top:24px; background:#dcfce7; padding:20px; border-radius:16px;">
-        <h4 style="color:#166534; font-size:14px; font-weight:800; margin-bottom:10px;">REPAIR SUMMARY</h4><ul id="healer-actions" style="font-size:12px; color:#166534; margin-left:20px;"></ul>
-      </div>
-      <div id="watchdog-chat" style="display:none; margin-top: 24px; border: 1.5px solid var(--border); border-radius: 16px; padding: 20px; background: #fff;">
-        <div id="chat-msgs" style="display:flex; flex-direction:column; gap:12px; max-height:300px; overflow-y:auto; margin-bottom:15px;"></div>
-        <div style="display:flex; gap:10px;"><input type="text" id="chat-in" placeholder="Ask fixes..."/><button onclick="sendHealerMsg()" style="width:auto; margin:0; padding:0 25px; background:var(--text-main);">Send</button></div>
-        <button class="secondary" onclick="endHealerSession()" style="margin-top:15px;">Finish & Lock</button>
       </div>
       <div id="tests-status" class="status-msg"></div>
     </div>
@@ -1530,80 +1513,14 @@
       
       document.getElementById('audit-list').style.display = 'block';
       
-      // Smart resolution logic
       const hasFail = (data.results || []).some(r => r.status === 'FAIL');
-      if (hasFail) {
-        document.getElementById('audit-resolve').style.display = 'block';
-        showStatus('tests', 'Audit complete. Discrepancies found.', 'error');
-      } else {
-        showStatus('tests', 'Audit complete. Systems operational.', 'success');
-      }
+      showStatus('tests', hasFail ? 'Audit complete. Issues found.' : 'Audit complete. Systems operational.', hasFail ? 'error' : 'success');
       
     } catch (e) {
       showStatus('tests', 'Connection lost during audit.', 'error');
     }
   }
 
-  async function triggerHealer() {
-    const pass = document.getElementById('master-pass').value;
-    showStatus('tests', 'Watchdog initializing repairs...', 'loading');
-    
-    try {
-      const res = await fetch(`${API}/admin/healer/trigger`, {
-        method: "POST", headers: {...authHeaders(), "Content-Type": "application/json"},
-        body: JSON.stringify({ password: pass })
-      });
-      const data = await res.json();
-      
-      if (data.success) {
-        document.getElementById('healer-report').style.display = 'block';
-        document.getElementById('healer-actions').innerHTML = (data.repairs || []).map(r => `<li>${r}</li>`).join('');
-        showStatus('tests', 'Watchdog repairs completed.', 'success');
-      } else {
-        showStatus('tests', 'Watchdog failed to initialize.', 'error');
-      }
-    } catch (e) {
-      showStatus('tests', 'Healer connection error.', 'error');
-    }
-  }
-
-  function openHealerChat() {
-    document.getElementById('watchdog-chat').style.display = 'block';
-    addWatchdogMsg("Hello. I am the System Watchdog. I have completed the structural repairs. What would you like to discuss?");
-  }
-
-  function addWatchdogMsg(txt, isUser=false) {
-    const chat = document.getElementById('chat-msgs');
-    const div = document.createElement('div');
-    div.style.padding = '10px 14px';
-    div.style.borderRadius = '12px';
-    div.style.fontSize = '12px';
-    div.style.maxWidth = '80%';
-    div.style.alignSelf = isUser ? 'flex-end' : 'flex-start';
-    div.style.background = isUser ? 'var(--primary)' : '#f1f5f9';
-    div.style.color = isUser ? 'white' : 'var(--text-main)';
-    div.textContent = txt;
-    chat.appendChild(div);
-    chat.scrollTop = chat.scrollHeight;
-  }
-
-  async function sendHealerMsg() {
-    const inp = document.getElementById('chat-in');
-    const msg = inp.value.trim();
-    if (!msg) return;
-    
-    addWatchdogMsg(msg, true);
-    inp.value = '';
-    
-    // Watchdog simulation
-    setTimeout(() => {
-      if (msg.toLowerCase().includes('what') || msg.toLowerCase().includes('fix')) {
-        addWatchdogMsg("I detected a dimension mismatch between your brain and the database. I have re-aligned the 384-dim legacy engine to ensure search works.");
-      } else {
-        addWatchdogMsg("Systems are currently stable at 100% accuracy. No further action required.");
-      }
-    }, 800);
-  }
 
   async function loadEmbedCode() {
     const pass = document.getElementById('master-pass').value;
@@ -2053,8 +1970,6 @@
   }
 
   function endHealerSession() {
-    document.getElementById('watchdog-chat').style.display = 'none';
-    document.getElementById('healer-report').style.display = 'none';
     document.getElementById('audit-list').style.display = 'none';
     showStatus('tests', 'Session closed & secured.', 'success');
   }
