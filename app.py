@@ -2406,10 +2406,10 @@ async def _auto_crawl_db(db_name: str, url: str, max_pages: int = 20) -> int:
         except Exception as e: logger.warning(f"[AUTO-CRAWL] Could not load seen URLs for {db_name}: {e}")
     base = url.rstrip("/")
     domain = urlparse(base).netloc
-    new_urls, added = [], 0
+    crawl_urls, added = [], 0
     newly_seen: list = []
     try:
-        # Step 1: discover new URLs via sitemap (reliable — no link-following needed)
+        # Step 1: discover URLs via sitemap — crawl ALL (not just new) for content refresh
         async with _hx.AsyncClient(timeout=15, headers={"User-Agent": "Mozilla/5.0"}, follow_redirects=True) as client:
             for sm_path in ["/sitemap.xml", "/sitemap_index.xml", "/sitemap/"]:
                 try:
@@ -2417,15 +2417,16 @@ async def _auto_crawl_db(db_name: str, url: str, max_pages: int = 20) -> int:
                     if r.status_code == 200 and "<loc>" in r.text:
                         found = re.findall(r'<loc>([^<]+)</loc>', r.text)
                         sitemap_urls = [u.strip() for u in found if urlparse(u.strip()).netloc == domain]
-                        new_urls = [u for u in sitemap_urls if u not in already_seen][:max_pages]
-                        logger.info(f"[AUTO-CRAWL] '{db_name}': {len(sitemap_urls)} sitemap URLs, {len(new_urls)} new")
+                        crawl_urls = sitemap_urls[:max_pages]
+                        new_count = len([u for u in crawl_urls if u not in already_seen])
+                        logger.info(f"[AUTO-CRAWL] '{db_name}': {len(sitemap_urls)} sitemap URLs — refreshing {len(crawl_urls)} ({new_count} new)")
                         break
                 except Exception as e:
                     logger.warning(f"[AUTO-CRAWL] Sitemap '{sm_path}' failed for {db_name}: {e}")
-        if not new_urls:
-            logger.info(f"[AUTO-CRAWL] '{db_name}': no new pages in sitemap")
+        if not crawl_urls:
+            logger.info(f"[AUTO-CRAWL] '{db_name}': sitemap empty or unreachable — skipping")
             return 0
-        # Step 2: fetch and index only new pages — use Playwright for JS rendering, one browser for all pages
+        # Step 2: fetch and re-index all pages — Playwright for JS rendering, one browser for all
         _browser = None
         _pw_ctx = None
         _pending_docs = []
@@ -2437,7 +2438,7 @@ async def _auto_crawl_db(db_name: str, url: str, max_pages: int = 20) -> int:
         except Exception as _pw_start_e:
             logger.warning(f"[AUTO-CRAWL] Playwright unavailable, falling back to httpx: {_pw_start_e}")
 
-        for page_url in new_urls:
+        for page_url in crawl_urls:
             try:
                 text = ""
                 if _browser:
@@ -2460,9 +2461,15 @@ async def _auto_crawl_db(db_name: str, url: str, max_pages: int = 20) -> int:
                             for tag in soup(["script","style","nav","footer","header"]): tag.decompose()
                             text = soup.get_text(separator="\n", strip=True)
                 if len(text) > 100:
+                    # Delete stale chunks for this URL before re-adding (no duplicate buildup)
+                    try:
+                        await asyncio.to_thread(lambda u=page_url: db.delete(where={"source": u}))
+                    except Exception as _del_e:
+                        logger.debug(f"[AUTO-CRAWL] Could not delete old chunks for {page_url}: {_del_e}")
                     _pending_docs.append(Document(page_content=text[:25000], metadata={"source": page_url}))
                     added += 1
-                newly_seen.append(page_url)
+                if page_url not in already_seen:
+                    newly_seen.append(page_url)
             except Exception as e: logger.warning(f"[AUTO-CRAWL] Page error {page_url}: {e}")
 
         # Batch write all docs at once — single HNSW lock instead of per-page, unblocks reads
