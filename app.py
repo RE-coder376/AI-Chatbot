@@ -4324,7 +4324,7 @@ async def _audit_chat(question: str, session_id: str = "audit_suite", base_url: 
         hdrs = {"Content-Type": "application/json"}
         if widget_key:
             hdrs["X-Widget-Key"] = widget_key
-        async with httpx.AsyncClient(timeout=30) as client:
+        async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
             res = await client.post(f"{base_url}/chat",
                                    headers=hdrs,
                                    json={"question": question, "session_id": session_id, "stream": False})
@@ -4469,7 +4469,7 @@ async def audit_hallucination(base_url: str = "http://localhost:8000"):
 async def audit_rate_limit(base_url: str = "http://localhost:8000"):
     import httpx, asyncio
     try:
-        async with httpx.AsyncClient(timeout=10) as client:
+        async with httpx.AsyncClient(timeout=10, follow_redirects=True) as client:
             tasks = [client.post(f"{base_url}/chat", json={"question": "hi", "session_id": f"rl_{i}"}) for i in range(25)]
             resps = await asyncio.gather(*tasks, return_exceptions=True)
             codes = [r.status_code for r in resps if hasattr(r, 'status_code')]
@@ -4482,7 +4482,7 @@ async def audit_rate_limit(base_url: str = "http://localhost:8000"):
 async def audit_admin_auth(base_url: str = "http://localhost:8000"):
     import httpx
     try:
-        async with httpx.AsyncClient(timeout=10) as client:
+        async with httpx.AsyncClient(timeout=10, follow_redirects=True) as client:
             res = await client.get(f"{base_url}/admin/databases",
                                    headers={"Authorization": "Bearer wrong_password_audit_test"})
             passed = res.status_code == 401
@@ -4500,7 +4500,7 @@ async def audit_db_stats(base_url: str = "http://localhost:8000"):
     import httpx
     try:
         pw = _audit_password()
-        async with httpx.AsyncClient(timeout=10) as client:
+        async with httpx.AsyncClient(timeout=10, follow_redirects=True) as client:
             res = await client.get(f"{base_url}/admin/db-stats",
                                    headers={"Authorization": f"Bearer {pw}"})
             ok = res.status_code == 200 and "next_crawl_ts" in res.text
@@ -4515,7 +4515,7 @@ async def audit_api_sources(base_url: str = "http://localhost:8000"):
     try:
         pw = _audit_password()
         active_db = _get_active_db()
-        async with httpx.AsyncClient(timeout=10) as client:
+        async with httpx.AsyncClient(timeout=10, follow_redirects=True) as client:
             res = await client.get(f"{base_url}/admin/api-sources",
                                    headers={"Authorization": f"Bearer {pw}", "X-Admin-DB": active_db})
             ok = res.status_code == 200 and "sources" in res.text.lower()

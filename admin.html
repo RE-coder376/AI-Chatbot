@@ -1130,14 +1130,15 @@
     statusEl.dataset.saved = '0';
     try {
       const res = await fetch(`${API}/admin/crawl-schedule`, {
-        method: 'POST', headers: {...authHeaders(), 'Content-Type': 'application/json'},
+        method: 'POST', headers: {...authHeaders(), 'X-Admin-DB': dbName, 'Content-Type': 'application/json'},
         body: JSON.stringify({password:pass, db_name:dbName, enabled, interval_minutes:interval, crawl_url:url})
       });
       const d = await res.json();
       if (d.success) {
-        statusEl.textContent = '✓ Saved';
+        statusEl.textContent = '✓ Saved — refreshing...';
         statusEl.style.color = '#16a34a';
         statusEl.dataset.saved = '1';
+        await loadDatabases();
       } else {
         statusEl.textContent = d.detail || 'Failed';
         statusEl.style.color = '#dc2626';
