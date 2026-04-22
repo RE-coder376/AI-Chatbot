@@ -1280,7 +1280,17 @@
     const menu = document.getElementById(`db-menu-${name}`);
     const isOpen = menu.style.display !== 'none';
     document.querySelectorAll('[id^="db-menu-"]').forEach(m => m.style.display = 'none');
-    if (!isOpen) menu.style.display = 'block';
+    if (!isOpen) {
+      menu.style.display = 'block';
+      const rect = menu.getBoundingClientRect();
+      if (rect.bottom > window.innerHeight) {
+        menu.style.top = 'auto';
+        menu.style.bottom = '100%';
+      } else {
+        menu.style.top = '100%';
+        menu.style.bottom = 'auto';
+      }
+    }
   }
   document.addEventListener('click', () => document.querySelectorAll('[id^="db-menu-"]').forEach(m => m.style.display = 'none'));
 
