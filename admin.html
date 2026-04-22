@@ -1508,14 +1508,21 @@
         const fixHtml = r.fix ? `
           <div style="margin-top:5px;">
             <span onclick="document.getElementById('${fixId}').style.display=document.getElementById('${fixId}').style.display==='none'?'block':'none'"
-                  style="cursor:pointer;font-size:10px;color:#d97706;font-weight:600;user-select:none;">💡 How to fix ▾</span>
+                  style="cursor:pointer;font-size:10px;color:#d97706;font-weight:600;user-select:none;">💡 What's wrong ▾</span>
             <div id="${fixId}" style="display:none;margin-top:4px;font-size:10px;color:#92400e;background:#fffbeb;border:1px solid #fcd34d;border-radius:6px;padding:7px 10px;line-height:1.5;">${r.fix}</div>
           </div>` : '';
+        const actionsHtml = (r.actions || []).map(a => {
+          const onclick = a.rerun
+            ? `runAudit('${a.rerun}')`
+            : `document.getElementById('${a.nav}')?.scrollIntoView({behavior:'smooth',block:'start'})`;
+          const color = a.rerun ? '#6366f1' : '#0ea5e9';
+          return `<button onclick="${onclick}" style="margin-top:5px;margin-right:4px;padding:3px 10px;font-size:10px;font-weight:600;border:1.5px solid ${color};border-radius:6px;background:#fff;color:${color};cursor:pointer;">${a.label}</button>`;
+        }).join('');
         return `
         <tr class="audit-row-new">
           <td style="font-weight:700;">${r.name}</td>
           <td><span class="badge badge-${r.status.toLowerCase()}">${r.status}</span></td>
-          <td style="font-size:11px; line-height:1.4; color:var(--text-main);">${r.desc}${fixHtml}</td>
+          <td style="font-size:11px; line-height:1.4; color:var(--text-main);">${r.desc}${fixHtml}${actionsHtml}</td>
         </tr>`;
       }).join('');
 
