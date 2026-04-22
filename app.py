@@ -481,13 +481,28 @@ def _github_sync_delete(db_name: str):
             f"https://api.github.com/repos/{_GITHUB_USERNAME}/{_GITHUB_REPO}/releases/tags/databases-latest",
             headers=api_hdr, timeout=30)
         if rel_resp.status_code != 200: return
+        deleted = False
         for asset in rel_resp.json().get("assets", []):
             if asset["name"] == f"{db_name}.zip":
                 _req.delete(
                     f"https://api.github.com/repos/{_GITHUB_USERNAME}/{_GITHUB_REPO}/releases/assets/{asset['id']}",
                     headers=api_hdr, timeout=30)
                 logger.info(f"[GH-SYNC] Deleted {db_name}.zip from GitHub releases")
-                return
+                deleted = True
+                break
+        # Also remove crawl_times and crawled_urls from Contents API so they can't restore the deleted DB
+        for fname in [f"crawl_times_{db_name}.json", f"crawled_urls_{db_name}.txt"]:
+            try:
+                r = _req.get(f"https://api.github.com/repos/{_GITHUB_USERNAME}/{_GITHUB_REPO}/contents/{fname}",
+                             headers=api_hdr, timeout=10)
+                if r.status_code == 200:
+                    sha = r.json().get("sha")
+                    _req.delete(f"https://api.github.com/repos/{_GITHUB_USERNAME}/{_GITHUB_REPO}/contents/{fname}",
+                                json={"message": f"delete: {fname}", "sha": sha},
+                                headers=api_hdr, timeout=15)
+                    logger.info(f"[GH-SYNC] Deleted {fname} from Contents API")
+            except Exception as _ce:
+                logger.warning(f"[GH-SYNC] Could not delete {fname}: {_ce}")
     except Exception as e:
         logger.error(f"[GH-SYNC] Delete error for {db_name}: {e}")
 # ──────────────────────────────────────────────────────────────────────────────
@@ -2488,6 +2503,8 @@ async def _auto_crawl_db(db_name: str, url: str, max_pages: int = 20) -> int:
         try:
             await asyncio.to_thread(seen_file.write_text, "\n".join(already_seen | set(newly_seen)), "utf-8")
         except Exception as e: logger.warning(f"[AUTO-CRAWL] Could not persist seen URLs for {db_name}: {e}")
+        threading.Thread(target=_github_backup_crawled_urls, args=(db_name,), daemon=True).start()
+    if added > 0:
         _bm25_cache.pop(db_name, None)
         # Copy /dev/shm back to databases/ so new docs survive restart
         _shm_path = Path(f"/dev/shm/chroma_{db_name}")
@@ -2506,8 +2523,9 @@ async def _auto_crawl_db(db_name: str, url: str, max_pages: int = 20) -> int:
                 logger.info(f"[AUTO-CRAWL] Copy-back to databases/{db_name} done")
             except Exception as _cb_e:
                 logger.warning(f"[AUTO-CRAWL] Copy-back failed (non-fatal): {_cb_e}")
+        # Always upload DB zip + crawl_times after a successful refresh (not just when new pages found)
         threading.Thread(target=_github_sync_upload, args=(db_name,), daemon=True).start()
-        threading.Thread(target=_github_backup_crawled_urls, args=(db_name,), daemon=True).start()
+        threading.Thread(target=_github_backup_crawl_times, args=(db_name,), daemon=True).start()
     return added
 
 async def _auto_scheduler():
@@ -4171,7 +4189,9 @@ async def delete_db(request: Request, password: str = Form(...), name: str = For
                 _intro_q_cache.pop(db_name, None)
                 _bm25_cache.pop(db_name, None)
                 _db_instance_cache.pop(db_name, None)
-                threading.Thread(target=_github_sync_delete, args=(db_name,), daemon=True).start()
+                # Await GitHub delete before responding — daemon threads can be killed on HF restart
+                # causing zips to persist and DBs to resurrect on next boot
+                await asyncio.to_thread(_github_sync_delete, db_name)
                 return {"success": True, "message": f"Repository '{db_name}' purged."}
             except Exception as e:
                 if i == 2: return JSONResponse({"detail": f"Purge failed (file lock): {str(e)}"}, status_code=500)
