@@ -1018,6 +1018,8 @@
       const hasApi = st.api_sources?.length > 0;
       const intervalM = st.crawl_interval_minutes || 60;
       const intervalLabel = intervalM < 60 ? `${intervalM}min` : `${intervalM/60}h`;
+      const health = st.health || {level:'empty', label:'Unknown', reason:'No data'};
+      const healthDot = {healthy:'🟢', warning:'🟡', critical:'🔴', empty:'⚪'}[health.level] || '⚪';
       const autoIcon = hasCrawl && hasApi ? '🟢🔌' : hasCrawl ? '🟢' : hasApi ? '🔌' : '⭕';
       const syncLabel = hasCrawl && hasApi
         ? `re-crawls every ${intervalLabel} + ${st.api_sources.length} live API source${st.api_sources.length>1?'s':''}`
@@ -1032,7 +1034,8 @@
         <div class="db-row">
           <div onclick="expandDb('${db.name}')" style="cursor:pointer;flex:1;">
             <div style="font-weight:800;font-size:14px;color:var(--text-main);">${db.name}</div>
-            <div style="font-size:11px;color:var(--text-muted);margin-top:3px;display:flex;gap:16px;flex-wrap:wrap;">
+            <div style="font-size:11px;color:var(--text-muted);margin-top:3px;display:flex;gap:16px;flex-wrap:wrap;align-items:center;">
+              <span title="${health.reason}">${healthDot} ${health.label}</span>
               <span>📦 ${(st.chunks||db.chunks||0).toLocaleString()} chunks</span>
               <span>${autoIcon} ${syncLabel}</span>
               ${hasCrawl ? `<span>🕐 Last: ${lastCrawlLabel}</span><span id="next-crawl-${db.name}" data-ts="${nextCrawlTs}">${isCrawling ? '🔄 Recrawling now...' : nextCrawlTs ? '⏭ Next: computing...' : '⏭ Next: due now'}</span>` : ''}
@@ -1051,6 +1054,13 @@
           </div>
         </div>
         <div class="db-details" id="details-${db.name}">
+          <div style="background:${{healthy:'#f0fdf4',warning:'#fffbeb',critical:'#fef2f2',empty:'#f8fafc'}[health.level]||'#f8fafc'};border:1px solid ${{healthy:'#86efac',warning:'#fcd34d',critical:'#fca5a5',empty:'#e2e8f0'}[health.level]||'#e2e8f0'};border-radius:10px;padding:12px 16px;margin-bottom:10px;display:flex;align-items:center;gap:12px;">
+            <span style="font-size:20px;">${healthDot}</span>
+            <div>
+              <div style="font-weight:700;font-size:13px;color:var(--text-main);">KB ${health.label}</div>
+              <div style="font-size:11px;color:var(--text-muted);margin-top:2px;">${health.reason}</div>
+            </div>
+          </div>
           <div class="grid-2" style="margin-bottom:10px;">
             <div><label>Storage Size</label><div style="font-weight:700;font-size:15px;">${db.size}</div></div>
             <div><label>Knowledge Chunks</label><div style="font-weight:700;font-size:15px;">${(st.chunks||db.chunks||0).toLocaleString()}</div></div>

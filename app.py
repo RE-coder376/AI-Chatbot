@@ -5496,6 +5496,31 @@ async def crawl_inspect(data: dict, request: Request):
     return StreamingResponse(_stream(), media_type="text/event-stream")
 
 
+def _compute_db_health(chunks: int, last_crawl: str, auto_enabled: bool, interval_m: float) -> dict:
+    """Return {level, label, reason} for a DB's health status."""
+    if chunks == 0:
+        return {"level": "empty", "label": "Empty", "reason": "No knowledge base data — crawl required"}
+    if chunks < 100:
+        return {"level": "critical", "label": "Critical", "reason": f"Only {chunks:,} chunks — too low to be useful"}
+    age_warn = False
+    age_reason = ""
+    if auto_enabled and last_crawl:
+        try:
+            age_days = (datetime.now() - datetime.fromisoformat(last_crawl)).days
+            threshold = max(3, int(interval_m * 3 / 1440))  # 3× interval in days, min 3
+            if age_days > threshold:
+                age_warn = True
+                age_reason = f"last crawl {age_days}d ago"
+        except Exception:
+            pass
+    if chunks < 300:
+        reason = f"{chunks:,} chunks (low)"
+        if age_reason: reason += f" — {age_reason}"
+        return {"level": "warning", "label": "Low", "reason": reason}
+    if age_warn:
+        return {"level": "warning", "label": "Stale", "reason": f"{chunks:,} chunks — {age_reason}"}
+    return {"level": "healthy", "label": "Healthy", "reason": f"{chunks:,} chunks"}
+
 @app.get("/admin/db-stats")
 def get_db_stats(request: Request, password: str = ""):
     password = _extract_password(request, password)
@@ -5567,6 +5592,7 @@ def get_db_stats(request: Request, password: str = ""):
             "crawl_interval_minutes": interval_m,
             "crawl_url": db_cfg.get("crawl_url", ""),
             "api_sources": db_cfg.get("api_sources", []),
+            "health": _compute_db_health(chunks, last_crawl, auto_enabled, interval_m),
         })
     return {"stats": stats}
 
