@@ -6058,6 +6058,24 @@ async def crawl_site(data: dict, request: Request):
             _seed_path = parsed.path.rstrip('/')
             _crawl_prefix = (base_nowww + _seed_path) if (_seed_path and _seed_path != '/') else base_nowww
 
+            # Detect redirects (e.g. demo.prestashop.com → demo8.prestashop.com/en/)
+            # Update base/prefix so BFS doesn't filter out all links from redirect target
+            try:
+                _redir_r = await asyncio.to_thread(
+                    _req.get, url, timeout=8, allow_redirects=True,
+                    headers={"User-Agent": "Mozilla/5.0"}
+                )
+                _final_url = str(_redir_r.url)
+                _final_parsed = urllib.parse.urlparse(_final_url)
+                _final_base_nowww = _strip_www(f"{_final_parsed.scheme}://{_final_parsed.netloc}")
+                if _final_base_nowww != base_nowww:
+                    _final_path = _final_parsed.path.rstrip('/')
+                    base_nowww = _final_base_nowww
+                    _crawl_prefix = (_final_base_nowww + _final_path) if (_final_path and _final_path != '/') else _final_base_nowww
+                    yield _send(f"↪️ Redirect detected → crawling {_final_base_nowww} instead")
+            except Exception:
+                pass
+
             pages = []
             async with async_playwright() as pw:
                 browser = await pw.chromium.launch(
