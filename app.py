@@ -1084,6 +1084,7 @@ _PROD_SPLIT_RE  = re.compile(r'\$(\d[\d,]*\.?\d*)\s+([A-Z][A-Za-z0-9 \(\)\-\.]+?
 _FAQ_SPLIT_RE   = re.compile(r'(?m)^(?=(?:Q:|Question:|How |What |Why |When |Where |Who |Can |Do |Is |Are |Does |Should ))', re.I)
 
 def _smart_chunk_page(text: str, url: str, chunk_size: int = 400, chunk_step: int = 320) -> list:
+    from langchain_core.documents import Document
     """
     Smart page chunker. Three modes, tried in order:
       1. Product page  — $PRICE + spec keywords → one Document per product, price metadata
