@@ -1018,10 +1018,10 @@
           <div onclick="expandDb('${db.name}')" style="cursor:pointer;flex:1;">
             <div style="font-weight:800;font-size:14px;color:var(--text-main);">${db.name}</div>
             <div style="font-size:11px;color:var(--text-muted);margin-top:3px;display:flex;gap:16px;flex-wrap:wrap;align-items:center;">
-              <span title="${health.reason}">${healthDot} ${health.label}</span>
-              <span>📦 ${(st.chunks||db.chunks||0).toLocaleString()} chunks</span>
+              <span id="health-dot-${db.name}" title="${health.reason}">${healthDot} ${health.label}</span>
+              <span id="chunks-${db.name}">📦 ${(st.chunks||db.chunks||0).toLocaleString()} chunks</span>
               <span>${autoIcon} ${syncLabel}</span>
-              ${hasCrawl ? `<span>🕐 Last: ${lastCrawlLabel}</span><span id="next-crawl-${db.name}" data-ts="${nextCrawlTs}">${isCrawling ? '🔄 Recrawling now...' : nextCrawlTs ? '⏭ Next: computing...' : '⏭ Next: due now'}</span>` : ''}
+              ${hasCrawl ? `<span id="last-crawl-label-${db.name}">🕐 Last: ${lastCrawlLabel}</span><span id="next-crawl-${db.name}" data-ts="${nextCrawlTs}">${isCrawling ? '🔄 Recrawling now...' : nextCrawlTs ? '⏭ Next: computing...' : '⏭ Next: due now'}</span>` : ''}
             </div>
           </div>
           <div class="db-actions">
@@ -1093,19 +1093,38 @@
         }
       });
     }, 1000);
-    // Re-fetch db-stats every 60s to update next_crawl_ts after crawls complete
+    // Re-fetch db-stats every 30s — updates chunks, health, last crawl, countdown live
     if (_crawlStatsRefreshTimer) clearInterval(_crawlStatsRefreshTimer);
     _crawlStatsRefreshTimer = setInterval(async () => {
       try {
         const res = await fetch(`${API}/admin/db-stats`, { headers: authHeaders() });
         if (!res.ok) return;
         const data = await res.json();
+        const _healthDots = {healthy:'🟢', warning:'🟡', critical:'🔴', empty:'⚪'};
         (data.stats || []).forEach(st => {
+          // Countdown timestamp
           const el = document.getElementById(`next-crawl-${st.name}`);
           if (el && el.dataset.crawling !== '1' && st.next_crawl_ts) el.dataset.ts = st.next_crawl_ts;
+          // Chunk count
+          const chunksEl = document.getElementById(`chunks-${st.name}`);
+          if (chunksEl) chunksEl.textContent = `📦 ${(st.chunks||0).toLocaleString()} chunks`;
+          // Health badge
+          const healthEl = document.getElementById(`health-dot-${st.name}`);
+          if (healthEl && st.health) {
+            const dot = _healthDots[st.health.level] || '⚪';
+            healthEl.textContent = `${dot} ${st.health.label}`;
+            healthEl.title = st.health.reason || '';
+          }
+          // Last crawl label
+          const lastEl = document.getElementById(`last-crawl-label-${st.name}`);
+          if (lastEl && st.last_crawl_time) {
+            const lastCrawl = new Date(st.last_crawl_time).toLocaleString();
+            const newChunks = st.last_crawl_chunks || 0;
+            lastEl.textContent = `🕐 Last: ${lastCrawl} (+${newChunks} new chunks)`;
+          }
         });
       } catch(e) { /* silent */ }
-    }, 60000);
+    }, 30000);
   }
 
   function markScheduleDirty(dbName) {

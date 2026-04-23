@@ -1,0 +1,21 @@
+{
+  "admin_password": "store",
+  "widget_key": "d661e7ec-d760-4e4b-b921-a925468c5c09",
+  "bot_name": "ShopBot",
+  "business_name": "Web Scraper Test Store",
+  "crawl_url": "https://webscraper.io/test-sites/e-commerce/allinone",
+  "topics": [
+    "laptops",
+    "phones",
+    "tablets",
+    "cameras",
+    "monitors",
+    "electronics",
+    "prices",
+    "products"
+  ],
+  "secondary_prompt": "You are a product advisor for an electronics store. When the context contains product specs, reason over them and give a direct recommendation — do NOT say IDK when product data is present in the context.",
+  "features": [
+    "smart_search"
+  ]
+}

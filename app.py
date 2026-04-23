@@ -2676,8 +2676,7 @@ async def _auto_scheduler():
                             except Exception as e: logger.debug(f"[SCHEDULER] Crawl interval parse ({db_dir.name}): {e}")
                         if due and db_name not in _crawling_dbs:
                             logger.info(f"[SCHEDULER] Auto-crawling '{db_name}'...")
-                            # Write timestamp NOW (start of crawl) so interval resets immediately
-                            # — prevents "due now" on all DBs while a long crawl is in progress
+                            # Write timestamp NOW so interval resets immediately for all DBs
                             _now_iso = datetime.now().isoformat()
                             try:
                                 _crawl_sidecar_pre = db_dir / "_crawl_times.json"
@@ -2688,29 +2687,30 @@ async def _auto_scheduler():
                                 _cfg_data_pre = json.loads(_cfg_path_pre.read_text(encoding="utf-8")) if _cfg_path_pre.exists() else {}
                                 _cfg_data_pre["last_crawl_time"] = _now_iso
                                 _cfg_path_pre.write_text(json.dumps(_cfg_data_pre, indent=2), encoding="utf-8")
-                                # Back up to GitHub so timestamp survives HF Space restarts
                                 threading.Thread(target=_github_backup_crawl_times, args=(db_name,), daemon=True).start()
                             except Exception as _pre_e:
                                 logger.warning(f"[SCHEDULER] Pre-crawl timestamp write failed: {_pre_e}")
-                            try:
-                                chunks = await _auto_crawl_db(db_name, db_cfg["crawl_url"])
-                                # Update chunk count only (timestamp already written at crawl start)
+                            # Fire as background task — don't await so loop continues to next DB immediately
+                            async def _run_crawl(_name=db_name, _dir=db_dir, _url=db_cfg["crawl_url"]):
                                 try:
-                                    _crawl_sidecar = db_dir / "_crawl_times.json"
-                                    _ct = json.loads(_crawl_sidecar.read_text(encoding="utf-8")) if _crawl_sidecar.exists() else {}
-                                    _ct["last_crawl_chunks"] = chunks
-                                    _crawl_sidecar.write_text(json.dumps(_ct, indent=2), encoding="utf-8")
-                                    _cfg_path = db_dir / "config.json"
-                                    _cfg_data = json.loads(_cfg_path.read_text(encoding="utf-8")) if _cfg_path.exists() else {}
-                                    _cfg_data["last_crawl_chunks"] = chunks
-                                    _cfg_path.write_text(json.dumps(_cfg_data, indent=2), encoding="utf-8")
-                                except Exception as _ce:
-                                    logger.warning(f"[SCHEDULER] Could not update chunk count: {_ce}")
-                                logger.info(f"[SCHEDULER] '{db_name}' crawled: +{chunks} chunks")
-                                _write_crawl_status(db_name, "success")
-                            except Exception as e:
-                                logger.error(f"[SCHEDULER] Crawl error '{db_name}': {e}")
-                                _write_crawl_status(db_name, "failed")
+                                    chunks = await _auto_crawl_db(_name, _url)
+                                    try:
+                                        _sc = _dir / "_crawl_times.json"
+                                        _ct = json.loads(_sc.read_text(encoding="utf-8")) if _sc.exists() else {}
+                                        _ct["last_crawl_chunks"] = chunks
+                                        _sc.write_text(json.dumps(_ct, indent=2), encoding="utf-8")
+                                        _cp = _dir / "config.json"
+                                        _cd = json.loads(_cp.read_text(encoding="utf-8")) if _cp.exists() else {}
+                                        _cd["last_crawl_chunks"] = chunks
+                                        _cp.write_text(json.dumps(_cd, indent=2), encoding="utf-8")
+                                    except Exception as _ce:
+                                        logger.warning(f"[SCHEDULER] Could not update chunk count: {_ce}")
+                                    logger.info(f"[SCHEDULER] '{_name}' crawled: +{chunks} chunks")
+                                    _write_crawl_status(_name, "success")
+                                except Exception as _e:
+                                    logger.error(f"[SCHEDULER] Crawl error '{_name}': {_e}")
+                                    _write_crawl_status(_name, "failed")
+                            asyncio.create_task(_run_crawl())
 
                     # ── API sources polling ───────────────────────────────
                     # last_fetch stored in sidecar to avoid corrupting config.json
