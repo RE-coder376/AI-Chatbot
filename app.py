@@ -6380,9 +6380,7 @@ async def crawl_site(data: dict, request: Request):
                         await _chroma_run(chroma_db.add_documents, chunks)
                     total_chunks += len(chunks)
 
-                PARALLEL = 20  # Max safe for HF Spaces: 16GB RAM, 2 vCPU (I/O-bound, not CPU-bound)
-                # RAM: 20 tabs × ~150MB = 3GB + 2GB app = 5GB total (well within 16GB)
-                # CPU: Playwright waits on network 80% of time — parallelism wins over CPU count
+                PARALLEL = 4  # Conservative: avoids Shopify/CDN rate-limiting (was 20 → blocked after ~200 pages)
                 sem = asyncio.Semaphore(PARALLEL)
                 log_queue = asyncio.Queue()
 
@@ -6517,6 +6515,7 @@ async def crawl_site(data: dict, request: Request):
                         title = ""
                         # Fast path: try httpx first (Shopify/WordPress server-render fine without browser).
                         # Falls through to Playwright only if httpx returns < 300 chars.
+                        await asyncio.sleep(random.uniform(0.3, 0.8))  # Polite delay — avoids CDN rate-limit
                         try:
                             _fast_text = await _requests_extract(cur_url)
                             if _fast_text and len(_fast_text) >= 300:
