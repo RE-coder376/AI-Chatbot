@@ -2704,10 +2704,12 @@ async def _auto_scheduler():
                                         _sc = _dir / "_crawl_times.json"
                                         _ct = json.loads(_sc.read_text(encoding="utf-8")) if _sc.exists() else {}
                                         _ct["last_crawl_chunks"] = chunks
+                                        _ct["last_crawl_completed"] = datetime.now().isoformat()
                                         _sc.write_text(json.dumps(_ct, indent=2), encoding="utf-8")
                                         _cp = _dir / "config.json"
                                         _cd = json.loads(_cp.read_text(encoding="utf-8")) if _cp.exists() else {}
                                         _cd["last_crawl_chunks"] = chunks
+                                        _cd["last_crawl_completed"] = datetime.now().isoformat()
                                         _cp.write_text(json.dumps(_cd, indent=2), encoding="utf-8")
                                     except Exception as _ce:
                                         logger.warning(f"[SCHEDULER] Could not update chunk count: {_ce}")
@@ -5831,6 +5833,7 @@ def get_db_stats(request: Request, password: str = ""):
             "name": db_dir.name,
             "chunks": chunks,
             "last_crawl_time": last_crawl,
+            "last_crawl_completed": _sc_data.get("last_crawl_completed") or db_cfg.get("last_crawl_completed", ""),
             "last_crawl_chunks": _sc_data.get("last_crawl_chunks") or db_cfg.get("last_crawl_chunks", 0),
             "next_crawl_ts": next_crawl_ts,
             "is_crawling": db_dir.name in _crawling_dbs,

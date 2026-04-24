@@ -1018,7 +1018,7 @@
     if (isClient) dbs = dbs.filter(db => db.name === sessionDb);
     document.getElementById("db-list").innerHTML = dbs.map(db => {
       const st = statsMap[db.name] || {};
-      const lastCrawl = st.last_crawl_time ? new Date(st.last_crawl_time).toLocaleString() : '—';
+      const lastCrawl = (st.last_crawl_completed || st.last_crawl_time) ? new Date(st.last_crawl_completed || st.last_crawl_time).toLocaleString() : '—';
       const nextCrawlTs = st.next_crawl_ts || '';
       const isCrawling = st.is_crawling || false;
       const hasCrawl = st.auto_crawl_enabled && st.crawl_url;
@@ -1141,8 +1141,8 @@
           }
           // Last crawl label
           const lastEl = document.getElementById(`last-crawl-label-${st.name}`);
-          if (lastEl && st.last_crawl_time) {
-            const lastCrawl = new Date(st.last_crawl_time).toLocaleString();
+          if (lastEl && (st.last_crawl_completed || st.last_crawl_time)) {
+            const lastCrawl = new Date(st.last_crawl_completed || st.last_crawl_time).toLocaleString();
             const newChunks = st.last_crawl_chunks || 0;
             lastEl.textContent = `🕐 Last: ${lastCrawl} (+${newChunks} new chunks)`;
           }
