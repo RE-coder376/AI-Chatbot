@@ -460,7 +460,10 @@ def _github_sync_upload(db_name: str):
         new_asset_id = up.json()["id"]
         # Step 2: upload confirmed — now safe to delete old asset
         if f"{db_name}.zip" in assets_map:
-            _req.delete(f"https://api.github.com/repos/{_GITHUB_USERNAME}/{_GITHUB_REPO}/releases/assets/{assets_map[f'{db_name}.zip']['id']}", headers=api_hdr, timeout=30)
+            del_r = _req.delete(f"https://api.github.com/repos/{_GITHUB_USERNAME}/{_GITHUB_REPO}/releases/assets/{assets_map[f'{db_name}.zip']['id']}", headers=api_hdr, timeout=30)
+            if del_r.status_code not in (204, 200):
+                logger.warning(f"[GH-SYNC] Old asset delete returned {del_r.status_code} — step 3 may fail")
+            import time as _time; _time.sleep(2)  # let GitHub propagate deletion before re-uploading same name
         # Step 3: re-upload with final name (GitHub has no rename API)
         with open(tmp_zip, "rb") as fz:
             final_up = _req.post(
