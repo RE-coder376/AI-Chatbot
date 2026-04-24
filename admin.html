@@ -747,14 +747,26 @@
   }
 
   async function cancelDbCrawl(dbName) {
+    const nextEl = document.getElementById(`next-crawl-${dbName}`);
+    const cancelEl = document.getElementById(`cancel-crawl-${dbName}`);
+    // Immediate feedback
+    if (nextEl) nextEl.textContent = '\u23f8 Stopping...';
+    if (cancelEl) cancelEl.style.display = 'none';
     try {
       const res = await fetch(`${API}/admin/crawl/cancel`, {
         method: 'POST', headers: {...authHeaders(), 'X-Admin-DB': dbName, 'Content-Type': 'application/json'},
         body: JSON.stringify({db_name: dbName, password: localStorage.getItem('adminPass') || ''})
       });
       const d = await res.json();
-      showStatus('db', d.status === 'cancelled' ? `\u2705 Crawl stopped for ${dbName}` : '\u26a0\ufe0f No crawl running', d.status === 'cancelled' ? 'success' : 'warning');
-    } catch(e) { showStatus('db', '\u274c Cancel failed', 'error'); }
+      if (nextEl) nextEl.textContent = d.status === 'cancelled' ? '\u2705 Stopped' : '\u26a0\ufe0f Not running';
+      // After 3s reset to countdown mode so the timer takes over
+      setTimeout(() => {
+        if (nextEl) { nextEl.dataset.crawling = '0'; nextEl.textContent = '\u23ed Next: computing...'; }
+      }, 3000);
+    } catch(e) {
+      if (nextEl) { nextEl.dataset.crawling = '1'; nextEl.textContent = '\ud83d\udd04 Recrawling now...'; }
+      if (cancelEl) cancelEl.style.display = 'inline';
+    }
   }
 
   function unlockSystem(passArg, dbArg) {
@@ -1161,7 +1173,7 @@
           if (cancelBtn) cancelBtn.style.display = st.is_crawling ? 'inline' : 'none';
         });
       } catch(e) { /* silent */ }
-    }, 30000);
+    }, 10000);
   }
 
   function markScheduleDirty(dbName) {
