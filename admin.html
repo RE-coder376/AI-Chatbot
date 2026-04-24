@@ -707,7 +707,7 @@
       // Rebuild log UI and resume poll
       const statusEl = document.getElementById('crawl-status');
       if (statusEl && !document.getElementById('crawl-logs')) {
-        statusEl.innerHTML = '<div style="margin-bottom:10px;">🔄 Reconnected — crawl still running...</div><div id="crawl-logs" style="font-family:monospace; font-size:10px; background:#1e293b; color:#86efac; padding:12px; border-radius:12px; max-height:200px; overflow-y:auto; line-height:1.4;"></div>';
+        statusEl.innerHTML = '<div style="margin-bottom:10px;display:flex;align-items:center;gap:10px;">🔄 Reconnected — crawl still running... <button onclick="cancelActiveCrawl()" style="background:#dc2626;color:#fff;border:none;padding:3px 10px;border-radius:8px;font-size:11px;cursor:pointer;">⏹ Cancel</button></div><div id="crawl-logs" style="font-family:monospace; font-size:10px; background:#1e293b; color:#86efac; padding:12px; border-radius:12px; max-height:200px; overflow-y:auto; line-height:1.4;"></div>';
       }
       const logsEl = document.getElementById('crawl-logs');
       if (logsEl && !data.done) _pollCrawlStatus(db_name, pass, logsEl, statusEl);
@@ -731,6 +731,30 @@
     const csrf = sessionStorage.getItem('csrfToken') || '';
     const db   = localStorage.getItem('adminDb') || '';
     return { 'Authorization': `Bearer ${pass}`, 'X-CSRF-Token': csrf, 'X-Admin-DB': db };
+  }
+
+  async function cancelActiveCrawl() {
+    const db_name = window._activeCrawlDb || localStorage.getItem('adminDb') || '';
+    if (!db_name) return;
+    try {
+      const res = await fetch(`${API}/admin/crawl/cancel`, {
+        method: 'POST', headers: {...authHeaders(), 'Content-Type': 'application/json'},
+        body: JSON.stringify({db_name, password: localStorage.getItem('adminPass') || ''})
+      });
+      const d = await res.json();
+      showStatus('crawl', d.status === 'cancelled' ? '\u2705 Crawl cancelled' : '\u26a0\ufe0f No crawl running', d.status === 'cancelled' ? 'success' : 'warning');
+    } catch(e) { showStatus('crawl', '\u274c Cancel failed', 'error'); }
+  }
+
+  async function cancelDbCrawl(dbName) {
+    try {
+      const res = await fetch(`${API}/admin/crawl/cancel`, {
+        method: 'POST', headers: {...authHeaders(), 'X-Admin-DB': dbName, 'Content-Type': 'application/json'},
+        body: JSON.stringify({db_name: dbName, password: localStorage.getItem('adminPass') || ''})
+      });
+      const d = await res.json();
+      showStatus('db', d.status === 'cancelled' ? `\u2705 Crawl stopped for ${dbName}` : '\u26a0\ufe0f No crawl running', d.status === 'cancelled' ? 'success' : 'warning');
+    } catch(e) { showStatus('db', '\u274c Cancel failed', 'error'); }
   }
 
   function unlockSystem(passArg, dbArg) {
@@ -1021,7 +1045,7 @@
               <span id="health-dot-${db.name}" title="${health.reason}">${healthDot} ${health.label}</span>
               <span id="chunks-${db.name}">📦 ${(st.chunks||db.chunks||0).toLocaleString()} chunks</span>
               <span>${autoIcon} ${syncLabel}</span>
-              ${hasCrawl ? `<span id="last-crawl-label-${db.name}">🕐 Last: ${lastCrawlLabel}</span><span id="next-crawl-${db.name}" data-ts="${nextCrawlTs}">${isCrawling ? '🔄 Recrawling now...' : nextCrawlTs ? '⏭ Next: computing...' : '⏭ Next: due now'}</span>` : ''}
+              ${hasCrawl ? `<span id="last-crawl-label-${db.name}">🕐 Last: ${lastCrawlLabel}</span><span id="next-crawl-${db.name}" data-ts="${nextCrawlTs}">${isCrawling ? '🔄 Recrawling now...' : nextCrawlTs ? '⏭ Next: computing...' : '⏭ Next: due now'}</span><button id="cancel-crawl-${db.name}" onclick="cancelDbCrawl('${db.name}')" style="display:${isCrawling?'inline-block':'none'};background:#dc2626;color:#fff;border:none;padding:2px 8px;border-radius:6px;font-size:10px;cursor:pointer;margin-left:4px;">⏹ Stop</button>` : ''}
             </div>
           </div>
           <div class="db-actions">
@@ -1122,6 +1146,19 @@
             const newChunks = st.last_crawl_chunks || 0;
             lastEl.textContent = `🕐 Last: ${lastCrawl} (+${newChunks} new chunks)`;
           }
+          // is_crawling: update badge + show/hide cancel button
+          const nextEl = document.getElementById(`next-crawl-${st.name}`);
+          if (nextEl) {
+            if (st.is_crawling) {
+              nextEl.textContent = '🔄 Recrawling now...';
+              nextEl.dataset.crawling = '1';
+            } else if (nextEl.dataset.crawling === '1') {
+              nextEl.dataset.crawling = '0';
+              if (st.next_crawl_ts) nextEl.dataset.ts = st.next_crawl_ts;
+            }
+          }
+          const cancelBtn = document.getElementById(`cancel-crawl-${st.name}`);
+          if (cancelBtn) cancelBtn.style.display = st.is_crawling ? 'inline-block' : 'none';
         });
       } catch(e) { /* silent */ }
     }, 30000);
@@ -1905,7 +1942,7 @@
 
     showStatus('crawl', 'Starting crawl engine...', 'loading', true);
     const statusEl = document.getElementById('crawl-status');
-    statusEl.innerHTML = '<div style="margin-bottom:10px;">🚀 Initializing...</div><div id="crawl-logs" style="font-family:monospace; font-size:10px; background:#1e293b; color:#86efac; padding:12px; border-radius:12px; max-height:200px; overflow-y:auto; line-height:1.4;"></div>';
+    statusEl.innerHTML = '<div style="margin-bottom:10px;display:flex;align-items:center;gap:10px;">🚀 Initializing... <button onclick="cancelActiveCrawl()" style="background:#dc2626;color:#fff;border:none;padding:3px 10px;border-radius:8px;font-size:11px;cursor:pointer;">⏹ Cancel</button></div><div id="crawl-logs" style="font-family:monospace; font-size:10px; background:#1e293b; color:#86efac; padding:12px; border-radius:12px; max-height:200px; overflow-y:auto; line-height:1.4;"></div>';
     const logsEl = document.getElementById('crawl-logs');
 
     // Start crawl as background task — returns immediately, crawl runs on server

@@ -734,6 +734,7 @@ _chat_rate:  dict = {}   # ip -> deque of timestamps
 _admin_rate: dict = {}
 _rate_lock = threading.Lock()
 _crawling_dbs: set = set()   # DBs currently mid-crawl
+_crawl_cancel_events: dict = {}  # db_name -> asyncio.Event; set by /admin/crawl/cancel
 
 def check_rate_limit(ip: str, store: dict, limit: int, window: int = 60) -> bool:
     now = time.time()
@@ -2488,6 +2489,8 @@ async def _auto_crawl_db(db_name: str, url: str, max_pages: int = 20) -> int:
             db = local_db
     if not db or not url: return 0
     _crawling_dbs.add(db_name)
+    cancel_ev = asyncio.Event()
+    _crawl_cancel_events[db_name] = cancel_ev
     seen_file = DATABASES_DIR / db_name / "crawled_urls.txt"
     already_seen: set = set()
     if seen_file.exists():
@@ -2610,6 +2613,7 @@ async def _auto_crawl_db(db_name: str, url: str, max_pages: int = 20) -> int:
             except Exception: pass
     finally:
         _crawling_dbs.discard(db_name)
+        _crawl_cancel_events.pop(db_name, None)
     if newly_seen:
         try:
             await asyncio.to_thread(seen_file.write_text, "\n".join(already_seen | set(newly_seen)), "utf-8")
@@ -2867,7 +2871,7 @@ async def csrf_middleware(request: Request, call_next):
     """Enforce CSRF token on state-changing admin requests (POST/DELETE/PUT to /admin/*)."""
     if request.method in ("POST", "DELETE", "PUT") and request.url.path.startswith("/admin/"):
         # Exempt the CSRF token endpoint itself and ingest/file upload endpoints
-        exempt = {"/admin/csrf-token", "/admin/ingest/files", "/admin/sync-github", "/admin/databases/set-active", "/admin/crawl"}
+        exempt = {"/admin/csrf-token", "/admin/ingest/files", "/admin/sync-github", "/admin/databases/set-active", "/admin/crawl", "/admin/crawl/cancel"}
         if request.url.path not in exempt:
             token = request.headers.get("X-CSRF-Token", "")
             if not token or token not in _csrf_tokens or time.time() > _csrf_tokens.get(token, 0):
@@ -5936,6 +5940,18 @@ async def delete_api_source(request: Request, data: dict):
 _crawl_state: dict = {}
 # Format: {db_name: {"logs": [], "done": False, "running": False, "error": False}}
 
+@app.post("/admin/crawl/cancel")
+async def cancel_crawl_endpoint(data: dict, request: Request):
+    db_name = _extract_admin_db(request, data.get("db_name", "").strip())
+    cfg = get_config(db_name) if db_name else get_config()
+    admin_auth(_extract_password(request, data.get("password", "")), cfg)
+    ev = _crawl_cancel_events.get(db_name)
+    if ev:
+        ev.set()
+        _crawling_dbs.discard(db_name)
+        return {"status": "cancelled"}
+    return {"status": "not_running"}
+
 @app.get("/admin/crawl-status")
 async def get_crawl_status(request: Request):
     db_name  = request.query_params.get("db_name", "").strip()
@@ -6511,6 +6527,9 @@ async def crawl_site(data: dict, request: Request):
                 async def _crawl_one(cur_url, idx):
                     nonlocal completed
                     async with sem:
+                        if _crawl_cancel_events.get(db_name, asyncio.Event()).is_set():
+                            completed += 1
+                            return
                         # --- PDF path ---
                         if cur_url.lower().endswith(".pdf"):
                             text = await _pdf_extract(cur_url)
@@ -6543,6 +6562,7 @@ async def crawl_site(data: dict, request: Request):
                         if len(text) < 300:
                             # --- Playwright: full JS render + lazy scroll ---
                             pg = await ctx.new_page()
+                            await pg.set_default_timeout(15000)  # Hard cap all Playwright ops — prevents hung evaluate/goto on WAF slow-drip
                             await stealth(pg)
                             for attempt in range(3):
                                 try:
