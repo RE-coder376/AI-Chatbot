@@ -1045,7 +1045,7 @@
               <span id="health-dot-${db.name}" title="${health.reason}">${healthDot} ${health.label}</span>
               <span id="chunks-${db.name}">📦 ${(st.chunks||db.chunks||0).toLocaleString()} chunks</span>
               <span>${autoIcon} ${syncLabel}</span>
-              ${hasCrawl ? `<span id="last-crawl-label-${db.name}">🕐 Last: ${lastCrawlLabel}</span><span id="next-crawl-${db.name}" data-ts="${nextCrawlTs}">${isCrawling ? '🔄 Recrawling now...' : nextCrawlTs ? '⏭ Next: computing...' : '⏭ Next: due now'}</span><button id="cancel-crawl-${db.name}" onclick="cancelDbCrawl('${db.name}')" style="display:${isCrawling?'inline-block':'none'};background:#dc2626;color:#fff;border:none;padding:2px 8px;border-radius:6px;font-size:10px;cursor:pointer;margin-left:4px;">⏹ Stop</button>` : ''}
+              ${hasCrawl ? `<span id="last-crawl-label-${db.name}">🕐 Last: ${lastCrawlLabel}</span><span id="next-crawl-${db.name}" data-ts="${nextCrawlTs}">${isCrawling ? '🔄 Recrawling now...' : nextCrawlTs ? '⏭ Next: computing...' : '⏭ Next: due now'}</span><span id="cancel-crawl-${db.name}" style="display:${isCrawling?'inline':'none'}"> · <a href="#" onclick="event.preventDefault();cancelDbCrawl('${db.name}')" style="color:#ef4444;font-size:10px;text-decoration:none;" title="Stop after current page finishes (up to 15s)">stop crawl</a></span>` : ''}
             </div>
           </div>
           <div class="db-actions">
@@ -1158,7 +1158,7 @@
             }
           }
           const cancelBtn = document.getElementById(`cancel-crawl-${st.name}`);
-          if (cancelBtn) cancelBtn.style.display = st.is_crawling ? 'inline-block' : 'none';
+          if (cancelBtn) cancelBtn.style.display = st.is_crawling ? 'inline' : 'none';
         });
       } catch(e) { /* silent */ }
     }, 30000);
