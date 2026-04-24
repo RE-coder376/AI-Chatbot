@@ -224,11 +224,9 @@ def _github_sync_download():
             db_extract_dir.mkdir(exist_ok=True)
             with zipfile.ZipFile(tmp_zip, "r") as z:
                 for member in z.namelist():
-                    # Skip config.json — passwords/settings live in repo config
-                    if member in (f"{db_name}/config.json", "config.json"):
-                        # Only skip config if one already exists locally (preserve admin edits)
-                        if (db_extract_dir / "config.json").exists():
-                            continue
+                    # Always extract config.json from zip — zip is uploaded after every admin change
+                    # so it always has the latest settings (auto-crawl, passwords, etc.)
+                    # The committed config.json in git is just a fallback default
                     # Strip leading db_name/ prefix if present (handle both zip formats)
                     rel = member[len(db_name)+1:] if member.startswith(f"{db_name}/") else member
                     rel = rel.replace("\\", "/")  # normalize Windows backslash paths
