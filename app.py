@@ -5821,11 +5821,12 @@ def get_db_stats(request: Request, password: str = ""):
             _sc_data = {}
         last_crawl = _sc_data.get("last_crawl_time") or db_cfg.get("last_crawl_time", "")
         last_crawl_status = _sc_data.get("last_crawl_status") or db_cfg.get("last_crawl_status", "")
+        # Base next_crawl_ts on completion time (not start) so "due now" clears after crawl finishes
+        _last_for_next = _sc_data.get("last_crawl_completed") or db_cfg.get("last_crawl_completed") or last_crawl
         next_crawl_ts = ""
-        if last_crawl and auto_enabled:
+        if _last_for_next and auto_enabled:
             try:
-                last_dt = datetime.fromisoformat(last_crawl)
-                next_crawl_ts = (last_dt + timedelta(minutes=interval_m)).isoformat()
+                next_crawl_ts = (datetime.fromisoformat(_last_for_next) + timedelta(minutes=interval_m)).isoformat()
             except: pass
         elif auto_enabled:
             next_crawl_ts = datetime.now().isoformat()  # due now
@@ -6570,9 +6571,9 @@ async def crawl_site(data: dict, request: Request):
                             pg = await ctx.new_page()
                             await pg.set_default_timeout(15000)  # Hard cap all Playwright ops — prevents hung evaluate/goto on WAF slow-drip
                             await stealth(pg)
-                            for attempt in range(3):
+                            for attempt in range(5):
                                 try:
-                                    await pg.goto(cur_url, wait_until="domcontentloaded", timeout=20000)
+                                    await pg.goto(cur_url, wait_until="domcontentloaded", timeout=15000)
                                     # Quick JSON-LD check — if it gives content, skip expensive networkidle wait
                                     quick_text = await pg.evaluate("""() => {
                                         let out = '';
@@ -6721,10 +6722,11 @@ async def crawl_site(data: dict, request: Request):
                                                 pending_pages.append({"url": f"{cur_url}#site-navigation", "text": f"SITE NAVIGATION AND STRUCTURE:\n{_sb_text}"})
                                     break
                                 except Exception as e:
-                                    if attempt < 2:
+                                    if attempt < 4:
                                         await asyncio.sleep(1 * (attempt + 1))
                                     else:
-                                        logger.warning(f"Crawl error [{attempt+1}/3] {cur_url}: {e}")
+                                        logger.warning(f"Crawl error [{attempt+1}/5] {cur_url}: {e}")
+                                        await log_queue.put(f"[{completed}/{len(to_crawl)}] ❌ Skipped (5 fails): {cur_url[:70]}")
                             try:
                                 await pg.close()
                             except Exception:
