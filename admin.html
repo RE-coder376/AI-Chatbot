@@ -733,13 +733,37 @@
     return { 'Authorization': `Bearer ${pass}`, 'X-CSRF-Token': csrf, 'X-Admin-DB': db };
   }
 
+  // Refresh CSRF token silently — call before any write operation if token may be stale
+  async function refreshCsrf() {
+    const pass = localStorage.getItem('adminPass') || '';
+    const db   = localStorage.getItem('adminDb') || '';
+    try {
+      const r = await fetch(`${API}/admin/csrf-token`, { headers: { 'Authorization': `Bearer ${pass}`, 'X-Admin-DB': db } });
+      if (r.ok) { const d = await r.json(); sessionStorage.setItem('csrfToken', d.csrf_token); }
+    } catch(e) {}
+  }
+
+  // Fetch wrapper that auto-refreshes CSRF on 403 and retries once
+  async function authFetch(url, opts = {}) {
+    let res = await fetch(url, opts);
+    if (res.status === 403) {
+      const body = await res.clone().json().catch(() => ({}));
+      if ((body.detail || '').toLowerCase().includes('csrf')) {
+        await refreshCsrf();
+        opts.headers = { ...opts.headers, 'X-CSRF-Token': sessionStorage.getItem('csrfToken') || '' };
+        res = await fetch(url, opts);
+      }
+    }
+    return res;
+  }
+
   async function cancelActiveCrawl() {
     const db_name = window._activeCrawlDb || localStorage.getItem('adminDb') || '';
     if (!db_name) return;
     const btn = document.getElementById('crawl-stop-btn');
     if (btn) { btn.textContent = 'stopping...'; btn.style.pointerEvents = 'none'; }
     try {
-      const res = await fetch(`${API}/admin/crawl/cancel`, {
+      const res = await authFetch(`${API}/admin/crawl/cancel`, {
         method: 'POST', headers: {...authHeaders(), 'Content-Type': 'application/json'},
         body: JSON.stringify({db_name, password: localStorage.getItem('adminPass') || ''})
       });
@@ -759,7 +783,7 @@
     if (nextEl) nextEl.textContent = '\u23f8 Stopping...';
     if (cancelEl) cancelEl.style.display = 'none';
     try {
-      const res = await fetch(`${API}/admin/crawl/cancel`, {
+      const res = await authFetch(`${API}/admin/crawl/cancel`, {
         method: 'POST', headers: {...authHeaders(), 'X-Admin-DB': dbName, 'Content-Type': 'application/json'},
         body: JSON.stringify({db_name: dbName, password: localStorage.getItem('adminPass') || ''})
       });
@@ -925,7 +949,7 @@
     btn.textContent = '...';
     const pass = document.getElementById('master-pass').value;
     try {
-      const r = await fetch(`${API}/admin/knowledge-gaps/suggest`, {
+      const r = await authFetch(`${API}/admin/knowledge-gaps/suggest`, {
         method: 'POST', headers: {...authHeaders(), 'Content-Type': 'application/json'},
         body: JSON.stringify({password: pass, question})
       });
@@ -946,7 +970,7 @@
     const ta = document.getElementById(`suggest-text-${idx}`);
     if (!ta || !ta.value.trim()) return;
     const pass = document.getElementById('master-pass').value;
-    const r = await fetch(`${API}/admin/ingest/text`, {
+    const r = await authFetch(`${API}/admin/ingest/text`, {
       method: 'POST', headers: {...authHeaders(), 'Content-Type': 'application/json'},
       body: JSON.stringify({password: pass, text: ta.value.trim(), target_db: localStorage.getItem('adminDb') || ''})
     });
@@ -1203,7 +1227,7 @@
     statusEl.textContent = 'Saving...';
     statusEl.dataset.saved = '0';
     try {
-      const res = await fetch(`${API}/admin/crawl-schedule`, {
+      const res = await authFetch(`${API}/admin/crawl-schedule`, {
         method: 'POST', headers: {...authHeaders(), 'X-Admin-DB': dbName, 'Content-Type': 'application/json'},
         body: JSON.stringify({password:pass, db_name:dbName, enabled, interval_minutes:interval, crawl_url:url})
       });
@@ -1275,7 +1299,7 @@
     const pass = document.getElementById('master-pass').value;
     const f = new FormData(); f.append("password", pass); f.append("name", name);
     showStatus('db', `Switching to ${name}...`, 'loading');
-    const res = await fetch(`${API}/admin/databases/set-active`, { method:"POST", headers: authHeaders(), body:f });
+    const res = await authFetch(`${API}/admin/databases/set-active`, { method:"POST", headers: authHeaders(), body:f });
     const d = await res.json();
     showStatus('db', d.success ? `✅ Switched to ${name}. Backend loading (~30s) — refresh chat after 30s.` : (d.message || d.detail), d.success ? 'success' : 'error');
     clearBrandingFields();
@@ -1291,9 +1315,9 @@
     const csrf = sessionStorage.getItem('csrfToken') || '';
     showStatus('db', '☁️ Syncing from GitHub — please wait 30-60 seconds...', 'loading');
     try {
-      const r = await fetch(`${API}/admin/sync-github`, {
+      const r = await authFetch(`${API}/admin/sync-github`, {
         method: 'POST',
-        headers: {'Authorization': `Bearer ${pass}`, 'X-Admin-DB': db, 'X-CSRF-Token': csrf}
+        headers: {...authHeaders()}
       });
       const data = await r.json();
       const msg = data.message || data.detail || (r.ok ? 'Sync started — refresh list in 30s' : 'Unknown error');
@@ -1315,7 +1339,7 @@
     if (!name) return showStatus('db', 'Name required.', 'error');
     const f = new FormData(); f.append("password", pass); f.append("name", name); f.append("db_password", dbPass);
     showStatus('db', `Initializing ${name}...`, 'loading');
-    const res = await fetch(`${API}/admin/create-db`, { method:"POST", headers: authHeaders(), body:f });
+    const res = await authFetch(`${API}/admin/create-db`, { method:"POST", headers: authHeaders(), body:f });
     const d = await res.json();
     if (d.success) { document.getElementById('new-db-name').value = ''; document.getElementById('new-db-pass').value = ''; }
     showStatus('db', d.message || d.detail, d.success ? 'success' : 'error');
@@ -1327,7 +1351,7 @@
     const pass = document.getElementById('master-pass').value;
     const f = new FormData(); f.append("password", pass); f.append("name", name);
     showStatus('db', `Purging ${name}...`, 'loading');
-    const res = await fetch(`${API}/admin/delete-db`, { method:"POST", headers: authHeaders(), body:f });
+    const res = await authFetch(`${API}/admin/delete-db`, { method:"POST", headers: authHeaders(), body:f });
     const d = await res.json();
     showStatus('db', d.message || d.detail, d.success ? 'success' : 'error');
     loadDatabases();
@@ -1364,7 +1388,7 @@
     if (!newName || newName.trim() === oldName) return;
     const pass = document.getElementById('master-pass').value;
     const f = new FormData(); f.append("password", pass); f.append("old_name", oldName); f.append("new_name", newName.trim());
-    const res = await fetch(`${API}/admin/rename-db`, { method:"POST", headers: authHeaders(), body:f });
+    const res = await authFetch(`${API}/admin/rename-db`, { method:"POST", headers: authHeaders(), body:f });
     const d = await res.json();
     alert(d.message || d.detail || (res.ok ? 'Renamed.' : 'Failed.'));
     loadDatabases();
@@ -1375,7 +1399,7 @@
     const newPass = prompt(`New admin password for "${dbName}":`);
     if (!newPass || !newPass.trim()) return;
     const pass = document.getElementById('master-pass').value;
-    const res = await fetch(`${API}/admin/ops`, {
+    const res = await authFetch(`${API}/admin/ops`, {
       method: "POST",
       headers: { ...authHeaders(), 'X-Admin-DB': dbName, 'Content-Type': 'application/json' },
       body: JSON.stringify({ password: pass, admin_password: newPass.trim() })
@@ -1389,7 +1413,7 @@
     const pass = document.getElementById('master-pass').value;
     const f = new FormData(); f.append("password", pass); f.append("name", name);
     showStatus('db', `Clearing ${name}...`, 'loading');
-    const res = await fetch(`${API}/admin/databases/clear-data`, { method:"POST", headers: authHeaders(), body:f });
+    const res = await authFetch(`${API}/admin/databases/clear-data`, { method:"POST", headers: authHeaders(), body:f });
     const d = await res.json();
     showStatus('db', d.message || d.detail, d.success ? 'success' : 'error');
     loadDatabases();
@@ -1424,9 +1448,9 @@
       }
     };
     showStatus('ops', 'Saving operations...', 'loading');
-    const res = await fetch(`${API}/admin/ops`, { 
-      method: "POST", headers: {...authHeaders(), "Content-Type": "application/json"}, 
-      body:JSON.stringify(payload) 
+    const res = await authFetch(`${API}/admin/ops`, {
+      method: "POST", headers: {...authHeaders(), "Content-Type": "application/json"},
+      body:JSON.stringify(payload)
     });
     const d = await res.json();
     showStatus('ops', d.message || d.error, d.success ? 'success' : 'error');
@@ -1488,7 +1512,7 @@
     };
     showStatus('brand', 'Pushing Changes...', 'loading');
     try {
-      const res = await fetch(`${API}/admin/branding`, { method: "POST", headers: {...authHeaders(), "Content-Type": "application/json"}, body:JSON.stringify(payload) });
+      const res = await authFetch(`${API}/admin/branding`, { method: "POST", headers: {...authHeaders(), "Content-Type": "application/json"}, body:JSON.stringify(payload) });
       const d = await res.json();
       showStatus('brand', d.message || d.detail || d.error || 'Unknown error', d.success ? 'success' : 'error');
     } catch(e) {
@@ -1540,7 +1564,7 @@
     const a = document.getElementById('faq-a').value.trim();
     if (!q || !a) return showStatus('faq', 'Both question and answer are required.', 'error');
     showStatus('faq', 'Adding FAQ...', 'loading');
-    const d = await fetch('/admin/faqs', { method: 'POST', headers: {...authHeaders(), 'Content-Type': 'application/json'},
+    const d = await authFetch('/admin/faqs', { method: 'POST', headers: {...authHeaders(), 'Content-Type': 'application/json'},
       body: JSON.stringify({password: pass, question: q, answer: a}) }).then(r=>r.json());
     if (d.success) {
       document.getElementById('faq-q').value = '';
@@ -1552,7 +1576,7 @@
 
   async function deleteFaq(id) {
     const pass = document.getElementById('master-pass').value;
-    await fetch(`/admin/faqs/${id}`, {headers: authHeaders(), method:'DELETE'});
+    await authFetch(`/admin/faqs/${id}`, {headers: authHeaders(), method:'DELETE'});
     loadFaqs();
   }
 
@@ -1689,7 +1713,7 @@
     try {
       let res, d;
       if (isUrl) {
-        res = await fetch(`${API}/admin/ingest/fetch-url`, {
+        res = await authFetch(`${API}/admin/ingest/fetch-url`, {
           method: 'POST', headers: {...authHeaders(), 'Content-Type': 'application/json'},
           body: JSON.stringify({ password: pass, url: text.split('\n')[0].trim(), target_db: getIngestTarget() })
         });
@@ -1701,7 +1725,7 @@
           showStatus('ingest', d.message + ` (${d.chunks} items)`, 'success');
         } else showStatus('ingest', d.detail || 'Fetch failed.', 'error');
       } else {
-        res = await fetch(`${API}/admin/ingest/smart-text`, {
+        res = await authFetch(`${API}/admin/ingest/smart-text`, {
           method: 'POST', headers: {...authHeaders(), 'Content-Type': 'application/json'},
           body: JSON.stringify({ password: pass, content: text, format: fmt, target_db: getIngestTarget() })
         });
@@ -1726,7 +1750,7 @@
       f.append('password', pass);
       f.append('target_db', getIngestTarget());
       for (const file of fileInput.files) f.append('files', file);
-      const res = await fetch(`${API}/admin/ingest/files`, { method: 'POST', headers: authHeaders(), body: f });
+      const res = await authFetch(`${API}/admin/ingest/files`, { method: 'POST', headers: authHeaders(), body: f });
       const d = await res.json();
       if (d.success) { fileInput.value = ''; showStatus('ingest', d.message || 'Uploaded.', 'success'); }
       else showStatus('ingest', d.detail || 'Upload failed.', 'error');
@@ -1742,7 +1766,7 @@
     statusEl.textContent = 'Fetching...';
     try {
       // Fetch the external API via a proxy on our server
-      const res = await fetch(`${API}/admin/ingest/fetch-url`, {
+      const res = await authFetch(`${API}/admin/ingest/fetch-url`, {
         method: 'POST', headers: {...authHeaders(), 'Content-Type': 'application/json'},
         body: JSON.stringify({ password: pass, url, json_path: jsonPath, target_db: getIngestTarget() })
       });
@@ -1780,7 +1804,7 @@
     const statusEl = document.getElementById('api-src-status');
     statusEl.textContent = 'Saving...'; statusEl.style.color = 'var(--text-muted)';
     try {
-      const res = await fetch(`${API}/admin/api-sources`, {
+      const res = await authFetch(`${API}/admin/api-sources`, {
         method: 'POST', headers: {...authHeaders(), 'Content-Type': 'application/json'},
         body: JSON.stringify({
           password: pass,
@@ -1804,7 +1828,7 @@
 
   async function deleteApiSource(name) {
     const pass = document.getElementById('master-pass').value;
-    await fetch(`${API}/admin/api-sources/delete`, {
+    await authFetch(`${API}/admin/api-sources/delete`, {
       method: 'POST', headers: {...authHeaders(), 'Content-Type': 'application/json'},
       body: JSON.stringify({password:pass, db_name:getIngestTarget(), name})
     });
@@ -1831,7 +1855,7 @@
     }, 1000);
 
     try {
-      const res = await fetch(`${API}/admin/reindex`, {
+      const res = await authFetch(`${API}/admin/reindex`, {
         method: 'POST', headers: {...authHeaders(), 'Content-Type': 'application/json'},
         body: JSON.stringify({ password: pass, target_db: getIngestTarget() })
       });
@@ -1870,7 +1894,7 @@
 
     const groups = [];
     try {
-      const response = await fetch(`${API}/admin/crawl-inspect`, {
+      const response = await authFetch(`${API}/admin/crawl-inspect`, {
         method: 'POST', headers: {...authHeaders(), 'Content-Type': 'application/json'},
         body: JSON.stringify({password: pass, url})
       });
@@ -1952,9 +1976,9 @@
     if (clearFirst && !await showConfirm('Clear Before Crawl', `This will delete all existing data in "${db_name}". A backup will be saved first. Continue?`, 'Clear & Crawl', true)) return;
 
     // Save embedding model to DB config first
-    await fetch(`${API}/admin/embedding-model`, {
+    await authFetch(`${API}/admin/embedding-model`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { ...authHeaders(), "Content-Type": "application/json" },
       body: JSON.stringify({ password: pass, embedding_model, db_name })
     });
 
