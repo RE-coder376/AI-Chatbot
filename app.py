@@ -740,6 +740,7 @@ _crawling_dbs: set = set()   # DBs currently mid-crawl
 _crawl_cancel_events: dict = {}  # db_name -> asyncio.Event; set by /admin/crawl/cancel
 _crawl_start_times: dict = {}  # db_name -> time.time() when crawl started
 _auto_crawl_sem: asyncio.Semaphore | None = None  # initialized in lifespan; 1 auto-crawl at a time
+_queued_crawls: set = set()  # DBs that have been scheduled but not yet started (waiting for sem)
 
 def check_rate_limit(ip: str, store: dict, limit: int, window: int = 60) -> bool:
     now = time.time()
@@ -2464,8 +2465,9 @@ def _check_config_security():
     except Exception as e:
         logger.warning(f"Config security check failed: {e}")
 
-async def _auto_crawl_db(db_name: str, url: str, max_pages: int = 20) -> int:
-    """Scheduled re-crawl — refreshes all sitemap pages (or BFS if no sitemap) for the DB."""
+async def _auto_crawl_db(db_name: str, url: str, max_pages: int = 0) -> int:
+    """Scheduled re-crawl — refreshes all sitemap pages (or BFS if no sitemap) for the DB.
+    max_pages=0 means unlimited (crawl entire sitemap)."""
     import httpx as _hx
     from bs4 import BeautifulSoup
     from urllib.parse import urlparse, urljoin
@@ -2537,7 +2539,7 @@ async def _auto_crawl_db(db_name: str, url: str, max_pages: int = 20) -> int:
                                 except Exception: pass
                             candidate = expanded if expanded else candidate
                         sitemap_urls = candidate
-                        crawl_urls = sitemap_urls[:max_pages]
+                        crawl_urls = sitemap_urls if max_pages == 0 else sitemap_urls[:max_pages]
                         new_count = len([u for u in crawl_urls if u not in already_seen])
                         logger.info(f"[AUTO-CRAWL] '{db_name}': {len(sitemap_urls)} sitemap URLs — refreshing {len(crawl_urls)} ({new_count} new)")
                         break
@@ -2556,7 +2558,7 @@ async def _auto_crawl_db(db_name: str, url: str, max_pages: int = 20) -> int:
                             href = urljoin(url, a["href"]).split("#")[0].rstrip("/")
                             if _domain_match(urlparse(href).netloc, domain) and href not in bfs_urls:
                                 bfs_urls.append(href)
-                        crawl_urls = bfs_urls[:max_pages]
+                        crawl_urls = bfs_urls if max_pages == 0 else bfs_urls[:max_pages]
                         logger.info(f"[AUTO-CRAWL] '{db_name}': BFS found {len(crawl_urls)} URLs from homepage")
             except Exception as _bfs_e:
                 logger.warning(f"[AUTO-CRAWL] BFS fallback failed for {db_name}: {_bfs_e}")
@@ -2740,44 +2742,37 @@ async def _auto_scheduler():
                             try:
                                 due = now >= datetime.fromisoformat(last_str) + timedelta(minutes=interval_m)
                             except Exception as e: logger.debug(f"[SCHEDULER] Crawl interval parse ({db_dir.name}): {e}")
-                        if due and db_name not in _crawling_dbs:
-                            logger.info(f"[SCHEDULER] Auto-crawling '{db_name}'...")
-                            # Write timestamp NOW so interval resets immediately for all DBs
-                            _now_iso = datetime.now().isoformat()
-                            try:
-                                _crawl_sidecar_pre = db_dir / "_crawl_times.json"
-                                _ct_pre = json.loads(_crawl_sidecar_pre.read_text(encoding="utf-8")) if _crawl_sidecar_pre.exists() else {}
-                                _ct_pre["last_crawl_time"] = _now_iso
-                                _crawl_sidecar_pre.write_text(json.dumps(_ct_pre, indent=2), encoding="utf-8")
-                                _cfg_path_pre = db_dir / "config.json"
-                                _cfg_data_pre = json.loads(_cfg_path_pre.read_text(encoding="utf-8")) if _cfg_path_pre.exists() else {}
-                                _cfg_data_pre["last_crawl_time"] = _now_iso
-                                _cfg_path_pre.write_text(json.dumps(_cfg_data_pre, indent=2), encoding="utf-8")
-                                threading.Thread(target=_github_backup_crawl_times, args=(db_name,), daemon=True).start()
-                            except Exception as _pre_e:
-                                logger.warning(f"[SCHEDULER] Pre-crawl timestamp write failed: {_pre_e}")
-                            # Fire as background task — don't await so loop continues to next DB immediately
+                        if due and db_name not in _crawling_dbs and db_name not in _queued_crawls:
+                            logger.info(f"[SCHEDULER] Queuing auto-crawl for '{db_name}'...")
+                            _queued_crawls.add(db_name)
+                            # Fire as background task — timestamp written AFTER crawl completes
                             async def _run_crawl(_name=db_name, _dir=db_dir, _url=db_cfg["crawl_url"]):
                                 try:
                                     chunks = await _auto_crawl_db(_name, _url)
+                                    _done_iso = datetime.now().isoformat()
                                     try:
                                         _sc = _dir / "_crawl_times.json"
                                         _ct = json.loads(_sc.read_text(encoding="utf-8")) if _sc.exists() else {}
+                                        _ct["last_crawl_time"] = _done_iso
                                         _ct["last_crawl_chunks"] = chunks
-                                        _ct["last_crawl_completed"] = datetime.now().isoformat()
+                                        _ct["last_crawl_completed"] = _done_iso
                                         _sc.write_text(json.dumps(_ct, indent=2), encoding="utf-8")
                                         _cp = _dir / "config.json"
                                         _cd = json.loads(_cp.read_text(encoding="utf-8")) if _cp.exists() else {}
+                                        _cd["last_crawl_time"] = _done_iso
                                         _cd["last_crawl_chunks"] = chunks
-                                        _cd["last_crawl_completed"] = datetime.now().isoformat()
+                                        _cd["last_crawl_completed"] = _done_iso
                                         _cp.write_text(json.dumps(_cd, indent=2), encoding="utf-8")
+                                        threading.Thread(target=_github_backup_crawl_times, args=(_name,), daemon=True).start()
                                     except Exception as _ce:
-                                        logger.warning(f"[SCHEDULER] Could not update chunk count: {_ce}")
+                                        logger.warning(f"[SCHEDULER] Could not update crawl timestamps: {_ce}")
                                     logger.info(f"[SCHEDULER] '{_name}' crawled: +{chunks} chunks")
                                     _write_crawl_status(_name, "success")
                                 except Exception as _e:
                                     logger.error(f"[SCHEDULER] Crawl error '{_name}': {_e}")
                                     _write_crawl_status(_name, "failed")
+                                finally:
+                                    _queued_crawls.discard(_name)
                             asyncio.create_task(_run_crawl())
 
                     # ── API sources polling ───────────────────────────────
