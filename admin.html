@@ -736,14 +736,20 @@
   async function cancelActiveCrawl() {
     const db_name = window._activeCrawlDb || localStorage.getItem('adminDb') || '';
     if (!db_name) return;
+    const btn = document.getElementById('crawl-stop-btn');
+    if (btn) { btn.textContent = 'stopping...'; btn.style.pointerEvents = 'none'; }
     try {
       const res = await fetch(`${API}/admin/crawl/cancel`, {
         method: 'POST', headers: {...authHeaders(), 'Content-Type': 'application/json'},
         body: JSON.stringify({db_name, password: localStorage.getItem('adminPass') || ''})
       });
       const d = await res.json();
+      if (btn) btn.textContent = d.status === 'cancelled' ? 'stopped' : 'not running';
       showStatus('crawl', d.status === 'cancelled' ? '\u2705 Crawl cancelled' : '\u26a0\ufe0f No crawl running', d.status === 'cancelled' ? 'success' : 'warning');
-    } catch(e) { showStatus('crawl', '\u274c Cancel failed', 'error'); }
+    } catch(e) {
+      if (btn) { btn.textContent = 'stop crawl'; btn.style.pointerEvents = 'auto'; }
+      showStatus('crawl', '\u274c Cancel failed', 'error');
+    }
   }
 
   async function cancelDbCrawl(dbName) {
@@ -1954,7 +1960,7 @@
 
     showStatus('crawl', 'Starting crawl engine...', 'loading', true);
     const statusEl = document.getElementById('crawl-status');
-    statusEl.innerHTML = '<div style="margin-bottom:10px;display:flex;align-items:center;gap:10px;">🚀 Initializing... <button onclick="cancelActiveCrawl()" style="background:#dc2626;color:#fff;border:none;padding:3px 10px;border-radius:8px;font-size:11px;cursor:pointer;">⏹ Cancel</button></div><div id="crawl-logs" style="font-family:monospace; font-size:10px; background:#1e293b; color:#86efac; padding:12px; border-radius:12px; max-height:200px; overflow-y:auto; line-height:1.4;"></div>';
+    statusEl.innerHTML = '<div style="margin-bottom:10px;">🚀 Initializing...</div><div id="crawl-logs" style="font-family:monospace; font-size:10px; background:#1e293b; color:#86efac; padding:12px; border-radius:12px; max-height:200px; overflow-y:auto; line-height:1.4;"></div><div style="margin-top:6px;text-align:right;"><a href="#" id="crawl-stop-btn" onclick="event.preventDefault();cancelActiveCrawl()" style="color:#ef4444;font-size:11px;text-decoration:none;opacity:0.7;" title="Stop after current page finishes">stop crawl</a></div>';
     const logsEl = document.getElementById('crawl-logs');
 
     // Start crawl as background task — returns immediately, crawl runs on server
