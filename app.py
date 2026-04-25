@@ -32,7 +32,7 @@ if sys.platform == 'win32':
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import List, Optional, Dict, AsyncGenerator
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 warnings.filterwarnings("ignore")
 os.environ["PYTHONWARNINGS"] = "ignore"
@@ -2796,7 +2796,7 @@ async def _auto_scheduler():
                             async def _run_crawl(_name=db_name, _dir=db_dir, _url=db_cfg["crawl_url"]):
                                 try:
                                     chunks = await _auto_crawl_db(_name, _url)
-                                    _done_iso = datetime.now().isoformat()
+                                    _done_iso = datetime.now(timezone.utc).astimezone(timezone(timedelta(hours=5))).isoformat()
                                     try:
                                         _sc = _dir / "_crawl_times.json"
                                         _ct = json.loads(_sc.read_text(encoding="utf-8")) if _sc.exists() else {}
