@@ -2603,7 +2603,10 @@ async def _auto_crawl_db(db_name: str, url: str, max_pages: int = 0) -> int:
                         try:
                             _pg = await _browser.new_page()
                             if _pg is None:
-                                raise RuntimeError("new_page() returned None — browser crashed")
+                                # Browser process dead — no point retrying, nullify so all remaining pages skip Playwright
+                                logger.warning(f"[AUTO-CRAWL] '{db_name}' browser dead at {page_url[:70]} — switching to httpx for remaining pages")
+                                _browser = None
+                                break
                             await _pg.set_default_timeout(15000)
                             await _pg.goto(page_url, wait_until="domcontentloaded", timeout=15000)
                             await _pg.wait_for_timeout(1500)
