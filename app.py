@@ -2689,7 +2689,7 @@ async def _auto_crawl_db(db_name: str, url: str, max_pages: int = 0) -> int:
             except Exception as e: logger.warning(f"[AUTO-CRAWL] Page error {page_url}: {e}")
         await _hx_client.aclose()
         _total_elapsed = int(time.time() - _crawl_start)
-        logger.info(f"[AUTO-CRAWL] '{db_name}' finished: {_page_idx}/{_total_pages} pages, +{added} chunks, {_skipped} skipped, {_total_elapsed}s total")
+        logger.info(f"[AUTO-CRAWL] '{db_name}' finished: {_page_idx}/{_total_pages} pages, {added} indexed, {_skipped} skipped, {_total_elapsed}s total")
 
         # Final batch write for remaining docs
         if _pending_docs:
