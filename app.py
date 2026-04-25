@@ -739,6 +739,7 @@ _rate_lock = threading.Lock()
 _crawling_dbs: set = set()   # DBs currently mid-crawl
 _crawl_cancel_events: dict = {}  # db_name -> asyncio.Event; set by /admin/crawl/cancel
 _crawl_start_times: dict = {}  # db_name -> time.time() when crawl started
+_auto_crawl_sem: asyncio.Semaphore | None = None  # initialized in lifespan; 1 auto-crawl at a time
 
 def check_rate_limit(ip: str, store: dict, limit: int, window: int = 60) -> bool:
     now = time.time()
@@ -2492,6 +2493,12 @@ async def _auto_crawl_db(db_name: str, url: str, max_pages: int = 20) -> int:
             logger.warning(f"[AUTO-CRAWL] Could not create write-db for {db_name}: {_e}")
             db = local_db
     if not db or not url: return 0
+    # Serialize auto-crawls: queue if another is running (prevents OOM + ChromaDB write lock)
+    _sem = _auto_crawl_sem or asyncio.Semaphore(1)
+    if _crawling_dbs:
+        logger.info(f"[AUTO-CRAWL] '{db_name}' queued — waiting for {list(_crawling_dbs)} to finish")
+    await _sem.acquire()
+    logger.info(f"[AUTO-CRAWL] '{db_name}' semaphore acquired — starting crawl")
     _crawling_dbs.add(db_name)
     cancel_ev = asyncio.Event()
     _crawl_cancel_events[db_name] = cancel_ev
@@ -2656,6 +2663,7 @@ async def _auto_crawl_db(db_name: str, url: str, max_pages: int = 20) -> int:
         _crawling_dbs.discard(db_name)
         _crawl_cancel_events.pop(db_name, None)
         _crawl_start_times.pop(db_name, None)
+        _sem.release()
     if newly_seen:
         try:
             await asyncio.to_thread(seen_file.write_text, "\n".join(already_seen | set(newly_seen)), "utf-8")
@@ -2880,6 +2888,8 @@ def _init_crawl_timestamps():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    global _auto_crawl_sem
+    _auto_crawl_sem = asyncio.Semaphore(1)  # Only 1 auto-crawl at a time — prevents OOM + ChromaDB lock
     # These can be slow on Windows/large DBs; run in threads to let FastAPI bind to port 8000 immediately
     asyncio.create_task(asyncio.to_thread(_check_config_security))
     asyncio.create_task(asyncio.to_thread(_load_key_health))
