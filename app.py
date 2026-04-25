@@ -2528,14 +2528,16 @@ async def _auto_crawl_db(db_name: str, url: str, max_pages: int = 0) -> int:
                         found = re.findall(r'<loc>([^<]+)</loc>', r.text)
                         candidate = [u.strip() for u in found if _domain_match(urlparse(u.strip()).netloc, domain)]
                         # If all locs are XML files, it's a sitemap index — expand sub-sitemaps
-                        if candidate and all(u.endswith(".xml") for u in candidate):
+                        # Use urlparse to strip query strings before checking .xml extension (Shopify adds ?from=&to=)
+                        def _is_xml(u): return urlparse(u).path.endswith(".xml")
+                        if candidate and all(_is_xml(u) for u in candidate):
                             expanded = []
                             for sub_url in candidate[:10]:
                                 try:
                                     sr = await client.get(sub_url)
                                     if sr.status_code == 200 and "<loc>" in sr.text:
                                         sub_found = re.findall(r'<loc>([^<]+)</loc>', sr.text)
-                                        expanded += [u.strip() for u in sub_found if _domain_match(urlparse(u.strip()).netloc, domain) and not u.strip().endswith(".xml")]
+                                        expanded += [u.strip() for u in sub_found if _domain_match(urlparse(u.strip()).netloc, domain) and not _is_xml(u.strip())]
                                 except Exception: pass
                             candidate = expanded if expanded else candidate
                         sitemap_urls = candidate
