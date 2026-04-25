@@ -2588,6 +2588,20 @@ async def _auto_crawl_db(db_name: str, url: str, max_pages: int = 0) -> int:
             if cancel_ev.is_set():
                 logger.info(f"[AUTO-CRAWL] '{db_name}' cancelled at page {_page_idx}/{_total_pages}")
                 break
+            # ── Restart browser every 30 pages to prevent memory accumulation ──
+            if _browser and _page_idx % 30 == 0:
+                try:
+                    await _browser.close()
+                    await _pw_ctx.stop()
+                except Exception: pass
+                try:
+                    _pw_ctx = await async_playwright().start()
+                    _browser = await _pw_ctx.chromium.launch(headless=True, args=["--no-sandbox","--disable-dev-shm-usage"])
+                    logger.info(f"[AUTO-CRAWL] '{db_name}' browser restarted at page {_page_idx} (memory reset)")
+                except Exception as _restart_e:
+                    logger.warning(f"[AUTO-CRAWL] '{db_name}' browser restart failed: {_restart_e} — continuing with httpx")
+                    _browser = None
+                    _pw_ctx = None
             # ── Progress logging every 60s ──
             _now_t = time.time()
             if _now_t - _last_progress_log >= 60:
