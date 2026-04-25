@@ -2695,6 +2695,8 @@ async def _auto_crawl_db(db_name: str, url: str, max_pages: int = 0) -> int:
             try: await _pw_ctx.stop()
             except Exception: pass
     finally:
+        try: await _hx_client.aclose()
+        except Exception: pass
         _crawling_dbs.discard(db_name)
         _crawl_cancel_events.pop(db_name, None)
         _crawl_start_times.pop(db_name, None)
