@@ -2674,7 +2674,7 @@ async def _auto_crawl_db(db_name: str, url: str, max_pages: int = 0) -> int:
                         await asyncio.to_thread(lambda u=page_url: db.delete(where={"source": u}))
                     except Exception as _del_e:
                         logger.debug(f"[AUTO-CRAWL] Could not delete old chunks for {page_url}: {_del_e}")
-                    _pending_docs.append(Document(page_content=text[:25000], metadata={"source": page_url}))
+                    _pending_docs.extend(_smart_chunk_page(text, page_url))
                     added += 1
                     # Batch write every 100 docs — prevents unbounded RAM + avoids single huge write at end
                     if len(_pending_docs) >= 100:
