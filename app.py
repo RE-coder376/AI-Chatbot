@@ -2582,11 +2582,16 @@ async def _auto_crawl_db(db_name: str, url: str, max_pages: int = 0) -> int:
         _skipped = 0
         _page_idx = 0
         _total_pages = len(crawl_urls)
+        _MAX_CRAWL_SECONDS = 4 * 3600  # 4hr hard limit — kills truly stuck crawls
+        _hx_client = _hx.AsyncClient(timeout=15, headers={"User-Agent": "Mozilla/5.0"}, follow_redirects=True)
         for page_url in crawl_urls:
             _page_idx += 1
-            # ── Cancel check — per-DB specific ──
+            # ── Cancel check + overall timeout ──
             if cancel_ev.is_set():
                 logger.info(f"[AUTO-CRAWL] '{db_name}' cancelled at page {_page_idx}/{_total_pages}")
+                break
+            if time.time() - _crawl_start > _MAX_CRAWL_SECONDS:
+                logger.warning(f"[AUTO-CRAWL] '{db_name}' hit {_MAX_CRAWL_SECONDS//3600}hr limit at page {_page_idx}/{_total_pages} — stopping")
                 break
             # ── Restart browser every 30 pages to prevent memory accumulation ──
             if _browser and _page_idx % 30 == 0:
@@ -2640,16 +2645,15 @@ async def _auto_crawl_db(db_name: str, url: str, max_pages: int = 0) -> int:
                                 await asyncio.sleep(1 * (_attempt + 1))
                             else:
                                 logger.warning(f"[AUTO-CRAWL] '{db_name}' Playwright failed 3x {page_url[:70]}: {_pe} — trying httpx")
-                # httpx fallback — always runs if Playwright failed or unavailable
+                # httpx fallback — reuse single client across all pages
                 if not text:
                     try:
-                        async with _hx.AsyncClient(timeout=15, headers={"User-Agent": "Mozilla/5.0"}, follow_redirects=True) as _cl:
-                            r = await _cl.get(page_url)
-                            if r.status_code == 200:
-                                soup = BeautifulSoup(r.text, "html.parser")
-                                for tag in soup(["script","style"]): tag.decompose()
-                                for tag in soup.find_all(style=lambda s: s and "display:none" in s.replace(" ","")): tag.decompose()
-                                text = soup.get_text(separator="\n", strip=True)
+                        r = await _hx_client.get(page_url)
+                        if r.status_code == 200:
+                            soup = BeautifulSoup(r.text, "html.parser")
+                            for tag in soup(["script","style"]): tag.decompose()
+                            for tag in soup.find_all(style=lambda s: s and "display:none" in s.replace(" ","")): tag.decompose()
+                            text = soup.get_text(separator="\n", strip=True)
                     except Exception as _hx_e:
                         logger.warning(f"[AUTO-CRAWL] '{db_name}' httpx also failed {page_url[:70]}: {_hx_e}")
                 # Only count as skipped if BOTH Playwright and httpx failed
@@ -2662,15 +2666,27 @@ async def _auto_crawl_db(db_name: str, url: str, max_pages: int = 0) -> int:
                         logger.debug(f"[AUTO-CRAWL] Could not delete old chunks for {page_url}: {_del_e}")
                     _pending_docs.append(Document(page_content=text[:25000], metadata={"source": page_url}))
                     added += 1
+                    # Batch write every 100 docs — prevents unbounded RAM + avoids single huge write at end
+                    if len(_pending_docs) >= 100:
+                        try:
+                            await asyncio.wait_for(asyncio.to_thread(db.add_documents, _pending_docs), timeout=120)
+                            logger.info(f"[AUTO-CRAWL] '{db_name}' batch written: {len(_pending_docs)} docs")
+                        except Exception as _bw_e:
+                            logger.warning(f"[AUTO-CRAWL] '{db_name}' batch write failed: {_bw_e}")
+                        _pending_docs = []
                 if page_url not in already_seen:
                     newly_seen.append(page_url)
             except Exception as e: logger.warning(f"[AUTO-CRAWL] Page error {page_url}: {e}")
+        await _hx_client.aclose()
         _total_elapsed = int(time.time() - _crawl_start)
         logger.info(f"[AUTO-CRAWL] '{db_name}' finished: {_page_idx}/{_total_pages} pages, +{added} chunks, {_skipped} skipped, {_total_elapsed}s total")
 
-        # Batch write all docs at once — single HNSW lock instead of per-page, unblocks reads
+        # Final batch write for remaining docs
         if _pending_docs:
-            await asyncio.to_thread(db.add_documents, _pending_docs)
+            try:
+                await asyncio.wait_for(asyncio.to_thread(db.add_documents, _pending_docs), timeout=120)
+            except Exception as _fw_e:
+                logger.warning(f"[AUTO-CRAWL] '{db_name}' final batch write failed: {_fw_e}")
 
         if _browser:
             try: await _browser.close()
