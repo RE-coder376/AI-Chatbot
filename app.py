@@ -2638,8 +2638,9 @@ async def _auto_crawl_db(db_name: str, url: str, max_pages: int = 0) -> int:
                             text = soup.get_text(separator="\n", strip=True)
                             _pw_ok = True
                             break
-                        except RuntimeError as _pe:
-                            # RuntimeError from dead-browser checks above — no retries
+                        except (RuntimeError, TypeError) as _pe:
+                            # RuntimeError = our dead-browser check; TypeError = Python's "await None" error
+                            # Both mean browser process is dead — no retries ever
                             if _pg is not None:
                                 try: await _pg.close()
                                 except Exception: pass
