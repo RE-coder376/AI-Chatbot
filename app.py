@@ -2641,6 +2641,11 @@ async def _auto_crawl_db(db_name: str, url: str, max_pages: int = 0) -> int:
                             if _pg is not None:
                                 try: await _pg.close()
                                 except Exception: pass
+                            # "NoneType can't be used in await" = browser process dead, retrying is pointless
+                            if "NoneType" in str(_pe) or "object None" in str(_pe):
+                                logger.warning(f"[AUTO-CRAWL] '{db_name}' browser dead — switching all remaining pages to httpx")
+                                _browser = None
+                                break
                             if _attempt < 2:
                                 await asyncio.sleep(1 * (_attempt + 1))
                             else:
