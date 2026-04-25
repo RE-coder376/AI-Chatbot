@@ -2620,12 +2620,13 @@ async def _auto_crawl_db(db_name: str, url: str, max_pages: int = 0) -> int:
                     for _attempt in range(3):
                         _pg = None
                         try:
-                            _pg = await _browser.new_page()
+                            # Check before awaiting — dead browser returns None directly (not a coroutine)
+                            _coro = _browser.new_page()
+                            if _coro is None:
+                                raise RuntimeError("browser dead: new_page() returned None")
+                            _pg = await _coro
                             if _pg is None:
-                                # Browser process dead — no point retrying, nullify so all remaining pages skip Playwright
-                                logger.warning(f"[AUTO-CRAWL] '{db_name}' browser dead at {page_url[:70]} — switching to httpx for remaining pages")
-                                _browser = None
-                                break
+                                raise RuntimeError("browser dead: awaited page is None")
                             await _pg.set_default_timeout(15000)
                             await _pg.goto(page_url, wait_until="domcontentloaded", timeout=15000)
                             await _pg.wait_for_timeout(1500)
@@ -2637,15 +2638,18 @@ async def _auto_crawl_db(db_name: str, url: str, max_pages: int = 0) -> int:
                             text = soup.get_text(separator="\n", strip=True)
                             _pw_ok = True
                             break
+                        except RuntimeError as _pe:
+                            # RuntimeError from dead-browser checks above — no retries
+                            if _pg is not None:
+                                try: await _pg.close()
+                                except Exception: pass
+                            logger.warning(f"[AUTO-CRAWL] '{db_name}' browser dead — switching all remaining pages to httpx")
+                            _browser = None
+                            break
                         except Exception as _pe:
                             if _pg is not None:
                                 try: await _pg.close()
                                 except Exception: pass
-                            # "NoneType can't be used in await" = browser process dead, retrying is pointless
-                            if "NoneType" in str(_pe) or "object None" in str(_pe):
-                                logger.warning(f"[AUTO-CRAWL] '{db_name}' browser dead — switching all remaining pages to httpx")
-                                _browser = None
-                                break
                             if _attempt < 2:
                                 await asyncio.sleep(1 * (_attempt + 1))
                             else:
