@@ -738,6 +738,7 @@ _admin_rate: dict = {}
 _rate_lock = threading.Lock()
 _crawling_dbs: set = set()   # DBs currently mid-crawl
 _crawl_cancel_events: dict = {}  # db_name -> asyncio.Event; set by /admin/crawl/cancel
+_crawl_start_times: dict = {}  # db_name -> time.time() when crawl started
 
 def check_rate_limit(ip: str, store: dict, limit: int, window: int = 60) -> bool:
     now = time.time()
@@ -2494,6 +2495,7 @@ async def _auto_crawl_db(db_name: str, url: str, max_pages: int = 20) -> int:
     _crawling_dbs.add(db_name)
     cancel_ev = asyncio.Event()
     _crawl_cancel_events[db_name] = cancel_ev
+    _crawl_start_times[db_name] = time.time()
     seen_file = DATABASES_DIR / db_name / "crawled_urls.txt"
     already_seen: set = set()
     if seen_file.exists():
@@ -2566,25 +2568,48 @@ async def _auto_crawl_db(db_name: str, url: str, max_pages: int = 20) -> int:
         except Exception as _pw_start_e:
             logger.warning(f"[AUTO-CRAWL] Playwright unavailable, falling back to httpx: {_pw_start_e}")
 
+        _crawl_start = time.time()
+        _last_progress_log = _crawl_start
+        _skipped = 0
+        _page_idx = 0
+        _total_pages = len(crawl_urls)
         for page_url in crawl_urls:
+            _page_idx += 1
+            # ── Cancel check — per-DB specific ──
+            if cancel_ev.is_set():
+                logger.info(f"[AUTO-CRAWL] '{db_name}' cancelled at page {_page_idx}/{_total_pages}")
+                break
+            # ── Progress logging every 60s ──
+            _now_t = time.time()
+            if _now_t - _last_progress_log >= 60:
+                _elapsed = int(_now_t - _crawl_start)
+                logger.info(f"[AUTO-CRAWL] '{db_name}' progress: {_page_idx}/{_total_pages} pages, +{added} chunks, {_skipped} skipped, {_elapsed}s elapsed")
+                _last_progress_log = _now_t
             try:
                 text = ""
                 if _browser:
-                    try:
-                        _pg = await _browser.new_page()
-                        await _pg.goto(page_url, wait_until="domcontentloaded", timeout=20000)
-                        await _pg.wait_for_timeout(3000)  # let JS render content
-                        html = await _pg.content()
-                        await _pg.close()
-                        soup = BeautifulSoup(html, "html.parser")
-                        # Keep footer/header — e-commerce sites put shipping/return policy there.
-                        # Only remove script/style (non-content) and display:none elements.
-                        for tag in soup(["script","style"]): tag.decompose()
-                        for tag in soup.find_all(style=lambda s: s and "display:none" in s.replace(" ","")): tag.decompose()
-                        text = soup.get_text(separator="\n", strip=True)
-                    except Exception as _pe:
-                        logger.warning(f"[AUTO-CRAWL] Playwright page error {page_url}: {_pe}")
-                if not text:  # fallback to httpx if Playwright failed or unavailable
+                    for _attempt in range(3):
+                        try:
+                            _pg = await _browser.new_page()
+                            await _pg.set_default_timeout(15000)
+                            await _pg.goto(page_url, wait_until="domcontentloaded", timeout=15000)
+                            await _pg.wait_for_timeout(1500)
+                            html = await _pg.content()
+                            await _pg.close()
+                            soup = BeautifulSoup(html, "html.parser")
+                            for tag in soup(["script","style"]): tag.decompose()
+                            for tag in soup.find_all(style=lambda s: s and "display:none" in s.replace(" ","")): tag.decompose()
+                            text = soup.get_text(separator="\n", strip=True)
+                            break
+                        except Exception as _pe:
+                            try: await _pg.close()
+                            except Exception: pass
+                            if _attempt < 2:
+                                await asyncio.sleep(1 * (_attempt + 1))
+                            else:
+                                logger.warning(f"[AUTO-CRAWL] '{db_name}' page failed 3x: {page_url[:70]}: {_pe}")
+                                _skipped += 1
+                if not text:
                     async with _hx.AsyncClient(timeout=15, headers={"User-Agent": "Mozilla/5.0"}, follow_redirects=True) as _cl:
                         r = await _cl.get(page_url)
                         if r.status_code == 200:
@@ -2593,7 +2618,6 @@ async def _auto_crawl_db(db_name: str, url: str, max_pages: int = 20) -> int:
                             for tag in soup.find_all(style=lambda s: s and "display:none" in s.replace(" ","")): tag.decompose()
                             text = soup.get_text(separator="\n", strip=True)
                 if len(text) > 100:
-                    # Delete stale chunks for this URL before re-adding (no duplicate buildup)
                     try:
                         await asyncio.to_thread(lambda u=page_url: db.delete(where={"source": u}))
                     except Exception as _del_e:
@@ -2603,6 +2627,8 @@ async def _auto_crawl_db(db_name: str, url: str, max_pages: int = 20) -> int:
                 if page_url not in already_seen:
                     newly_seen.append(page_url)
             except Exception as e: logger.warning(f"[AUTO-CRAWL] Page error {page_url}: {e}")
+        _total_elapsed = int(time.time() - _crawl_start)
+        logger.info(f"[AUTO-CRAWL] '{db_name}' finished: {_page_idx}/{_total_pages} pages, +{added} chunks, {_skipped} skipped, {_total_elapsed}s total")
 
         # Batch write all docs at once — single HNSW lock instead of per-page, unblocks reads
         if _pending_docs:
@@ -2617,6 +2643,7 @@ async def _auto_crawl_db(db_name: str, url: str, max_pages: int = 20) -> int:
     finally:
         _crawling_dbs.discard(db_name)
         _crawl_cancel_events.pop(db_name, None)
+        _crawl_start_times.pop(db_name, None)
     if newly_seen:
         try:
             await asyncio.to_thread(seen_file.write_text, "\n".join(already_seen | set(newly_seen)), "utf-8")
@@ -2651,6 +2678,16 @@ async def _auto_scheduler():
     await asyncio.sleep(60)  # Extended warm-up to ensure API is ready first
     while True:
         try:
+            # ── Stuck-detection: log any crawl running > 5min ──
+            if _crawling_dbs:
+                for _cdb in list(_crawling_dbs):
+                    _cstart = _crawl_start_times.get(_cdb, 0)
+                    if _cstart:
+                        _celapsed = int(time.time() - _cstart)
+                        if _celapsed > 300:
+                            logger.warning(f"[SCHEDULER] STUCK? '{_cdb}' has been crawling for {_celapsed}s ({_celapsed//60}min)")
+                        elif _celapsed > 60:
+                            logger.info(f"[SCHEDULER] '{_cdb}' crawling for {_celapsed}s")
             if DATABASES_DIR.exists():
                 for db_dir in DATABASES_DIR.iterdir():
                     if not db_dir.is_dir(): continue
@@ -5955,7 +5992,7 @@ async def cancel_crawl_endpoint(data: dict, request: Request):
     ev = _crawl_cancel_events.get(db_name)
     if ev:
         ev.set()
-        _crawling_dbs.discard(db_name)
+        logger.info(f"[CANCEL] Cancel signal sent for '{db_name}'")
         return {"status": "cancelled"}
     return {"status": "not_running"}
 
