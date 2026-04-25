@@ -2587,10 +2587,14 @@ async def _auto_crawl_db(db_name: str, url: str, max_pages: int = 20) -> int:
                 _last_progress_log = _now_t
             try:
                 text = ""
+                _pw_ok = False
                 if _browser:
                     for _attempt in range(3):
+                        _pg = None
                         try:
                             _pg = await _browser.new_page()
+                            if _pg is None:
+                                raise RuntimeError("new_page() returned None — browser crashed")
                             await _pg.set_default_timeout(15000)
                             await _pg.goto(page_url, wait_until="domcontentloaded", timeout=15000)
                             await _pg.wait_for_timeout(1500)
@@ -2600,23 +2604,31 @@ async def _auto_crawl_db(db_name: str, url: str, max_pages: int = 20) -> int:
                             for tag in soup(["script","style"]): tag.decompose()
                             for tag in soup.find_all(style=lambda s: s and "display:none" in s.replace(" ","")): tag.decompose()
                             text = soup.get_text(separator="\n", strip=True)
+                            _pw_ok = True
                             break
                         except Exception as _pe:
-                            try: await _pg.close()
-                            except Exception: pass
+                            if _pg is not None:
+                                try: await _pg.close()
+                                except Exception: pass
                             if _attempt < 2:
                                 await asyncio.sleep(1 * (_attempt + 1))
                             else:
-                                logger.warning(f"[AUTO-CRAWL] '{db_name}' page failed 3x: {page_url[:70]}: {_pe}")
-                                _skipped += 1
+                                logger.warning(f"[AUTO-CRAWL] '{db_name}' Playwright failed 3x {page_url[:70]}: {_pe} — trying httpx")
+                # httpx fallback — always runs if Playwright failed or unavailable
                 if not text:
-                    async with _hx.AsyncClient(timeout=15, headers={"User-Agent": "Mozilla/5.0"}, follow_redirects=True) as _cl:
-                        r = await _cl.get(page_url)
-                        if r.status_code == 200:
-                            soup = BeautifulSoup(r.text, "html.parser")
-                            for tag in soup(["script","style"]): tag.decompose()
-                            for tag in soup.find_all(style=lambda s: s and "display:none" in s.replace(" ","")): tag.decompose()
-                            text = soup.get_text(separator="\n", strip=True)
+                    try:
+                        async with _hx.AsyncClient(timeout=15, headers={"User-Agent": "Mozilla/5.0"}, follow_redirects=True) as _cl:
+                            r = await _cl.get(page_url)
+                            if r.status_code == 200:
+                                soup = BeautifulSoup(r.text, "html.parser")
+                                for tag in soup(["script","style"]): tag.decompose()
+                                for tag in soup.find_all(style=lambda s: s and "display:none" in s.replace(" ","")): tag.decompose()
+                                text = soup.get_text(separator="\n", strip=True)
+                    except Exception as _hx_e:
+                        logger.warning(f"[AUTO-CRAWL] '{db_name}' httpx also failed {page_url[:70]}: {_hx_e}")
+                # Only count as skipped if BOTH Playwright and httpx failed
+                if not text or len(text) <= 100:
+                    _skipped += 1
                 if len(text) > 100:
                     try:
                         await asyncio.to_thread(lambda u=page_url: db.delete(where={"source": u}))
@@ -2693,9 +2705,12 @@ async def _auto_scheduler():
                     if not db_dir.is_dir(): continue
                     cfg_file = db_dir / "config.json"
                     if not cfg_file.exists(): continue
-                    try: 
-                        db_cfg = json.loads(cfg_file.read_text(encoding="utf-8-sig"))
-                    except Exception as e: 
+                    try:
+                        _raw = cfg_file.read_text(encoding="utf-8-sig").strip()
+                        if not _raw:
+                            continue  # empty config.json — skip silently
+                        db_cfg = json.loads(_raw)
+                    except Exception as e:
                         logger.warning(f"[SCHEDULER] Bad config for {db_dir.name}: {e}")
                         continue
                     db_name = db_dir.name
