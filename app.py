@@ -12,6 +12,7 @@ import asyncio
 import re
 import uuid
 import hmac
+import hashlib
 import secrets
 import warnings
 import shutil
@@ -66,6 +67,8 @@ ACTIVE_DB_FILE = Path("active_db.txt")
 DATABASES_DIR = Path("databases")
 DB_SECRETS_FILE = "secrets.json"
 DB_SECRET_KEYS = {"admin_password", "smtp_password", "sendgrid_keys", "widget_key", "api_sources"}
+PASSWORD_HASH_PREFIX = "pbkdf2_sha256"
+PASSWORD_HASH_ITERATIONS = 260_000
 
 # HF Spaces / containerised deploy: restore files from env vars if missing
 _keys_env = os.environ.get("KEYS_JSON", "")
@@ -146,6 +149,9 @@ def _save_db_secrets(db_name: str, updates: dict) -> None:
             existing = json.loads(secret_file.read_text(encoding="utf-8-sig"))
         except Exception as e:
             logger.warning(f"_save_db_secrets: could not parse {secret_file}: {e}")
+    # Avoid storing plaintext admin passwords for tenants.
+    if secret_updates.get("admin_password") and not _is_password_hash(secret_updates["admin_password"]):
+        secret_updates["admin_password"] = _hash_password(secret_updates["admin_password"])
     safe_updates = {k: v for k, v in secret_updates.items() if v != "" or existing.get(k, "") == ""}
     existing.update(safe_updates)
     _atomic_write_json(secret_file, existing)
@@ -802,6 +808,7 @@ def _mark_key_failed(api_key: str, error_str: str):
 # Rate limiting (in-memory, per IP) — protected by lock to prevent race conditions
 _chat_rate:  dict = {}   # ip -> deque of timestamps
 _admin_rate: dict = {}
+_public_write_rate: dict = {}
 _rate_lock = threading.Lock()
 _crawling_dbs: set = set()   # DBs currently mid-crawl
 _crawl_cancel_events: dict = {}  # db_name -> asyncio.Event; set by /admin/crawl/cancel
@@ -2135,20 +2142,66 @@ def _validate_db_name(name: str) -> str:
         raise HTTPException(status_code=400, detail="Invalid database name")
     return name
 
-def admin_auth(password: str, cfg: dict):
-    """Accept if password matches ADMIN_PASSWORD env var (super-admin) OR the DB's own admin_password."""
+def _is_password_hash(value: str) -> bool:
+    return isinstance(value, str) and value.startswith(f"{PASSWORD_HASH_PREFIX}$")
+
+def _hash_password(password: str) -> str:
+    """Hash newly saved tenant passwords without adding a paid auth dependency."""
+    password = str(password or "")
+    salt = secrets.token_hex(16)
+    digest = hashlib.pbkdf2_hmac(
+        "sha256",
+        password.encode("utf-8"),
+        salt.encode("utf-8"),
+        PASSWORD_HASH_ITERATIONS,
+    ).hex()
+    return f"{PASSWORD_HASH_PREFIX}${PASSWORD_HASH_ITERATIONS}${salt}${digest}"
+
+def _password_matches(candidate: str, stored: str) -> bool:
+    """Compare plaintext or pbkdf2 password values in constant time."""
+    candidate = str(candidate or "")
+    stored = str(stored or "")
+    if not candidate or not stored:
+        return False
+    if _is_password_hash(stored):
+        try:
+            _, rounds_s, salt, expected = stored.split("$", 3)
+            digest = hashlib.pbkdf2_hmac(
+                "sha256",
+                candidate.encode("utf-8"),
+                salt.encode("utf-8"),
+                int(rounds_s),
+            ).hex()
+            return hmac.compare_digest(digest, expected)
+        except Exception:
+            return False
+    return hmac.compare_digest(candidate.encode(), stored.encode())
+
+def _get_root_password() -> str:
     root_pw = os.getenv("ADMIN_PASSWORD", "") or ""
-    if not root_pw:
-        # Locally (no env var), read raw config.json — NOT the overlaid cfg which has DB password
+    if not root_pw and CONFIG_FILE.exists():
         try:
             root_pw = json.loads(CONFIG_FILE.read_text(encoding="utf-8-sig")).get("admin_password", "") or ""
         except Exception:
-            pass
+            root_pw = ""
+    return root_pw
+
+def _is_owner_password(password: str) -> bool:
+    return _password_matches(password, _get_root_password())
+
+def require_owner_auth(password: str) -> str:
+    if _is_owner_password(password):
+        return "owner"
+    raise HTTPException(status_code=401, detail="Owner authorization required")
+
+def admin_auth(password: str, cfg: dict):
+    """Accept if password matches ADMIN_PASSWORD env var (super-admin) OR the DB's own admin_password."""
+    root_pw = _get_root_password()
     db_pw = cfg.get("admin_password", "") or ""
-    if root_pw and hmac.compare_digest(password.encode(), root_pw.encode()):
-        return  # super-admin
-    if db_pw and hmac.compare_digest(password.encode(), db_pw.encode()):
-        return  # per-DB client admin
+    if _password_matches(password, root_pw):
+        return "owner"
+    if _password_matches(password, db_pw):
+        return "client"
     raise HTTPException(status_code=401, detail="Unauthorized")
 
 def _extract_password(request: Request, fallback: str = "") -> str:
@@ -2164,7 +2217,8 @@ def _extract_admin_db(request: Request, fallback: str = "") -> str:
     db = (request.headers.get("X-Admin-DB", "")
           or request.query_params.get("db_name", "")
           or fallback)
-    return db.strip() or _get_active_db()
+    db = db.strip() or _get_active_db()
+    return _validate_db_name(db) if db else ""
 
 def any_key_ready() -> bool:
     """Fast check: returns True if at least one key is off cooldown."""
@@ -4077,9 +4131,10 @@ def _delete_faq_from_db(faq_id: str, db_name: str = ""):
 @app.get("/admin/faqs")
 async def get_faqs(request: Request, password: str = ""):
     password = _extract_password(request, password)
-    db_name = _extract_admin_db(request)
-    cfg = get_config(db_name)
-    admin_auth(password, cfg)
+    try:
+        require_owner_auth(password)
+    except HTTPException:
+        return JSONResponse({"detail": "Unauthorized"}, status_code=401)
     return JSONResponse({"faqs": _load_faqs(db_name)})
 
 @app.post("/admin/faqs")
@@ -4122,9 +4177,11 @@ async def debug_retrieve(request: Request):
         data = await request.json()
     except Exception:
         return JSONResponse({"detail": "Invalid JSON"}, status_code=400)
-    cfg = get_config()
-    try: admin_auth(_extract_password(request, data.get("password", "")), cfg)
-    except HTTPException: return JSONResponse({"detail": "Unauthorized"}, status_code=401)
+    # Owner-only: this endpoint leaks raw retrieved context across tenants.
+    try:
+        require_owner_auth(_extract_password(request, data.get("password", "")))
+    except HTTPException:
+        return JSONResponse({"detail": "Unauthorized"}, status_code=401)
     question = data.get("question", "").strip()
     if not question:
         return JSONResponse({"detail": "question required"}, status_code=400)
@@ -4186,20 +4243,12 @@ async def get_auth_mode(request: Request):
     """Returns 'owner' if password matches root config, 'client' if only DB-specific password."""
     password = _extract_password(request, request.query_params.get("password", ""))
     db_name = _extract_admin_db(request)
-    # Read root config directly (no DB overlay) to get root password
-    root_password = os.getenv("ADMIN_PASSWORD", "")
-    if not root_password:
-        try:
-            root_cfg = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
-            root_password = root_cfg.get("admin_password", "")
-        except Exception:
-            root_password = ""
-    if root_password and hmac.compare_digest(password.encode(), root_password.encode()):
+    if _is_owner_password(password):
         return {"role": "owner"}
     # Not root — check if DB-specific password matches (already validated by branding call)
     db_cfg = get_config(db_name)
     db_password = db_cfg.get("admin_password", "")
-    if db_password and hmac.compare_digest(password.encode(), db_password.encode()):
+    if _password_matches(password, db_password):
         return {"role": "client", "db": db_name}
     return JSONResponse({"detail": "Unauthorized"}, status_code=401)
 
@@ -4232,8 +4281,10 @@ async def save_ops(request: Request, data: dict = None):
     db_name = _extract_admin_db(request)
     cfg = get_config(db_name)
     password = _extract_password(request, data.get("password", ""))
-    try: admin_auth(password, cfg)
-    except HTTPException: return JSONResponse({"detail": "Unauthorized"}, status_code=401)
+    try:
+        role = admin_auth(password, cfg)
+    except HTTPException:
+        return JSONResponse({"detail": "Unauthorized"}, status_code=401)
     updates = {k: data[k] for k in ("contact_email", "whatsapp_number", "async_contact_url", "hours", "always_open", "sender_email", "smtp_password", "smtp_host", "smtp_port", "admin_password") if k in data}
     save_db_config(updates, db_name)
     return {"success": True, "message": "Operational settings saved to active DB."}
@@ -4280,6 +4331,8 @@ async def set_embedding_model(request: Request, data: dict = None):
     target = data.get("db_name", "").strip()
     if target:
         target = _validate_db_name(target)
+        if role != "owner" and target != db_name:
+            return JSONResponse({"detail": "Unauthorized"}, status_code=401)
         db_cfg_file = DATABASES_DIR / target / "config.json"
         db_cfg_file.parent.mkdir(parents=True, exist_ok=True)
         existing = {}
@@ -4298,13 +4351,7 @@ def get_databases(request: Request, password: str = ""):
     db_name = _extract_admin_db(request, "")
     cfg = get_config(db_name) if db_name else get_config()
     admin_auth(password, cfg)
-    root_pw = os.getenv("ADMIN_PASSWORD", "") or ""
-    if not root_pw and CONFIG_FILE.exists():
-        try:
-            root_pw = json.loads(CONFIG_FILE.read_text(encoding="utf-8-sig")).get("admin_password", "") or ""
-        except Exception:
-            root_pw = ""
-    is_root = bool(root_pw and hmac.compare_digest(password.encode(), root_pw.encode()))
+    is_root = _is_owner_password(password)
     dbs = []
     active = ACTIVE_DB_FILE.read_text(encoding="utf-8").strip() if ACTIVE_DB_FILE.exists() else "default"
     if DATABASES_DIR.exists():
@@ -4334,9 +4381,10 @@ def get_databases(request: Request, password: str = ""):
 @app.post("/admin/databases/clear-data")
 async def clear_db_data(request: Request, password: str = Form(...), name: str = Form(...)):
     password = _extract_password(request, password)
-    cfg = get_config()
-    try: admin_auth(password, cfg)
-    except HTTPException: return JSONResponse({"detail": "Unauthorized"}, status_code=401)
+    try:
+        require_owner_auth(password)
+    except HTTPException:
+        return JSONResponse({"detail": "Unauthorized"}, status_code=401)
     name = _validate_db_name(name)
     db_path = DATABASES_DIR / name
     if not db_path.exists(): return JSONResponse({"detail": "DB not found"}, status_code=404)
@@ -4389,32 +4437,22 @@ async def sync_github(request: Request):
 @app.post("/admin/databases/set-active")
 async def set_active_db(request: Request, password: str = Form(...), name: str = Form(...)):
     password = _extract_password(request, password)
+    name = _validate_db_name(name)
     # Auth for set-active: only the super-admin (root/env password) may switch active DB.
     # If no root password is configured (single-tenant / first setup), fall back to
     # accepting any valid per-DB password so the owner isn't locked out.
-    root_pw = os.environ.get("ADMIN_PASSWORD", "")
-    if not root_pw and CONFIG_FILE.exists():
-        try:
-            root_pw = json.loads(CONFIG_FILE.read_text(encoding="utf-8-sig")).get("admin_password", "")
-        except: pass
+    root_pw = _get_root_password()
     if root_pw:
-        if not hmac.compare_digest(password.encode(), root_pw.encode()):
+        try:
+            require_owner_auth(password)
+        except HTTPException:
             return JSONResponse({"detail": "Unauthorized — only the super-admin may switch active DB"}, status_code=401)
     else:
-        # No root password configured (single-tenant / local dev) — accept any valid DB password
-        found = False
-        for db_dir in (DATABASES_DIR.iterdir() if DATABASES_DIR.exists() else []):
-            if not db_dir.is_dir(): continue
-            cfg_path = db_dir / "config.json"
-            if not cfg_path.exists(): continue
-            try:
-                db_pw = get_config(db_dir.name).get("admin_password", "")
-                if db_pw and hmac.compare_digest(password.encode(), db_pw.encode()):
-                    found = True; break
-            except: pass
-        if not found:
+        # No root password configured (single-tenant / local dev): allow switching only to a DB
+        # whose own password matches.
+        db_pw = get_config(name).get("admin_password", "")
+        if not _password_matches(password, db_pw):
             return JSONResponse({"detail": "Unauthorized"}, status_code=401)
-    name = _validate_db_name(name)
     current = ACTIVE_DB_FILE.read_text(encoding="utf-8").strip() if ACTIVE_DB_FILE.exists() else ""
     if current == name:
         return {"success": True, "message": f"{name} is already the active DB."}
@@ -5458,13 +5496,15 @@ def get_embed_code(request: Request, password: str = ""):
 
 @app.post("/admin/reindex")
 async def reindex(request: Request, data: dict):
-    cfg = get_config()
-    try: admin_auth(_extract_password(request, data.get("password", "")), cfg)
-    except HTTPException: return JSONResponse({"detail": "Unauthorized"}, status_code=401)
+    try:
+        require_owner_auth(_extract_password(request, data.get("password", "")))
+    except HTTPException:
+        return JSONResponse({"detail": "Unauthorized"}, status_code=401)
     target = data.get("target_db", "").strip()
     try:
         global embeddings_model
         if target:
+            target = _validate_db_name(target)
             prev = ACTIVE_DB_FILE.read_text(encoding="utf-8").strip() if ACTIVE_DB_FILE.exists() else ""
             try:
                 ACTIVE_DB_FILE.write_text(target, encoding="utf-8")
@@ -5950,15 +5990,13 @@ def _compute_db_health(chunks: int, last_crawl: str, auto_enabled: bool, interva
 @app.get("/admin/db-stats")
 def get_db_stats(request: Request, password: str = ""):
     password = _extract_password(request, password)
-    root_cfg = get_config()
-    root_pw = os.getenv("ADMIN_PASSWORD", "") or root_cfg.get("admin_password", "") or ""
-    is_root = root_pw and hmac.compare_digest(password.encode(), root_pw.encode())
+    is_root = _is_owner_password(password)
     # For per-DB passwords: check if the X-Admin-DB header's DB password matches
     client_db = _extract_admin_db(request)
     if not is_root:
         if client_db:
             db_pw = get_config(client_db).get("admin_password", "") or ""
-            if not (db_pw and hmac.compare_digest(password.encode(), db_pw.encode())):
+            if not _password_matches(password, db_pw):
                 return JSONResponse({"detail": "Unauthorized"}, status_code=401)
         else:
             return JSONResponse({"detail": "Unauthorized"}, status_code=401)
