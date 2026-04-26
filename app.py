@@ -64,6 +64,8 @@ KEYS_FILE = Path("keys.json")
 CONFIG_FILE = Path("config.json")
 ACTIVE_DB_FILE = Path("active_db.txt")
 DATABASES_DIR = Path("databases")
+DB_SECRETS_FILE = "secrets.json"
+DB_SECRET_KEYS = {"admin_password", "smtp_password", "sendgrid_keys", "widget_key", "api_sources"}
 
 # HF Spaces / containerised deploy: restore files from env vars if missing
 _keys_env = os.environ.get("KEYS_JSON", "")
@@ -85,6 +87,69 @@ def _get_active_db() -> str:
         if dbs: return dbs[0]
     return ""
 
+def _safe_db_secret_name(db_name: str) -> str:
+    return re.sub(r"[^A-Za-z0-9]", "_", (db_name or "").strip()).upper()
+
+def _load_db_secrets(db_name: str) -> dict:
+    """Load untracked/env per-DB secrets without requiring them in tracked config.json."""
+    name = (db_name or "").strip()
+    if not name or not re.match(r"^[a-zA-Z0-9_\-]+$", name):
+        return {}
+    data = {}
+    secret_file = DATABASES_DIR / name / DB_SECRETS_FILE
+    if secret_file.exists():
+        try:
+            raw = json.loads(secret_file.read_text(encoding="utf-8-sig"))
+            if isinstance(raw, dict):
+                data.update({k: v for k, v in raw.items() if k in DB_SECRET_KEYS})
+        except Exception as e:
+            logger.warning(f"Could not parse {secret_file}: {e}")
+    prefix = _safe_db_secret_name(name)
+    env_json = os.getenv(f"DB_{prefix}_SECRETS_JSON", "")
+    if env_json:
+        try:
+            raw_env = json.loads(env_json)
+            if isinstance(raw_env, dict):
+                data.update({k: v for k, v in raw_env.items() if k in DB_SECRET_KEYS})
+        except Exception as e:
+            logger.warning(f"Could not parse DB_{prefix}_SECRETS_JSON: {e}")
+    env_map = {
+        "admin_password": os.getenv(f"DB_{prefix}_ADMIN_PASSWORD", ""),
+        "smtp_password": os.getenv(f"DB_{prefix}_SMTP_PASSWORD", ""),
+        "widget_key": os.getenv(f"DB_{prefix}_WIDGET_KEY", ""),
+        "sendgrid_keys": os.getenv(f"DB_{prefix}_SENDGRID_KEYS_JSON", ""),
+        "api_sources": os.getenv(f"DB_{prefix}_API_SOURCES_JSON", ""),
+    }
+    for key, value in env_map.items():
+        if not value:
+            continue
+        if key in ("sendgrid_keys", "api_sources"):
+            try:
+                data[key] = json.loads(value)
+            except Exception as e:
+                logger.warning(f"Could not parse DB_{prefix}_{key.upper()} env JSON: {e}")
+        else:
+            data[key] = value
+    return data
+
+def _save_db_secrets(db_name: str, updates: dict) -> None:
+    """Persist only sensitive DB settings to an untracked per-DB secrets file."""
+    name = _validate_db_name(db_name)
+    secret_updates = {k: v for k, v in updates.items() if k in DB_SECRET_KEYS}
+    if not secret_updates:
+        return
+    secret_file = DATABASES_DIR / name / DB_SECRETS_FILE
+    secret_file.parent.mkdir(parents=True, exist_ok=True)
+    existing = {}
+    if secret_file.exists():
+        try:
+            existing = json.loads(secret_file.read_text(encoding="utf-8-sig"))
+        except Exception as e:
+            logger.warning(f"_save_db_secrets: could not parse {secret_file}: {e}")
+    safe_updates = {k: v for k, v in secret_updates.items() if v != "" or existing.get(k, "") == ""}
+    existing.update(safe_updates)
+    _atomic_write_json(secret_file, existing)
+
 def _get_db_for_widget_key(key: str) -> str:
     """Return the db_name that owns this widget_key, or '' if not found. Cached."""
     if key in _widget_key_cache:
@@ -99,6 +164,7 @@ def _get_db_for_widget_key(key: str) -> str:
             continue
         try:
             cfg = json.loads(cfg_file.read_text(encoding="utf-8"))
+            cfg.update(_load_db_secrets(db_dir.name))
             if cfg.get("widget_key") == key:
                 _widget_key_cache[key] = db_dir.name
                 return db_dir.name
@@ -428,6 +494,7 @@ def _github_sync_upload(db_name: str):
                 rel = f.relative_to(db_path)
                 rel_str = str(rel).replace("\\", "/")  # normalize for Linux extraction
                 if rel_str.startswith("visitor_history"): continue
+                if rel_str in (DB_SECRETS_FILE, "config.local.json"): continue
                 z.write(f, rel_str)
         file_size = tmp_zip.stat().st_size
         logger.info(f"[GH-SYNC] {db_name}.zip → {file_size/1024/1024:.1f}MB")
@@ -1982,7 +2049,7 @@ def save_visitor_turn(visitor_id: str, role: str, content: str, db_name: str = "
 
 def get_config(db_name: str = ""):
     """Merge root config with active DB config. DB values override root (empty strings skipped).
-    Secrets (admin_password, smtp_password, sendgrid_keys) are overlaid from env vars.
+    Per-DB secrets are loaded from untracked secrets.json/env overlays.
     If db_name is provided, uses that DB instead of active_db.txt."""
     root = {}
     if CONFIG_FILE.exists():
@@ -2010,6 +2077,9 @@ def get_config(db_name: str = ""):
                             root[k] = v
             except Exception as e:
                 logger.warning(f"get_config: could not parse DB config for '{active}': {e}")
+        for k, v in _load_db_secrets(active).items():
+            if v != "" and v is not None:
+                root[k] = v
     # --- Overlay secrets from environment variables (highest priority) ---
     # NOTE: ADMIN_PASSWORD env var is intentionally NOT overlaid here — it's the super-admin
     # password checked separately in admin_auth(). Overlaying it would break per-DB client auth.
@@ -2027,20 +2097,23 @@ def save_config(config):
     _atomic_write_json(CONFIG_FILE, config)
 
 def save_db_config(updates: dict, db_name: str = ""):
-    """Save branding/ops overrides to the specified (or active) DB's config.json only."""
+    """Save public DB settings to config.json and sensitive settings to secrets.json."""
     active = db_name or (ACTIVE_DB_FILE.read_text(encoding="utf-8").strip() if ACTIVE_DB_FILE.exists() else "")
     if not active:
         save_config({**get_config(), **updates})
         return
+    _save_db_secrets(active, updates)
+    public_updates = {k: v for k, v in updates.items() if k not in DB_SECRET_KEYS}
     db_cfg_file = DATABASES_DIR / active / "config.json"
     existing = {}
     if db_cfg_file.exists():
         try: existing = json.loads(db_cfg_file.read_text(encoding="utf-8-sig"))
         except Exception as e: logger.warning(f"save_db_config: could not parse {db_cfg_file}: {e}")
     # Never overwrite existing non-empty values with empty strings
-    safe_updates = {k: v for k, v in updates.items() if v != "" or existing.get(k, "") == ""}
-    existing.update(safe_updates)
-    _atomic_write_json(db_cfg_file, existing)
+    safe_updates = {k: v for k, v in public_updates.items() if v != "" or existing.get(k, "") == ""}
+    if safe_updates:
+        existing.update(safe_updates)
+        _atomic_write_json(db_cfg_file, existing)
     threading.Thread(target=_github_sync_upload, args=(active,), daemon=True).start()
 
 def _atomic_write_json(path: Path, data) -> None:
@@ -4225,11 +4298,19 @@ def get_databases(request: Request, password: str = ""):
     db_name = _extract_admin_db(request, "")
     cfg = get_config(db_name) if db_name else get_config()
     admin_auth(password, cfg)
+    root_pw = os.getenv("ADMIN_PASSWORD", "") or ""
+    if not root_pw and CONFIG_FILE.exists():
+        try:
+            root_pw = json.loads(CONFIG_FILE.read_text(encoding="utf-8-sig")).get("admin_password", "") or ""
+        except Exception:
+            root_pw = ""
+    is_root = bool(root_pw and hmac.compare_digest(password.encode(), root_pw.encode()))
     dbs = []
     active = ACTIVE_DB_FILE.read_text(encoding="utf-8").strip() if ACTIVE_DB_FILE.exists() else "default"
     if DATABASES_DIR.exists():
         for d in sorted(DATABASES_DIR.iterdir(), key=lambda x: x.name):
             if not d.is_dir(): continue
+            if not is_root and d.name != db_name: continue
             # Disk size (sum all files recursively)
             total_bytes = sum(f.stat().st_size for f in d.rglob("*") if f.is_file())
             if total_bytes < 1024: size_str = f"{total_bytes} B"
@@ -4317,13 +4398,8 @@ async def set_active_db(request: Request, password: str = Form(...), name: str =
             root_pw = json.loads(CONFIG_FILE.read_text(encoding="utf-8-sig")).get("admin_password", "")
         except: pass
     if root_pw:
-        # Root password OR per-DB password for their own DB only
         if not hmac.compare_digest(password.encode(), root_pw.encode()):
-            # Not root — check if per-DB password matches the requested DB
-            db_cfg = get_config(name)
-            db_pw = db_cfg.get("admin_password", "")
-            if not (db_pw and hmac.compare_digest(password.encode(), db_pw.encode())):
-                return JSONResponse({"detail": "Unauthorized — only the super-admin may switch active DB"}, status_code=401)
+            return JSONResponse({"detail": "Unauthorized — only the super-admin may switch active DB"}, status_code=401)
     else:
         # No root password configured (single-tenant / local dev) — accept any valid DB password
         found = False
@@ -4332,7 +4408,7 @@ async def set_active_db(request: Request, password: str = Form(...), name: str =
             cfg_path = db_dir / "config.json"
             if not cfg_path.exists(): continue
             try:
-                db_pw = json.loads(cfg_path.read_text(encoding="utf-8-sig")).get("admin_password", "")
+                db_pw = get_config(db_dir.name).get("admin_password", "")
                 if db_pw and hmac.compare_digest(password.encode(), db_pw.encode()):
                     found = True; break
             except: pass
@@ -4364,15 +4440,17 @@ async def create_db(request: Request, password: str = Form(...), name: str = For
     except HTTPException: return JSONResponse({"detail": "Invalid database name"}, status_code=400)
     db_path = DATABASES_DIR / db_name
     db_path.mkdir(parents=True, exist_ok=True)
-    # Write per-DB config with admin_password so client can log in immediately
+    # Write public per-DB config and store the client password in untracked secrets.
     db_cfg_path = db_path / "config.json"
     if not db_cfg_path.exists():
-        db_cfg_path.write_text(json.dumps({"admin_password": db_password.strip()}, indent=2), encoding="utf-8")
+        db_cfg_path.write_text(json.dumps({}, indent=2), encoding="utf-8")
+        if db_password.strip():
+            _save_db_secrets(db_name, {"admin_password": db_password.strip()})
     elif db_password.strip():
         try:
             existing = json.loads(db_cfg_path.read_text(encoding="utf-8"))
-            existing["admin_password"] = db_password.strip()
             db_cfg_path.write_text(json.dumps(existing, indent=2), encoding="utf-8")
+            _save_db_secrets(db_name, {"admin_password": db_password.strip()})
         except Exception: pass
     threading.Thread(target=_github_sync_upload, args=(db_name,), daemon=True).start()
     # Remove from deleted_dbs.txt if re-creating a previously-deleted DB
@@ -5360,11 +5438,8 @@ def get_embed_code(request: Request, password: str = ""):
     # Auto-generate widget_key if missing
     if not widget_key and db_name:
         widget_key = str(uuid.uuid4())
-        _db_cfg_path = DATABASES_DIR / db_name / "config.json"
         try:
-            _db_cfg = json.loads(_db_cfg_path.read_text(encoding="utf-8")) if _db_cfg_path.exists() else {}
-            _db_cfg["widget_key"] = widget_key
-            _atomic_write_json(_db_cfg_path, _db_cfg)
+            _save_db_secrets(db_name, {"widget_key": widget_key})
             _widget_key_cache[widget_key] = db_name
         except Exception as _wk_e:
             logger.warning(f"Could not persist widget_key for {db_name}: {_wk_e}")
@@ -5882,12 +5957,7 @@ def get_db_stats(request: Request, password: str = ""):
     client_db = _extract_admin_db(request)
     if not is_root:
         if client_db:
-            db_cfg_path = DATABASES_DIR / client_db / "config.json"
-            db_cfg_data = {}
-            if db_cfg_path.exists():
-                try: db_cfg_data = json.loads(db_cfg_path.read_text(encoding="utf-8"))
-                except: pass
-            db_pw = db_cfg_data.get("admin_password", "") or ""
+            db_pw = get_config(client_db).get("admin_password", "") or ""
             if not (db_pw and hmac.compare_digest(password.encode(), db_pw.encode())):
                 return JSONResponse({"detail": "Unauthorized"}, status_code=401)
         else:
@@ -5982,12 +6052,7 @@ def get_api_sources(request: Request, password: str = "", db_name: str = ""):
     except HTTPException: return JSONResponse({"detail": "Unauthorized"}, status_code=401)
     if not db_name:
         db_name = ACTIVE_DB_FILE.read_text(encoding="utf-8").strip() if ACTIVE_DB_FILE.exists() else ""
-    db_cfg_file = DATABASES_DIR / db_name / "config.json"
-    db_cfg = {}
-    if db_cfg_file.exists():
-        try: db_cfg = json.loads(db_cfg_file.read_text(encoding="utf-8-sig"))
-        except: pass
-    return {"api_sources": db_cfg.get("api_sources", []), "db_name": db_name}
+    return {"api_sources": cfg.get("api_sources", []), "db_name": db_name}
 
 @app.post("/admin/api-sources")
 async def save_api_source(request: Request, data: dict):
@@ -6013,16 +6078,10 @@ async def save_api_source(request: Request, data: dict):
     db_cfg_file = DATABASES_DIR / db_name / "config.json"
     if not db_cfg_file.exists():
         return JSONResponse({"detail": f"DB '{db_name}' has no config"}, status_code=404)
-    try:
-        existing = json.loads(db_cfg_file.read_text(encoding="utf-8-sig"))
-    except Exception as e:
-        logger.error(f"API source add: config corrupt for {db_name}: {e}")
-        return JSONResponse({"detail": "Config file corrupt, cannot modify"}, status_code=500)
+    existing = get_config(db_name)
     sources = [s for s in existing.get("api_sources", []) if s["name"] != new_src["name"]]
     sources.append(new_src)
-    existing["api_sources"] = sources
-    db_cfg_file.write_text(json.dumps(existing, indent=2), encoding="utf-8")
-    threading.Thread(target=_github_sync_upload, args=(db_name,), daemon=True).start()
+    save_db_config({"api_sources": sources}, db_name)
     return {"success": True, "message": f"API source '{new_src['name']}' saved"}
 
 @app.post("/admin/api-sources/delete")
@@ -6037,14 +6096,8 @@ async def delete_api_source(request: Request, data: dict):
     db_cfg_file = DATABASES_DIR / db_name / "config.json"
     if not db_cfg_file.exists():
         return JSONResponse({"detail": f"DB '{db_name}' has no config"}, status_code=404)
-    try:
-        existing = json.loads(db_cfg_file.read_text(encoding="utf-8-sig"))
-    except Exception as e:
-        logger.error(f"API source delete: config corrupt for {db_name}: {e}")
-        return JSONResponse({"detail": "Config file corrupt, cannot modify"}, status_code=500)
-    existing["api_sources"] = [s for s in existing.get("api_sources", []) if s["name"] != name]
-    db_cfg_file.write_text(json.dumps(existing, indent=2), encoding="utf-8")
-    threading.Thread(target=_github_sync_upload, args=(db_name,), daemon=True).start()
+    existing = get_config(db_name)
+    save_db_config({"api_sources": [s for s in existing.get("api_sources", []) if s["name"] != name]}, db_name)
     return {"success": True, "message": f"Deleted '{name}'"}
 
 # Per-DB crawl state for background crawl — survives tab close / SSE disconnect
@@ -7077,17 +7130,9 @@ async def human_handoff(request: Request):
     data = await request.json()
     # Use widget_key to resolve correct per-DB config (multi-tenant)
     widget_key = request.headers.get("X-Widget-Key", data.get("widget_key", ""))
-    _db_name = ""
-    if widget_key and DATABASES_DIR.exists():
-        for _d in DATABASES_DIR.iterdir():
-            if _d.is_dir():
-                try:
-                    _wk = json.loads((_d / "config.json").read_text(encoding="utf-8")).get("widget_key", "")
-                    if _wk and _wk == widget_key:
-                        _db_name = _d.name
-                        break
-                except Exception:
-                    pass
+    _db_name = _get_db_for_widget_key(widget_key) if widget_key else ""
+    if widget_key and not _db_name:
+        return JSONResponse({"success": False, "message": "Invalid widget key"}, status_code=401)
     cfg = get_config(_db_name)
     session_id = str(data.get("session_id", "anonymous"))[:64]
     conversation = data.get("conversation", [])
@@ -7157,7 +7202,7 @@ Context:
     return JSONResponse({"detail": f"Failed after 3 attempts: {last_err}"}, status_code=500)
 
 @app.post("/csat")
-async def submit_csat(data: dict):
+async def submit_csat(request: Request, data: dict):
     rating     = int(data.get("rating", 0))
     session_id = str(data.get("session_id", ""))[:64]
     comment    = str(data.get("comment", ""))[:500]
@@ -7165,7 +7210,11 @@ async def submit_csat(data: dict):
         raise HTTPException(400, "Rating must be 1-5")
     entry = {"session_id": session_id, "rating": rating, "comment": comment,
              "timestamp": datetime.now().isoformat()}
-    cf = _csat_file()
+    wk = (data.get("widget_key", "") or request.headers.get("X-Widget-Key", "")).strip()
+    tenant_db = _get_db_for_widget_key(wk) if wk else ""
+    if wk and not tenant_db:
+        return JSONResponse({"detail": "Invalid widget key"}, status_code=401)
+    cf = _csat_file(tenant_db)
     with _analytics_lock:
         data_list = []
         if cf.exists():
@@ -7176,8 +7225,12 @@ async def submit_csat(data: dict):
     return {"ok": True}
 
 @app.post("/feedback")
-async def feedback(data: dict):
+async def feedback(request: Request, data: dict):
     try:
+        wk = (data.get("widget_key", "") or request.headers.get("X-Widget-Key", "")).strip()
+        tenant_db = _get_db_for_widget_key(wk) if wk else ""
+        if wk and not tenant_db:
+            return JSONResponse({"detail": "Invalid widget key"}, status_code=401)
         entry = {
             "session_id": data.get("session_id", ""),
             "rating": data.get("rating", 0),
@@ -7185,7 +7238,7 @@ async def feedback(data: dict):
             "answer": data.get("answer", ""),
             "timestamp": datetime.now().isoformat(),
         }
-        ff = _feedback_file()
+        ff = _feedback_file(tenant_db)
         with _analytics_lock:
             existing = []
             if ff.exists():
@@ -7276,10 +7329,12 @@ async def submit_lead(request: Request, data: dict):
     """Save lead data to leads.json and send email notification with failover."""
     try:
         logger.debug(f"Received /submit-lead request")
-        LEADS_FILE = Path("leads.json")
         # Resolve per-tenant config via widget_key (or X-Widget-Key header)
         wk = (data.get("widget_key", "") or request.headers.get("X-Widget-Key", "")).strip()
         tenant_db = _get_db_for_widget_key(wk) if wk else ""
+        if wk and not tenant_db:
+            return JSONResponse({"detail": "Invalid widget key"}, status_code=401)
+        LEADS_FILE = (DATABASES_DIR / tenant_db / "leads.json") if tenant_db else Path("leads.json")
         cfg = get_config(tenant_db) if tenant_db else get_config()
         
         entry = {

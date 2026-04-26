@@ -1,17 +1,17 @@
-{
-  "admin_password": "stationery_studio",
-  "bot_name": "AI Assistant",
-  "business_name": "Our Company",
-  "contact_email": "hamzanaimat.14@gmail.com",
-  "sender_email": "hamzanaimat.14@gmail.com",
-  "sendgrid_keys": [],
-  "branding": {},
-  "crawl_url": "https://stationerystudio.pk",
-  "auto_crawl_enabled": false,
-  "crawl_interval_minutes": 60.0,
-  "last_crawl_time": "2026-03-24T02:44:00.075839",
-  "last_crawl_chunks": 0,
-  "features": [
-    "smart_search"
-  ]
+﻿{
+    "bot_name":  "AI Assistant",
+    "business_name":  "Our Company",
+    "contact_email":  "hamzanaimat.14@gmail.com",
+    "sender_email":  "hamzanaimat.14@gmail.com",
+    "branding":  {
+
+                 },
+    "crawl_url":  "https://stationerystudio.pk",
+    "auto_crawl_enabled":  false,
+    "crawl_interval_minutes":  60.0,
+    "last_crawl_time":  "2026-03-24T02:44:00.075839",
+    "last_crawl_chunks":  0,
+    "features":  [
+                     "smart_search"
+                 ]
 }

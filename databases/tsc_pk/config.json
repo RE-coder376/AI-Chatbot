@@ -1,17 +1,17 @@
-{
-  "admin_password": "tsc_pk",
-  "bot_name": "AI Assistant",
-  "business_name": "Our Company",
-  "contact_email": "hamzanaimat.14@gmail.com",
-  "sender_email": "hamza.aiemployee@gmail.com",
-  "sendgrid_keys": [],
-  "branding": {},
-  "crawl_url": "https://thestationerycompany.pk",
-  "auto_crawl_enabled": false,
-  "crawl_interval_minutes": 1440.0,
-  "last_crawl_time": "2026-04-15T08:20:42.092579",
-  "last_crawl_chunks": 0,
-  "features": [
-    "smart_search"
-  ]
+﻿{
+    "bot_name":  "AI Assistant",
+    "business_name":  "Our Company",
+    "contact_email":  "hamzanaimat.14@gmail.com",
+    "sender_email":  "hamza.aiemployee@gmail.com",
+    "branding":  {
+
+                 },
+    "crawl_url":  "https://thestationerycompany.pk",
+    "auto_crawl_enabled":  false,
+    "crawl_interval_minutes":  1440.0,
+    "last_crawl_time":  "2026-04-15T08:20:42.092579",
+    "last_crawl_chunks":  0,
+    "features":  [
+                     "smart_search"
+                 ]
 }

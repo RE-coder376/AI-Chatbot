@@ -1,6 +1,4 @@
 {
-  "admin_password": "store",
-  "widget_key": "d661e7ec-d760-4e4b-b921-a925468c5c09",
   "bot_name": "ShopBot",
   "business_name": "Web Scraper Test Store",
   "crawl_url": "https://webscraper.io/test-sites/e-commerce/allinone",

@@ -667,6 +667,7 @@
   })();
 
   const API = window.location.origin;
+  localStorage.removeItem('adminPass'); // legacy cleanup: passwords now live only for the tab session
   let feedbackChart = null;
 
   // ── Custom confirm dialog (replaces browser confirm()) ──
@@ -726,8 +727,26 @@
     }
   }
 
+  function escapeHtml(value) {
+    return String(value ?? '').replace(/[&<>"']/g, ch => ({
+      '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+    }[ch]));
+  }
+
+  function escapeJsString(value) {
+    return String(value ?? '').replace(/\\/g, '\\\\').replace(/'/g, "\\'").replace(/\r?\n/g, ' ');
+  }
+
+  function appendSafeLog(el, msg) {
+    if (!el) return;
+    const div = document.createElement('div');
+    div.textContent = String(msg ?? '');
+    el.appendChild(div);
+    el.scrollTop = el.scrollHeight;
+  }
+
   function authHeaders() {
-    const pass = localStorage.getItem('adminPass') || '';
+    const pass = sessionStorage.getItem('adminPass') || '';
     const csrf = sessionStorage.getItem('csrfToken') || '';
     const db   = localStorage.getItem('adminDb') || '';
     return { 'Authorization': `Bearer ${pass}`, 'X-CSRF-Token': csrf, 'X-Admin-DB': db };
@@ -735,7 +754,7 @@
 
   // Refresh CSRF token silently — call before any write operation if token may be stale
   async function refreshCsrf() {
-    const pass = localStorage.getItem('adminPass') || '';
+    const pass = sessionStorage.getItem('adminPass') || '';
     const db   = localStorage.getItem('adminDb') || '';
     try {
       const r = await fetch(`${API}/admin/csrf-token`, { headers: { 'Authorization': `Bearer ${pass}`, 'X-Admin-DB': db } });
@@ -765,7 +784,7 @@
     try {
       const res = await authFetch(`${API}/admin/crawl/cancel`, {
         method: 'POST', headers: {...authHeaders(), 'Content-Type': 'application/json'},
-        body: JSON.stringify({db_name, password: localStorage.getItem('adminPass') || ''})
+        body: JSON.stringify({db_name, password: sessionStorage.getItem('adminPass') || ''})
       });
       const d = await res.json();
       if (btn) btn.textContent = d.status === 'cancelled' ? 'stopped' : 'not running';
@@ -785,7 +804,7 @@
     try {
       const res = await authFetch(`${API}/admin/crawl/cancel`, {
         method: 'POST', headers: {...authHeaders(), 'X-Admin-DB': dbName, 'Content-Type': 'application/json'},
-        body: JSON.stringify({db_name: dbName, password: localStorage.getItem('adminPass') || ''})
+        body: JSON.stringify({db_name: dbName, password: sessionStorage.getItem('adminPass') || ''})
       });
       const d = await res.json();
       if (nextEl) nextEl.textContent = d.status === 'cancelled' ? '\u2705 Stopped' : '\u26a0\ufe0f Not running';
@@ -809,9 +828,9 @@
     if (!db)   return showStatus('auth', 'DB name required.', 'error');
     showStatus('auth', 'Authenticating...', 'loading');
     fetch(`${API}/admin/branding`, { headers: { 'Authorization': `Bearer ${pass}`, 'X-Admin-DB': db } }).then(async r => {
-      if (!r.ok) { localStorage.removeItem('adminPass'); sessionStorage.removeItem('csrfToken'); localStorage.removeItem('adminDb'); showStatus('auth', 'Denied. Wrong password or DB name.', 'error'); return; }
+      if (!r.ok) { sessionStorage.removeItem('adminPass'); sessionStorage.removeItem('csrfToken'); localStorage.removeItem('adminDb'); showStatus('auth', 'Denied. Wrong password or DB name.', 'error'); return; }
       const data = await r.json();
-      localStorage.setItem('adminPass', pass);
+      sessionStorage.setItem('adminPass', pass);
       localStorage.setItem('adminDb', db);
       // Save DB name to this browser's local history for dropdown
       const hist = JSON.parse(localStorage.getItem('adminDbHistory') || '[]');
@@ -826,9 +845,10 @@
       const authModeResp = await fetch(`${API}/admin/auth-mode`, { headers: { 'Authorization': `Bearer ${pass}`, 'X-Admin-DB': db } });
       if (authModeResp.ok) {
         const authMode = await authModeResp.json();
-        // Always switch active DB to the one being logged into (owner or client)
-        const sf = new FormData(); sf.append("password", pass); sf.append("name", db);
-        fetch(`${API}/admin/databases/set-active`, { method:"POST", headers: authHeaders(), body:sf }).catch(()=>{});
+        if (authMode.role === 'owner') {
+          const sf = new FormData(); sf.append("password", pass); sf.append("name", db);
+          fetch(`${API}/admin/databases/set-active`, { method:"POST", headers: authHeaders(), body:sf }).catch(()=>{});
+        }
         if (authMode.role === 'client') {
           document.body.classList.add('client-mode');
           sessionStorage.setItem('clientMode', '1');
@@ -871,7 +891,7 @@
     // Clear all session state on page load — require explicit login every time
     sessionStorage.removeItem('clientMode');
     sessionStorage.removeItem('csrfToken');
-    localStorage.removeItem('adminPass');
+    sessionStorage.removeItem('adminPass');
     localStorage.removeItem('adminDb');
   });
 
@@ -923,12 +943,13 @@
       const freq = {};
       data.forEach(g => { freq[g.question] = (freq[g.question] || 0) + 1; });
       const sorted = Object.entries(freq).sort((a,b) => b[1]-a[1]).slice(0, 30);
+      window._gapQuestions = sorted.map(([q]) => q);
       el.innerHTML = '<table style="width:100%;font-size:12px;"><tbody>' +
         sorted.map(([q,c], idx) => {
-          const escaped = q.replace(/'/g, "\\'").replace(/"/g, '&quot;');
+          const escaped = idx;
           return `<tr>
             <td style="color:var(--primary);font-weight:700;width:30px;padding:4px 8px 4px 0">${c}x</td>
-            <td style="padding:4px 0">${q}</td>
+            <td style="padding:4px 0">${escapeHtml(q)}</td>
             <td style="padding:4px 0 4px 8px"><button onclick="suggestAnswer(this,'${escaped}',${idx})" style="font-size:11px;padding:3px 8px;background:#f0fdf4;border:1px solid #86efac;border-radius:8px;cursor:pointer;color:#166534">💡 Suggest</button></td>
           </tr>
           <tr id="suggest-row-${idx}" style="display:none">
@@ -946,6 +967,8 @@
   }
 
   async function suggestAnswer(btn, question, idx) {
+    idx = Number.isInteger(idx) ? idx : Number(question);
+    question = (window._gapQuestions || [])[idx] || '';
     btn.textContent = '...';
     const pass = document.getElementById('master-pass').value;
     try {
@@ -992,11 +1015,11 @@
       document.getElementById('stat-total').textContent = data.total_queries ?? data.total ?? 0;
       
       document.getElementById('stat-most-asked').innerHTML = data.most_asked.map(q => `
-        <tr><td style="color:var(--primary); font-weight:800; width:40px;">${q.count}x</td><td>${q.q}</td></tr>
+        <tr><td style="color:var(--primary); font-weight:800; width:40px;">${Number(q.count || 0)}x</td><td>${escapeHtml(q.q)}</td></tr>
       `).join('') || '<tr><td colspan="2">No data yet.</td></tr>';
       
       document.getElementById('stat-most-recent').innerHTML = data.most_recent.map(h => `
-        <tr><td style="color:var(--text-muted); width:80px;">${new Date(h.t).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'})}</td><td>${h.q}</td></tr>
+        <tr><td style="color:var(--text-muted); width:80px;">${escapeHtml(new Date(h.t).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'}))}</td><td>${escapeHtml(h.q)}</td></tr>
       `).join('') || '<tr><td colspan="2">No data yet.</td></tr>';
       
       showStatus('stats', 'Analytics synced.', 'success');
@@ -1277,16 +1300,17 @@
     if (!el) return;
     el.innerHTML = '<span style="opacity:0.5">Checking...</span>';
     fetch(`${API}/health`).then(r => r.json()).then(h => {
+      const providers = (h.providers || []).map(p => escapeHtml(p)).join(', ');
       const keyTxt = h.any_key_ready
-        ? `✅ ${h.active_keys} keys (${(h.providers||[]).join(', ')})`
+        ? `✅ ${Number(h.active_keys || 0)} keys (${providers})`
         : '❌ No keys loaded';
       const sessionDb = localStorage.getItem('adminDb') || '';
-      const dbTxt = sessionDb ? `✅ Managing: ${sessionDb}` : (h.status === 'ready' ? `✅ Server ready` : `⚠️ ${h.status}`);
+      const dbTxt = sessionDb ? `✅ Managing: ${escapeHtml(sessionDb)}` : (h.status === 'ready' ? `✅ Server ready` : `⚠️ ${escapeHtml(h.status)}`);
       el.innerHTML = `<span style="margin-right:16px">${dbTxt}</span><span>${keyTxt}</span>`;
       // Re-sync active DB only for client mode (clients cannot switch; owners may intentionally switch)
       const isClientMode = sessionStorage.getItem('clientMode') === '1';
       if (isClientMode && sessionDb && h.active_db && h.active_db !== sessionDb) {
-        const pass = localStorage.getItem('adminPass') || '';
+        const pass = sessionStorage.getItem('adminPass') || '';
         if (pass) {
           const sf = new FormData(); sf.append('password', pass); sf.append('name', sessionDb);
           fetch(`${API}/admin/databases/set-active`, { method: 'POST', headers: authHeaders(), body: sf }).catch(() => {});
@@ -1310,7 +1334,7 @@
     updateHealthStatus();
   }
   async function syncFromGithub() {
-    const pass = localStorage.getItem('adminPass') || '';
+    const pass = sessionStorage.getItem('adminPass') || '';
     const db   = localStorage.getItem('adminDb') || '';
     const csrf = sessionStorage.getItem('csrfToken') || '';
     showStatus('db', '☁️ Syncing from GitHub — please wait 30-60 seconds...', 'loading');
@@ -1550,11 +1574,12 @@
     const d = await fetch(`/admin/faqs`, { headers: authHeaders() }).then(r=>r.json()).catch(()=>({faqs:[]}));
     const list = document.getElementById('faq-list');
     if (!d.faqs || d.faqs.length === 0) { list.innerHTML = '<p style="color:var(--text-muted);font-size:13px;">No FAQs yet.</p>'; return; }
-    list.innerHTML = d.faqs.map(f => `
+    window._faqIds = d.faqs.map(f => String(f.id || ''));
+    list.innerHTML = d.faqs.map((f, idx) => `
       <div style="background:#f8fafc;border:1px solid var(--border);border-radius:10px;padding:12px;margin-bottom:8px;">
-        <div style="font-weight:700;margin-bottom:4px;">Q: ${f.question}</div>
-        <div style="color:var(--text-muted);font-size:13px;margin-bottom:8px;">A: ${f.answer}</div>
-        <button onclick="deleteFaq('${f.id}')" style="background:#ef4444;padding:4px 12px;font-size:12px;">🗑 Delete</button>
+        <div style="font-weight:700;margin-bottom:4px;">Q: ${escapeHtml(f.question)}</div>
+        <div style="color:var(--text-muted);font-size:13px;margin-bottom:8px;">A: ${escapeHtml(f.answer)}</div>
+        <button onclick="deleteFaq((window._faqIds || [])[${idx}] || '')" style="background:#ef4444;padding:4px 12px;font-size:12px;">🗑 Delete</button>
       </div>`).join('');
   }
 
@@ -1603,24 +1628,25 @@
       
       const newRows = (data.results || []).map(r => {
         const fixId = `fix-${Math.random().toString(36).slice(2)}`;
+        const safeStatus = String(r.status || '').toLowerCase().replace(/[^a-z-]/g, '');
         const fixHtml = r.fix ? `
           <div style="margin-top:5px;">
             <span onclick="document.getElementById('${fixId}').style.display=document.getElementById('${fixId}').style.display==='none'?'block':'none'"
                   style="cursor:pointer;font-size:10px;color:#d97706;font-weight:600;user-select:none;">💡 What's wrong ▾</span>
-            <div id="${fixId}" style="display:none;margin-top:4px;font-size:10px;color:#92400e;background:#fffbeb;border:1px solid #fcd34d;border-radius:6px;padding:7px 10px;line-height:1.5;">${r.fix}</div>
+            <div id="${fixId}" style="display:none;margin-top:4px;font-size:10px;color:#92400e;background:#fffbeb;border:1px solid #fcd34d;border-radius:6px;padding:7px 10px;line-height:1.5;">${escapeHtml(r.fix)}</div>
           </div>` : '';
         const actionsHtml = (r.actions || []).map(a => {
           const onclick = a.rerun
             ? `runAudit('${a.rerun}')`
             : `document.getElementById('${a.nav}')?.scrollIntoView({behavior:'smooth',block:'start'})`;
           const color = a.rerun ? '#6366f1' : '#0ea5e9';
-          return `<button onclick="${onclick}" style="margin-top:5px;margin-right:4px;padding:3px 10px;font-size:10px;font-weight:600;border:1.5px solid ${color};border-radius:6px;background:#fff;color:${color};cursor:pointer;">${a.label}</button>`;
+          return `<button onclick="${onclick}" style="margin-top:5px;margin-right:4px;padding:3px 10px;font-size:10px;font-weight:600;border:1.5px solid ${color};border-radius:6px;background:#fff;color:${color};cursor:pointer;">${escapeHtml(a.label)}</button>`;
         }).join('');
         return `
         <tr class="audit-row-new">
-          <td style="font-weight:700;">${r.name}</td>
-          <td><span class="badge badge-${r.status.toLowerCase()}">${r.status}</span></td>
-          <td style="font-size:11px; line-height:1.4; color:var(--text-main);">${r.desc}${fixHtml}${actionsHtml}</td>
+          <td style="font-weight:700;">${escapeHtml(r.name)}</td>
+          <td><span class="badge badge-${safeStatus}">${escapeHtml(r.status)}</span></td>
+          <td style="font-size:11px; line-height:1.4; color:var(--text-main);">${escapeHtml(r.desc)}${fixHtml}${actionsHtml}</td>
         </tr>`;
       }).join('');
 
@@ -1771,8 +1797,8 @@
         body: JSON.stringify({ password: pass, url, json_path: jsonPath, target_db: getIngestTarget() })
       });
       const d = await res.json();
-      if (d.success) statusEl.innerHTML = `<span style="color:#16a34a;">✓ ${d.message} (${d.chunks} chunks from ${d.items} items)</span>`;
-      else statusEl.innerHTML = `<span style="color:#dc2626;">✗ ${d.detail || 'Failed'}</span>`;
+      if (d.success) statusEl.innerHTML = `<span style="color:#16a34a;">✓ ${escapeHtml(d.message)} (${Number(d.chunks || 0)} chunks from ${Number(d.items || 0)} items)</span>`;
+      else statusEl.innerHTML = `<span style="color:#dc2626;">✗ ${escapeHtml(d.detail || 'Failed')}</span>`;
     } catch(e) { statusEl.innerHTML = `<span style="color:#dc2626;">✗ Connection error</span>`; }
   }
 
@@ -1785,16 +1811,17 @@
       const sources = d.api_sources || [];
       const el = document.getElementById('api-sources-list');
       if (!sources.length) { el.innerHTML = '<div style="font-size:12px;color:var(--text-muted);">No API sources configured for this DB.</div>'; return; }
-      el.innerHTML = sources.map(s => `
+      window._apiSourceNames = sources.map(s => String(s.name || ''));
+      el.innerHTML = sources.map((s, idx) => `
         <div style="display:flex;align-items:center;gap:10px;padding:8px 12px;background:#fff;border:1px solid var(--border);border-radius:8px;margin-bottom:6px;font-size:12px;">
           <div style="flex:1;">
-            <span style="font-weight:700;">${s.name}</span>
-            <span style="color:var(--text-muted);margin-left:8px;">${s.url.slice(0,50)}${s.url.length>50?'...':''}</span>
-            <span style="margin-left:8px;color:#7c3aed;">every ${s.interval_hours}h</span>
-            <span style="margin-left:8px;color:var(--text-muted);">last: ${s.last_fetch ? new Date(s.last_fetch).toLocaleString() : 'never'}</span>
-            ${(s.keywords||[]).length ? `<span style="margin-left:8px;color:#0369a1;font-size:11px;">🔑 ${s.keywords.join(', ')}</span>` : '<span style="margin-left:8px;color:#9ca3af;font-size:11px;">always fires</span>'}
+            <span style="font-weight:700;">${escapeHtml(s.name)}</span>
+            <span style="color:var(--text-muted);margin-left:8px;">${escapeHtml(String(s.url || '').slice(0,50))}${String(s.url || '').length>50?'...':''}</span>
+            <span style="margin-left:8px;color:#7c3aed;">every ${Number(s.interval_hours || 0)}h</span>
+            <span style="margin-left:8px;color:var(--text-muted);">last: ${s.last_fetch ? escapeHtml(new Date(s.last_fetch).toLocaleString()) : 'never'}</span>
+            ${(s.keywords||[]).length ? `<span style="margin-left:8px;color:#0369a1;font-size:11px;">keys: ${escapeHtml((s.keywords || []).join(', '))}</span>` : '<span style="margin-left:8px;color:#9ca3af;font-size:11px;">always fires</span>'}
           </div>
-          <button onclick="deleteApiSource('${s.name}')" style="width:auto;margin:0;padding:4px 10px;font-size:11px;background:#fee2e2;color:#dc2626;border:none;border-radius:6px;cursor:pointer;font-weight:700;">✕</button>
+          <button onclick="deleteApiSource((window._apiSourceNames || [])[${idx}] || '')" style="width:auto;margin:0;padding:4px 10px;font-size:11px;background:#fee2e2;color:#dc2626;border:none;border-radius:6px;cursor:pointer;font-weight:700;">&times;</button>
         </div>`).join('');
     } catch(e) { document.getElementById('api-sources-list').innerHTML = '<div style="color:#dc2626;font-size:12px;">Failed to load</div>'; }
   }
@@ -1910,7 +1937,7 @@
           if (!line.startsWith('data:')) continue;
           try {
             const d = JSON.parse(line.slice(5).trim());
-            if (d.msg && logsEl) { logsEl.innerHTML += `<div>${d.msg}</div>`; logsEl.scrollTop = logsEl.scrollHeight; }
+            if (d.msg && logsEl) appendSafeLog(logsEl, d.msg);
             if (d.total_groups) { window._inspectTotal = d.total_groups; }
             if (d.group) {
               groups.push(d.group);
@@ -1939,16 +1966,19 @@
       </tr>
       ${groups.map(g => {
         const yes = g.recommended;
+        const pattern = escapeHtml(g.pattern);
+        const sampleUrl = g.sample_url ? escapeHtml(String(g.sample_url).slice(0,60) + '...') : '';
+        const reason = escapeHtml(g.reason);
         const badge = yes
           ? `<span style="background:#dcfce7;color:#16a34a;padding:2px 8px;border-radius:8px;font-weight:700;font-size:11px;">✅ Crawl</span>`
           : `<span style="background:#fee2e2;color:#dc2626;padding:2px 8px;border-radius:8px;font-weight:700;font-size:11px;">❌ Skip</span>`;
-        const preview = g.snippet ? `<div style="margin-top:4px;color:#94a3b8;font-size:9px;font-style:italic;line-height:1.4;">"${g.snippet.slice(0,120)}..."</div>` : '';
+        const preview = g.snippet ? `<div style="margin-top:4px;color:#94a3b8;font-size:9px;font-style:italic;line-height:1.4;">"${escapeHtml(String(g.snippet).slice(0,120))}..."</div>` : '';
         return `<tr style="border-top:1px solid #e2e8f0;background:${yes?'#f0fdf4':'#fff8f8'};">
-          <td style="padding:6px;text-align:center;"><input type="checkbox" class="group-check" data-pattern="${g.pattern}" ${yes?'checked':''}></td>
+          <td style="padding:6px;text-align:center;"><input type="checkbox" class="group-check" data-pattern="${pattern}" ${yes?'checked':''}></td>
           <td style="padding:6px;text-align:center;">${badge}</td>
-          <td style="padding:6px;font-family:monospace;color:#334155;font-size:10px;">${g.pattern}<br><span style="color:#94a3b8;font-size:9px;">${g.sample_url?g.sample_url.slice(0,60)+'...':''}</span></td>
-          <td style="padding:6px;text-align:right;color:#64748b;">${g.count}</td>
-          <td style="padding:6px;color:#64748b;font-size:10px;">${g.reason}${preview}</td>
+          <td style="padding:6px;font-family:monospace;color:#334155;font-size:10px;">${pattern}<br><span style="color:#94a3b8;font-size:9px;">${sampleUrl}</span></td>
+          <td style="padding:6px;text-align:right;color:#64748b;">${Number(g.count || 0)}</td>
+          <td style="padding:6px;color:#64748b;font-size:10px;">${reason}${preview}</td>
         </tr>`;
       }).join('')}
     </table>

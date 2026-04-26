@@ -5,7 +5,6 @@
   "crawl_interval_minutes": 1440.0,
   "last_crawl_time": "2026-04-15T08:20:39.343574",
   "last_crawl_chunks": 0,
-  "admin_password": "belony",
   "features": [
     "smart_search"
   ]
