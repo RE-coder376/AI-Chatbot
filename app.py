@@ -494,7 +494,7 @@ def _github_sync_upload(db_name: str):
                 rel = f.relative_to(db_path)
                 rel_str = str(rel).replace("\\", "/")  # normalize for Linux extraction
                 if rel_str.startswith("visitor_history"): continue
-                if rel_str in (DB_SECRETS_FILE, "config.local.json"): continue
+                if rel_str in ("config.local.json",): continue
                 z.write(f, rel_str)
         file_size = tmp_zip.stat().st_size
         logger.info(f"[GH-SYNC] {db_name}.zip → {file_size/1024/1024:.1f}MB")
