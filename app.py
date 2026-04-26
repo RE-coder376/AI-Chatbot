@@ -3059,6 +3059,10 @@ def _init_crawl_timestamps():
 async def lifespan(app: FastAPI):
     global _auto_crawl_sem
     _auto_crawl_sem = asyncio.Semaphore(1)  # Only 1 auto-crawl at a time — prevents OOM + ChromaDB lock
+    # Unit tests should not trigger background init (DB loads, schedulers, cleanup).
+    if os.getenv("UNIT_TEST", "").strip() == "1":
+        yield
+        return
     # These can be slow on Windows/large DBs; run in threads to let FastAPI bind to port 8000 immediately
     asyncio.create_task(asyncio.to_thread(_check_config_security))
     asyncio.create_task(asyncio.to_thread(_load_key_health))
