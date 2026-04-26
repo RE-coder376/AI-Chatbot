@@ -3,6 +3,7 @@ import os
 from pathlib import Path
 
 import pytest
+import services.config as _svc_config
 
 
 @pytest.fixture()
@@ -24,6 +25,9 @@ def app_module(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(app_mod, "DATABASES_DIR", db_dir, raising=True)
     monkeypatch.setattr(app_mod, "CONFIG_FILE", tmp_path / "config.json", raising=True)
     monkeypatch.setattr(app_mod, "ACTIVE_DB_FILE", tmp_path / "active_db.txt", raising=True)
+    monkeypatch.setattr(_svc_config, "DATABASES_DIR", db_dir, raising=True)
+    monkeypatch.setattr(_svc_config, "CONFIG_FILE", tmp_path / "config.json", raising=True)
+    monkeypatch.setattr(_svc_config, "ACTIVE_DB_FILE", tmp_path / "active_db.txt", raising=True)
 
     # Ensure a stable active DB name for any fallback paths.
     (tmp_path / "active_db.txt").write_text("a", encoding="utf-8")
