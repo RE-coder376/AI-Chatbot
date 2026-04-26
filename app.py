@@ -6789,8 +6789,21 @@ async def crawl_site(data: dict, request: Request):
                                         if (mainEl && mainEl.innerText.trim().length > 100) {
                                             bodyText = mainEl.innerText;
                                         } else {
-                                            // Fallback: full body (sidebar text will be in here too, acceptable)
-                                            bodyText = document.body ? document.body.innerText : '';
+                                            // Fallback: clone body, strip nav/sidebar noise, then get innerText
+                                            if (document.body) {
+                                                const clone = document.body.cloneNode(true);
+                                                [
+                                                    'nav', 'header', 'footer', 'aside',
+                                                    '[role="navigation"]', '[role="banner"]', '[role="contentinfo"]',
+                                                    '.nav', '.navigation', '.sidebar', '.side_categories',
+                                                    '.nav-list', '.breadcrumb', '.breadcrumbs',
+                                                    '.pagination', '.social-links', '.cookie-notice',
+                                                    'script', 'style', 'noscript', 'iframe', 'svg'
+                                                ].forEach(sel => {
+                                                    clone.querySelectorAll(sel).forEach(el => el.remove());
+                                                });
+                                                bodyText = clone.innerText || '';
+                                            }
                                         }
 
                                         // Return as JSON so Python can handle sidebar separately
