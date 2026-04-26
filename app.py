@@ -4430,9 +4430,7 @@ async def clear_db_data(request: Request, password: str = Form(...), name: str =
 async def sync_github(request: Request):
     """Trigger GitHub DB download manually — useful after fresh Render deploy."""
     password = _extract_password(request)
-    db_name = _extract_admin_db(request)
-    cfg = get_config(db_name)
-    admin_auth(password, cfg)
+    require_owner_auth(password)
     if not os.environ.get("GITHUB_PAT"):
         return JSONResponse({"message": "No GITHUB_PAT configured — cannot sync"}, status_code=400)
     threading.Thread(target=_github_sync_download, daemon=True).start()

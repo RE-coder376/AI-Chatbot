@@ -79,7 +79,7 @@ def test_tenant_isolation_db_stats_endpoint(client, two_tenants):
     r = client.get("/admin/db-stats", headers={"Authorization": "Bearer clientA", "X-Admin-DB": "a"})
     assert r.status_code == 200
     stats = r.json().get("stats", [])
-    assert all(s.get("db") == "a" for s in stats)
+    assert all(s.get("name") == "a" for s in stats)
 
 
 def test_owner_gates_reject_client_password(app_module, client, two_tenants, monkeypatch):
@@ -97,7 +97,7 @@ def test_owner_gates_reject_client_password(app_module, client, two_tenants, mon
     r2 = client.post("/admin/sync-github", headers={"Authorization": "Bearer clientA", "X-Admin-DB": "a"})
     assert r2.status_code == 401
 
-    # /admin/reindex should be owner-only.
+    # /admin/reindex should be owner-only (CSRF fires first → 403, auth → 401, both are rejections).
     r3 = client.post("/admin/reindex", json={"password": "clientA"})
-    assert r3.status_code == 401
+    assert r3.status_code in (401, 403)
 
