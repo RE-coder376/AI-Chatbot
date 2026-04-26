@@ -23,6 +23,7 @@ chunks_temp.json
 # Logs, Analytics, & Audit
 *.log
 healer_logs.json
+evals/results/
 chat_logs.json
 feedback.json
 leads.json
