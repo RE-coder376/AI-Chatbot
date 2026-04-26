@@ -67,8 +67,11 @@ ACTIVE_DB_FILE = Path("active_db.txt")
 DATABASES_DIR = Path("databases")
 DB_SECRETS_FILE = "secrets.json"
 DB_SECRET_KEYS = {"admin_password", "smtp_password", "sendgrid_keys", "widget_key", "api_sources"}
-PASSWORD_HASH_PREFIX = "pbkdf2_sha256"
-PASSWORD_HASH_ITERATIONS = 260_000
+from services.auth import (
+    PASSWORD_HASH_PREFIX, PASSWORD_HASH_ITERATIONS,
+    _validate_db_name, _is_password_hash, _hash_password,
+    _password_matches, _extract_password,
+)
 
 # HF Spaces / containerised deploy: restore files from env vars if missing
 _keys_env = os.environ.get("KEYS_JSON", "")
@@ -2135,47 +2138,8 @@ def _atomic_write_json(path: Path, data) -> None:
         except: pass
         raise
 
-def _validate_db_name(name: str) -> str:
-    """Reject path traversal and invalid characters in DB names."""
-    name = (name or "").strip()
-    if not name or not re.match(r'^[a-zA-Z0-9_\-]+$', name) or ".." in name:
-        raise HTTPException(status_code=400, detail="Invalid database name")
-    return name
-
-def _is_password_hash(value: str) -> bool:
-    return isinstance(value, str) and value.startswith(f"{PASSWORD_HASH_PREFIX}$")
-
-def _hash_password(password: str) -> str:
-    """Hash newly saved tenant passwords without adding a paid auth dependency."""
-    password = str(password or "")
-    salt = secrets.token_hex(16)
-    digest = hashlib.pbkdf2_hmac(
-        "sha256",
-        password.encode("utf-8"),
-        salt.encode("utf-8"),
-        PASSWORD_HASH_ITERATIONS,
-    ).hex()
-    return f"{PASSWORD_HASH_PREFIX}${PASSWORD_HASH_ITERATIONS}${salt}${digest}"
-
-def _password_matches(candidate: str, stored: str) -> bool:
-    """Compare plaintext or pbkdf2 password values in constant time."""
-    candidate = str(candidate or "")
-    stored = str(stored or "")
-    if not candidate or not stored:
-        return False
-    if _is_password_hash(stored):
-        try:
-            _, rounds_s, salt, expected = stored.split("$", 3)
-            digest = hashlib.pbkdf2_hmac(
-                "sha256",
-                candidate.encode("utf-8"),
-                salt.encode("utf-8"),
-                int(rounds_s),
-            ).hex()
-            return hmac.compare_digest(digest, expected)
-        except Exception:
-            return False
-    return hmac.compare_digest(candidate.encode(), stored.encode())
+# _validate_db_name, _is_password_hash, _hash_password, _password_matches
+# imported from services.auth above
 
 def _get_root_password() -> str:
     root_pw = os.getenv("ADMIN_PASSWORD", "") or ""
@@ -2204,12 +2168,7 @@ def admin_auth(password: str, cfg: dict):
         return "client"
     raise HTTPException(status_code=401, detail="Unauthorized")
 
-def _extract_password(request: Request, fallback: str = "") -> str:
-    """Extract password from Authorization: Bearer <pass> header, or fall back to provided value."""
-    auth = request.headers.get("Authorization", "")
-    if auth.startswith("Bearer "):
-        return auth[7:]
-    return fallback
+# _extract_password imported from services.auth above
 
 def _extract_admin_db(request: Request, fallback: str = "") -> str:
     """Extract the client DB name from X-Admin-DB header, query param, or fallback.
