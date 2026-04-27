@@ -3707,172 +3707,63 @@ def _now_run_id() -> str:
     return datetime.utcnow().strftime("%Y%m%d_%H%M%S")
 
 def _default_idk_tests() -> list[dict]:
-    return [
-        {"id": "idk_weather", "difficulty": "easy", "q": "What is the weather today?", "expect": {"type": "REFUSE"}},
-        {"id": "idk_capital", "difficulty": "easy", "q": "What is the capital of Japan?", "expect": {"type": "REFUSE"}},
-        {"id": "idk_trivia", "difficulty": "easy", "q": "What is 2+2?", "expect": {"type": "REFUSE"}},
-        {"id": "idk_unknown", "difficulty": "medium", "q": "What is your CEO's favorite color?", "expect": {"type": "IDK"}},
-    ]
+    return []
+
+
+def _build_owner_eval_tests(base_url: str, owner_password: str, db_name: str, count: int, strategy: str = "kb") -> list[dict]:
+    from evals import eval_v1 as _eval_v1
+
+    items = _eval_v1._collect_eval_items(base_url, owner_password, db_name, max(3, min(int(count or 12), 25)))
+    tests: list[dict] = []
+    allowed_sources = None
+    if strategy == "analytics":
+        allowed_sources = {"faq", "analytics", "knowledge_gap", "embedded_qa"}
+
+    for idx, item in enumerate(items):
+        if allowed_sources and item.source not in allowed_sources:
+            continue
+        reference_text = (item.reference_answer or item.retrieve_context_preview or "").strip()
+        tests.append({
+            "id": item.candidate_key or f"eval_{idx}",
+            "difficulty": item.difficulty,
+            "source": item.source,
+            "selection_bucket": item.selection_bucket,
+            "q": item.q,
+            "expect": {
+                "type": item.expect,
+                "expected_source": (item.retrieve_sources[0] if item.retrieve_sources else ""),
+                "reference_text": reference_text[:1500],
+                "key_facts": [],
+            },
+        })
+        if len(tests) >= count:
+            break
+
+    if tests:
+        return tests[:count]
+
+    for idx, item in enumerate(items[:count]):
+        reference_text = (item.reference_answer or item.retrieve_context_preview or "").strip()
+        tests.append({
+            "id": item.candidate_key or f"eval_{idx}",
+            "difficulty": item.difficulty,
+            "source": item.source,
+            "selection_bucket": item.selection_bucket,
+            "q": item.q,
+            "expect": {
+                "type": item.expect,
+                "expected_source": (item.retrieve_sources[0] if item.retrieve_sources else ""),
+                "reference_text": reference_text[:1500],
+                "key_facts": [],
+            },
+        })
+    return tests[:count]
 
 def _collect_eval_items_from_analytics(db_name: str, count: int = 12) -> list[dict]:
-    items: list[dict] = []
-    try:
-        db_dir = DATABASES_DIR / _validate_db_name(db_name)
-        analytics_file = db_dir / "analytics.json"
-        if analytics_file.exists():
-            analytics = json.loads(analytics_file.read_text(encoding="utf-8"))
-            q_counts = analytics.get("questions") or {}
-            if isinstance(q_counts, dict):
-                for q, _ in sorted(q_counts.items(), key=lambda kv: kv[1], reverse=True):
-                    if isinstance(q, str) and q.strip():
-                        items.append({"id": f"aq_{len(items)}", "difficulty": "easy", "q": q.strip(), "expect": {"type": "ANSWER"}})
-                        if len(items) >= count:
-                            break
-        gaps_file = db_dir / "knowledge_gaps.json"
-        if len(items) < count and gaps_file.exists():
-            gaps = json.loads(gaps_file.read_text(encoding="utf-8"))
-            if isinstance(gaps, list):
-                for g in gaps:
-                    if not isinstance(g, dict):
-                        continue
-                    q = g.get("question", "")
-                    if isinstance(q, str) and q.strip():
-                        items.append({"id": f"gq_{len(items)}", "difficulty": "medium", "q": q.strip(), "expect": {"type": "ANSWER"}})
-                        if len(items) >= count:
-                            break
-    except Exception:
-        pass
-
-    # De-dup by question text.
-    deduped: list[dict] = []
-    seen = set()
-    for it in items:
-        k = (it.get("q") or "").strip().lower()
-        if not k or k in seen:
-            continue
-        seen.add(k)
-        deduped.append(it)
-        if len(deduped) >= count:
-            break
-
-    for p in _default_idk_tests():
-        if len(deduped) >= count:
-            break
-        k = p["q"].strip().lower()
-        if k not in seen:
-            deduped.append(p)
-            seen.add(k)
-
-    return deduped[:count]
+    return []
 
 async def _generate_eval_items_from_kb(db_name: str, db, cfg: dict, count: int = 12) -> list[dict]:
-    """One-call KB-driven eval generator (answerable tests anchored to a source URL + key facts)."""
-    try:
-        sample = db._collection.get(limit=40, include=["documents", "metadatas"])
-    except Exception as e:
-        raise HTTPException(status_code=503, detail=f"KB not ready for {db_name}: {e}")
-    docs = sample.get("documents") or []
-    metas = sample.get("metadatas") or []
-
-    pairs: list[tuple[str, str]] = []
-    for i in range(min(len(docs), len(metas))):
-        text = docs[i] or ""
-        meta = metas[i] or {}
-        src = (meta.get("source") or meta.get("url") or "").strip()
-        if not isinstance(text, str) or len(text.strip()) < 220:
-            continue
-        pairs.append((src[:300], text.strip()))
-    if not pairs:
-        return _collect_eval_items_from_analytics(db_name, count=max(10, min(count, 20)))
-
-    uniq: list[tuple[str, str]] = []
-    seen_src = set()
-    for src, text in pairs:
-        key = (src or "unknown").lower()
-        if key in seen_src:
-            continue
-        seen_src.add(key)
-        uniq.append((src or "unknown", text))
-        if len(uniq) >= 10:
-            break
-
-    kb_blocks = []
-    for idx, (src, text) in enumerate(uniq, 1):
-        kb_blocks.append(f"[DOC {idx}] SOURCE: {src}\nTEXT:\n{text[:1400]}\n")
-    kb_text = "\n---\n".join(kb_blocks)[:14000]
-
-    llm = get_fresh_llm()
-    if not llm:
-        raise HTTPException(status_code=503, detail="No LLM keys available to generate eval questions.")
-
-    biz = cfg.get("business_name", "this business")
-    target_n = max(10, min(int(count), 20))
-    prompt = (
-        f"You are creating an evaluation suite for a RAG chatbot for {biz}.\n"
-        f"Based ONLY on the KB excerpts below, create {target_n} test cases.\n\n"
-        "Rules:\n"
-        "- Mix difficulty across: easy, medium, hard, very_hard.\n"
-        "- Each test MUST be answerable ONLY from one of the DOCs provided OR be explicitly unanswerable.\n"
-        "- For answerable tests: expect.type=ANSWER, include 3-6 short key_facts, and expected_source copied from SOURCE.\n"
-        "- For unanswerable tests: expect.type=IDK or REFUSE and omit key_facts and expected_source.\n"
-        "- Output ONLY strict JSON in this exact shape:\n"
-        '{ "tests": [ {"difficulty":"easy|medium|hard|very_hard","q":"...","expect":{"type":"ANSWER|IDK|REFUSE","key_facts":["..."],"expected_source":"..."} } ] }\n\n'
-        f"KB:\n{kb_text}"
-    )
-
-    try:
-        resp = await asyncio.wait_for(llm.ainvoke([{"role": "user", "content": prompt}]), timeout=40)
-        raw = (resp.content or "").strip()
-    except Exception as e:
-        raise HTTPException(status_code=503, detail=f"Eval generation failed: {e}")
-
-    m = re.search(r"\{.*\}", raw, re.DOTALL)
-    if not m:
-        return _collect_eval_items_from_analytics(db_name, count=target_n)
-    try:
-        obj = json.loads(m.group(0))
-    except Exception:
-        return _collect_eval_items_from_analytics(db_name, count=target_n)
-
-    tests = obj.get("tests") if isinstance(obj, dict) else None
-    if not isinstance(tests, list) or not tests:
-        return _collect_eval_items_from_analytics(db_name, count=target_n)
-
-    out: list[dict] = []
-    for i, t in enumerate(tests[:target_n]):
-        if not isinstance(t, dict):
-            continue
-        q = (t.get("q") or "").strip()
-        if not q:
-            continue
-        diff = (t.get("difficulty") or "medium").strip()
-        if diff not in ("easy", "medium", "hard", "very_hard"):
-            diff = "medium"
-        expect = t.get("expect") if isinstance(t.get("expect"), dict) else {"type": "ANSWER"}
-        et = (expect.get("type") or "ANSWER").strip().upper()
-        if et not in ("ANSWER", "IDK", "REFUSE"):
-            et = "ANSWER"
-
-        item: dict = {"id": f"kb_{i}", "difficulty": diff, "q": q, "expect": {"type": et}}
-        if et == "ANSWER":
-            kf = expect.get("key_facts") or []
-            if isinstance(kf, list):
-                item["expect"]["key_facts"] = [str(x)[:220] for x in kf if str(x).strip()][:8]
-            src = (expect.get("expected_source") or "").strip()
-            if src:
-                item["expect"]["expected_source"] = src[:300]
-        out.append(item)
-
-    # Ensure a couple fixed IDK/REFUSE probes exist.
-    out_ids = {_norm_text(x.get("q", "")) for x in out}
-    for p in _default_idk_tests():
-        if len(out) >= target_n:
-            break
-        if _norm_text(p["q"]) not in out_ids:
-            out.append(p)
-            out_ids.add(_norm_text(p["q"]))
-
-    return out[:target_n]
+    return []
 
 async def _eval_retrieve_docs(q: str, tenant_db, k: int = 8) -> tuple[int, list[dict], list[str]]:
     """LLM-free retrieval for evals (embeddings only). Returns (doc_count, docs[], sources[])."""
@@ -3960,11 +3851,8 @@ async def admin_generate_evals(request: Request):
     if strategy not in ("kb", "analytics"):
         strategy = "kb"
 
-    tenant_db = _get_or_create_db(db_name)
-    if strategy == "analytics":
-        tests = _collect_eval_items_from_analytics(db_name, count=count)
-    else:
-        tests = await _generate_eval_items_from_kb(db_name, tenant_db, cfg, count=count)
+    base_url = str(request.base_url).rstrip("/")
+    tests = _build_owner_eval_tests(base_url, password, db_name, count=count, strategy=strategy)
 
     payload = {
         "db": db_name,
@@ -3996,13 +3884,11 @@ async def admin_run_evals(request: Request):
 
     cfg = get_config(db_name)
     tenant_db = _get_or_create_db(db_name)
+    base_url = str(request.base_url).rstrip("/")
 
     if not isinstance(tests, list) or not tests:
         strategy = (data.get("strategy") or "analytics").strip().lower()
-        if strategy == "kb":
-            tests = await _generate_eval_items_from_kb(db_name, tenant_db, cfg, count=count)
-        else:
-            tests = _collect_eval_items_from_analytics(db_name, count=count)
+        tests = _build_owner_eval_tests(base_url, password, db_name, count=count, strategy=strategy)
 
     tests = tests[:count]
 
@@ -4032,12 +3918,15 @@ async def admin_run_evals(request: Request):
         key_facts = expect.get("key_facts") or []
         if not isinstance(key_facts, list):
             key_facts = []
+        reference_text = (expect.get("reference_text") or "").strip()
 
         row = {
             "id": t.get("id") or f"t_{len(rows)}",
+            "source": t.get("source") or "",
+            "selection_bucket": t.get("selection_bucket") or "",
             "difficulty": difficulty,
             "q": q,
-            "expect": {"type": etype, "expected_source": expected_source, "key_facts": key_facts[:8]},
+            "expect": {"type": etype, "expected_source": expected_source, "key_facts": key_facts[:8], "reference_text": reference_text[:1500]},
             "checks": {"retrieval": None, "answer": None, "idk": None},
             "retrieve": {"sources": [], "doc_count": None, "docs": []},
             "answer": {"text": "", "present_facts": [], "missing_facts": []},
@@ -4061,7 +3950,7 @@ async def admin_run_evals(request: Request):
                 row["answer"]["text"] = ans[:4000]
                 if chat_sources:
                     row["retrieve"]["sources"] = chat_sources[:8]
-                    if etype == "ANSWER":
+                    if etype == "ANSWER" and row["checks"]["retrieval"] is None:
                         retrieval_total += 1
                         hit = _sources_hit_expected(chat_sources, expected_source) if expected_source else bool(chat_sources)
                         row["checks"]["retrieval"] = bool(hit)
@@ -4095,6 +3984,25 @@ async def admin_run_evals(request: Request):
                 ok = (len(missing) == 0) or (len(present) / max(1, len(key_facts)) >= 0.7)
                 row["checks"]["answer"] = bool(ok)
                 if ok:
+                    answer_pass += 1
+            elif etype == "ANSWER":
+                from evals import eval_v1 as _eval_v1
+                answer_total += 1
+                eval_item = _eval_v1.EvalItem(
+                    q=q,
+                    expect="ANSWER",
+                    source=str(t.get("source") or "analytics"),
+                    reference_answer=reference_text,
+                    retrieve_doc_count=int(row["retrieve"].get("doc_count") or 0),
+                    retrieve_context_length=max([len((d.get("preview") or "")) for d in (row["retrieve"].get("docs") or [])] or [0]),
+                    retrieve_context_preview=reference_text,
+                    retrieve_sources=list(row["retrieve"].get("sources") or []),
+                )
+                answer_ok, answer_reason, _ = _eval_v1._grade_answer(eval_item, row["answer"]["text"] or "")
+                row["checks"]["answer"] = (answer_ok == "PASS")
+                if answer_reason:
+                    row["answer"]["reason"] = answer_reason
+                if row["checks"]["answer"]:
                     answer_pass += 1
 
         rows.append(row)
