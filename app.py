@@ -3874,16 +3874,23 @@ async def _generate_eval_items_from_kb(db_name: str, db, cfg: dict, count: int =
 
     return out[:target_n]
 
-async def _eval_retrieve_sources(q: str, tenant_db, k: int = 8) -> tuple[int, list[str]]:
-    """LLM-free retrieval for evals (embeddings only)."""
+async def _eval_retrieve_docs(q: str, tenant_db, k: int = 8) -> tuple[int, list[dict], list[str]]:
+    """LLM-free retrieval for evals (embeddings only). Returns (doc_count, docs[], sources[])."""
     try:
         docs = await asyncio.to_thread(tenant_db.similarity_search, q, k)
         sources: list[str] = []
+        doc_rows: list[dict] = []
         for d in docs or []:
             try:
                 src = (d.metadata or {}).get("source") or ""
                 if isinstance(src, str) and src.strip():
                     sources.append(src.strip())
+                prev = ""
+                try:
+                    prev = (d.page_content or "")[:500]
+                except Exception:
+                    prev = ""
+                doc_rows.append({"source": (src.strip() if isinstance(src, str) else ""), "preview": prev})
             except Exception:
                 continue
         # De-dup while preserving order
@@ -3895,9 +3902,9 @@ async def _eval_retrieve_sources(q: str, tenant_db, k: int = 8) -> tuple[int, li
                 continue
             seen.add(sl)
             deduped.append(s)
-        return (len(docs or []), deduped[:k])
+        return (len(docs or []), doc_rows[:k], deduped[:k])
     except Exception:
-        return (0, [])
+        return (0, [], [])
 
 async def _eval_answer_via_stream(q: str, cfg: dict, tenant_db, db_name: str) -> tuple[str, list[str]]:
     """Consume the production streaming path to extract (answer, sources)."""
@@ -4032,13 +4039,14 @@ async def admin_run_evals(request: Request):
             "q": q,
             "expect": {"type": etype, "expected_source": expected_source, "key_facts": key_facts[:8]},
             "checks": {"retrieval": None, "answer": None, "idk": None},
-            "retrieve": {"sources": [], "doc_count": None},
+            "retrieve": {"sources": [], "doc_count": None, "docs": []},
             "answer": {"text": "", "present_facts": [], "missing_facts": []},
         }
 
         if mode in ("retrieve", "both"):
-            doc_count, sources = await _eval_retrieve_sources(q, tenant_db, k=8)
+            doc_count, doc_rows, sources = await _eval_retrieve_docs(q, tenant_db, k=8)
             row["retrieve"]["doc_count"] = doc_count
+            row["retrieve"]["docs"] = doc_rows
             row["retrieve"]["sources"] = sources
             if etype == "ANSWER":
                 retrieval_total += 1

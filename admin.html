@@ -2333,12 +2333,31 @@
 
     const srcs = document.getElementById('eval-detail-sources');
     srcs.innerHTML = '';
-    (row.retrieve?.sources || []).forEach(s => {
-      const div = document.createElement('div');
-      div.className = 'eval-fact';
-      div.textContent = s;
-      srcs.appendChild(div);
-    });
+    const docs = row.retrieve?.docs || [];
+    if (docs && docs.length) {
+      docs.forEach(d => {
+        const wrap = document.createElement('div');
+        wrap.className = 'eval-fact';
+        const top = document.createElement('div');
+        top.style.fontWeight = '800';
+        top.textContent = (d.source || 'source').toString();
+        const prev = document.createElement('div');
+        prev.style.marginTop = '4px';
+        prev.style.fontSize = '11px';
+        prev.style.color = 'var(--text-muted)';
+        prev.textContent = (d.preview || '').toString().slice(0, 320);
+        wrap.appendChild(top);
+        wrap.appendChild(prev);
+        srcs.appendChild(wrap);
+      });
+    } else {
+      (row.retrieve?.sources || []).forEach(s => {
+        const div = document.createElement('div');
+        div.className = 'eval-fact';
+        div.textContent = s;
+        srcs.appendChild(div);
+      });
+    }
 
     overlay.classList.add('active');
   }
