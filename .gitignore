@@ -19,6 +19,15 @@ __pycache__/
 *.pyo
 *.pyd
 chunks_temp.json
+tests/_tmp/
+
+# Local scratch artifacts (never commit)
+pytest_tmp/
+.pytest_tmp/
+pytest-cache-files-*/
+EXIT*
+nul
+NUL
 
 # Logs, Analytics, & Audit
 *.log

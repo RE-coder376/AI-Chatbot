@@ -84,6 +84,7 @@
     .badge-current { background: var(--primary); color: white; }
     .badge-pass { background: #dcfce7; color: #166534; }
     .badge-fail { background: #fee2e2; color: #991b1b; }
+    .badge-na { background: #f1f5f9; color: #475569; }
 
     #brand-preview { border: 1px solid var(--border); border-radius: 20px; overflow: hidden; max-width: 320px; margin-top: 16px; box-shadow: var(--shadow); }
     #prev-header { padding: 16px; display: flex; align-items: center; gap: 12px; }
@@ -120,8 +121,38 @@
   #confirm-box .btn-cancel { background: #f1f5f9; color: #475569; border: 1px solid #e2e8f0; border-radius: 10px; padding: 9px 18px; cursor: pointer; font-size: 13px; font-weight: 600; }
   #confirm-box .btn-ok { background: #ef4444; color: #fff; border: none; border-radius: 10px; padding: 9px 18px; cursor: pointer; font-size: 13px; font-weight: 600; }
   #confirm-box .btn-ok.safe { background: #6366f1; }
+
+  /* â”€â”€ Eval Detail Overlay â”€â”€ */
+  #eval-overlay {
+    display: none; position: fixed; inset: 0; background: rgba(15,23,42,0.55);
+    z-index: 10000; align-items: center; justify-content: center; padding: 20px;
+  }
+  #eval-overlay.active { display: flex; }
+  #eval-box {
+    background: #fff; border-radius: 18px; padding: 22px;
+    max-width: 980px; width: 100%; max-height: 86vh; overflow: auto;
+    box-shadow: 0 24px 70px rgba(0,0,0,0.20);
+  }
+  .eval-pill {
+    display: inline-flex; align-items: center; gap: 8px;
+    padding: 6px 10px; border-radius: 10px; font-size: 11px; font-weight: 800;
+    border: 1px solid var(--border); background: #f8fafc;
+  }
+  .eval-row-meta { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 10px; }
+  .eval-answer-box {
+    white-space: pre-wrap; background: #0f172a; color: #e2e8f0;
+    border-radius: 12px; padding: 12px; margin-top: 12px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 12px; line-height: 1.5;
+  }
+  .eval-facts { margin-top: 12px; display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  .eval-facts .panel { border: 1px solid var(--border); border-radius: 12px; padding: 12px; background: #fff; }
+  .eval-facts h4 { font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-muted); margin-bottom: 8px; }
+  .eval-fact { font-size: 12px; padding: 8px 10px; border-radius: 10px; background: #f8fafc; border: 1px solid var(--border); margin-bottom: 8px; }
+  .eval-src { font-size: 12px; color: var(--text-muted); margin-top: 8px; }
   /* Client mode — hide owner-only sections */
   body.client-mode #card-tests,
+  body.client-mode #card-evals,
   body.client-mode #card-crawl,
   body.client-mode #card-db,
   body.client-mode #owner-only-ops,
@@ -143,6 +174,36 @@
       <div class="btn-row">
         <button class="btn-cancel" onclick="confirmResolve(false)">Cancel</button>
         <button class="btn-ok" id="confirm-ok-btn" onclick="confirmResolve(true)">Confirm</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Eval Detail Overlay -->
+  <div id="eval-overlay" onclick="hideEvalOverlay()">
+    <div id="eval-box" onclick="event.stopPropagation()">
+      <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;">
+        <div style="flex:1;">
+          <div style="font-size:11px;font-weight:800;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.05em;">Eval Details</div>
+          <div id="eval-detail-q" style="font-size:16px;font-weight:800;margin-top:6px;"></div>
+          <div id="eval-detail-meta" class="eval-row-meta"></div>
+        </div>
+        <button class="secondary" style="width:auto;margin:0;padding:8px 12px;" onclick="hideEvalOverlay()">Close</button>
+      </div>
+      <div id="eval-detail-src" class="eval-src"></div>
+      <div id="eval-detail-answer" class="eval-answer-box"></div>
+      <div class="eval-facts">
+        <div class="panel">
+          <h4>Key Facts Present</h4>
+          <div id="eval-detail-present"></div>
+        </div>
+        <div class="panel">
+          <h4>Key Facts Missing</h4>
+          <div id="eval-detail-missing"></div>
+        </div>
+      </div>
+      <div style="margin-top:12px;">
+        <div style="font-size:11px;font-weight:800;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.05em;margin-bottom:8px;">Retrieved Sources</div>
+        <div id="eval-detail-sources"></div>
       </div>
     </div>
   </div>
@@ -521,6 +582,71 @@
         
       </div>
       <div id="tests-status" class="status-msg"></div>
+    </div>
+  </div>
+
+  <!-- 8. RAG Evals & Scoreboard (Owner-only) -->
+  <div class="card" id="card-evals">
+    <div class="card-header" onclick="toggle('evals')"><h2>🧪 RAG Evals & Scoreboard</h2><div class="card-arrow">▼</div></div>
+    <div class="card-body">
+      <p style="font-size:12px; color:var(--text-muted); margin-bottom:14px;">
+        One-click quality checks for a tenant DB. Scores are split into Retrieval, Answer, and IDK/Refusal so you can see what broke.
+      </p>
+
+      <div class="grid-2" style="align-items:end;">
+        <div>
+          <label>Tenant DB</label>
+          <select id="eval-db"></select>
+        </div>
+        <div class="grid-2" style="gap:10px;">
+          <div>
+            <label>Mode</label>
+            <select id="eval-mode">
+              <option value="retrieve">Retrieve only (Cheap)</option>
+              <option value="chat">Chat (More accurate)</option>
+              <option value="both">Both</option>
+            </select>
+          </div>
+          <div>
+            <label>Questions</label>
+            <input id="eval-count" type="number" min="8" max="20" value="12"/>
+          </div>
+        </div>
+      </div>
+
+      <div class="grid-2" style="margin-top:10px; gap:10px;">
+        <button class="secondary" style="margin:0;" onclick="generateEvalSet('analytics')">Generate from Analytics (Free)</button>
+        <button class="secondary" style="margin:0;" onclick="generateEvalSet('kb')">Generate from KB (Uses keys)</button>
+      </div>
+
+      <button style="margin-top:12px;" onclick="runEvalSuite()">Run Eval Suite</button>
+      <div id="eval-status" class="status-msg"></div>
+
+      <div id="eval-scores" style="display:none; margin-top:14px;">
+        <div style="display:flex; gap:10px; flex-wrap:wrap;">
+          <span class="eval-pill" title="Weighted summary score (0-10)."><span>Overall</span><span id="score-overall" style="margin-left:auto;font-weight:900;"></span></span>
+          <span class="eval-pill" title="Did we retrieve the expected source / relevant chunks?"><span>Retrieval</span><span id="score-retrieval" style="margin-left:auto;font-weight:900;"></span></span>
+          <span class="eval-pill" title="Given the retrieved context, did the bot include the key facts?"><span>Answer</span><span id="score-answer" style="margin-left:auto;font-weight:900;"></span></span>
+          <span class="eval-pill" title="For unanswerable tests, did the bot refuse or say it doesn't know?"><span>IDK</span><span id="score-idk" style="margin-left:auto;font-weight:900;"></span></span>
+        </div>
+        <div id="eval-meaning" style="margin-top:10px; font-size:12px; color:var(--text-muted); line-height:1.5;"></div>
+      </div>
+
+      <div id="eval-results" style="display:none; margin-top:12px;">
+        <table style="border:1px solid var(--border); border-radius:12px; overflow:hidden;">
+          <thead style="background:#f8fafc;">
+            <tr>
+              <th>Difficulty</th>
+              <th>Question</th>
+              <th>Retrieval</th>
+              <th>Answer</th>
+              <th>IDK</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody id="eval-body"></tbody>
+        </table>
+      </div>
     </div>
   </div>
 
@@ -905,6 +1031,7 @@
       if (id === 'brand')  loadBranding();
       if (id === 'ops')    loadOps();
       if (id === 'ingest') loadApiSources();
+      if (id === 'evals')  loadEvalDbs();
     }
   }
 
@@ -2117,6 +2244,189 @@
     if (!await showConfirm('Clear Draft Cache', 'Clear all locally saved draft content?', 'Clear', false)) return;
     Object.keys(localStorage).filter(k => k.startsWith('draft_') || k === 'chat_draft').forEach(k => localStorage.removeItem(k));
     showStatus('auth', 'Local draft cache cleared.', 'success');
+  }
+
+  // --- RAG EVALS (OWNER) ---
+  async function loadEvalDbs() {
+    const sel = document.getElementById('eval-db');
+    if (!sel) return;
+    // Only owners should see this card, but keep function safe.
+    if (document.body.classList.contains('client-mode')) return;
+    sel.innerHTML = '';
+    try {
+      const r = await fetch(`${API}/admin/databases`, { headers: authHeaders() });
+      const d = await r.json();
+      const dbs = (d.databases || []).map(x => x.name).filter(Boolean);
+      if (!dbs.length) {
+        const opt = document.createElement('option');
+        opt.value = '';
+        opt.textContent = 'No databases';
+        sel.appendChild(opt);
+        return;
+      }
+      const current = localStorage.getItem('adminDb') || dbs[0];
+      dbs.forEach(name => {
+        const opt = document.createElement('option');
+        opt.value = name;
+        opt.textContent = name;
+        if (name === current) opt.selected = true;
+        sel.appendChild(opt);
+      });
+    } catch (e) {
+      const opt = document.createElement('option');
+      opt.value = '';
+      opt.textContent = 'Failed to load';
+      sel.appendChild(opt);
+    }
+  }
+
+  function hideEvalOverlay() {
+    document.getElementById('eval-overlay')?.classList.remove('active');
+  }
+
+  function showEvalOverlay(row) {
+    const overlay = document.getElementById('eval-overlay');
+    if (!overlay) return;
+    document.getElementById('eval-detail-q').textContent = row.q || '';
+
+    const meta = document.getElementById('eval-detail-meta');
+    meta.innerHTML = '';
+    const pills = [
+      { label: 'Difficulty', value: row.difficulty || '—' },
+      { label: 'Expect', value: (row.expect && row.expect.type) ? row.expect.type : '—' },
+      { label: 'Retrieval', value: row.checks?.retrieval === true ? 'PASS' : row.checks?.retrieval === false ? 'FAIL' : '—' },
+      { label: 'Answer', value: row.checks?.answer === true ? 'PASS' : row.checks?.answer === false ? 'FAIL' : '—' },
+      { label: 'IDK', value: row.checks?.idk === true ? 'PASS' : row.checks?.idk === false ? 'FAIL' : '—' },
+    ];
+    pills.forEach(p => {
+      const el = document.createElement('span');
+      el.className = 'eval-pill';
+      el.textContent = `${p.label}: ${p.value}`;
+      meta.appendChild(el);
+    });
+
+    const srcEl = document.getElementById('eval-detail-src');
+    const expSrc = row.expect?.expected_source || '';
+    srcEl.textContent = expSrc ? `Expected source: ${expSrc}` : '';
+
+    const ansEl = document.getElementById('eval-detail-answer');
+    ansEl.textContent = row.answer?.text || '';
+
+    const pres = document.getElementById('eval-detail-present');
+    const miss = document.getElementById('eval-detail-missing');
+    pres.innerHTML = '';
+    miss.innerHTML = '';
+    (row.answer?.present_facts || []).forEach(f => {
+      const d = document.createElement('div');
+      d.className = 'eval-fact';
+      d.textContent = f;
+      pres.appendChild(d);
+    });
+    (row.answer?.missing_facts || []).forEach(f => {
+      const d = document.createElement('div');
+      d.className = 'eval-fact';
+      d.style.borderColor = '#fecaca';
+      d.style.background = '#fff1f2';
+      d.textContent = f;
+      miss.appendChild(d);
+    });
+
+    const srcs = document.getElementById('eval-detail-sources');
+    srcs.innerHTML = '';
+    (row.retrieve?.sources || []).forEach(s => {
+      const div = document.createElement('div');
+      div.className = 'eval-fact';
+      div.textContent = s;
+      srcs.appendChild(div);
+    });
+
+    overlay.classList.add('active');
+  }
+
+  function _badge(val) {
+    if (val === true) return '<span class="badge badge-pass">PASS</span>';
+    if (val === false) return '<span class="badge badge-fail">FAIL</span>';
+    return '<span class="badge badge-na">—</span>';
+  }
+
+  function _renderEvalMeaning(scores, mode) {
+    const r = Number(scores?.retrieval || 0);
+    const a = Number(scores?.answer || 0);
+    const i = Number(scores?.idk || 0);
+    if (mode === 'retrieve') {
+      return 'Retrieve-only mode checks whether we fetch relevant sources. If this is low, focus on chunking, embeddings, filters, and ingestion quality.';
+    }
+    if (r < 6) return 'Retrieval is the bottleneck. The bot cannot answer well if it can’t fetch the right chunks. Improve chunking, source metadata, ingestion, and retrieval filters.';
+    if (a < 6) return 'Answer is the bottleneck. Retrieval looks OK, but the bot isn’t using the context well. Tune the prompt, reduce overly strict guardrails, or adjust formatting rules.';
+    if (i < 6) return 'IDK/Refusal is the bottleneck. The bot is either hallucinating or refusing incorrectly. Tune the scope/IDK rules and refusal wording.';
+    return 'Looks healthy. If you want a higher score, increase the number of “hard/very hard” questions and focus on the failures below.';
+  }
+
+  async function generateEvalSet(strategy) {
+    const db = document.getElementById('eval-db')?.value || localStorage.getItem('adminDb') || '';
+    const count = Number(document.getElementById('eval-count')?.value || 12);
+    if (!db) return showStatus('eval', 'Select a DB first.', 'error');
+    showStatus('eval', `Generating eval set (${strategy})...`, 'loading', true);
+    try {
+      const r = await authFetch(`${API}/admin/evals/generate`, {
+        method: 'POST',
+        headers: { ...authHeaders(), 'Content-Type': 'application/json' },
+        body: JSON.stringify({ password: sessionStorage.getItem('adminPass') || '', db_name: db, count, strategy }),
+      });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) return showStatus('eval', d.detail || 'Generate failed', 'error', true);
+      showStatus('eval', `✅ Generated ${d.count || count} questions for ${db}`, 'success', true);
+    } catch (e) {
+      showStatus('eval', 'Generate failed: ' + e.message, 'error', true);
+    }
+  }
+
+  async function runEvalSuite() {
+    const db = document.getElementById('eval-db')?.value || localStorage.getItem('adminDb') || '';
+    const mode = document.getElementById('eval-mode')?.value || 'retrieve';
+    const count = Number(document.getElementById('eval-count')?.value || 12);
+    if (!db) return showStatus('eval', 'Select a DB first.', 'error');
+    showStatus('eval', `Running eval suite (${mode})...`, 'loading', true);
+    document.getElementById('eval-results').style.display = 'none';
+    document.getElementById('eval-scores').style.display = 'none';
+    try {
+      const r = await authFetch(`${API}/admin/evals/run`, {
+        method: 'POST',
+        headers: { ...authHeaders(), 'Content-Type': 'application/json' },
+        body: JSON.stringify({ password: sessionStorage.getItem('adminPass') || '', db_name: db, mode, count }),
+      });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) return showStatus('eval', d.detail || 'Eval failed', 'error', true);
+
+      document.getElementById('score-overall').textContent = `${d.scores?.overall ?? '—'}/10`;
+      document.getElementById('score-retrieval').textContent = `${d.scores?.retrieval ?? '—'}/10`;
+      document.getElementById('score-answer').textContent = `${d.scores?.answer ?? '—'}/10`;
+      document.getElementById('score-idk').textContent = `${d.scores?.idk ?? '—'}/10`;
+      document.getElementById('eval-meaning').textContent = _renderEvalMeaning(d.scores, d.mode);
+      document.getElementById('eval-scores').style.display = 'block';
+
+      const body = document.getElementById('eval-body');
+      body.innerHTML = '';
+      window._lastEvalResults = (d.results || []);
+      window._lastEvalResults.forEach((row, idx) => {
+        const tr = document.createElement('tr');
+        tr.innerHTML = `
+          <td style="font-size:11px;font-weight:800;color:var(--text-muted);text-transform:uppercase;">${escapeHtml(row.difficulty || '—')}</td>
+          <td style="font-weight:700;">${escapeHtml(row.q || '')}</td>
+          <td>${_badge(row.checks?.retrieval)}</td>
+          <td>${_badge(row.checks?.answer)}</td>
+          <td>${_badge(row.checks?.idk)}</td>
+          <td style="text-align:right;">
+            <button class="secondary" style="width:auto;margin:0;padding:6px 10px;font-size:11px;" onclick="showEvalOverlay(window._lastEvalResults[${idx}])">View</button>
+          </td>
+        `;
+        body.appendChild(tr);
+      });
+      document.getElementById('eval-results').style.display = 'block';
+      showStatus('eval', `✅ Done. Overall ${d.scores?.overall ?? '—'}/10`, 'success', true);
+    } catch (e) {
+      showStatus('eval', 'Eval failed: ' + e.message, 'error', true);
+    }
   }
 
   function endHealerSession() {

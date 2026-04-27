@@ -101,3 +101,46 @@ def test_owner_gates_reject_client_password(app_module, client, two_tenants, mon
     r3 = client.post("/admin/reindex", json={"password": "clientA"})
     assert r3.status_code in (401, 403)
 
+
+def test_owner_gates_evals_run_and_smoke_owner_run(app_module, client, two_tenants, monkeypatch):
+    # Acquire CSRF token as owner (required for /admin/* POST routes).
+    token_resp = client.get("/admin/csrf-token", headers={"Authorization": "Bearer ownerpw", "X-Admin-DB": "a"})
+    assert token_resp.status_code == 200
+    token = token_resp.json()["csrf_token"]
+
+    # Client must not be able to run evals (owner-only).
+    r = client.post(
+        "/admin/evals/run",
+        headers={"Authorization": "Bearer clientA", "X-Admin-DB": "a", "X-CSRF-Token": token},
+        json={"password": "clientA", "db_name": "a", "mode": "retrieve", "tests": [{"q": "hi", "expect": {"type": "ANSWER"}}]},
+    )
+    assert r.status_code == 401
+
+    # Owner run should work even without a real ChromaDB: monkeypatch DB retrieval to a dummy object.
+    class _Doc:
+        def __init__(self, source: str):
+            self.metadata = {"source": source}
+
+    class _DummyDB:
+        def similarity_search(self, q, k):
+            return [_Doc("https://example.com/source1")]
+
+    monkeypatch.setattr(app_module, "_get_or_create_db", lambda name: _DummyDB(), raising=True)
+
+    ok = client.post(
+        "/admin/evals/run",
+        headers={"Authorization": "Bearer ownerpw", "X-Admin-DB": "a", "X-CSRF-Token": token},
+        json={
+            "password": "ownerpw",
+            "db_name": "a",
+            "mode": "retrieve",
+            "tests": [
+                {"id": "t1", "difficulty": "easy", "q": "What is this about?", "expect": {"type": "ANSWER", "expected_source": "example.com"}},
+                {"id": "t2", "difficulty": "easy", "q": "What is 2+2?", "expect": {"type": "REFUSE"}},
+            ],
+        },
+    )
+    assert ok.status_code == 200
+    data = ok.json()
+    assert data["db"] == "a"
+    assert "scores" in data and "overall" in data["scores"]

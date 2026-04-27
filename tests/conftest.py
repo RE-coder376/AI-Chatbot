@@ -1,5 +1,7 @@
 import importlib
 import os
+import shutil
+import uuid
 from pathlib import Path
 
 import pytest
@@ -7,7 +9,7 @@ import services.config as _svc_config
 
 
 @pytest.fixture()
-def app_module(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+def app_module(monkeypatch: pytest.MonkeyPatch, request):
     """
     Provides an isolated app module instance with:
     - background startup tasks disabled (UNIT_TEST=1)
@@ -18,6 +20,17 @@ def app_module(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 
     import app as app_mod
     importlib.reload(app_mod)
+
+    # Avoid pytest's tmpdir plugin (blocked in this sandbox): create a temp dir under tests/_tmp.
+    base = Path(__file__).resolve().parent / "_tmp"
+    base.mkdir(parents=True, exist_ok=True)
+    tmp_path = base / uuid.uuid4().hex
+    tmp_path.mkdir(parents=True, exist_ok=True)
+
+    def _cleanup():
+        shutil.rmtree(tmp_path, ignore_errors=True)
+
+    request.addfinalizer(_cleanup)
 
     # Re-point global paths into the tmp dir so tests don't touch real tenant data.
     db_dir = tmp_path / "databases"
@@ -65,4 +78,3 @@ def two_tenants(app_module):
     _make_db(app_module, "a", "clientA", "wk_a")
     _make_db(app_module, "b", "clientB", "wk_b")
     return {"a": {"pw": "clientA", "wk": "wk_a"}, "b": {"pw": "clientB", "wk": "wk_b"}}
-

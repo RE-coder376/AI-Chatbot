@@ -3643,6 +3643,474 @@ async def debug_retrieve(request: Request):
         "has_content": doc_count > 0,
     }
 
+# --- OWNER EVALS (RAG Quality Scoreboard) ---
+
+_EVAL_SET_FILENAME = "eval_set.json"
+_EVAL_RUNS_DIRNAME = "runs"
+
+def _eval_dir(db_name: str) -> Path:
+    db_name = _validate_db_name(db_name)
+    p = DATABASES_DIR / db_name / "evals"
+    p.mkdir(parents=True, exist_ok=True)
+    return p
+
+def _eval_runs_dir(db_name: str) -> Path:
+    p = _eval_dir(db_name) / _EVAL_RUNS_DIRNAME
+    p.mkdir(parents=True, exist_ok=True)
+    return p
+
+def _load_eval_set(db_name: str) -> dict:
+    p = _eval_dir(db_name) / _EVAL_SET_FILENAME
+    if not p.exists():
+        return {}
+    try:
+        return json.loads(p.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+def _save_eval_set(db_name: str, data: dict) -> None:
+    p = _eval_dir(db_name) / _EVAL_SET_FILENAME
+    _atomic_write_json(p, data)
+
+def _norm_text(s: str) -> str:
+    s = (s or "").lower()
+    s = re.sub(r"[^a-z0-9\\s]+", " ", s)
+    s = re.sub(r"\\s+", " ", s).strip()
+    return s
+
+def _token_set(s: str) -> set:
+    return {t for t in _norm_text(s).split(" ") if len(t) >= 3}
+
+def _fact_present(answer: str, fact: str) -> bool:
+    """Cheap matcher: substring OR token overlap."""
+    a = _norm_text(answer)
+    f = _norm_text(fact)
+    if not f:
+        return True
+    if f in a:
+        return True
+    ft = _token_set(f)
+    if len(ft) < 3:
+        return f in a
+    at = _token_set(a)
+    if not at:
+        return False
+    overlap = len(ft & at) / max(1, len(ft))
+    return overlap >= 0.6
+
+def _score_0_10(passed: int, total: int) -> float:
+    if total <= 0:
+        return 0.0
+    return round(10.0 * (passed / total), 1)
+
+def _now_run_id() -> str:
+    return datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+
+def _default_idk_tests() -> list[dict]:
+    return [
+        {"id": "idk_weather", "difficulty": "easy", "q": "What is the weather today?", "expect": {"type": "REFUSE"}},
+        {"id": "idk_capital", "difficulty": "easy", "q": "What is the capital of Japan?", "expect": {"type": "REFUSE"}},
+        {"id": "idk_trivia", "difficulty": "easy", "q": "What is 2+2?", "expect": {"type": "REFUSE"}},
+        {"id": "idk_unknown", "difficulty": "medium", "q": "What is your CEO's favorite color?", "expect": {"type": "IDK"}},
+    ]
+
+def _collect_eval_items_from_analytics(db_name: str, count: int = 12) -> list[dict]:
+    items: list[dict] = []
+    try:
+        db_dir = DATABASES_DIR / _validate_db_name(db_name)
+        analytics_file = db_dir / "analytics.json"
+        if analytics_file.exists():
+            analytics = json.loads(analytics_file.read_text(encoding="utf-8"))
+            q_counts = analytics.get("questions") or {}
+            if isinstance(q_counts, dict):
+                for q, _ in sorted(q_counts.items(), key=lambda kv: kv[1], reverse=True):
+                    if isinstance(q, str) and q.strip():
+                        items.append({"id": f"aq_{len(items)}", "difficulty": "easy", "q": q.strip(), "expect": {"type": "ANSWER"}})
+                        if len(items) >= count:
+                            break
+        gaps_file = db_dir / "knowledge_gaps.json"
+        if len(items) < count and gaps_file.exists():
+            gaps = json.loads(gaps_file.read_text(encoding="utf-8"))
+            if isinstance(gaps, list):
+                for g in gaps:
+                    if not isinstance(g, dict):
+                        continue
+                    q = g.get("question", "")
+                    if isinstance(q, str) and q.strip():
+                        items.append({"id": f"gq_{len(items)}", "difficulty": "medium", "q": q.strip(), "expect": {"type": "ANSWER"}})
+                        if len(items) >= count:
+                            break
+    except Exception:
+        pass
+
+    # De-dup by question text.
+    deduped: list[dict] = []
+    seen = set()
+    for it in items:
+        k = (it.get("q") or "").strip().lower()
+        if not k or k in seen:
+            continue
+        seen.add(k)
+        deduped.append(it)
+        if len(deduped) >= count:
+            break
+
+    for p in _default_idk_tests():
+        if len(deduped) >= count:
+            break
+        k = p["q"].strip().lower()
+        if k not in seen:
+            deduped.append(p)
+            seen.add(k)
+
+    return deduped[:count]
+
+async def _generate_eval_items_from_kb(db_name: str, db, cfg: dict, count: int = 12) -> list[dict]:
+    """One-call KB-driven eval generator (answerable tests anchored to a source URL + key facts)."""
+    try:
+        sample = db._collection.get(limit=40, include=["documents", "metadatas"])
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=f"KB not ready for {db_name}: {e}")
+    docs = sample.get("documents") or []
+    metas = sample.get("metadatas") or []
+
+    pairs: list[tuple[str, str]] = []
+    for i in range(min(len(docs), len(metas))):
+        text = docs[i] or ""
+        meta = metas[i] or {}
+        src = (meta.get("source") or meta.get("url") or "").strip()
+        if not isinstance(text, str) or len(text.strip()) < 220:
+            continue
+        pairs.append((src[:300], text.strip()))
+    if not pairs:
+        return _collect_eval_items_from_analytics(db_name, count=max(10, min(count, 20)))
+
+    uniq: list[tuple[str, str]] = []
+    seen_src = set()
+    for src, text in pairs:
+        key = (src or "unknown").lower()
+        if key in seen_src:
+            continue
+        seen_src.add(key)
+        uniq.append((src or "unknown", text))
+        if len(uniq) >= 10:
+            break
+
+    kb_blocks = []
+    for idx, (src, text) in enumerate(uniq, 1):
+        kb_blocks.append(f"[DOC {idx}] SOURCE: {src}\nTEXT:\n{text[:1400]}\n")
+    kb_text = "\n---\n".join(kb_blocks)[:14000]
+
+    llm = get_fresh_llm()
+    if not llm:
+        raise HTTPException(status_code=503, detail="No LLM keys available to generate eval questions.")
+
+    biz = cfg.get("business_name", "this business")
+    target_n = max(10, min(int(count), 20))
+    prompt = (
+        f"You are creating an evaluation suite for a RAG chatbot for {biz}.\n"
+        f"Based ONLY on the KB excerpts below, create {target_n} test cases.\n\n"
+        "Rules:\n"
+        "- Mix difficulty across: easy, medium, hard, very_hard.\n"
+        "- Each test MUST be answerable ONLY from one of the DOCs provided OR be explicitly unanswerable.\n"
+        "- For answerable tests: expect.type=ANSWER, include 3-6 short key_facts, and expected_source copied from SOURCE.\n"
+        "- For unanswerable tests: expect.type=IDK or REFUSE and omit key_facts and expected_source.\n"
+        "- Output ONLY strict JSON in this exact shape:\n"
+        '{ "tests": [ {"difficulty":"easy|medium|hard|very_hard","q":"...","expect":{"type":"ANSWER|IDK|REFUSE","key_facts":["..."],"expected_source":"..."} } ] }\n\n'
+        f"KB:\n{kb_text}"
+    )
+
+    try:
+        resp = await asyncio.wait_for(llm.ainvoke([{"role": "user", "content": prompt}]), timeout=40)
+        raw = (resp.content or "").strip()
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=f"Eval generation failed: {e}")
+
+    m = re.search(r"\{.*\}", raw, re.DOTALL)
+    if not m:
+        return _collect_eval_items_from_analytics(db_name, count=target_n)
+    try:
+        obj = json.loads(m.group(0))
+    except Exception:
+        return _collect_eval_items_from_analytics(db_name, count=target_n)
+
+    tests = obj.get("tests") if isinstance(obj, dict) else None
+    if not isinstance(tests, list) or not tests:
+        return _collect_eval_items_from_analytics(db_name, count=target_n)
+
+    out: list[dict] = []
+    for i, t in enumerate(tests[:target_n]):
+        if not isinstance(t, dict):
+            continue
+        q = (t.get("q") or "").strip()
+        if not q:
+            continue
+        diff = (t.get("difficulty") or "medium").strip()
+        if diff not in ("easy", "medium", "hard", "very_hard"):
+            diff = "medium"
+        expect = t.get("expect") if isinstance(t.get("expect"), dict) else {"type": "ANSWER"}
+        et = (expect.get("type") or "ANSWER").strip().upper()
+        if et not in ("ANSWER", "IDK", "REFUSE"):
+            et = "ANSWER"
+
+        item: dict = {"id": f"kb_{i}", "difficulty": diff, "q": q, "expect": {"type": et}}
+        if et == "ANSWER":
+            kf = expect.get("key_facts") or []
+            if isinstance(kf, list):
+                item["expect"]["key_facts"] = [str(x)[:220] for x in kf if str(x).strip()][:8]
+            src = (expect.get("expected_source") or "").strip()
+            if src:
+                item["expect"]["expected_source"] = src[:300]
+        out.append(item)
+
+    # Ensure a couple fixed IDK/REFUSE probes exist.
+    out_ids = {_norm_text(x.get("q", "")) for x in out}
+    for p in _default_idk_tests():
+        if len(out) >= target_n:
+            break
+        if _norm_text(p["q"]) not in out_ids:
+            out.append(p)
+            out_ids.add(_norm_text(p["q"]))
+
+    return out[:target_n]
+
+async def _eval_retrieve_sources(q: str, tenant_db, k: int = 8) -> tuple[int, list[str]]:
+    """LLM-free retrieval for evals (embeddings only)."""
+    try:
+        docs = await asyncio.to_thread(tenant_db.similarity_search, q, k)
+        sources: list[str] = []
+        for d in docs or []:
+            try:
+                src = (d.metadata or {}).get("source") or ""
+                if isinstance(src, str) and src.strip():
+                    sources.append(src.strip())
+            except Exception:
+                continue
+        # De-dup while preserving order
+        seen = set()
+        deduped = []
+        for s in sources:
+            sl = s.lower()
+            if sl in seen:
+                continue
+            seen.add(sl)
+            deduped.append(s)
+        return (len(docs or []), deduped[:k])
+    except Exception:
+        return (0, [])
+
+async def _eval_answer_via_stream(q: str, cfg: dict, tenant_db, db_name: str) -> tuple[str, list[str]]:
+    """Consume the production streaming path to extract (answer, sources)."""
+    async def _run():
+        answer_parts: list[str] = []
+        sources: list[str] = []
+        async for chunk in chat_stream_generator(
+            q, [], "", "", "",
+            request=None, cfg=cfg, tenant_db=tenant_db, db_name=db_name
+        ):
+            if not isinstance(chunk, str):
+                continue
+            for line in chunk.splitlines():
+                line = line.strip()
+                if not line.startswith("data:"):
+                    continue
+                payload = line[len("data:"):].strip()
+                try:
+                    obj = json.loads(payload)
+                except Exception:
+                    continue
+                if obj.get("type") == "chunk":
+                    answer_parts.append(str(obj.get("content", "")))
+                elif obj.get("type") == "metadata":
+                    srcs = obj.get("sources") or []
+                    if isinstance(srcs, list):
+                        sources = [str(s) for s in srcs if isinstance(s, str)]
+        return ("".join(answer_parts).strip(), sources)
+    return await asyncio.wait_for(_run(), timeout=120)
+
+def _sources_hit_expected(sources: list[str], expected_source: str) -> bool:
+    if not expected_source:
+        return False
+    es = expected_source.strip().lower()
+    for s in sources or []:
+        sl = (s or "").strip().lower()
+        if not sl:
+            continue
+        if es in sl or sl in es:
+            return True
+    return False
+
+@app.post("/admin/evals/generate")
+async def admin_generate_evals(request: Request):
+    data = await request.json()
+    password = _extract_password(request, data.get("password", ""))
+    require_owner_auth(password)
+
+    db_name = _validate_db_name((data.get("db_name") or "").strip() or _get_active_db())
+    cfg = get_config(db_name)
+    count = max(10, min(int(data.get("count", 12) or 12), 20))
+    strategy = (data.get("strategy") or "kb").strip().lower()
+    if strategy not in ("kb", "analytics"):
+        strategy = "kb"
+
+    tenant_db = _get_or_create_db(db_name)
+    if strategy == "analytics":
+        tests = _collect_eval_items_from_analytics(db_name, count=count)
+    else:
+        tests = await _generate_eval_items_from_kb(db_name, tenant_db, cfg, count=count)
+
+    payload = {
+        "db": db_name,
+        "strategy": strategy,
+        "count": len(tests),
+        "tests": tests,
+        "generated_at": datetime.utcnow().isoformat() + "Z",
+    }
+    _save_eval_set(db_name, payload)
+    return {"success": True, "db": db_name, "count": len(tests)}
+
+@app.post("/admin/evals/run")
+async def admin_run_evals(request: Request):
+    data = await request.json()
+    password = _extract_password(request, data.get("password", ""))
+    require_owner_auth(password)
+
+    db_name = _validate_db_name((data.get("db_name") or "").strip() or _get_active_db())
+    mode = (data.get("mode") or "retrieve").strip().lower()
+    if mode not in ("retrieve", "chat", "both"):
+        mode = "retrieve"
+    count = max(8, min(int(data.get("count", 12) or 12), 20))
+
+    # Allow explicit test injection (used by pytest). Not exposed in admin UI.
+    tests = data.get("tests")
+    if not isinstance(tests, list) or not tests:
+        eval_set = _load_eval_set(db_name)
+        tests = eval_set.get("tests") if isinstance(eval_set, dict) else None
+
+    cfg = get_config(db_name)
+    tenant_db = _get_or_create_db(db_name)
+
+    if not isinstance(tests, list) or not tests:
+        strategy = (data.get("strategy") or "analytics").strip().lower()
+        if strategy == "kb":
+            tests = await _generate_eval_items_from_kb(db_name, tenant_db, cfg, count=count)
+        else:
+            tests = _collect_eval_items_from_analytics(db_name, count=count)
+
+    tests = tests[:count]
+
+    rows: list[dict] = []
+    retrieval_total = 0
+    retrieval_pass = 0
+    answer_total = 0
+    answer_pass = 0
+    idk_total = 0
+    idk_pass = 0
+
+    for t in tests:
+        if not isinstance(t, dict):
+            continue
+        q = (t.get("q") or "").strip()
+        if not q:
+            continue
+        difficulty = (t.get("difficulty") or "medium").strip()
+        if difficulty not in ("easy", "medium", "hard", "very_hard"):
+            difficulty = "medium"
+        expect = t.get("expect") if isinstance(t.get("expect"), dict) else {"type": "ANSWER"}
+        etype = (expect.get("type") or "ANSWER").strip().upper()
+        if etype not in ("ANSWER", "IDK", "REFUSE"):
+            etype = "ANSWER"
+
+        expected_source = (expect.get("expected_source") or "").strip()
+        key_facts = expect.get("key_facts") or []
+        if not isinstance(key_facts, list):
+            key_facts = []
+
+        row = {
+            "id": t.get("id") or f"t_{len(rows)}",
+            "difficulty": difficulty,
+            "q": q,
+            "expect": {"type": etype, "expected_source": expected_source, "key_facts": key_facts[:8]},
+            "checks": {"retrieval": None, "answer": None, "idk": None},
+            "retrieve": {"sources": [], "doc_count": None},
+            "answer": {"text": "", "present_facts": [], "missing_facts": []},
+        }
+
+        if mode in ("retrieve", "both"):
+            doc_count, sources = await _eval_retrieve_sources(q, tenant_db, k=8)
+            row["retrieve"]["doc_count"] = doc_count
+            row["retrieve"]["sources"] = sources
+            if etype == "ANSWER":
+                retrieval_total += 1
+                hit = _sources_hit_expected(sources, expected_source) if expected_source else bool(doc_count > 0)
+                row["checks"]["retrieval"] = bool(hit)
+                if hit:
+                    retrieval_pass += 1
+
+        if mode in ("chat", "both"):
+            try:
+                ans, chat_sources = await _eval_answer_via_stream(q, cfg, tenant_db, db_name)
+                row["answer"]["text"] = ans[:4000]
+                if chat_sources:
+                    row["retrieve"]["sources"] = chat_sources[:8]
+                    if etype == "ANSWER":
+                        retrieval_total += 1
+                        hit = _sources_hit_expected(chat_sources, expected_source) if expected_source else bool(chat_sources)
+                        row["checks"]["retrieval"] = bool(hit)
+                        if hit:
+                            retrieval_pass += 1
+            except Exception as e:
+                row["answer"]["error"] = str(e)[:180]
+
+            if etype in ("IDK", "REFUSE"):
+                idk_total += 1
+                text_l = (row["answer"]["text"] or "").lower()
+                if etype == "REFUSE":
+                    ok = any(s in text_l for s in ("i can't help with that", "i cannot help with that", "outside that scope", "i specialize in helping with"))
+                else:
+                    ok = any(s in text_l for s in ("i don't have", "i do not have", "not in my", "no information", "not available", "i can't find", "i cannot find", "i'm not sure"))
+                row["checks"]["idk"] = bool(ok)
+                if ok:
+                    idk_pass += 1
+
+            if etype == "ANSWER" and key_facts:
+                answer_total += 1
+                present = []
+                missing = []
+                for fact in key_facts[:8]:
+                    if _fact_present(row["answer"]["text"], str(fact)):
+                        present.append(str(fact)[:220])
+                    else:
+                        missing.append(str(fact)[:220])
+                row["answer"]["present_facts"] = present
+                row["answer"]["missing_facts"] = missing
+                ok = (len(missing) == 0) or (len(present) / max(1, len(key_facts)) >= 0.7)
+                row["checks"]["answer"] = bool(ok)
+                if ok:
+                    answer_pass += 1
+
+        rows.append(row)
+
+    retrieval_score = _score_0_10(retrieval_pass, retrieval_total)
+    answer_score = _score_0_10(answer_pass, answer_total) if mode in ("chat", "both") else 0.0
+    idk_score = _score_0_10(idk_pass, idk_total) if mode in ("chat", "both") else 0.0
+
+    overall = round(0.45 * retrieval_score + 0.45 * answer_score + 0.10 * idk_score, 1) if mode in ("chat", "both") else retrieval_score
+
+    run_id = _now_run_id()
+    run_payload = {
+        "id": run_id,
+        "db": db_name,
+        "mode": mode,
+        "scores": {"overall": overall, "retrieval": retrieval_score, "answer": answer_score, "idk": idk_score},
+        "counts": {"total": len(rows), "retrieval_total": retrieval_total, "answer_total": answer_total, "idk_total": idk_total},
+        "generated_at": datetime.utcnow().isoformat() + "Z",
+        "results": rows,
+    }
+    out_path = _eval_runs_dir(db_name) / f"run_{run_id}.json"
+    _atomic_write_json(out_path, run_payload)
+    return run_payload
+
 
 @app.get("/config")
 def public_config(request: Request):
