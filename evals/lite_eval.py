@@ -1,67 +1,8 @@
 import argparse
-import json
 import time
-from pathlib import Path
 
 import requests
-
-
-def _read_json(path: Path):
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
-        return None
-
-
-def _collect_questions(db_name: str, count: int) -> list[str]:
-    db_dir = Path("databases") / db_name
-    questions: list[str] = []
-
-    # Prefer "most asked" questions from analytics.
-    analytics = _read_json(db_dir / "analytics.json") or {}
-    q_counts = analytics.get("questions") or {}
-    if isinstance(q_counts, dict):
-        for q, _ in sorted(q_counts.items(), key=lambda kv: kv[1], reverse=True):
-            if isinstance(q, str) and q.strip():
-                questions.append(q.strip())
-
-    # Add knowledge gaps (usually high-signal user phrasing).
-    gaps = _read_json(db_dir / "knowledge_gaps.json") or []
-    if isinstance(gaps, list):
-        for g in gaps:
-            if not isinstance(g, dict):
-                continue
-            q = g.get("question", "")
-            if isinstance(q, str) and q.strip():
-                questions.append(q.strip())
-
-    # De-dup while preserving order.
-    deduped: list[str] = []
-    seen = set()
-    for q in questions:
-        key = q.lower()
-        if key in seen:
-            continue
-        seen.add(key)
-        deduped.append(q)
-        if len(deduped) >= count:
-            break
-
-    # If we don't have enough, pad with a couple of safe, generic out-of-scope probes.
-    if len(deduped) < count:
-        pads = [
-            "What is 2+2?",
-            "What is the weather today?",
-            "How do I hack a wifi network?",
-        ]
-        for p in pads:
-            if len(deduped) >= count:
-                break
-            if p.lower() not in seen:
-                deduped.append(p)
-                seen.add(p.lower())
-
-    return deduped[:count]
+from evals import eval_v1
 
 
 def _wait_for_active_db(base_url: str, db_name: str, timeout_s: int = 120) -> None:
@@ -90,10 +31,6 @@ def main() -> int:
     if not db_name:
         raise SystemExit("Missing --db")
 
-    questions = _collect_questions(db_name, max(1, min(args.count, 30)))
-    if not questions:
-        raise SystemExit("No questions found for DB (need analytics.json or knowledge_gaps.json).")
-
     # Switch active DB (owner-only when root password exists).
     r = requests.post(
         f"{args.base_url}/admin/databases/set-active",
@@ -103,6 +40,11 @@ def main() -> int:
     if r.status_code != 200:
         raise SystemExit(f"set-active failed: HTTP {r.status_code} {r.text[:200]}")
     _wait_for_active_db(args.base_url, db_name)
+
+    items = eval_v1._collect_eval_items(args.base_url, args.password, db_name, max(1, min(args.count, 30)))
+    questions = [item.q for item in items]
+    if not questions:
+        raise SystemExit("No DB-grounded eval questions were found for this tenant.")
 
     print(f"DB: {db_name}")
     print(f"Mode: {args.mode} | Questions: {len(questions)}")
@@ -147,4 +89,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
