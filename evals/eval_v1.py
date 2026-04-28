@@ -12,6 +12,8 @@ from pathlib import Path
 import requests
 
 EVALS_DIR = Path(__file__).resolve().parent
+PROJECT_ROOT = EVALS_DIR.parent
+DATABASES_DIR = PROJECT_ROOT / "databases"
 
 
 IDK_SIGS = (
@@ -116,7 +118,7 @@ def _difficulty_for_question(question: str) -> str:
 
 
 def _load_faq_items(db_name: str) -> list[EvalItem]:
-    db_dir = Path("databases") / db_name
+    db_dir = DATABASES_DIR / db_name
     faqs = _read_json(db_dir / "faqs.json") or []
     items: list[EvalItem] = []
     if not isinstance(faqs, list):
@@ -141,7 +143,7 @@ def _load_faq_items(db_name: str) -> list[EvalItem]:
 
 
 def _load_analytics_candidates(db_name: str) -> list[EvalItem]:
-    db_dir = Path("databases") / db_name
+    db_dir = DATABASES_DIR / db_name
     analytics = _read_json(db_dir / "analytics.json") or {}
     questions = Counter()
 
@@ -179,7 +181,7 @@ def _load_analytics_candidates(db_name: str) -> list[EvalItem]:
 
 
 def _load_gap_candidates(db_name: str) -> list[EvalItem]:
-    db_dir = Path("databases") / db_name
+    db_dir = DATABASES_DIR / db_name
     gaps = _read_json(db_dir / "knowledge_gaps.json") or []
     items: list[EvalItem] = []
     if not isinstance(gaps, list):
@@ -202,7 +204,7 @@ def _load_gap_candidates(db_name: str) -> list[EvalItem]:
 
 
 def _load_document_rows_via_chroma(db_name: str) -> list[tuple[str, str]]:
-    db_dir = Path("databases") / db_name
+    db_dir = DATABASES_DIR / db_name
     try:
         import chromadb
 
@@ -224,7 +226,7 @@ def _load_document_rows_via_chroma(db_name: str) -> list[tuple[str, str]]:
 
 
 def _load_document_rows_via_sqlite(db_name: str) -> list[tuple[str, str]]:
-    db_path = Path("databases") / db_name / "chroma.sqlite3"
+    db_path = DATABASES_DIR / db_name / "chroma.sqlite3"
     if not db_path.exists():
         return []
     try:

@@ -16,6 +16,7 @@ def _scratch_dir() -> Path:
 def test_collect_seed_items_filters_generic_noise_and_keeps_curated(monkeypatch):
     temp_path = _scratch_dir()
     monkeypatch.chdir(temp_path)
+    monkeypatch.setattr(eval_v1, "DATABASES_DIR", temp_path / "databases")
     monkeypatch.setattr(eval_v1, "_load_document_rows", lambda _db_name: [])
     db_dir = temp_path / "databases" / "tenant_a"
 
@@ -59,6 +60,7 @@ def test_collect_seed_items_filters_generic_noise_and_keeps_curated(monkeypatch)
 def test_collect_eval_items_keeps_only_grounded_candidates(monkeypatch):
     temp_path = _scratch_dir()
     monkeypatch.chdir(temp_path)
+    monkeypatch.setattr(eval_v1, "DATABASES_DIR", temp_path / "databases")
     monkeypatch.setattr(eval_v1, "_load_document_rows", lambda _db_name: [])
     db_dir = temp_path / "databases" / "tenant_b"
 
@@ -98,6 +100,7 @@ def test_collect_eval_items_keeps_only_grounded_candidates(monkeypatch):
 def test_faq_items_still_need_retrieval_support(monkeypatch):
     temp_path = _scratch_dir()
     monkeypatch.chdir(temp_path)
+    monkeypatch.setattr(eval_v1, "DATABASES_DIR", temp_path / "databases")
     monkeypatch.setattr(eval_v1, "_load_document_rows", lambda _db_name: [])
     db_dir = temp_path / "databases" / "tenant_c"
 
@@ -138,6 +141,27 @@ def test_grade_answer_fails_long_but_ungrounded_answer():
     assert overlap == 0.0
 
 
+def test_grade_answer_passes_grounded_answer():
+    item = eval_v1.EvalItem(
+        q="How does the refund policy work?",
+        expect="ANSWER",
+        source="analytics",
+        reference_answer="Refunds are allowed within 7 days for unused items with proof of purchase.",
+        retrieve_doc_count=3,
+        retrieve_context_length=240,
+        retrieve_context_preview="Refunds are allowed within 7 days for unused items with proof of purchase.",
+    )
+
+    status, reason, overlap = eval_v1._grade_answer(
+        item,
+        "Refunds are allowed within 7 days for unused items, and you need proof of purchase.",
+    )
+
+    assert status == "PASS"
+    assert reason is None
+    assert overlap >= 0.12
+
+
 def test_build_summary_does_not_fake_idk_score():
     results = [
         {"retrieval_status": "PASS", "answer_status": "PASS", "idk_status": "SKIP", "overall_status": "PASS"},
@@ -156,6 +180,7 @@ def test_build_summary_does_not_fake_idk_score():
 def test_finalize_selection_uses_stable_core_and_rotates_discovery(monkeypatch):
     temp_path = _scratch_dir()
     monkeypatch.chdir(temp_path)
+    monkeypatch.setattr(eval_v1, "DATABASES_DIR", temp_path / "databases")
     monkeypatch.setattr(eval_v1, "_load_document_rows", lambda _db_name: [])
 
     core_pool = [
@@ -203,3 +228,70 @@ def test_preflight_retrieve_raises_on_owner_auth_failure(monkeypatch):
         assert False, "Expected EvalAuthError"
     except eval_v1.EvalAuthError as exc:
         assert "Owner auth failed" in str(exc)
+
+
+def test_load_document_rows_prefers_chroma_then_falls_back(monkeypatch):
+    chroma_rows = [("doc-a", "alpha")]
+    sqlite_rows = [("doc-b", "beta")]
+
+    monkeypatch.setattr(eval_v1, "_load_document_rows_via_chroma", lambda _db_name: chroma_rows)
+    monkeypatch.setattr(eval_v1, "_load_document_rows_via_sqlite", lambda _db_name: sqlite_rows)
+    assert eval_v1._load_document_rows("tenant_x") == chroma_rows
+
+    monkeypatch.setattr(eval_v1, "_load_document_rows_via_chroma", lambda _db_name: [])
+    assert eval_v1._load_document_rows("tenant_x") == sqlite_rows
+
+
+def test_database_dir_is_project_relative():
+    expected = eval_v1.EVALS_DIR.parent / "databases"
+    assert eval_v1.DATABASES_DIR == expected
+
+
+def test_collect_eval_items_end_to_end_with_seeded_sources(monkeypatch):
+    monkeypatch.setattr(
+        eval_v1,
+        "_collect_seed_items",
+        lambda _db_name, _desired_count: [
+            eval_v1.EvalItem(
+                q="What is AgentFactory?",
+                source="faq",
+                difficulty="easy",
+                reference_answer="AgentFactory is an AI agent learning platform.",
+                frequency=1000,
+                candidate_key="faq::agentfactory",
+            ),
+            eval_v1.EvalItem(
+                q="How does the curriculum work?",
+                source="analytics",
+                difficulty="medium",
+                reference_answer="The curriculum is delivered in guided chapters with projects.",
+                frequency=10,
+                candidate_key="analytics::curriculum",
+            ),
+            eval_v1.EvalItem(
+                q="Summarize Chapter 24.",
+                source="chunk_topic",
+                difficulty="hard",
+                reference_answer="Chapter 24 is about building a proactive AI employee.",
+                frequency=2,
+                candidate_key="chunk::24",
+            ),
+        ],
+    )
+
+    def fake_preflight(_base_url, _password, item):
+        item.retrieve_doc_count = 3
+        item.retrieve_context_length = 300
+        item.retrieve_context_preview = item.reference_answer
+        item.retrieve_sources = ["seeded-source"]
+        return item
+
+    monkeypatch.setattr(eval_v1, "_preflight_retrieve", fake_preflight)
+    monkeypatch.setattr(eval_v1, "_save_rotation_state", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(eval_v1, "_load_rotation_state", lambda _db_name: {"cursor": 0})
+
+    items = eval_v1._collect_eval_items("http://example.test", "ownerpw", "tenant_seeded", 3)
+
+    assert len(items) == 3
+    assert {item.source for item in items} == {"faq", "analytics", "chunk_topic"}
+    assert all(item.retrieve_doc_count > 0 for item in items)
