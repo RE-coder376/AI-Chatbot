@@ -1995,7 +1995,6 @@ def init_systems():
 def _startup_sync():
     """Background: sync from GitHub then load the active DB."""
     _github_sync_download(load_db_callback=_load_db_now)
-    _load_db_now()
     _init_crawl_timestamps()  # must run AFTER DBs are downloaded
 
 def _cleanup_old_data(retention_days: int = 90):
@@ -2029,7 +2028,11 @@ def _check_config_security():
         for db_dir in DATABASES_DIR.iterdir() if DATABASES_DIR.exists() else []:
             db_cfg = db_dir / "config.json"
             if db_cfg.exists():
-                raw = json.loads(db_cfg.read_text(encoding="utf-8"))
+                try:
+                    raw = json.loads(db_cfg.read_text(encoding="utf-8"))
+                except Exception as db_err:
+                    logger.warning(f"Config security check skipped unreadable DB config {db_cfg}: {db_err}")
+                    continue
                 if raw.get("admin_password") or raw.get("smtp_password"):
                     logger.error(f"⚠️  SECURITY: Secrets found in {db_cfg} — move to .env!")
     except Exception as e:
@@ -2317,6 +2320,9 @@ async def _auto_scheduler():
     await asyncio.sleep(60)  # Extended warm-up to ensure API is ready first
     while True:
         try:
+            if _github_sync_result.get("status") == "running":
+                await asyncio.sleep(60)
+                continue
             # ── Stuck-detection: log any crawl running > 5min ──
             if _crawling_dbs:
                 for _cdb in list(_crawling_dbs):
@@ -3710,10 +3716,85 @@ def _default_idk_tests() -> list[dict]:
     return []
 
 
-def _build_owner_eval_tests(base_url: str, owner_password: str, db_name: str, count: int, strategy: str = "kb") -> list[dict]:
+def _ensure_eval_embeddings_ready() -> bool:
+    global embeddings_model
+    if embeddings_model is not None:
+        return True
+    try:
+        from langchain_community.embeddings.fastembed import FastEmbedEmbeddings
+        embeddings_model = FastEmbedEmbeddings(model_name="BAAI/bge-small-en-v1.5")
+        logger.info("[EVAL] Loaded FastEmbed for owner eval generation")
+        return True
+    except Exception as e:
+        logger.warning(f"[EVAL] Could not load embeddings model for evals: {e}")
+        return False
+
+
+def _owner_eval_blocker(db_name: str) -> str:
+    if _github_sync_result.get("status") == "running":
+        return "Background GitHub restore is still running. Please try again in a minute."
+    db_dir = DATABASES_DIR / db_name
+    if not db_dir.exists():
+        return f"Tenant DB '{db_name}' is not available yet."
+    try:
+        if any(db_dir.rglob("*.tmp_sync")):
+            return f"Tenant DB '{db_name}' is still being restored."
+    except Exception:
+        pass
+    db_cfg_file = db_dir / "config.json"
+    if db_cfg_file.exists():
+        try:
+            raw_cfg = db_cfg_file.read_text(encoding="utf-8-sig").strip()
+            if not raw_cfg:
+                return f"Tenant config for '{db_name}' is still being restored."
+            json.loads(raw_cfg)
+        except Exception:
+            return f"Tenant config for '{db_name}' is not readable yet. Please try again shortly."
+    if not (db_dir / "chroma.sqlite3").exists():
+        return f"Tenant KB for '{db_name}' is not ready yet."
+    if not _ensure_eval_embeddings_ready():
+        return "Embeddings are still warming up. Please try again shortly."
+    return ""
+
+
+async def _build_owner_eval_tests(base_url: str, owner_password: str, db_name: str, count: int, strategy: str = "kb") -> list[dict]:
     from evals import eval_v1 as _eval_v1
 
-    items = _eval_v1._collect_eval_items(base_url, owner_password, db_name, max(3, min(int(count or 12), 25)))
+    desired_count = max(3, min(int(count or 12), 25))
+    seeds = _eval_v1._collect_seed_items(db_name, max(desired_count * 4, 20))
+    if not seeds:
+        return []
+
+    tenant_db = _get_or_create_db(db_name)
+    if tenant_db is None:
+        return []
+
+    preflighted = []
+    for item in seeds:
+        doc_count, doc_rows, sources = await _eval_retrieve_docs(item.q, tenant_db, k=8)
+        item.retrieve_doc_count = int(doc_count or 0)
+        item.retrieve_sources = list(sources or [])[:5]
+        preview_parts = []
+        for row in doc_rows or []:
+            preview = str((row or {}).get("preview") or "").strip()
+            if preview:
+                preview_parts.append(preview)
+        preview_text = "\n\n".join(preview_parts)[:3000]
+        item.retrieve_context_preview = preview_text
+        item.retrieve_context_length = len(preview_text)
+        preflighted.append(item)
+
+    grounded = [item for item in preflighted if _eval_v1._is_grounded(item)]
+    grounded.sort(key=_eval_v1._source_priority)
+
+    core_pool = [item for item in grounded if item.source in {"faq", "embedded_qa", "analytics"}]
+    discovery_pool = [item for item in grounded if item.source in {"chunk_topic", "knowledge_gap", "analytics", "embedded_qa"}]
+    if not core_pool:
+        core_pool = grounded
+    if not discovery_pool:
+        discovery_pool = grounded
+
+    items = _eval_v1._finalize_selection(core_pool, discovery_pool, desired_count, db_name)
     tests: list[dict] = []
     allowed_sources = None
     if strategy == "analytics":
@@ -3850,9 +3931,12 @@ async def admin_generate_evals(request: Request):
     strategy = (data.get("strategy") or "kb").strip().lower()
     if strategy not in ("kb", "analytics"):
         strategy = "kb"
+    blocker = _owner_eval_blocker(db_name)
+    if blocker:
+        return JSONResponse({"detail": blocker}, status_code=503)
 
     base_url = str(request.base_url).rstrip("/")
-    tests = _build_owner_eval_tests(base_url, password, db_name, count=count, strategy=strategy)
+    tests = await _build_owner_eval_tests(base_url, password, db_name, count=count, strategy=strategy)
 
     payload = {
         "db": db_name,
@@ -3883,12 +3967,15 @@ async def admin_run_evals(request: Request):
         tests = eval_set.get("tests") if isinstance(eval_set, dict) else None
 
     cfg = get_config(db_name)
-    tenant_db = _get_or_create_db(db_name)
     base_url = str(request.base_url).rstrip("/")
+    blocker = _owner_eval_blocker(db_name)
+    if blocker:
+        return JSONResponse({"detail": blocker}, status_code=503)
+    tenant_db = _get_or_create_db(db_name)
 
     if not isinstance(tests, list) or not tests:
         strategy = (data.get("strategy") or "analytics").strip().lower()
-        tests = _build_owner_eval_tests(base_url, password, db_name, count=count, strategy=strategy)
+        tests = await _build_owner_eval_tests(base_url, password, db_name, count=count, strategy=strategy)
 
     tests = tests[:count]
 

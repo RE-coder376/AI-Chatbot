@@ -48,10 +48,11 @@ def _github_sync_download(load_db_callback=None):
     DATABASES_DIR.mkdir(exist_ok=True)
     pat = os.environ.get("GITHUB_PAT", "").strip()
     if not pat:
-        _github_sync_result.clear()
         _github_sync_result.update({"status": "skipped", "detail": "No GITHUB_PAT env var set"})
         logger.info("[GH-SYNC] No GITHUB_PAT set — skipping download")
         return
+    _github_sync_result.clear()
+    _github_sync_result.update({"status": "running", "detail": "Fetching release metadata"})
     headers = {"Authorization": f"token {pat}", "User-Agent": "chatbot-sync",
                "Accept": "application/octet-stream"}
     api_hdr = {"Authorization": f"token {pat}", "User-Agent": "chatbot-sync"}
@@ -93,6 +94,7 @@ def _github_sync_download(load_db_callback=None):
             db_name = asset["name"][:-4]
             size_mb = asset["size"] / 1024 / 1024
             logger.info(f"[GH-SYNC] Downloading {db_name}.zip ({size_mb:.1f}MB)...")
+            _github_sync_result["detail"] = f"Restoring {db_name}.zip ({size_mb:.1f}MB)"
             tmp_zip = Path(f"/tmp/{db_name}_sync.zip")
             asset_url = f"https://api.github.com/repos/{_GITHUB_USERNAME}/{_GITHUB_REPO}/releases/assets/{asset['id']}"
             with _req.get(asset_url, headers=headers, stream=True, timeout=600) as r:
@@ -117,8 +119,10 @@ def _github_sync_download(load_db_callback=None):
                     if member.endswith("/"):
                         dest.mkdir(exist_ok=True)
                     else:
-                        with z.open(member) as src, open(dest, "wb") as dst:
+                        tmp_dest = dest.with_name(dest.name + ".tmp_sync")
+                        with z.open(member) as src, open(tmp_dest, "wb") as dst:
                             dst.write(src.read())
+                        os.replace(str(tmp_dest), str(dest))
                     # Fix permissions
                     try:
                         if dest.is_file(): dest.chmod(0o644)
@@ -141,11 +145,26 @@ def _github_sync_download(load_db_callback=None):
             try: _download_zip(asset)
             except Exception as e: logger.warning(f"[GH-SYNC] Small DB sync failed for {asset['name']}: {e}")
         def _bg_sync_rest():
+            pending = [asset["name"][:-4] for asset in large_assets]
+            if pending:
+                _github_sync_result.clear()
+                _github_sync_result.update({
+                    "status": "running",
+                    "detail": f"Restoring large DBs: {', '.join(pending[:3])}" + ("..." if len(pending) > 3 else ""),
+                    "pending_large_dbs": pending,
+                })
             for asset in large_assets:
                 try: _download_zip(asset)
                 except Exception as e: logger.warning(f"[GH-SYNC] Background sync failed for {asset['name']}: {e}")
-        if other_assets:
+            _github_sync_result.clear()
+            _github_sync_result.update({"status": "ok", "detail": f"{len(zip_assets)} DBs restored"})
+            logger.info("[GH-SYNC] Sync finished after background restore")
+        if large_assets:
             threading.Thread(target=_bg_sync_rest, daemon=True).start()
+        else:
+            _github_sync_result.clear()
+            _github_sync_result.update({"status": "ok", "detail": f"{len(zip_assets)} DBs restored"})
+            logger.info("[GH-SYNC] All databases restored from GitHub")
         # Restore crawled_urls.txt and crawl_times.json for each DB (backed up to Contents API)
         for db_dir in sorted(DATABASES_DIR.iterdir()):
             if not db_dir.is_dir(): continue
@@ -179,8 +198,6 @@ def _github_sync_download(load_db_callback=None):
                         logger.info(f"[GH-SYNC] Removed deleted DB '{_dn}' from local disk")
         except Exception as _del_e:
             logger.warning(f"[GH-SYNC] deleted_dbs.txt cleanup failed: {_del_e}")
-        _github_sync_result.clear()
-        _github_sync_result.update({"status": "ok", "detail": f"{len(zip_assets)} DBs restored"})
         logger.info("[GH-SYNC] ✅ All databases restored from GitHub")
         # Set active DB priority:
         # 1. ACTIVE_DB env var (explicit deployment override — always wins)
