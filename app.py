@@ -3754,11 +3754,21 @@ def _owner_eval_blocker(db_name: str) -> str:
     if db_cfg_file.exists():
         try:
             raw_cfg = db_cfg_file.read_text(encoding="utf-8-sig").strip()
-            if not raw_cfg:
-                return f"Tenant config for '{db_name}' is still being restored."
-            json.loads(raw_cfg)
-        except Exception:
-            return f"Tenant config for '{db_name}' is not readable yet. Please try again shortly."
+            if raw_cfg:
+                json.loads(raw_cfg)
+            else:
+                logger.warning(f"[EVAL] Empty config.json for '{db_name}' during owner eval check; proceeding with fallback config")
+        except Exception as e:
+            try:
+                fallback_cfg = get_config(db_name)
+                if not fallback_cfg:
+                    return f"Tenant config for '{db_name}' is not readable yet. Please try again shortly."
+                logger.warning(
+                    f"[EVAL] Unreadable config.json for '{db_name}' during owner eval check ({e}); "
+                    "proceeding with merged fallback config"
+                )
+            except Exception:
+                return f"Tenant config for '{db_name}' is not readable yet. Please try again shortly."
     if not (db_dir / "chroma.sqlite3").exists():
         return f"Tenant KB for '{db_name}' is not ready yet."
     if not _ensure_eval_embeddings_ready():
