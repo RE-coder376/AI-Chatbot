@@ -137,7 +137,7 @@ def test_grade_answer_fails_long_but_ungrounded_answer():
     )
 
     assert status == "FAIL"
-    assert "align closely enough" in reason
+    assert "faithful enough" in reason or "align closely enough" in reason
     assert overlap == 0.0
 
 
@@ -160,6 +160,60 @@ def test_grade_answer_passes_grounded_answer():
     assert status == "PASS"
     assert reason is None
     assert overlap >= 0.12
+
+
+def test_grade_retrieval_rewards_good_top_rank():
+    item = eval_v1.EvalItem(
+        q="How do refunds work?",
+        reference_answer="Refunds are allowed within 7 days for unused items with proof of purchase.",
+        retrieve_context_preview="Refunds are allowed within 7 days for unused items with proof of purchase.",
+        retrieve_sources=["https://example.test/refunds"],
+    )
+
+    result = eval_v1._grade_retrieval(
+        item,
+        [
+            {
+                "source": "https://example.test/refunds",
+                "preview": "Refunds are allowed within 7 days for unused items with proof of purchase.",
+            },
+            {
+                "source": "https://example.test/about",
+                "preview": "Our company was founded in 2020 and serves online businesses.",
+            },
+        ],
+        expected_source="https://example.test/refunds",
+    )
+
+    assert result["status"] == "PASS"
+    assert result["average_precision"] >= 0.9
+    assert result["first_relevant_rank"] == 1
+
+
+def test_grade_retrieval_fails_when_relevant_chunk_is_buried():
+    item = eval_v1.EvalItem(
+        q="How do refunds work?",
+        reference_answer="Refunds are allowed within 7 days for unused items with proof of purchase.",
+        retrieve_context_preview="Refunds are allowed within 7 days for unused items with proof of purchase.",
+        retrieve_sources=["https://example.test/refunds"],
+    )
+
+    result = eval_v1._grade_retrieval(
+        item,
+        [
+            {"source": "https://example.test/about", "preview": "We are a growing company with a remote team."},
+            {"source": "https://example.test/blog", "preview": "Read our latest marketing trends and AI updates."},
+            {
+                "source": "https://example.test/refunds",
+                "preview": "Refunds are allowed within 7 days for unused items with proof of purchase.",
+            },
+        ],
+        expected_source="https://example.test/refunds",
+    )
+
+    assert result["status"] == "FAIL"
+    assert result["diagnosis"] == "weak_top_k"
+    assert result["average_precision"] < 0.55
 
 
 def test_grade_answer_classifies_refuse_consistently():
@@ -192,6 +246,45 @@ def test_grade_answer_classifies_idk_consistently():
 
     assert status == "PASS"
     assert reason is None
+
+
+def test_grade_answer_fails_unfaithful_supported_sounding_answer():
+    item = eval_v1.EvalItem(
+        q="What is the refund policy?",
+        expect="ANSWER",
+        source="faq",
+        reference_answer="Refunds are allowed within 7 days for unused items with proof of purchase.",
+        retrieve_doc_count=3,
+        retrieve_context_length=240,
+        retrieve_context_preview="Refunds are allowed within 7 days for unused items with proof of purchase.",
+    )
+
+    status, reason, _ = eval_v1._grade_answer(
+        item,
+        "Refunds are only available within 30 days, and opened items are always accepted without proof of purchase.",
+    )
+
+    assert status == "FAIL"
+    assert "faithful enough" in reason
+
+
+def test_answer_metrics_penalize_irrelevant_rambling():
+    item = eval_v1.EvalItem(
+        q="How do I register for the program?",
+        expect="ANSWER",
+        source="faq",
+        reference_answer="Create an account, verify your email, and complete the checkout form.",
+        retrieve_doc_count=2,
+        retrieve_context_length=200,
+        retrieve_context_preview="Create an account, verify your email, and complete the checkout form.",
+    )
+
+    metrics = eval_v1._answer_metrics(
+        item,
+        "Our team cares deeply about student success and community values. We believe in practical learning and innovation.",
+    )
+
+    assert metrics["answer_relevance"] < 0.5
 
 
 def test_build_summary_does_not_fake_idk_score():

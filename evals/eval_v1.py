@@ -813,6 +813,23 @@ def _token_set(text: str) -> set[str]:
     return {t for t in tokens if len(t) > 2 and t not in STOPWORDS}
 
 
+def _question_type(question: str) -> str:
+    q = _normalize_question(question).lower()
+    if re.search(r"\b(compare|difference|versus|vs\.?)\b", q):
+        return "comparison"
+    if re.search(r"\b(how|steps|process|create|setup|set up|register|apply|start)\b", q):
+        return "how_to"
+    if re.search(r"\b(policy|refund|return|privacy|terms|cancellation|guarantee)\b", q):
+        return "policy"
+    if re.search(r"\b(price|pricing|cost|fee|plan|package)\b", q):
+        return "pricing"
+    if re.search(r"\b(contact|support|email|phone|whatsapp|book|schedule)\b", q):
+        return "contact_or_next_step"
+    if re.search(r"\b(can|does|do you offer|available|availability|integrate)\b", q):
+        return "availability"
+    return "fact"
+
+
 def _overlap_score(a: str, b: str) -> float:
     ta = _token_set(a)
     tb = _token_set(b)
@@ -825,27 +842,236 @@ def _reference_text_for(item: EvalItem) -> str:
     return item.reference_answer or item.retrieve_context_preview
 
 
-def _grade_answer(item: EvalItem, answer_text: str) -> tuple[str, str | None, float]:
+def _source_match(actual_source: str, expected_source: str) -> bool:
+    actual = (actual_source or "").strip().lower()
+    expected = (expected_source or "").strip().lower()
+    if not actual or not expected:
+        return False
+    if actual == expected:
+        return True
+    return actual.endswith(expected) or expected.endswith(actual) or expected in actual or actual in expected
+
+
+def _average_precision(binary_verdicts: list[int]) -> float:
+    if not binary_verdicts:
+        return 0.0
+    cumsum = 0
+    numerator = 0.0
+    for i, verdict in enumerate(binary_verdicts, start=1):
+        cumsum += verdict
+        if verdict:
+            numerator += cumsum / i
+    return round(numerator / max(1, cumsum), 3) if cumsum else 0.0
+
+
+def _statement_list(text: str) -> list[str]:
+    raw = re.split(r"(?<=[.!?])\s+|\s*;\s*|\s+\-\s+|\s+\band\b\s+(?=[A-Z0-9])", (text or "").strip())
+    statements = []
+    for part in raw:
+        stmt = _normalize_question(part).strip(" .")
+        if len(stmt) < 12:
+            continue
+        statements.append(stmt)
+    return statements[:8]
+
+
+def _reference_contexts(item: EvalItem) -> list[str]:
+    parts = []
+    ref = (item.reference_answer or "").strip()
+    preview = (item.retrieve_context_preview or "").strip()
+    if ref:
+        parts.append(ref)
+    if preview and preview != ref:
+        parts.append(preview)
+    return parts or [item.q]
+
+
+def _statement_supported(statement: str, contexts: list[str]) -> tuple[bool, float]:
+    st_tokens = _token_set(statement)
+    if not st_tokens:
+        return False, 0.0
+    best = 0.0
+    for context in contexts:
+        st_nums = set(re.findall(r"\b\d+\b", statement))
+        ctx_nums = set(re.findall(r"\b\d+\b", context))
+        if st_nums and ctx_nums and not st_nums.issubset(ctx_nums):
+            continue
+        stmt_l = statement.lower()
+        ctx_l = context.lower()
+        if ("without proof" in stmt_l or "no proof" in stmt_l) and "proof of purchase" in ctx_l and "without proof" not in ctx_l and "no proof" not in ctx_l:
+            continue
+        score = _overlap_score(statement, context)
+        ctx_hits = len(st_tokens & _token_set(context))
+        if ctx_hits >= 3:
+            score = max(score, min(1.0, ctx_hits / max(1, len(st_tokens))))
+        best = max(best, score)
+    return best >= 0.34, round(best, 3)
+
+
+def _statement_relevant(statement: str, question: str, reference_text: str = "") -> tuple[bool, float]:
+    st_tokens = _token_set(statement)
+    q_tokens = _token_set(question)
+    ref_tokens = _token_set(reference_text)
+    if not st_tokens or (not q_tokens and not ref_tokens):
+        return False, 0.0
+    q_overlap = len(st_tokens & q_tokens)
+    r_overlap = len(st_tokens & ref_tokens)
+    q_score = q_overlap / max(1, min(len(st_tokens), len(q_tokens))) if q_tokens else 0.0
+    r_score = r_overlap / max(1, min(len(st_tokens), len(ref_tokens))) if ref_tokens else 0.0
+    score = max(q_score, r_score)
+    return (q_overlap >= 2 or r_overlap >= 2 or score >= 0.3), round(score, 3)
+
+
+def _doc_relevance(doc_text: str, question: str, reference_text: str, source: str = "", expected_source: str = "") -> tuple[int, str]:
+    q_tokens = _token_set(question)
+    doc_tokens = _token_set(doc_text)
+    ref_tokens = _token_set(reference_text)
+    q_hits = len(q_tokens & doc_tokens)
+    ref_hits = len(ref_tokens & doc_tokens)
+    source_hit = _source_match(source, expected_source)
+    overlap = _overlap_score(doc_text, reference_text or question)
+
+    score = 0.0
+    if source_hit:
+        score += 0.45
+    if q_hits >= 2:
+        score += 0.2
+    elif q_hits == 1:
+        score += 0.1
+    if ref_hits >= 4:
+        score += 0.35
+    elif ref_hits >= 2:
+        score += 0.2
+    elif ref_hits == 1:
+        score += 0.1
+    score = max(score, overlap)
+
+    if score >= 0.55:
+        return 1, "strong_match"
+    if score >= 0.3:
+        return 0, "partial_match"
+    return 0, "weak_match"
+
+
+def _grade_retrieval(item: EvalItem, doc_rows: list[dict] | None = None, expected_source: str = "") -> dict:
+    rows = list(doc_rows or [])
+    if not rows and item.retrieve_context_preview:
+        rows = [{"source": (item.retrieve_sources[0] if item.retrieve_sources else ""), "preview": item.retrieve_context_preview}]
+
+    reference_text = _reference_text_for(item)
+    binary_verdicts: list[int] = []
+    ranked = []
+    for idx, row in enumerate(rows, start=1):
+        preview = str((row or {}).get("preview") or "")
+        source = str((row or {}).get("source") or "")
+        verdict, label = _doc_relevance(preview, item.q, reference_text, source=source, expected_source=expected_source)
+        binary_verdicts.append(verdict)
+        ranked.append({"rank": idx, "source": source, "verdict": verdict, "label": label})
+
+    hit = any(v == 1 for v in binary_verdicts)
+    precision_at_3 = round(sum(binary_verdicts[:3]) / max(1, min(3, len(binary_verdicts))), 3) if binary_verdicts else 0.0
+    average_precision = _average_precision(binary_verdicts)
+    first_relevant_rank = next((i + 1 for i, v in enumerate(binary_verdicts) if v == 1), None)
+
+    if not rows:
+        status = "FAIL"
+        diagnosis = "retrieval_miss"
+        reason = "Retriever returned no document rows for this question."
+    elif hit and average_precision >= 0.55:
+        status = "PASS"
+        diagnosis = "retrieval_ok"
+        reason = None
+    elif hit:
+        status = "FAIL"
+        diagnosis = "weak_top_k"
+        reason = "Retriever found some relevant context, but the top-ranked chunks were not precise enough."
+    else:
+        status = "FAIL"
+        diagnosis = "retrieval_miss"
+        reason = "Top retrieved chunks did not align strongly enough with the expected tenant content."
+
+    return {
+        "status": status,
+        "reason": reason,
+        "diagnosis": diagnosis,
+        "hit": hit,
+        "precision_at_3": precision_at_3,
+        "average_precision": average_precision,
+        "first_relevant_rank": first_relevant_rank,
+        "ranked_verdicts": ranked[:5],
+    }
+
+
+def _answer_metrics(item: EvalItem, answer_text: str) -> dict:
     answer_class = _answer_class(answer_text)
-    overlap = _overlap_score(answer_text, _reference_text_for(item))
-    reference_tokens = _token_set(_reference_text_for(item))
+    reference_text = _reference_text_for(item)
+    overlap = _overlap_score(answer_text, reference_text)
+    reference_tokens = _token_set(reference_text)
     answer_tokens = _token_set(answer_text)
     token_hits = len(reference_tokens & answer_tokens)
+    statements = _statement_list(answer_text)
+    if not statements and answer_text.strip():
+        statements = [_normalize_question(answer_text)]
+    contexts = _reference_contexts(item)
+
+    supported = 0
+    relevant = 0
+    support_scores = []
+    relevance_scores = []
+    for statement in statements:
+        ok_support, support_score = _statement_supported(statement, contexts)
+        ok_relevance, relevance_score = _statement_relevant(statement, item.q, reference_text)
+        support_scores.append(support_score)
+        relevance_scores.append(relevance_score)
+        if ok_support:
+            supported += 1
+        if ok_relevance:
+            relevant += 1
+
+    total = len(statements)
+    faithfulness = round(supported / total, 3) if total else 0.0
+    answer_relevance = round(relevant / total, 3) if total else 0.0
+    return {
+        "answer_class": answer_class,
+        "overlap": overlap,
+        "token_hits": token_hits,
+        "statements": statements,
+        "faithfulness": faithfulness,
+        "answer_relevance": answer_relevance,
+        "support_scores": support_scores,
+        "relevance_scores": relevance_scores,
+    }
+
+
+def _grade_answer(item: EvalItem, answer_text: str) -> tuple[str, str | None, float]:
+    metrics = _answer_metrics(item, answer_text)
+    answer_class = metrics["answer_class"]
+    overlap = metrics["overlap"]
+    token_hits = metrics["token_hits"]
+    reference_tokens = _token_set(_reference_text_for(item))
     required_hits = max(4, min(8, (len(reference_tokens) + 4) // 5)) if reference_tokens else 4
+    qtype = _question_type(item.q)
+    min_faithfulness = 0.67 if qtype in {"policy", "pricing", "comparison"} else 0.6
+    min_relevance = 0.55 if qtype in {"how_to", "comparison"} else 0.5
 
     if item.expect == "ANSWER":
         if answer_class != "ANSWER":
-            return "FAIL", f"Expected an in-domain answer, got {answer_class}.", overlap
+            diag = "grounded_but_answered_idk" if answer_class == "IDK" else "grounded_but_refused"
+            return "FAIL", f"Expected an in-domain answer, got {answer_class}. ({diag})", overlap
         if len(answer_text) < 25:
             return "FAIL", "Answer was too short to be trustworthy.", overlap
         if item.retrieve_doc_count <= 0 or item.retrieve_context_length < 80:
             return "FAIL", "Answer was produced without enough retrieved tenant context.", overlap
-        if overlap < 0.12 or token_hits < required_hits:
+        if metrics["faithfulness"] < min_faithfulness:
+            return "FAIL", "Answer was not faithful enough to the retrieved tenant context.", overlap
+        if metrics["answer_relevance"] < min_relevance:
+            return "FAIL", "Answer did not address the user's question directly enough.", overlap
+        if overlap < 0.1 and token_hits < required_hits:
             return "FAIL", "Answer did not align closely enough with the retrieved tenant reference.", overlap
         return "PASS", None, overlap
 
     if item.expect == "IDK":
-        return ("PASS", None, overlap) if answer_class == "IDK" else ("FAIL", f"Expected IDK, got {answer_class}.", overlap)
+        return ("PASS", None, overlap) if answer_class in {"IDK", "REFUSE"} else ("FAIL", f"Expected IDK-safe behavior, got {answer_class}.", overlap)
 
     return ("PASS", None, overlap) if answer_class == "REFUSE" else ("FAIL", f"Expected REFUSE, got {answer_class}.", overlap)
 
@@ -941,6 +1167,7 @@ def main() -> int:
             "source": item.source,
             "selection_bucket": item.selection_bucket,
             "difficulty": item.difficulty,
+            "question_type": _question_type(item.q),
             "reference_preview": (item.reference_answer or item.retrieve_context_preview)[:400],
             "retrieval_status": "SKIP",
             "answer_status": "SKIP",
@@ -953,10 +1180,18 @@ def main() -> int:
             row["doc_count"] = item.retrieve_doc_count
             row["context_length"] = item.retrieve_context_length
             row["sources"] = item.retrieve_sources
-            retrieve_pass = item.retrieve_doc_count > 0 and item.retrieve_context_length >= 120
-            row["retrieval_status"] = "PASS" if retrieve_pass else "FAIL"
-            if not retrieve_pass:
-                row["retrieval_reason"] = "Retriever did not surface enough tenant context for this question."
+            retrieval_eval = _grade_retrieval(item)
+            retrieve_pass = retrieval_eval["status"] == "PASS"
+            row["retrieval_status"] = retrieval_eval["status"]
+            row["retrieval_reason"] = retrieval_eval.get("reason")
+            row["retrieval_diagnosis"] = retrieval_eval.get("diagnosis")
+            row["retrieval_metrics"] = {
+                "hit": retrieval_eval.get("hit"),
+                "precision_at_3": retrieval_eval.get("precision_at_3"),
+                "average_precision": retrieval_eval.get("average_precision"),
+                "first_relevant_rank": retrieval_eval.get("first_relevant_rank"),
+            }
+            row["retrieval_ranked_verdicts"] = retrieval_eval.get("ranked_verdicts", [])
 
         if args.mode in ("chat", "both"):
             cr = requests.post(
@@ -976,11 +1211,18 @@ def main() -> int:
             ans = (cr.json() or {}).get("answer", "")
             ans_s = str(ans).strip()
             answer_class = _answer_class(ans_s)
+            answer_metrics = _answer_metrics(item, ans_s)
             answer_status, answer_reason, overlap = _grade_answer(item, ans_s)
 
             row["answer_preview"] = ans_s[:400]
             row["answer_class"] = answer_class
             row["answer_overlap"] = round(overlap, 3)
+            row["answer_metrics"] = {
+                "faithfulness": answer_metrics["faithfulness"],
+                "answer_relevance": answer_metrics["answer_relevance"],
+                "token_hits": answer_metrics["token_hits"],
+                "statement_count": len(answer_metrics["statements"]),
+            }
             if item.expect == "IDK":
                 row["idk_status"] = answer_status
                 if answer_reason:

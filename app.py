@@ -4008,6 +4008,8 @@ async def admin_run_evals(request: Request):
     for t in tests:
         if not isinstance(t, dict):
             continue
+        from evals import eval_v1 as _eval_v1
+
         q = (t.get("q") or "").strip()
         if not q:
             continue
@@ -4030,11 +4032,13 @@ async def admin_run_evals(request: Request):
             "source": t.get("source") or "",
             "selection_bucket": t.get("selection_bucket") or "",
             "difficulty": difficulty,
+            "question_type": _eval_v1._question_type(q),
             "q": q,
             "expect": {"type": etype, "expected_source": expected_source, "key_facts": key_facts[:8], "reference_text": reference_text[:1500]},
             "checks": {"retrieval": None, "answer": None, "idk": None},
-            "retrieve": {"sources": [], "doc_count": None, "docs": []},
-            "answer": {"text": "", "present_facts": [], "missing_facts": []},
+            "retrieve": {"sources": [], "doc_count": None, "docs": [], "metrics": {}},
+            "answer": {"text": "", "present_facts": [], "missing_facts": [], "metrics": {}},
+            "diagnosis": "",
         }
 
         if mode in ("retrieve", "both"):
@@ -4044,9 +4048,28 @@ async def admin_run_evals(request: Request):
             row["retrieve"]["sources"] = sources
             if etype == "ANSWER":
                 retrieval_total += 1
-                hit = _sources_hit_expected(sources, expected_source) if expected_source else bool(doc_count > 0)
-                row["checks"]["retrieval"] = bool(hit)
-                if hit:
+                eval_item = _eval_v1.EvalItem(
+                    q=q,
+                    expect="ANSWER",
+                    source=str(t.get("source") or "analytics"),
+                    reference_answer=reference_text or " ".join(str(f) for f in key_facts[:8]),
+                    retrieve_doc_count=int(doc_count or 0),
+                    retrieve_context_length=len(_eval_docs_preview(doc_rows, limit=3000)),
+                    retrieve_context_preview=_eval_docs_preview(doc_rows, limit=3000),
+                    retrieve_sources=list(sources or []),
+                )
+                retrieval_eval = _eval_v1._grade_retrieval(eval_item, doc_rows, expected_source=expected_source)
+                row["retrieve"]["metrics"] = {
+                    "hit": retrieval_eval.get("hit"),
+                    "precision_at_3": retrieval_eval.get("precision_at_3"),
+                    "average_precision": retrieval_eval.get("average_precision"),
+                    "first_relevant_rank": retrieval_eval.get("first_relevant_rank"),
+                    "ranked_verdicts": retrieval_eval.get("ranked_verdicts", []),
+                }
+                row["checks"]["retrieval"] = (retrieval_eval["status"] == "PASS")
+                if retrieval_eval.get("reason"):
+                    row["retrieve"]["reason"] = retrieval_eval["reason"]
+                if row["checks"]["retrieval"]:
                     retrieval_pass += 1
 
         if mode in ("chat", "both"):
@@ -4057,16 +4080,33 @@ async def admin_run_evals(request: Request):
                     row["retrieve"]["sources"] = chat_sources[:8]
                     if etype == "ANSWER" and row["checks"]["retrieval"] is None:
                         retrieval_total += 1
-                        hit = _sources_hit_expected(chat_sources, expected_source) if expected_source else bool(chat_sources)
-                        row["checks"]["retrieval"] = bool(hit)
-                        if hit:
+                        eval_item = _eval_v1.EvalItem(
+                            q=q,
+                            expect="ANSWER",
+                            source=str(t.get("source") or "analytics"),
+                            reference_answer=reference_text or " ".join(str(f) for f in key_facts[:8]),
+                            retrieve_doc_count=int(row["retrieve"].get("doc_count") or 0),
+                            retrieve_context_length=len(_eval_docs_preview(row["retrieve"].get("docs") or [], limit=3000)),
+                            retrieve_context_preview=_eval_docs_preview(row["retrieve"].get("docs") or [], limit=3000),
+                            retrieve_sources=list(chat_sources or []),
+                        )
+                        retrieval_eval = _eval_v1._grade_retrieval(eval_item, row["retrieve"].get("docs") or [], expected_source=expected_source)
+                        row["retrieve"]["metrics"] = {
+                            "hit": retrieval_eval.get("hit"),
+                            "precision_at_3": retrieval_eval.get("precision_at_3"),
+                            "average_precision": retrieval_eval.get("average_precision"),
+                            "first_relevant_rank": retrieval_eval.get("first_relevant_rank"),
+                            "ranked_verdicts": retrieval_eval.get("ranked_verdicts", []),
+                        }
+                        row["checks"]["retrieval"] = (retrieval_eval["status"] == "PASS")
+                        if retrieval_eval.get("reason"):
+                            row["retrieve"]["reason"] = retrieval_eval["reason"]
+                        if row["checks"]["retrieval"]:
                             retrieval_pass += 1
             except Exception as e:
                 row["answer"]["error"] = str(e)[:180]
 
             if etype in ("IDK", "REFUSE"):
-                from evals import eval_v1 as _eval_v1
-
                 idk_total += 1
                 preview_text = _eval_docs_preview(row["retrieve"].get("docs") or [], limit=3000)
                 eval_item = _eval_v1.EvalItem(
@@ -4079,48 +4119,70 @@ async def admin_run_evals(request: Request):
                     retrieve_context_preview=preview_text,
                     retrieve_sources=list(row["retrieve"].get("sources") or []),
                 )
+                answer_metrics = _eval_v1._answer_metrics(eval_item, row["answer"]["text"] or "")
                 idk_ok, idk_reason, _ = _eval_v1._grade_answer(eval_item, row["answer"]["text"] or "")
                 row["checks"]["idk"] = (idk_ok == "PASS")
+                row["answer"]["metrics"] = {
+                    "faithfulness": answer_metrics["faithfulness"],
+                    "answer_relevance": answer_metrics["answer_relevance"],
+                    "token_hits": answer_metrics["token_hits"],
+                    "statement_count": len(answer_metrics["statements"]),
+                }
                 if idk_reason:
                     row["answer"]["reason"] = idk_reason
                 if row["checks"]["idk"]:
                     idk_pass += 1
 
-            if etype == "ANSWER" and key_facts:
-                answer_total += 1
-                present = []
-                missing = []
-                for fact in key_facts[:8]:
-                    if _fact_present(row["answer"]["text"], str(fact)):
-                        present.append(str(fact)[:220])
-                    else:
-                        missing.append(str(fact)[:220])
-                row["answer"]["present_facts"] = present
-                row["answer"]["missing_facts"] = missing
-                ok = (len(missing) == 0) or (len(present) / max(1, len(key_facts)) >= 0.7)
-                row["checks"]["answer"] = bool(ok)
-                if ok:
-                    answer_pass += 1
-            elif etype == "ANSWER":
-                from evals import eval_v1 as _eval_v1
+            if etype == "ANSWER":
                 answer_total += 1
                 preview_text = _eval_docs_preview(row["retrieve"].get("docs") or [], limit=3000)
+                ref_text = reference_text or " ".join(str(fact) for fact in key_facts[:8])
                 eval_item = _eval_v1.EvalItem(
                     q=q,
                     expect="ANSWER",
                     source=str(t.get("source") or "analytics"),
-                    reference_answer=reference_text,
+                    reference_answer=ref_text,
                     retrieve_doc_count=int(row["retrieve"].get("doc_count") or 0),
                     retrieve_context_length=len(preview_text),
                     retrieve_context_preview=preview_text,
                     retrieve_sources=list(row["retrieve"].get("sources") or []),
                 )
+                answer_metrics = _eval_v1._answer_metrics(eval_item, row["answer"]["text"] or "")
                 answer_ok, answer_reason, _ = _eval_v1._grade_answer(eval_item, row["answer"]["text"] or "")
                 row["checks"]["answer"] = (answer_ok == "PASS")
+                row["answer"]["metrics"] = {
+                    "faithfulness": answer_metrics["faithfulness"],
+                    "answer_relevance": answer_metrics["answer_relevance"],
+                    "token_hits": answer_metrics["token_hits"],
+                    "statement_count": len(answer_metrics["statements"]),
+                }
+                if key_facts:
+                    present = []
+                    missing = []
+                    for fact in key_facts[:8]:
+                        if _fact_present(row["answer"]["text"], str(fact)):
+                            present.append(str(fact)[:220])
+                        else:
+                            missing.append(str(fact)[:220])
+                    row["answer"]["present_facts"] = present
+                    row["answer"]["missing_facts"] = missing
                 if answer_reason:
                     row["answer"]["reason"] = answer_reason
                 if row["checks"]["answer"]:
                     answer_pass += 1
+
+        if row["checks"].get("retrieval") is False:
+            row["diagnosis"] = "weak_top_k"
+        elif row["checks"].get("answer") is False and "Expected an in-domain answer, got IDK" in str(row["answer"].get("reason") or ""):
+            row["diagnosis"] = "grounded_but_answered_idk"
+        elif row["checks"].get("answer") is False and "Expected an in-domain answer, got REFUSE" in str(row["answer"].get("reason") or ""):
+            row["diagnosis"] = "grounded_but_refused"
+        elif row["checks"].get("answer") is False and "faithful enough" in str(row["answer"].get("reason") or ""):
+            row["diagnosis"] = "answer_not_faithful"
+        elif row["checks"].get("answer") is False and "address the user's question" in str(row["answer"].get("reason") or ""):
+            row["diagnosis"] = "answer_irrelevant"
+        elif row["checks"].get("idk") is False:
+            row["diagnosis"] = "idk_mismatch"
 
         rows.append(row)
 
