@@ -51,6 +51,16 @@ GENERIC_OOS_PATTERNS = (
     re.compile(r"\bscrape twitter\b", re.I),
     re.compile(r"\bfifa world cup\b", re.I),
     re.compile(r"\bchocolate cake\b", re.I),
+    re.compile(r"\bintegral of\b", re.I),
+    re.compile(r"\bsystem prompt\b", re.I),
+    re.compile(r"\bignore (all|your|previous) instructions\b", re.I),
+    re.compile(r"\bdrop table\b", re.I),
+    re.compile(r"\bgaming laptop\b", re.I),
+    re.compile(r"\btouchscreen\b", re.I),
+    re.compile(r"\bsubscription\b", re.I),
+    re.compile(r"\bfirst one you mentioned\b", re.I),
+    re.compile(r"\bfrom now on your name\b", re.I),
+    re.compile(r"\bwhat is your name\b", re.I),
 )
 
 STOPWORDS = {
@@ -59,6 +69,37 @@ STOPWORDS = {
     "the", "this", "to", "us", "we", "what", "when", "where", "which", "who",
     "why", "with", "your",
 }
+
+CODEISH_PATTERNS = (
+    re.compile(r"[{}<>\\]"),
+    re.compile(r"\bprint\s*\("),
+    re.compile(r"\bdef\s+\w+\s*\("),
+    re.compile(r"\bclass\s+\w+"),
+    re.compile(r"\bimport\s+\w+"),
+    re.compile(r"\breturn\s+"),
+)
+
+INSTRUCTIONAL_PATTERNS = (
+    re.compile(r"\bwhat you are learning\b", re.I),
+    re.compile(r"\btry with ai\b", re.I),
+    re.compile(r"\bhere is my data\b", re.I),
+    re.compile(r"\bmeeting notes\b", re.I),
+    re.compile(r"\buse these codes\b", re.I),
+    re.compile(r"\bquality-check\b", re.I),
+    re.compile(r"\blast verified\b", re.I),
+    re.compile(r"\bdeliverable\b", re.I),
+    re.compile(r"\bpolicy reference\b", re.I),
+)
+
+TOPIC_NOISE_PATTERNS = (
+    re.compile(r"\bmib/s\b", re.I),
+    re.compile(r"\bkib\b", re.I),
+    re.compile(r"\bobjects:\b", re.I),
+    re.compile(r"\bdone\b", re.I),
+    re.compile(r"\bmkdir\b", re.I),
+    re.compile(r"\bcd\s+~/", re.I),
+    re.compile(r"\blearning-spec\b", re.I),
+)
 
 
 @dataclass
@@ -97,6 +138,16 @@ def _looks_like_oos_or_noise(question: str) -> bool:
     if len(q) < 8:
         return True
     if len(q.split()) < 2:
+        return True
+    if len(q) > 180:
+        return True
+    if q.count("?") > 1:
+        return True
+    if sum(1 for ch in q if ch in ":;[]{}|") >= 4:
+        return True
+    if any(p.search(q) for p in CODEISH_PATTERNS):
+        return True
+    if any(p.search(q) for p in INSTRUCTIONAL_PATTERNS):
         return True
     return any(p.search(q) for p in GENERIC_OOS_PATTERNS)
 
@@ -151,7 +202,7 @@ def _load_analytics_candidates(db_name: str) -> list[EvalItem]:
     if isinstance(q_counts, dict):
         for q, count in q_counts.items():
             qn = _normalize_question(q)
-            if not qn or _looks_like_oos_or_noise(qn):
+            if not qn or not _looks_like_good_question(qn):
                 continue
             try:
                 questions[qn] += int(count or 0)
@@ -164,7 +215,7 @@ def _load_analytics_candidates(db_name: str) -> list[EvalItem]:
             if not isinstance(entry, dict):
                 continue
             qn = _normalize_question(entry.get("q", ""))
-            if not qn or _looks_like_oos_or_noise(qn):
+            if not qn or not _looks_like_good_question(qn):
                 continue
             questions[qn] += 1
 
@@ -190,7 +241,7 @@ def _load_gap_candidates(db_name: str) -> list[EvalItem]:
         if not isinstance(gap, dict):
             continue
         q = _normalize_question(gap.get("question", ""))
-        if not q or _looks_like_oos_or_noise(q):
+        if not q or not _looks_like_good_question(q):
             continue
         items.append(
             EvalItem(
@@ -203,29 +254,33 @@ def _load_gap_candidates(db_name: str) -> list[EvalItem]:
     return items
 
 
-def _load_document_rows_via_chroma(db_name: str) -> list[tuple[str, str]]:
+def _load_document_rows_via_chroma(db_name: str) -> list[tuple[str, str, str]]:
     db_dir = DATABASES_DIR / db_name
     try:
         import chromadb
 
         client = chromadb.PersistentClient(path=str(db_dir))
-        rows: list[tuple[str, str]] = []
+        rows: list[tuple[str, str, str]] = []
         for collection in client.list_collections():
             try:
-                payload = collection.get(include=["documents"])
+                payload = collection.get(include=["documents", "metadatas"])
             except Exception:
                 continue
             ids = payload.get("ids") or []
             documents = payload.get("documents") or []
-            for row_id, doc in zip(ids, documents):
+            metadatas = payload.get("metadatas") or []
+            for row_id, doc, metadata in zip(ids, documents, metadatas):
                 if isinstance(doc, str) and doc.strip():
-                    rows.append((str(row_id), doc))
+                    source = ""
+                    if isinstance(metadata, dict):
+                        source = str(metadata.get("source") or "")
+                    rows.append((str(row_id), doc, source))
         return rows
     except Exception:
         return []
 
 
-def _load_document_rows_via_sqlite(db_name: str) -> list[tuple[str, str]]:
+def _load_document_rows_via_sqlite(db_name: str) -> list[tuple[str, str, str]]:
     db_path = DATABASES_DIR / db_name / "chroma.sqlite3"
     if not db_path.exists():
         return []
@@ -233,20 +288,30 @@ def _load_document_rows_via_sqlite(db_name: str) -> list[tuple[str, str]]:
         conn = sqlite3.connect(db_path)
         cur = conn.cursor()
         rows = cur.execute(
-            "SELECT id, string_value FROM embedding_metadata "
-            "WHERE key='chroma:document' ORDER BY id",
+            "SELECT docs.id, docs.string_value, COALESCE(src.string_value, '') "
+            "FROM embedding_metadata docs "
+            "LEFT JOIN embedding_metadata src ON src.id = docs.id AND src.key='source' "
+            "WHERE docs.key='chroma:document' ORDER BY docs.id",
         ).fetchall()
         conn.close()
-        return [(str(row_id), raw_text or "") for row_id, raw_text in rows]
+        return [(str(row_id), raw_text or "", source or "") for row_id, raw_text, source in rows]
     except Exception:
         return []
 
 
-def _load_document_rows(db_name: str) -> list[tuple[str, str]]:
+def _load_document_rows(db_name: str) -> list[tuple[str, str, str]]:
     rows = _load_document_rows_via_chroma(db_name)
     if rows:
         return rows
     return _load_document_rows_via_sqlite(db_name)
+
+
+def _unpack_doc_row(row) -> tuple[str, str, str]:
+    if len(row) >= 3:
+        row_id, text, source = row[0], row[1], row[2]
+        return str(row_id), str(text or ""), str(source or "")
+    row_id, text = row[0], row[1]
+    return str(row_id), str(text or ""), ""
 
 
 def _load_doc_qa_fallbacks(db_name: str, limit: int) -> list[EvalItem]:
@@ -255,17 +320,19 @@ def _load_doc_qa_fallbacks(db_name: str, limit: int) -> list[EvalItem]:
     if not rows:
         return items
 
-    for _, text in rows:
-        match = re.search(r"Q:\s*(.+?)\s*A:\s*(.+)", text, re.S | re.I)
+    for row in rows:
+        _, text, _ = _unpack_doc_row(row)
+        match = re.search(r"Q:\s*([^\n\r]{3,220}?)\s*A:\s*(.+)", text, re.S | re.I)
         if not match:
             continue
         q = _normalize_question(match.group(1))
         a = _normalize_question(match.group(2))
-        if not q or not a or _looks_like_oos_or_noise(q):
+        if not q or not a or not _looks_like_good_question(q):
             continue
         items.append(
             EvalItem(
                 q=q,
+                expect=_infer_expectation_from_reference(a),
                 source="embedded_qa",
                 difficulty=_difficulty_for_question(q),
                 reference_answer=a,
@@ -306,9 +373,27 @@ def _clean_chunk_text(text: str) -> str:
     return re.sub(r"\s+", " ", cleaned).strip()
 
 
+def _looks_like_instructional_chunk(text: str) -> bool:
+    cleaned = _clean_chunk_text(text)
+    if not cleaned:
+        return True
+    lower = cleaned.lower()
+    if any(p.search(cleaned) for p in CODEISH_PATTERNS):
+        return True
+    if any(p.search(cleaned) for p in INSTRUCTIONAL_PATTERNS):
+        return True
+    if "```" in cleaned or "\"\"\"" in cleaned:
+        return True
+    if lower.count("chapter") >= 3 and lower.count(":") >= 3:
+        return True
+    return False
+
+
 def _is_low_value_chunk(text: str) -> bool:
     cleaned = _clean_chunk_text(text)
     if len(cleaned.split()) < 20:
+        return True
+    if _looks_like_instructional_chunk(cleaned):
         return True
     junk_hits = sum(
         1
@@ -326,52 +411,111 @@ def _is_low_value_chunk(text: str) -> bool:
     return junk_hits >= 2
 
 
-def _extract_chunk_topic(text: str) -> str:
+def _looks_like_good_topic(topic: str) -> bool:
+    norm = _normalize_question(topic)
+    if not norm or len(norm) < 6 or len(norm) > 90:
+        return False
+    words = norm.split()
+    if len(words) < 2 or len(words) > 10:
+        return False
+    if any(p.search(norm) for p in CODEISH_PATTERNS):
+        return False
+    if any(p.search(norm) for p in INSTRUCTIONAL_PATTERNS):
+        return False
+    if any(p.search(norm) for p in TOPIC_NOISE_PATTERNS):
+        return False
+    if sum(1 for ch in norm if ch in ":;[]{}|") >= 3:
+        return False
+    if norm.lower().startswith(("what ", "how ", "why ", "here ", "this ", "that ", "they ", "you ")):
+        return False
+    return True
+
+
+def _looks_like_good_question(question: str) -> bool:
+    q = _normalize_question(question)
+    if _looks_like_oos_or_noise(q):
+        return False
+    if len(q) > 160:
+        return False
+    if not (
+        q.endswith("?")
+        or q.lower().startswith(("what ", "how ", "why ", "when ", "where ", "who ", "which ", "can ", "does ", "is ", "are ", "should ", "summarize ", "compare "))
+    ):
+        return False
+    return True
+
+
+def _infer_expectation_from_reference(reference_text: str) -> str:
+    text = (reference_text or "").lower()
+    if any(sig in text for sig in IDK_SIGS):
+        return "IDK"
+    if "escalated this" in text or "couldn't find information" in text or "could not find information" in text:
+        return "IDK"
+    return "ANSWER"
+
+
+def _topic_from_source(source: str) -> str:
+    raw = (source or "").strip().rstrip("/")
+    if not raw:
+        return ""
+    slug = raw.split("/")[-1]
+    slug = re.sub(r"\.[a-z0-9]+$", "", slug, flags=re.I)
+    slug = slug.replace("-", " ").replace("_", " ").strip()
+    slug = re.sub(r"\s+", " ", slug)
+    if slug.lower() in {"docs", "english", "leaderboard"}:
+        return ""
+    topic = " ".join(word.capitalize() if word.islower() else word for word in slug.split())
+    return topic if _looks_like_good_topic(topic) else ""
+
+
+def _extract_chunk_topic(text: str, source: str = "") -> str:
     cleaned = _clean_chunk_text(text)
     if not cleaned:
         return ""
 
-    chapter = re.search(r"(Chapter\s+\d+\s*:\s*[^.?!]{4,90})", cleaned, re.I)
+    chapter = re.search(
+        r"(Chapter\s+\d+\s*:\s*(?:[A-Z][A-Za-z0-9/&,\-()']*\s*){1,8})",
+        cleaned,
+    )
     if chapter:
-        return _normalize_question(chapter.group(1))
+        topic = _normalize_question(chapter.group(1))
+        return topic if _looks_like_good_topic(topic) else ""
 
-    heading = re.search(r"([A-Z][A-Za-z0-9/&,\-()' ]{8,90})[:.]", cleaned)
+    source_topic = _topic_from_source(source)
+    if source_topic:
+        return source_topic
+
+    heading = re.search(r"([A-Z][A-Za-z0-9/&,\-()' ]{4,80})[:.]", cleaned)
     if heading:
         topic = _normalize_question(heading.group(1))
-        if len(topic.split()) >= 2:
+        words = topic.split()
+        titleish = sum(1 for word in words if word[:1].isupper() or word.isupper())
+        if _looks_like_good_topic(topic) and len(words) <= 8 and titleish / max(1, len(words)) >= 0.6:
             return topic
 
-    words = cleaned.split()
-    topic = " ".join(words[: min(10, len(words))]).strip(" ,.-:")
-    return _normalize_question(topic)
+    return ""
 
 
 def _make_chunk_question(topic: str, chunk_text: str) -> str:
-    cleaned = _clean_chunk_text(chunk_text)
     topic = _normalize_question(topic)
     if not topic:
         return ""
-    templates = [
-        "What is {topic}?",
-        "How does {topic} work?",
-        "What should I know about {topic}?",
-        "What are the key details about {topic}?",
-        "Summarize {topic}.",
-    ]
-    if re.search(r"\bcompare|difference|versus|vs\.?\b", cleaned, re.I):
-        templates = [
-            "What is the difference explained in {topic}?",
-            "How does {topic} compare the options it mentions?",
-            "Summarize the comparison in {topic}.",
-        ]
-    elif re.search(r"\bprice|cost|shipping|return|refund|policy\b", cleaned, re.I):
-        templates = [
-            "What does {topic} say about pricing or policy?",
-            "What are the important policy details in {topic}?",
-            "Summarize the key customer-facing details in {topic}.",
-        ]
-    idx = int(hashlib.sha1(topic.lower().encode("utf-8")).hexdigest()[:8], 16) % len(templates)
-    return templates[idx].format(topic=topic)
+    if re.search(r"\bchapter\s+\d+\b", topic, re.I):
+        question = f"Summarize {topic}."
+    elif re.search(r"\bcompare|difference|versus|vs\.?\b", topic, re.I):
+        question = f"What is the difference explained in {topic}?"
+    elif len(topic.split()) <= 4:
+        question = f"What is {topic}?"
+    else:
+        question = f"What should I know about {topic}?"
+    return question if _looks_like_good_question(question) else ""
+
+
+def _candidate_row_order(rows: list[tuple[str, str]]) -> list[tuple[str, str]]:
+    return sorted(
+        rows,
+        key=lambda row: int(hashlib.sha1(str(row[0]).encode("utf-8")).hexdigest()[:12], 16),
+    )
 
 
 def _load_chunk_topic_candidates(db_name: str, limit: int) -> list[EvalItem]:
@@ -381,11 +525,12 @@ def _load_chunk_topic_candidates(db_name: str, limit: int) -> list[EvalItem]:
 
     items: list[EvalItem] = []
     seen_topics = set()
-    for row_id, raw_text in rows:
-        text = raw_text or ""
+    max_candidates = max(limit * 12, 120)
+    for row in _candidate_row_order(rows):
+        row_id, text, source = _unpack_doc_row(row)
         if _is_low_value_chunk(text):
             continue
-        topic = _extract_chunk_topic(text)
+        topic = _extract_chunk_topic(text, source)
         if not topic:
             continue
         topic_key = topic.lower()
@@ -393,7 +538,7 @@ def _load_chunk_topic_candidates(db_name: str, limit: int) -> list[EvalItem]:
             continue
         seen_topics.add(topic_key)
         question = _make_chunk_question(topic, text)
-        if not question or _looks_like_oos_or_noise(question):
+        if not question:
             continue
         items.append(
             EvalItem(
@@ -405,7 +550,7 @@ def _load_chunk_topic_candidates(db_name: str, limit: int) -> list[EvalItem]:
                 candidate_key=f"chunk::{row_id}::{topic_key}",
             )
         )
-        if len(items) >= limit:
+        if len(items) >= max_candidates:
             break
     return items
 
@@ -428,7 +573,42 @@ def _collect_seed_items(db_name: str, desired_count: int) -> list[EvalItem]:
         if not item.candidate_key:
             item.candidate_key = f"{item.source}::{key}"
         deduped.append(item)
-    return deduped
+    return _trim_seed_pool(deduped, desired_count)
+
+
+def _trim_seed_pool(items: list[EvalItem], desired_count: int) -> list[EvalItem]:
+    if not items:
+        return []
+
+    desired_count = max(10, desired_count)
+    per_source_cap = {
+        "faq": max(4, desired_count),
+        "embedded_qa": max(6, desired_count),
+        "analytics": max(10, desired_count * 2),
+        "chunk_topic": max(12, desired_count * 2),
+        "knowledge_gap": max(6, desired_count),
+    }
+    trimmed: list[EvalItem] = []
+    for source in ("faq", "embedded_qa", "analytics", "chunk_topic", "knowledge_gap"):
+        group = [item for item in items if item.source == source]
+        group.sort(key=_source_priority)
+        trimmed.extend(_select_diverse_items(group, per_source_cap.get(source, desired_count)))
+
+    target = max(desired_count, 30)
+    trimmed.sort(key=_source_priority)
+    selected = _select_diverse_items(trimmed, target)
+    if len(selected) >= target:
+        return selected
+
+    seen = {item.q.lower() for item in selected}
+    for item in trimmed:
+        if item.q.lower() in seen:
+            continue
+        selected.append(item)
+        seen.add(item.q.lower())
+        if len(selected) >= target:
+            break
+    return selected
 
 
 def _preflight_retrieve(base_url: str, password: str, item: EvalItem) -> EvalItem:

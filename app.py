@@ -3709,6 +3709,15 @@ def _score_0_10(passed: int, total: int) -> float:
         return 0.0
     return round(10.0 * (passed / total), 1)
 
+
+def _eval_docs_preview(doc_rows: list[dict], limit: int = 3000) -> str:
+    parts: list[str] = []
+    for row in doc_rows or []:
+        preview = str((row or {}).get("preview") or "").strip()
+        if preview:
+            parts.append(preview)
+    return "\n\n".join(parts)[:limit]
+
 def _now_run_id() -> str:
     return datetime.utcnow().strftime("%Y%m%d_%H%M%S")
 
@@ -3774,12 +3783,7 @@ async def _build_owner_eval_tests(base_url: str, owner_password: str, db_name: s
         doc_count, doc_rows, sources = await _eval_retrieve_docs(item.q, tenant_db, k=8)
         item.retrieve_doc_count = int(doc_count or 0)
         item.retrieve_sources = list(sources or [])[:5]
-        preview_parts = []
-        for row in doc_rows or []:
-            preview = str((row or {}).get("preview") or "").strip()
-            if preview:
-                preview_parts.append(preview)
-        preview_text = "\n\n".join(preview_parts)[:3000]
+        preview_text = _eval_docs_preview(doc_rows, limit=3000)
         item.retrieve_context_preview = preview_text
         item.retrieve_context_length = len(preview_text)
         preflighted.append(item)
@@ -3787,8 +3791,12 @@ async def _build_owner_eval_tests(base_url: str, owner_password: str, db_name: s
     grounded = [item for item in preflighted if _eval_v1._is_grounded(item)]
     grounded.sort(key=_eval_v1._source_priority)
 
-    core_pool = [item for item in grounded if item.source in {"faq", "embedded_qa", "analytics"}]
-    discovery_pool = [item for item in grounded if item.source in {"chunk_topic", "knowledge_gap", "analytics", "embedded_qa"}]
+    if strategy == "kb":
+        core_pool = [item for item in grounded if item.source in {"faq", "embedded_qa", "chunk_topic"}]
+        discovery_pool = [item for item in grounded if item.source in {"chunk_topic", "embedded_qa", "knowledge_gap"}]
+    else:
+        core_pool = [item for item in grounded if item.source in {"faq", "embedded_qa", "analytics"}]
+        discovery_pool = [item for item in grounded if item.source in {"chunk_topic", "knowledge_gap", "analytics", "embedded_qa"}]
     if not core_pool:
         core_pool = grounded
     if not discovery_pool:
@@ -4047,14 +4055,25 @@ async def admin_run_evals(request: Request):
                 row["answer"]["error"] = str(e)[:180]
 
             if etype in ("IDK", "REFUSE"):
+                from evals import eval_v1 as _eval_v1
+
                 idk_total += 1
-                text_l = (row["answer"]["text"] or "").lower()
-                if etype == "REFUSE":
-                    ok = any(s in text_l for s in ("i can't help with that", "i cannot help with that", "outside that scope", "i specialize in helping with"))
-                else:
-                    ok = any(s in text_l for s in ("i don't have", "i do not have", "not in my", "no information", "not available", "i can't find", "i cannot find", "i'm not sure"))
-                row["checks"]["idk"] = bool(ok)
-                if ok:
+                preview_text = _eval_docs_preview(row["retrieve"].get("docs") or [], limit=3000)
+                eval_item = _eval_v1.EvalItem(
+                    q=q,
+                    expect=etype,
+                    source=str(t.get("source") or "analytics"),
+                    reference_answer=reference_text,
+                    retrieve_doc_count=int(row["retrieve"].get("doc_count") or 0),
+                    retrieve_context_length=len(preview_text),
+                    retrieve_context_preview=preview_text,
+                    retrieve_sources=list(row["retrieve"].get("sources") or []),
+                )
+                idk_ok, idk_reason, _ = _eval_v1._grade_answer(eval_item, row["answer"]["text"] or "")
+                row["checks"]["idk"] = (idk_ok == "PASS")
+                if idk_reason:
+                    row["answer"]["reason"] = idk_reason
+                if row["checks"]["idk"]:
                     idk_pass += 1
 
             if etype == "ANSWER" and key_facts:
@@ -4075,14 +4094,15 @@ async def admin_run_evals(request: Request):
             elif etype == "ANSWER":
                 from evals import eval_v1 as _eval_v1
                 answer_total += 1
+                preview_text = _eval_docs_preview(row["retrieve"].get("docs") or [], limit=3000)
                 eval_item = _eval_v1.EvalItem(
                     q=q,
                     expect="ANSWER",
                     source=str(t.get("source") or "analytics"),
                     reference_answer=reference_text,
                     retrieve_doc_count=int(row["retrieve"].get("doc_count") or 0),
-                    retrieve_context_length=max([len((d.get("preview") or "")) for d in (row["retrieve"].get("docs") or [])] or [0]),
-                    retrieve_context_preview=reference_text,
+                    retrieve_context_length=len(preview_text),
+                    retrieve_context_preview=preview_text,
                     retrieve_sources=list(row["retrieve"].get("sources") or []),
                 )
                 answer_ok, answer_reason, _ = _eval_v1._grade_answer(eval_item, row["answer"]["text"] or "")

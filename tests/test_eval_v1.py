@@ -162,6 +162,38 @@ def test_grade_answer_passes_grounded_answer():
     assert overlap >= 0.12
 
 
+def test_grade_answer_classifies_refuse_consistently():
+    item = eval_v1.EvalItem(
+        q="What is the weather today?",
+        expect="REFUSE",
+        source="analytics",
+    )
+
+    status, reason, _ = eval_v1._grade_answer(
+        item,
+        "I can't help with that because it falls outside my scope. I specialize in helping with the tenant knowledge base.",
+    )
+
+    assert status == "PASS"
+    assert reason is None
+
+
+def test_grade_answer_classifies_idk_consistently():
+    item = eval_v1.EvalItem(
+        q="What is your CEO's favorite color?",
+        expect="IDK",
+        source="analytics",
+    )
+
+    status, reason, _ = eval_v1._grade_answer(
+        item,
+        "I don't have that information in my knowledge base right now.",
+    )
+
+    assert status == "PASS"
+    assert reason is None
+
+
 def test_build_summary_does_not_fake_idk_score():
     results = [
         {"retrieval_status": "PASS", "answer_status": "PASS", "idk_status": "SKIP", "overall_status": "PASS"},
@@ -240,6 +272,77 @@ def test_load_document_rows_prefers_chroma_then_falls_back(monkeypatch):
 
     monkeypatch.setattr(eval_v1, "_load_document_rows_via_chroma", lambda _db_name: [])
     assert eval_v1._load_document_rows("tenant_x") == sqlite_rows
+
+
+def test_doc_qa_fallback_filters_malformed_prompt_blobs(monkeypatch):
+    monkeypatch.setattr(
+        eval_v1,
+        "_load_document_rows",
+        lambda _db_name: [
+            (
+                "doc-1",
+                'Q: [The question as an employee would ask it]** A: [Your verified plain-language answer from /policy-lookup]',
+            ),
+            (
+                "doc-2",
+                "Q: What is AgentFactory? A: AgentFactory is an AI agent learning platform.",
+            ),
+        ],
+    )
+
+    items = eval_v1._load_doc_qa_fallbacks("tenant_x", 10)
+
+    assert [item.q for item in items] == ["What is AgentFactory?"]
+    assert items[0].expect == "ANSWER"
+
+
+def test_doc_qa_fallback_marks_missing_info_as_idk(monkeypatch):
+    monkeypatch.setattr(
+        eval_v1,
+        "_load_document_rows",
+        lambda _db_name: [
+            (
+                "doc-1",
+                "Q: Can TaskManager integrate with Jira? A: I searched the documentation but couldn't find information about Jira integration and escalated this to support.",
+            ),
+        ],
+    )
+
+    items = eval_v1._load_doc_qa_fallbacks("tenant_x", 10)
+
+    assert len(items) == 1
+    assert items[0].expect == "IDK"
+
+
+def test_chunk_topic_candidates_are_filtered_and_not_stuck_on_first_rows(monkeypatch):
+    rows = [
+        ("1", "Meeting notes: use these codes while taking notes. D: decision. A: action."),
+        ("2", "def build_agent(): return workflow"),
+        ("3", "Chapter 19: File Processing Workflows explains how files are transformed, validated, and routed through an agent workflow with structured outputs and review steps."),
+        ("4", "Computation and Data Extraction covers pulling structured values from messy text and converting them into reliable fields for downstream use.", "https://example.test/computation-and-data-extraction"),
+    ]
+    monkeypatch.setattr(eval_v1, "_load_document_rows", lambda _db_name: rows)
+    monkeypatch.setattr(eval_v1, "_candidate_row_order", lambda rows: rows)
+
+    items = eval_v1._load_chunk_topic_candidates("tenant_x", 1)
+    questions = [item.q for item in items]
+
+    assert questions
+    assert all("Meeting notes" not in q for q in questions)
+    assert all("def build_agent" not in q for q in questions)
+    assert any("Chapter 19" in q or "Computation and Data Extraction" in q for q in questions)
+
+
+def test_chunk_topic_candidates_filter_transfer_log_topics(monkeypatch):
+    rows = [
+        ("1", "objects: 100% (245/245), 89.42 KiB | 1.29 MiB/s, done. Create LEARNING-SPEC.md with your notes."),
+    ]
+    monkeypatch.setattr(eval_v1, "_load_document_rows", lambda _db_name: rows)
+    monkeypatch.setattr(eval_v1, "_candidate_row_order", lambda rows: rows)
+
+    items = eval_v1._load_chunk_topic_candidates("tenant_x", 10)
+
+    assert items == []
 
 
 def test_database_dir_is_project_relative():
