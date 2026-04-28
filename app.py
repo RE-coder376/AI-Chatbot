@@ -3725,6 +3725,37 @@ def _eval_docs_preview(doc_rows: list[dict], limit: int = 3000) -> str:
             parts.append(preview)
     return "\n\n".join(parts)[:limit]
 
+
+def _eval_likely_cause(row: dict) -> str:
+    diagnosis = str(row.get("diagnosis") or "")
+    retrieve = row.get("retrieve") or {}
+    answer = row.get("answer") or {}
+    r_metrics = retrieve.get("metrics") or {}
+    a_metrics = answer.get("metrics") or {}
+
+    if diagnosis == "retrieval_incomplete":
+        return "Retriever found some relevant chunks, but coverage was incomplete. Likely chunking, K-value, or retrieval-filter issue."
+    if diagnosis == "weak_top_k":
+        return "Retriever surfaced the right topic too weakly or too low in rank. Likely ranking or chunk-quality issue."
+    if diagnosis == "grounded_but_answered_idk":
+        return "Context was present, but the chatbot still backed off. Likely prompt/guardrail behavior or over-strict scope rules."
+    if diagnosis == "grounded_but_refused":
+        return "Context was present, but the chatbot refused anyway. Likely scope rules or refusal instructions are too aggressive."
+    if diagnosis == "answer_not_faithful":
+        return "Answer drifted away from retrieved context. Likely generation/prompt issue, or retrieved context was noisy."
+    if diagnosis == "answer_irrelevant":
+        return "Answer stayed in-domain but did not answer the user directly. Likely prompt shaping or response-format issue."
+    if diagnosis == "idk_mismatch":
+        return "Unsupported question handling was inconsistent. Likely scope/IDK wording mismatch."
+
+    if float(r_metrics.get("context_recall") or 0) < 0.67:
+        return "Retrieved context was probably incomplete for the full answer."
+    if float(a_metrics.get("faithfulness") or 0) < 0.67:
+        return "Answer did not stay close enough to the available context."
+    if float(a_metrics.get("answer_relevance") or 0) < 0.55:
+        return "Answer did not focus tightly enough on the user question."
+    return "No obvious failure signal on this row."
+
 def _now_run_id() -> str:
     return datetime.utcnow().strftime("%Y%m%d_%H%M%S")
 
@@ -4074,11 +4105,13 @@ async def admin_run_evals(request: Request):
                     "precision_at_3": retrieval_eval.get("precision_at_3"),
                     "average_precision": retrieval_eval.get("average_precision"),
                     "first_relevant_rank": retrieval_eval.get("first_relevant_rank"),
+                    "context_recall": retrieval_eval.get("context_recall"),
                     "ranked_verdicts": retrieval_eval.get("ranked_verdicts", []),
                 }
                 row["retrieve"]["score"] = round(
-                    0.7 * float(retrieval_eval.get("average_precision") or 0.0)
-                    + 0.3 * float(retrieval_eval.get("precision_at_3") or 0.0),
+                    0.55 * float(retrieval_eval.get("average_precision") or 0.0)
+                    + 0.20 * float(retrieval_eval.get("precision_at_3") or 0.0)
+                    + 0.25 * float(retrieval_eval.get("context_recall") or 0.0),
                     3,
                 )
                 retrieval_metric_values.append(row["retrieve"]["score"])
@@ -4112,11 +4145,13 @@ async def admin_run_evals(request: Request):
                             "precision_at_3": retrieval_eval.get("precision_at_3"),
                             "average_precision": retrieval_eval.get("average_precision"),
                             "first_relevant_rank": retrieval_eval.get("first_relevant_rank"),
+                            "context_recall": retrieval_eval.get("context_recall"),
                             "ranked_verdicts": retrieval_eval.get("ranked_verdicts", []),
                         }
                         row["retrieve"]["score"] = round(
-                            0.7 * float(retrieval_eval.get("average_precision") or 0.0)
-                            + 0.3 * float(retrieval_eval.get("precision_at_3") or 0.0),
+                            0.55 * float(retrieval_eval.get("average_precision") or 0.0)
+                            + 0.20 * float(retrieval_eval.get("precision_at_3") or 0.0)
+                            + 0.25 * float(retrieval_eval.get("context_recall") or 0.0),
                             3,
                         )
                         retrieval_metric_values.append(row["retrieve"]["score"])
@@ -4147,6 +4182,7 @@ async def admin_run_evals(request: Request):
                 row["answer"]["metrics"] = {
                     "faithfulness": answer_metrics["faithfulness"],
                     "answer_relevance": answer_metrics["answer_relevance"],
+                    "context_recall": answer_metrics["context_recall"],
                     "token_hits": answer_metrics["token_hits"],
                     "statement_count": len(answer_metrics["statements"]),
                 }
@@ -4177,12 +4213,14 @@ async def admin_run_evals(request: Request):
                 row["answer"]["metrics"] = {
                     "faithfulness": answer_metrics["faithfulness"],
                     "answer_relevance": answer_metrics["answer_relevance"],
+                    "context_recall": answer_metrics["context_recall"],
                     "token_hits": answer_metrics["token_hits"],
                     "statement_count": len(answer_metrics["statements"]),
                 }
                 row["answer"]["score"] = round(
-                    0.6 * float(answer_metrics["faithfulness"] or 0.0)
-                    + 0.4 * float(answer_metrics["answer_relevance"] or 0.0),
+                    0.50 * float(answer_metrics["faithfulness"] or 0.0)
+                    + 0.30 * float(answer_metrics["answer_relevance"] or 0.0)
+                    + 0.20 * float(answer_metrics["context_recall"] or 0.0),
                     3,
                 )
                 answer_metric_values.append(row["answer"]["score"])
@@ -4202,7 +4240,7 @@ async def admin_run_evals(request: Request):
                     answer_pass += 1
 
         if row["checks"].get("retrieval") is False:
-            row["diagnosis"] = "weak_top_k"
+            row["diagnosis"] = "retrieval_incomplete" if row["retrieve"].get("metrics", {}).get("context_recall", 1) < 0.5 else "weak_top_k"
         elif row["checks"].get("answer") is False and "Expected an in-domain answer, got IDK" in str(row["answer"].get("reason") or ""):
             row["diagnosis"] = "grounded_but_answered_idk"
         elif row["checks"].get("answer") is False and "Expected an in-domain answer, got REFUSE" in str(row["answer"].get("reason") or ""):
@@ -4213,6 +4251,7 @@ async def admin_run_evals(request: Request):
             row["diagnosis"] = "answer_irrelevant"
         elif row["checks"].get("idk") is False:
             row["diagnosis"] = "idk_mismatch"
+        row["likely_cause"] = _eval_likely_cause(row)
 
         rows.append(row)
 
@@ -4222,6 +4261,7 @@ async def admin_run_evals(request: Request):
 
     overall = round(0.45 * retrieval_score + 0.45 * answer_score + 0.10 * idk_score, 1) if mode in ("chat", "both") else retrieval_score
     diagnosis_counts = dict(Counter((row.get("diagnosis") or "pass") for row in rows))
+    likely_cause_counts = dict(Counter((row.get("likely_cause") or "unknown") for row in rows if row.get("overall_status") == "FAIL"))
     question_type_counts = dict(Counter((row.get("question_type") or "unknown") for row in rows))
 
     run_id = _now_run_id()
@@ -4231,7 +4271,7 @@ async def admin_run_evals(request: Request):
         "mode": mode,
         "scores": {"overall": overall, "retrieval": retrieval_score, "answer": answer_score, "idk": idk_score},
         "counts": {"total": len(rows), "retrieval_total": retrieval_total, "answer_total": answer_total, "idk_total": idk_total},
-        "summary": {"diagnosis_counts": diagnosis_counts, "question_type_counts": question_type_counts},
+        "summary": {"diagnosis_counts": diagnosis_counts, "likely_cause_counts": likely_cause_counts, "question_type_counts": question_type_counts},
         "generated_at": datetime.utcnow().isoformat() + "Z",
         "results": rows,
     }

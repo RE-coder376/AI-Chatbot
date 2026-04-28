@@ -2327,9 +2327,11 @@
     metricsEl.innerHTML = '';
     const metricCards = [
       { k: 'Diagnosis', v: row.diagnosis || 'pass' },
+      { k: 'Likely Cause', v: row.likely_cause || '—' },
       { k: 'Retrieval Score', v: row.retrieve?.score != null ? `${Number(row.retrieve.score).toFixed(2)}` : '—' },
       { k: 'Avg Precision', v: row.retrieve?.metrics?.average_precision != null ? `${Number(row.retrieve.metrics.average_precision).toFixed(2)}` : '—' },
       { k: 'Precision@3', v: row.retrieve?.metrics?.precision_at_3 != null ? `${Number(row.retrieve.metrics.precision_at_3).toFixed(2)}` : '—' },
+      { k: 'Context Recall', v: row.retrieve?.metrics?.context_recall != null ? `${Number(row.retrieve.metrics.context_recall).toFixed(2)}` : '—' },
       { k: 'Faithfulness', v: row.answer?.metrics?.faithfulness != null ? `${Number(row.answer.metrics.faithfulness).toFixed(2)}` : '—' },
       { k: 'Answer Relevance', v: row.answer?.metrics?.answer_relevance != null ? `${Number(row.answer.metrics.answer_relevance).toFixed(2)}` : '—' },
     ];
@@ -2413,13 +2415,19 @@
     const wrap = document.getElementById('eval-summary');
     if (!wrap) return;
     const diag = summary?.diagnosis_counts || {};
+    const causes = summary?.likely_cause_counts || {};
     const qtypes = summary?.question_type_counts || {};
     const diagRows = Object.entries(diag).sort((a,b)=>b[1]-a[1]).map(([k,v]) => `<div class="eval-fact">${escapeHtml(k)}: ${Number(v)}</div>`).join('') || '<div class="eval-fact">No diagnostics yet.</div>';
+    const causeRows = Object.entries(causes).sort((a,b)=>b[1]-a[1]).map(([k,v]) => `<div class="eval-fact">${escapeHtml(k)} (${Number(v)})</div>`).join('') || '<div class="eval-fact">No likely-cause hints yet.</div>';
     const typeRows = Object.entries(qtypes).sort((a,b)=>b[1]-a[1]).map(([k,v]) => `<div class="eval-fact">${escapeHtml(k)}: ${Number(v)}</div>`).join('') || '<div class="eval-fact">No question mix yet.</div>';
     wrap.innerHTML = `
       <div class="eval-summary-panel">
         <h4>Failure Mix</h4>
         ${diagRows}
+      </div>
+      <div class="eval-summary-panel">
+        <h4>Likely Causes</h4>
+        ${causeRows}
       </div>
       <div class="eval-summary-panel">
         <h4>Question Mix</h4>

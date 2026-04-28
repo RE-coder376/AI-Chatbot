@@ -57,6 +57,23 @@ def test_collect_seed_items_filters_generic_noise_and_keeps_curated(monkeypatch)
     assert "What is 2+2?" not in questions
 
 
+def test_subscription_questions_are_not_globally_filtered(monkeypatch):
+    temp_path = _scratch_dir()
+    monkeypatch.chdir(temp_path)
+    monkeypatch.setattr(eval_v1, "DATABASES_DIR", temp_path / "databases")
+    monkeypatch.setattr(eval_v1, "_load_document_rows", lambda _db_name: [])
+    db_dir = temp_path / "databases" / "tenant_subs"
+
+    _write_json(
+        db_dir / "analytics.json",
+        {"questions": {"How do I cancel my subscription plan?": 5}},
+    )
+
+    items = eval_v1._collect_seed_items("tenant_subs", 10)
+
+    assert [item.q for item in items] == ["How do I cancel my subscription plan?"]
+
+
 def test_collect_eval_items_keeps_only_grounded_candidates(monkeypatch):
     temp_path = _scratch_dir()
     monkeypatch.chdir(temp_path)
@@ -79,12 +96,15 @@ def test_collect_eval_items_keeps_only_grounded_candidates(monkeypatch):
         if "refund" in item.q.lower():
             item.retrieve_doc_count = 3
             item.retrieve_context_length = 420
+            item.retrieve_context_preview = "The refund policy allows refunds within 7 days and requires proof of purchase."
         elif "shipping" in item.q.lower():
             item.retrieve_doc_count = 2
             item.retrieve_context_length = 260
+            item.retrieve_context_preview = "Compare standard and express shipping by delivery speed and cost."
         else:
             item.retrieve_doc_count = 0
             item.retrieve_context_length = 0
+            item.retrieve_context_preview = ""
         return item
 
     monkeypatch.setattr(eval_v1, "_preflight_retrieve", fake_preflight)
@@ -95,6 +115,30 @@ def test_collect_eval_items_keeps_only_grounded_candidates(monkeypatch):
     assert "How does the refund policy work?" in questions
     assert "Compare standard and express shipping." in questions
     assert "What is your CEO's favorite color?" not in questions
+
+
+def test_is_grounded_requires_some_preview_relevance():
+    item = eval_v1.EvalItem(
+        q="How do refunds work?",
+        source="analytics",
+        retrieve_doc_count=5,
+        retrieve_context_length=500,
+        retrieve_context_preview="Our company values teamwork, innovation, and long-term learning culture.",
+    )
+
+    assert eval_v1._is_grounded(item) is False
+
+
+def test_is_grounded_accepts_relevant_preview():
+    item = eval_v1.EvalItem(
+        q="How do refunds work?",
+        source="analytics",
+        retrieve_doc_count=5,
+        retrieve_context_length=500,
+        retrieve_context_preview="Refunds are allowed within 7 days for unused items with proof of purchase.",
+    )
+
+    assert eval_v1._is_grounded(item) is True
 
 
 def test_faq_items_still_need_retrieval_support(monkeypatch):
@@ -190,6 +234,30 @@ def test_grade_retrieval_rewards_good_top_rank():
     assert result["first_relevant_rank"] == 1
 
 
+def test_grade_retrieval_fails_when_context_is_incomplete():
+    item = eval_v1.EvalItem(
+        q="How does the refund policy work?",
+        reference_answer="Refunds are allowed within 7 days. Unused items require proof of purchase. Damaged goods need support approval first.",
+        retrieve_context_preview="Refunds are allowed within 7 days for unused items with proof of purchase.",
+        retrieve_sources=["https://example.test/refunds"],
+    )
+
+    result = eval_v1._grade_retrieval(
+        item,
+        [
+            {
+                "source": "https://example.test/refunds",
+                "preview": "Refunds are allowed within 7 days for unused items with proof of purchase.",
+            },
+        ],
+        expected_source="https://example.test/refunds",
+    )
+
+    assert result["status"] == "FAIL"
+    assert result["diagnosis"] == "retrieval_incomplete"
+    assert result["context_recall"] < 0.8
+
+
 def test_grade_retrieval_fails_when_relevant_chunk_is_buried():
     item = eval_v1.EvalItem(
         q="How do refunds work?",
@@ -268,6 +336,16 @@ def test_grade_answer_fails_unfaithful_supported_sounding_answer():
     assert "faithful enough" in reason
 
 
+def test_statement_supported_rejects_wrong_numeric_claim():
+    ok, score = eval_v1._statement_supported(
+        "Refunds are allowed within 3 days for unused items.",
+        ["Refunds are allowed within 7 days for unused items with proof of purchase."],
+    )
+
+    assert ok is False
+    assert score == 0.0
+
+
 def test_answer_metrics_penalize_irrelevant_rambling():
     item = eval_v1.EvalItem(
         q="How do I register for the program?",
@@ -287,6 +365,34 @@ def test_answer_metrics_penalize_irrelevant_rambling():
     assert metrics["answer_relevance"] < 0.5
 
 
+def test_answer_metrics_include_context_recall():
+    item = eval_v1.EvalItem(
+        q="How does the refund policy work?",
+        expect="ANSWER",
+        source="faq",
+        reference_answer="Refunds are allowed within 7 days. Proof of purchase is required. Support approval is needed for damaged goods.",
+        retrieve_doc_count=2,
+        retrieve_context_length=200,
+        retrieve_context_preview="Refunds are allowed within 7 days. Proof of purchase is required.",
+    )
+
+    metrics = eval_v1._answer_metrics(item, "Refunds are allowed within 7 days and require proof of purchase.")
+
+    assert metrics["context_recall"] is not None
+    assert metrics["context_recall"] < 1.0
+
+
+def test_statement_relevant_is_stricter_for_long_domain_overlap():
+    ok, score = eval_v1._statement_relevant(
+        "The course learning dashboard offers a friendly community experience for members.",
+        "How do I cancel my subscription plan?",
+        "Cancel a subscription from the billing settings page.",
+    )
+
+    assert ok is False
+    assert score < 0.35
+
+
 def test_build_summary_does_not_fake_idk_score():
     results = [
         {"retrieval_status": "PASS", "answer_status": "PASS", "idk_status": "SKIP", "overall_status": "PASS"},
@@ -300,6 +406,20 @@ def test_build_summary_does_not_fake_idk_score():
     assert summary["answer_score"] == 5.0
     assert summary["idk_score"] is None
     assert summary["score_meanings"]["idk"] == "Not exercised in this run."
+
+
+def test_build_summary_includes_failure_breakdown():
+    results = [
+        {"retrieval_status": "FAIL", "answer_status": "SKIP", "idk_status": "SKIP", "overall_status": "FAIL", "retrieval_diagnosis": "weak_top_k"},
+        {"retrieval_status": "PASS", "answer_status": "FAIL", "idk_status": "SKIP", "overall_status": "FAIL", "answer_diagnosis": "grounded_but_answered_idk"},
+    ]
+
+    summary = eval_v1._build_summary(results)
+
+    assert summary["failure_breakdown"] == {
+        "weak_top_k": 1,
+        "grounded_but_answered_idk": 1,
+    }
 
 
 def test_finalize_selection_uses_stable_core_and_rotates_discovery(monkeypatch):
@@ -454,6 +574,22 @@ def test_make_chunk_question_skips_quiz_like_topics():
     )
 
     assert q == ""
+
+
+def test_chunk_reference_answer_prefers_clean_semantic_sentences():
+    ref = eval_v1._chunk_reference_answer(
+        "Refund Policy",
+        """
+        What you are learning: this exercise builds judgment.
+        The refund policy allows refunds within 7 days for unused items with proof of purchase.
+        Customers must contact support before returning damaged goods.
+        Prompt 3: compare your answer with a partner.
+        """,
+    )
+
+    assert "refund policy allows refunds within 7 days" in ref.lower()
+    assert "prompt 3" not in ref.lower()
+    assert "what you are learning" not in ref.lower()
 
 
 def test_database_dir_is_project_relative():

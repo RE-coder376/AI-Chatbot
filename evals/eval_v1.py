@@ -57,7 +57,6 @@ GENERIC_OOS_PATTERNS = (
     re.compile(r"\bdrop table\b", re.I),
     re.compile(r"\bgaming laptop\b", re.I),
     re.compile(r"\btouchscreen\b", re.I),
-    re.compile(r"\bsubscription\b", re.I),
     re.compile(r"\bfirst one you mentioned\b", re.I),
     re.compile(r"\bfrom now on your name\b", re.I),
     re.compile(r"\bwhat is your name\b", re.I),
@@ -496,6 +495,52 @@ def _extract_chunk_topic(text: str, source: str = "") -> str:
     return ""
 
 
+def _split_sentences(text: str) -> list[str]:
+    parts = re.split(r"(?<=[.!?])\s+|\n+", _clean_chunk_text(text))
+    sentences = []
+    for part in parts:
+        sent = _normalize_question(part).strip(" .")
+        if len(sent) < 20:
+            continue
+        if _looks_like_instructional_chunk(sent):
+            continue
+        if re.search(r"\bprompt\s+\d+\b", sent, re.I):
+            continue
+        sentences.append(sent)
+    return sentences
+
+
+def _chunk_reference_answer(topic: str, chunk_text: str) -> str:
+    topic_tokens = _token_set(topic)
+    sentences = _split_sentences(chunk_text)
+    if not sentences:
+        return _clean_chunk_text(chunk_text)[:500]
+
+    scored: list[tuple[float, str]] = []
+    for idx, sentence in enumerate(sentences):
+        sent_tokens = _token_set(sentence)
+        overlap = len(topic_tokens & sent_tokens)
+        score = overlap
+        if re.search(r"\b(step|process|workflow|allows|requires|includes|means|used to|helps|lets you)\b", sentence, re.I):
+            score += 0.75
+        if idx == 0:
+            score += 0.4
+        scored.append((score, sentence))
+
+    picked: list[str] = []
+    seen = set()
+    for _, sentence in sorted(scored, key=lambda x: (-x[0], sentences.index(x[1]))):
+        key = sentence.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        picked.append(sentence)
+        if len(" ".join(picked)) >= 420 or len(picked) >= 3:
+            break
+
+    return " ".join(picked)[:500] if picked else _clean_chunk_text(chunk_text)[:500]
+
+
 def _make_chunk_question(topic: str, chunk_text: str) -> str:
     topic = _normalize_question(topic)
     if not topic:
@@ -560,7 +605,7 @@ def _load_chunk_topic_candidates(db_name: str, limit: int) -> list[EvalItem]:
                 q=question,
                 source="chunk_topic",
                 difficulty=_difficulty_for_question(question),
-                reference_answer=_clean_chunk_text(text)[:700],
+                reference_answer=_chunk_reference_answer(topic, text),
                 frequency=2,
                 candidate_key=f"chunk::{row_id}::{topic_key}",
             )
@@ -653,7 +698,15 @@ def _preflight_retrieve(base_url: str, password: str, item: EvalItem) -> EvalIte
 
 def _is_grounded(item: EvalItem) -> bool:
     min_context = 80 if item.source in {"faq", "embedded_qa"} else 120
-    return item.retrieve_doc_count > 0 and item.retrieve_context_length >= min_context
+    if not (item.retrieve_doc_count > 0 and item.retrieve_context_length >= min_context):
+        return False
+    preview = (item.retrieve_context_preview or "").strip()
+    if not preview:
+        return False
+    overlap = _overlap_score(item.q, preview)
+    ref = (item.reference_answer or "").strip()
+    ref_overlap = _overlap_score(ref, preview) if ref else 0.0
+    return overlap >= 0.08 or ref_overlap >= 0.08
 
 
 def _select_diverse_items(items: list[EvalItem], count: int) -> list[EvalItem]:
@@ -905,13 +958,24 @@ def _statement_supported(statement: str, contexts: list[str]) -> tuple[bool, flo
     st_tokens = _token_set(statement)
     if not st_tokens:
         return False, 0.0
+    union_context = " ".join(contexts)
+    union_tokens = _token_set(union_context)
+    st_nums = set(re.findall(r"\b\d+\b", statement))
+    union_nums = set(re.findall(r"\b\d+\b", union_context))
+    if st_nums and union_nums and not st_nums.issubset(union_nums):
+        return False, 0.0
+    stmt_l = statement.lower()
+    union_l = union_context.lower()
+    negative_cues = (" not ", " never ", " without ", " no ")
+    if any(cue in f" {stmt_l} " for cue in negative_cues) and not any(cue in f" {union_l} " for cue in negative_cues):
+        shared = len(st_tokens & union_tokens)
+        if shared >= 2:
+            return False, 0.0
     best = 0.0
     for context in contexts:
-        st_nums = set(re.findall(r"\b\d+\b", statement))
         ctx_nums = set(re.findall(r"\b\d+\b", context))
         if st_nums and ctx_nums and not st_nums.issubset(ctx_nums):
             continue
-        stmt_l = statement.lower()
         ctx_l = context.lower()
         if ("without proof" in stmt_l or "no proof" in stmt_l) and "proof of purchase" in ctx_l and "without proof" not in ctx_l and "no proof" not in ctx_l:
             continue
@@ -934,7 +998,9 @@ def _statement_relevant(statement: str, question: str, reference_text: str = "")
     q_score = q_overlap / max(1, min(len(st_tokens), len(q_tokens))) if q_tokens else 0.0
     r_score = r_overlap / max(1, min(len(st_tokens), len(ref_tokens))) if ref_tokens else 0.0
     score = max(q_score, r_score)
-    return (q_overlap >= 2 or r_overlap >= 2 or score >= 0.3), round(score, 3)
+    long_stmt = len(st_tokens) >= 6
+    min_overlap = 3 if long_stmt else 2
+    return (q_overlap >= min_overlap or r_overlap >= min_overlap or score >= 0.35), round(score, 3)
 
 
 def _doc_relevance(doc_text: str, question: str, reference_text: str, source: str = "", expected_source: str = "") -> tuple[int, str]:
@@ -968,6 +1034,22 @@ def _doc_relevance(doc_text: str, question: str, reference_text: str, source: st
     return 0, "weak_match"
 
 
+def _context_recall(item: EvalItem) -> float | None:
+    reference_text = (item.reference_answer or "").strip()
+    preview = (item.retrieve_context_preview or "").strip()
+    if not reference_text or not preview:
+        return None
+    ref_statements = _statement_list(reference_text)
+    if not ref_statements:
+        ref_statements = [reference_text]
+    supported = 0
+    for statement in ref_statements:
+        ok, _ = _statement_supported(statement, [preview])
+        if ok:
+            supported += 1
+    return round(supported / max(1, len(ref_statements)), 3)
+
+
 def _grade_retrieval(item: EvalItem, doc_rows: list[dict] | None = None, expected_source: str = "") -> dict:
     rows = list(doc_rows or [])
     if not rows and item.retrieve_context_preview:
@@ -987,15 +1069,20 @@ def _grade_retrieval(item: EvalItem, doc_rows: list[dict] | None = None, expecte
     precision_at_3 = round(sum(binary_verdicts[:3]) / max(1, min(3, len(binary_verdicts))), 3) if binary_verdicts else 0.0
     average_precision = _average_precision(binary_verdicts)
     first_relevant_rank = next((i + 1 for i, v in enumerate(binary_verdicts) if v == 1), None)
+    context_recall = _context_recall(item)
 
     if not rows:
         status = "FAIL"
         diagnosis = "retrieval_miss"
         reason = "Retriever returned no document rows for this question."
-    elif hit and average_precision >= 0.55:
+    elif hit and average_precision >= 0.55 and (context_recall is None or context_recall >= 0.67):
         status = "PASS"
         diagnosis = "retrieval_ok"
         reason = None
+    elif hit and context_recall is not None and context_recall < 0.67:
+        status = "FAIL"
+        diagnosis = "retrieval_incomplete"
+        reason = "Retriever found relevant chunks, but the retrieved context did not cover enough of the expected answer."
     elif hit:
         status = "FAIL"
         diagnosis = "weak_top_k"
@@ -1013,6 +1100,7 @@ def _grade_retrieval(item: EvalItem, doc_rows: list[dict] | None = None, expecte
         "precision_at_3": precision_at_3,
         "average_precision": average_precision,
         "first_relevant_rank": first_relevant_rank,
+        "context_recall": context_recall,
         "ranked_verdicts": ranked[:5],
     }
 
@@ -1053,6 +1141,7 @@ def _answer_metrics(item: EvalItem, answer_text: str) -> dict:
         "statements": statements,
         "faithfulness": faithfulness,
         "answer_relevance": answer_relevance,
+        "context_recall": _context_recall(item),
         "support_scores": support_scores,
         "relevance_scores": relevance_scores,
     }
@@ -1116,6 +1205,13 @@ def _build_summary(results: list[dict]) -> dict:
     answer_statuses = [r.get("answer_status", "SKIP") for r in results]
     idk_statuses = [r.get("idk_status", "SKIP") for r in results]
     overall_statuses = [r.get("overall_status", "SKIP") for r in results]
+    failure_breakdown = dict(
+        Counter(
+            (r.get("retrieval_diagnosis") or r.get("answer_diagnosis") or r.get("idk_diagnosis") or "unknown")
+            for r in results
+            if r.get("overall_status") == "FAIL"
+        )
+    )
 
     retrieval_score = _score_of(retrieval_statuses)
     answer_score = _score_of(answer_statuses)
@@ -1136,6 +1232,7 @@ def _build_summary(results: list[dict]) -> dict:
         "idk_score": idk_score,
         "diagnosis": diagnosis,
         "selection_mix": dict(Counter(r.get("selection_bucket", "unknown") for r in results)),
+        "failure_breakdown": failure_breakdown,
         "score_meanings": {
             "overall": _score_meaning(overall_score),
             "retrieval": _score_meaning(retrieval_score),
@@ -1195,7 +1292,8 @@ def main() -> int:
             row["doc_count"] = item.retrieve_doc_count
             row["context_length"] = item.retrieve_context_length
             row["sources"] = item.retrieve_sources
-            retrieval_eval = _grade_retrieval(item)
+            expected_source = item.retrieve_sources[0] if item.retrieve_sources else ""
+            retrieval_eval = _grade_retrieval(item, expected_source=expected_source)
             retrieve_pass = retrieval_eval["status"] == "PASS"
             row["retrieval_status"] = retrieval_eval["status"]
             row["retrieval_reason"] = retrieval_eval.get("reason")
@@ -1240,10 +1338,22 @@ def main() -> int:
             }
             if item.expect == "IDK":
                 row["idk_status"] = answer_status
+                row["idk_diagnosis"] = "idk_ok" if answer_status == "PASS" else "idk_mismatch"
                 if answer_reason:
                     row["idk_reason"] = answer_reason
             else:
                 row["answer_status"] = answer_status
+                if answer_status == "FAIL":
+                    if "grounded_but_answered_idk" in (answer_reason or ""):
+                        row["answer_diagnosis"] = "grounded_but_answered_idk"
+                    elif "grounded_but_refused" in (answer_reason or ""):
+                        row["answer_diagnosis"] = "grounded_but_refused"
+                    elif "faithful enough" in (answer_reason or ""):
+                        row["answer_diagnosis"] = "answer_not_faithful"
+                    elif "address the user's question" in (answer_reason or ""):
+                        row["answer_diagnosis"] = "answer_irrelevant"
+                    else:
+                        row["answer_diagnosis"] = "answer_mismatch"
                 if answer_reason:
                     row["answer_reason"] = answer_reason
 
