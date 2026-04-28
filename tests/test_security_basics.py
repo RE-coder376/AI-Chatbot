@@ -126,6 +126,7 @@ def test_owner_gates_evals_run_and_smoke_owner_run(app_module, client, two_tenan
             return [_Doc("https://example.com/source1")]
 
     monkeypatch.setattr(app_module, "_get_or_create_db", lambda name: _DummyDB(), raising=True)
+    monkeypatch.setattr(app_module, "_owner_eval_blocker", lambda name: "", raising=True)
 
     ok = client.post(
         "/admin/evals/run",
