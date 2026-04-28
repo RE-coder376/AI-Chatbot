@@ -148,8 +148,15 @@
   .eval-facts { margin-top: 12px; display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
   .eval-facts .panel { border: 1px solid var(--border); border-radius: 12px; padding: 12px; background: #fff; }
   .eval-facts h4 { font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-muted); margin-bottom: 8px; }
-  .eval-fact { font-size: 12px; padding: 8px 10px; border-radius: 10px; background: #f8fafc; border: 1px solid var(--border); margin-bottom: 8px; }
-  .eval-src { font-size: 12px; color: var(--text-muted); margin-top: 8px; }
+.eval-fact { font-size: 12px; padding: 8px 10px; border-radius: 10px; background: #f8fafc; border: 1px solid var(--border); margin-bottom: 8px; }
+.eval-src { font-size: 12px; color: var(--text-muted); margin-top: 8px; }
+.eval-mini-grid { display:grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap:8px; margin-top:12px; }
+.eval-mini-card { border:1px solid var(--border); border-radius:10px; padding:10px 12px; background:#fff; }
+.eval-mini-card .k { font-size:11px; color:var(--text-muted); text-transform:uppercase; letter-spacing:.04em; }
+.eval-mini-card .v { font-size:16px; font-weight:800; margin-top:4px; }
+.eval-summary-grid { display:grid; grid-template-columns: 1fr 1fr; gap:12px; margin-top:12px; }
+.eval-summary-panel { border:1px solid var(--border); border-radius:10px; padding:12px; background:#fff; }
+.eval-summary-panel h4 { font-size:11px; text-transform:uppercase; letter-spacing:.05em; color:var(--text-muted); margin-bottom:8px; }
   /* Client mode — hide owner-only sections */
   body.client-mode #card-tests,
   body.client-mode #card-evals,
@@ -189,9 +196,10 @@
         </div>
         <button class="secondary" style="width:auto;margin:0;padding:8px 12px;" onclick="hideEvalOverlay()">Close</button>
       </div>
-      <div id="eval-detail-src" class="eval-src"></div>
-      <div id="eval-detail-answer" class="eval-answer-box"></div>
-      <div class="eval-facts">
+<div id="eval-detail-src" class="eval-src"></div>
+<div id="eval-detail-answer" class="eval-answer-box"></div>
+<div id="eval-detail-metrics" class="eval-mini-grid"></div>
+<div class="eval-facts">
         <div class="panel">
           <h4>Key Facts Present</h4>
           <div id="eval-detail-present"></div>
@@ -629,8 +637,9 @@
           <span class="eval-pill" title="Given the retrieved context, did the bot include the key facts?"><span>Answer</span><span id="score-answer" style="margin-left:auto;font-weight:900;"></span></span>
           <span class="eval-pill" title="For unanswerable tests, did the bot refuse or say it doesn't know?"><span>IDK</span><span id="score-idk" style="margin-left:auto;font-weight:900;"></span></span>
         </div>
-        <div id="eval-meaning" style="margin-top:10px; font-size:12px; color:var(--text-muted); line-height:1.5;"></div>
-      </div>
+<div id="eval-meaning" style="margin-top:10px; font-size:12px; color:var(--text-muted); line-height:1.5;"></div>
+<div id="eval-summary" class="eval-summary-grid" style="display:none;"></div>
+</div>
 
       <div id="eval-results" style="display:none; margin-top:12px;">
         <table style="border:1px solid var(--border); border-radius:12px; overflow:hidden;">
@@ -638,10 +647,11 @@
             <tr>
               <th>Difficulty</th>
               <th>Question</th>
-              <th>Retrieval</th>
-              <th>Answer</th>
-              <th>IDK</th>
-              <th></th>
+<th>Retrieval</th>
+<th>Answer</th>
+<th>IDK</th>
+<th>Diagnosis</th>
+<th></th>
             </tr>
           </thead>
           <tbody id="eval-body"></tbody>
@@ -2293,6 +2303,7 @@
     meta.innerHTML = '';
     const pills = [
       { label: 'Difficulty', value: row.difficulty || '—' },
+      { label: 'Type', value: row.question_type || '—' },
       { label: 'Expect', value: (row.expect && row.expect.type) ? row.expect.type : '—' },
       { label: 'Retrieval', value: row.checks?.retrieval === true ? 'PASS' : row.checks?.retrieval === false ? 'FAIL' : '—' },
       { label: 'Answer', value: row.checks?.answer === true ? 'PASS' : row.checks?.answer === false ? 'FAIL' : '—' },
@@ -2311,6 +2322,23 @@
 
     const ansEl = document.getElementById('eval-detail-answer');
     ansEl.textContent = row.answer?.text || '';
+
+    const metricsEl = document.getElementById('eval-detail-metrics');
+    metricsEl.innerHTML = '';
+    const metricCards = [
+      { k: 'Diagnosis', v: row.diagnosis || 'pass' },
+      { k: 'Retrieval Score', v: row.retrieve?.score != null ? `${Number(row.retrieve.score).toFixed(2)}` : '—' },
+      { k: 'Avg Precision', v: row.retrieve?.metrics?.average_precision != null ? `${Number(row.retrieve.metrics.average_precision).toFixed(2)}` : '—' },
+      { k: 'Precision@3', v: row.retrieve?.metrics?.precision_at_3 != null ? `${Number(row.retrieve.metrics.precision_at_3).toFixed(2)}` : '—' },
+      { k: 'Faithfulness', v: row.answer?.metrics?.faithfulness != null ? `${Number(row.answer.metrics.faithfulness).toFixed(2)}` : '—' },
+      { k: 'Answer Relevance', v: row.answer?.metrics?.answer_relevance != null ? `${Number(row.answer.metrics.answer_relevance).toFixed(2)}` : '—' },
+    ];
+    metricCards.forEach(m => {
+      const card = document.createElement('div');
+      card.className = 'eval-mini-card';
+      card.innerHTML = `<div class="k">${escapeHtml(m.k)}</div><div class="v">${escapeHtml(String(m.v))}</div>`;
+      metricsEl.appendChild(card);
+    });
 
     const pres = document.getElementById('eval-detail-present');
     const miss = document.getElementById('eval-detail-missing');
@@ -2381,6 +2409,26 @@
     return 'Looks healthy. If you want a higher score, increase the number of “hard/very hard” questions and focus on the failures below.';
   }
 
+  function _renderEvalSummary(summary) {
+    const wrap = document.getElementById('eval-summary');
+    if (!wrap) return;
+    const diag = summary?.diagnosis_counts || {};
+    const qtypes = summary?.question_type_counts || {};
+    const diagRows = Object.entries(diag).sort((a,b)=>b[1]-a[1]).map(([k,v]) => `<div class="eval-fact">${escapeHtml(k)}: ${Number(v)}</div>`).join('') || '<div class="eval-fact">No diagnostics yet.</div>';
+    const typeRows = Object.entries(qtypes).sort((a,b)=>b[1]-a[1]).map(([k,v]) => `<div class="eval-fact">${escapeHtml(k)}: ${Number(v)}</div>`).join('') || '<div class="eval-fact">No question mix yet.</div>';
+    wrap.innerHTML = `
+      <div class="eval-summary-panel">
+        <h4>Failure Mix</h4>
+        ${diagRows}
+      </div>
+      <div class="eval-summary-panel">
+        <h4>Question Mix</h4>
+        ${typeRows}
+      </div>
+    `;
+    wrap.style.display = 'grid';
+  }
+
   async function generateEvalSet(strategy) {
     const db = document.getElementById('eval-db')?.value || localStorage.getItem('adminDb') || '';
     const count = Number(document.getElementById('eval-count')?.value || 12);
@@ -2408,6 +2456,7 @@
     showStatus('eval', `Running eval suite (${mode})...`, 'loading', true);
     document.getElementById('eval-results').style.display = 'none';
     document.getElementById('eval-scores').style.display = 'none';
+    document.getElementById('eval-summary').style.display = 'none';
     try {
       const r = await authFetch(`${API}/admin/evals/run`, {
         method: 'POST',
@@ -2423,6 +2472,7 @@
       document.getElementById('score-idk').textContent = `${d.scores?.idk ?? '—'}/10`;
       document.getElementById('eval-meaning').textContent = _renderEvalMeaning(d.scores, d.mode);
       document.getElementById('eval-scores').style.display = 'block';
+      _renderEvalSummary(d.summary || {});
 
       const body = document.getElementById('eval-body');
       body.innerHTML = '';
@@ -2435,6 +2485,7 @@
           <td>${_badge(row.checks?.retrieval)}</td>
           <td>${_badge(row.checks?.answer)}</td>
           <td>${_badge(row.checks?.idk)}</td>
+          <td style="font-size:11px;color:var(--text-muted);font-weight:700;">${escapeHtml(row.diagnosis || 'pass')}</td>
           <td style="text-align:right;">
             <button class="secondary" style="width:auto;margin:0;padding:6px 10px;font-size:11px;" onclick="showEvalOverlay(window._lastEvalResults[${idx}])">View</button>
           </td>

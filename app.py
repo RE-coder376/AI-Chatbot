@@ -3710,6 +3710,13 @@ def _score_0_10(passed: int, total: int) -> float:
     return round(10.0 * (passed / total), 1)
 
 
+def _mean_score_0_10(values: list[float]) -> float:
+    vals = [float(v) for v in values if v is not None]
+    if not vals:
+        return 0.0
+    return round(10.0 * (sum(vals) / len(vals)), 1)
+
+
 def _eval_docs_preview(doc_rows: list[dict], limit: int = 3000) -> str:
     parts: list[str] = []
     for row in doc_rows or []:
@@ -4004,6 +4011,9 @@ async def admin_run_evals(request: Request):
     answer_pass = 0
     idk_total = 0
     idk_pass = 0
+    retrieval_metric_values: list[float] = []
+    answer_metric_values: list[float] = []
+    idk_metric_values: list[float] = []
 
     for t in tests:
         if not isinstance(t, dict):
@@ -4066,6 +4076,12 @@ async def admin_run_evals(request: Request):
                     "first_relevant_rank": retrieval_eval.get("first_relevant_rank"),
                     "ranked_verdicts": retrieval_eval.get("ranked_verdicts", []),
                 }
+                row["retrieve"]["score"] = round(
+                    0.7 * float(retrieval_eval.get("average_precision") or 0.0)
+                    + 0.3 * float(retrieval_eval.get("precision_at_3") or 0.0),
+                    3,
+                )
+                retrieval_metric_values.append(row["retrieve"]["score"])
                 row["checks"]["retrieval"] = (retrieval_eval["status"] == "PASS")
                 if retrieval_eval.get("reason"):
                     row["retrieve"]["reason"] = retrieval_eval["reason"]
@@ -4098,6 +4114,12 @@ async def admin_run_evals(request: Request):
                             "first_relevant_rank": retrieval_eval.get("first_relevant_rank"),
                             "ranked_verdicts": retrieval_eval.get("ranked_verdicts", []),
                         }
+                        row["retrieve"]["score"] = round(
+                            0.7 * float(retrieval_eval.get("average_precision") or 0.0)
+                            + 0.3 * float(retrieval_eval.get("precision_at_3") or 0.0),
+                            3,
+                        )
+                        retrieval_metric_values.append(row["retrieve"]["score"])
                         row["checks"]["retrieval"] = (retrieval_eval["status"] == "PASS")
                         if retrieval_eval.get("reason"):
                             row["retrieve"]["reason"] = retrieval_eval["reason"]
@@ -4128,6 +4150,8 @@ async def admin_run_evals(request: Request):
                     "token_hits": answer_metrics["token_hits"],
                     "statement_count": len(answer_metrics["statements"]),
                 }
+                row["answer"]["score"] = 1.0 if row["checks"]["idk"] else 0.0
+                idk_metric_values.append(row["answer"]["score"])
                 if idk_reason:
                     row["answer"]["reason"] = idk_reason
                 if row["checks"]["idk"]:
@@ -4156,6 +4180,12 @@ async def admin_run_evals(request: Request):
                     "token_hits": answer_metrics["token_hits"],
                     "statement_count": len(answer_metrics["statements"]),
                 }
+                row["answer"]["score"] = round(
+                    0.6 * float(answer_metrics["faithfulness"] or 0.0)
+                    + 0.4 * float(answer_metrics["answer_relevance"] or 0.0),
+                    3,
+                )
+                answer_metric_values.append(row["answer"]["score"])
                 if key_facts:
                     present = []
                     missing = []
@@ -4186,11 +4216,13 @@ async def admin_run_evals(request: Request):
 
         rows.append(row)
 
-    retrieval_score = _score_0_10(retrieval_pass, retrieval_total)
-    answer_score = _score_0_10(answer_pass, answer_total) if mode in ("chat", "both") else 0.0
-    idk_score = _score_0_10(idk_pass, idk_total) if mode in ("chat", "both") else 0.0
+    retrieval_score = _mean_score_0_10(retrieval_metric_values) if mode in ("retrieve", "both") else _score_0_10(retrieval_pass, retrieval_total)
+    answer_score = _mean_score_0_10(answer_metric_values) if mode in ("chat", "both") else 0.0
+    idk_score = _mean_score_0_10(idk_metric_values) if mode in ("chat", "both") else 0.0
 
     overall = round(0.45 * retrieval_score + 0.45 * answer_score + 0.10 * idk_score, 1) if mode in ("chat", "both") else retrieval_score
+    diagnosis_counts = dict(Counter((row.get("diagnosis") or "pass") for row in rows))
+    question_type_counts = dict(Counter((row.get("question_type") or "unknown") for row in rows))
 
     run_id = _now_run_id()
     run_payload = {
@@ -4199,6 +4231,7 @@ async def admin_run_evals(request: Request):
         "mode": mode,
         "scores": {"overall": overall, "retrieval": retrieval_score, "answer": answer_score, "idk": idk_score},
         "counts": {"total": len(rows), "retrieval_total": retrieval_total, "answer_total": answer_total, "idk_total": idk_total},
+        "summary": {"diagnosis_counts": diagnosis_counts, "question_type_counts": question_type_counts},
         "generated_at": datetime.utcnow().isoformat() + "Z",
         "results": rows,
     }

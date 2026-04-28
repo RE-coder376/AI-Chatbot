@@ -438,6 +438,24 @@ def test_chunk_topic_candidates_filter_transfer_log_topics(monkeypatch):
     assert items == []
 
 
+def test_make_chunk_question_prefers_process_wording_for_step_chunks():
+    q = eval_v1._make_chunk_question(
+        "Spec And Build Your First Tool",
+        "Step 1: write the spec. Step 2: review it. Step 3: build and verify the tool.",
+    )
+
+    assert q == "What is the process for Spec And Build Your First Tool?"
+
+
+def test_make_chunk_question_skips_quiz_like_topics():
+    q = eval_v1._make_chunk_question(
+        "Chapter Quiz",
+        "Prompt 1: answer the quiz questions and review your work.",
+    )
+
+    assert q == ""
+
+
 def test_database_dir_is_project_relative():
     expected = eval_v1.EVALS_DIR.parent / "databases"
     assert eval_v1.DATABASES_DIR == expected

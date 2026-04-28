@@ -500,14 +500,29 @@ def _make_chunk_question(topic: str, chunk_text: str) -> str:
     topic = _normalize_question(topic)
     if not topic:
         return ""
-    if re.search(r"\bchapter\s+\d+\b", topic, re.I):
-        question = f"Summarize {topic}."
-    elif re.search(r"\bcompare|difference|versus|vs\.?\b", topic, re.I):
+    text = _clean_chunk_text(chunk_text).lower()
+    low_topic = topic.lower()
+    if re.search(r"\b(quiz|exercise|worksheet|assignment|prompt \d+|module \d+)\b", low_topic):
+        return ""
+    if re.search(r"\b(what you are learning|exercise \d+|prompt \d+|producer vs consumer)\b", text):
+        return ""
+    if re.search(r"\b(step 1|step 2|follow these steps|to create|to build|to add|to configure|to set up)\b", text):
+        if re.search(r"\bchapter\s+\d+\b", low_topic, re.I):
+            question = f"What is the process covered in {topic}?"
+        elif len(topic.split()) <= 4:
+            question = f"How does {topic} work?"
+        else:
+            question = f"What is the process for {topic}?"
+    elif re.search(r"\bcompare|difference|versus|vs\.?\b", low_topic, re.I):
         question = f"What is the difference explained in {topic}?"
+    elif re.search(r"\bchapter\s+\d+\b", low_topic, re.I):
+        question = f"What is the main idea of {topic}?"
     elif len(topic.split()) <= 4:
         question = f"What is {topic}?"
+    elif re.search(r"\b(policy|workflow|system|framework|review|management|configuration)\b", low_topic):
+        question = f"How does {topic} work?"
     else:
-        question = f"What should I know about {topic}?"
+        question = f"What is the main idea of {topic}?"
     return question if _looks_like_good_question(question) else ""
 
 
