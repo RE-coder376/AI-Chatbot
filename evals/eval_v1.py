@@ -11,6 +11,8 @@ from pathlib import Path
 
 import requests
 
+EVALS_DIR = Path(__file__).resolve().parent
+
 
 IDK_SIGS = (
     "i don't have",
@@ -71,6 +73,10 @@ class EvalItem:
     retrieve_sources: list[str] = field(default_factory=list)
     selection_bucket: str = ""
     candidate_key: str = ""
+
+
+class EvalAuthError(RuntimeError):
+    pass
 
 
 def _read_json(path: Path):
@@ -195,25 +201,59 @@ def _load_gap_candidates(db_name: str) -> list[EvalItem]:
     return items
 
 
-def _load_doc_qa_fallbacks(db_name: str, limit: int) -> list[EvalItem]:
+def _load_document_rows_via_chroma(db_name: str) -> list[tuple[str, str]]:
+    db_dir = Path("databases") / db_name
+    try:
+        import chromadb
+
+        client = chromadb.PersistentClient(path=str(db_dir))
+        rows: list[tuple[str, str]] = []
+        for collection in client.list_collections():
+            try:
+                payload = collection.get(include=["documents"])
+            except Exception:
+                continue
+            ids = payload.get("ids") or []
+            documents = payload.get("documents") or []
+            for row_id, doc in zip(ids, documents):
+                if isinstance(doc, str) and doc.strip():
+                    rows.append((str(row_id), doc))
+        return rows
+    except Exception:
+        return []
+
+
+def _load_document_rows_via_sqlite(db_name: str) -> list[tuple[str, str]]:
     db_path = Path("databases") / db_name / "chroma.sqlite3"
     if not db_path.exists():
         return []
-    items: list[EvalItem] = []
     try:
         conn = sqlite3.connect(db_path)
         cur = conn.cursor()
         rows = cur.execute(
-            "SELECT string_value FROM embedding_metadata "
-            "WHERE key='chroma:document' AND string_value LIKE 'Q:%A:%' LIMIT ?",
-            (max(limit * 4, 20),),
+            "SELECT id, string_value FROM embedding_metadata "
+            "WHERE key='chroma:document' ORDER BY id",
         ).fetchall()
         conn.close()
+        return [(str(row_id), raw_text or "") for row_id, raw_text in rows]
     except Exception:
         return []
 
-    for row in rows:
-        text = row[0] or ""
+
+def _load_document_rows(db_name: str) -> list[tuple[str, str]]:
+    rows = _load_document_rows_via_chroma(db_name)
+    if rows:
+        return rows
+    return _load_document_rows_via_sqlite(db_name)
+
+
+def _load_doc_qa_fallbacks(db_name: str, limit: int) -> list[EvalItem]:
+    items: list[EvalItem] = []
+    rows = _load_document_rows(db_name)
+    if not rows:
+        return items
+
+    for _, text in rows:
         match = re.search(r"Q:\s*(.+?)\s*A:\s*(.+)", text, re.S | re.I)
         if not match:
             continue
@@ -237,7 +277,7 @@ def _load_doc_qa_fallbacks(db_name: str, limit: int) -> list[EvalItem]:
 
 
 def _chunk_state_file(db_name: str) -> Path:
-    return Path("evals") / "state" / f"{db_name}_rotation.json"
+    return EVALS_DIR / "state" / f"{db_name}_rotation.json"
 
 
 def _load_rotation_state(db_name: str) -> dict:
@@ -333,18 +373,8 @@ def _make_chunk_question(topic: str, chunk_text: str) -> str:
 
 
 def _load_chunk_topic_candidates(db_name: str, limit: int) -> list[EvalItem]:
-    db_path = Path("databases") / db_name / "chroma.sqlite3"
-    if not db_path.exists():
-        return []
-    try:
-        conn = sqlite3.connect(db_path)
-        cur = conn.cursor()
-        rows = cur.execute(
-            "SELECT id, string_value FROM embedding_metadata "
-            "WHERE key='chroma:document' ORDER BY id",
-        ).fetchall()
-        conn.close()
-    except Exception:
+    rows = _load_document_rows(db_name)
+    if not rows:
         return []
 
     items: list[EvalItem] = []
@@ -406,6 +436,10 @@ def _preflight_retrieve(base_url: str, password: str, item: EvalItem) -> EvalIte
             json={"password": password, "question": item.q},
             timeout=60,
         )
+        if res.status_code in (401, 403):
+            raise EvalAuthError(
+                "Owner auth failed during eval preflight. Pass the owner password used for /debug/retrieve."
+            )
         if res.status_code != 200:
             return item
         data = res.json() or {}
@@ -414,6 +448,8 @@ def _preflight_retrieve(base_url: str, password: str, item: EvalItem) -> EvalIte
         item.retrieve_context_preview = str(data.get("context_preview") or "")
         item.retrieve_sources = list(data.get("sources") or [])[:5]
         return item
+    except EvalAuthError:
+        raise
     except Exception:
         return item
 
@@ -613,6 +649,7 @@ def _grade_answer(item: EvalItem, answer_text: str) -> tuple[str, str | None, fl
     reference_tokens = _token_set(_reference_text_for(item))
     answer_tokens = _token_set(answer_text)
     token_hits = len(reference_tokens & answer_tokens)
+    required_hits = max(4, min(8, (len(reference_tokens) + 4) // 5)) if reference_tokens else 4
 
     if item.expect == "ANSWER":
         if answer_class != "ANSWER":
@@ -621,7 +658,7 @@ def _grade_answer(item: EvalItem, answer_text: str) -> tuple[str, str | None, fl
             return "FAIL", "Answer was too short to be trustworthy.", overlap
         if item.retrieve_doc_count <= 0 or item.retrieve_context_length < 80:
             return "FAIL", "Answer was produced without enough retrieved tenant context.", overlap
-        if overlap < 0.08 and token_hits < 3:
+        if overlap < 0.12 or token_hits < required_hits:
             return "FAIL", "Answer did not align closely enough with the retrieved tenant reference.", overlap
         return "PASS", None, overlap
 

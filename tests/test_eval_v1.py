@@ -1,4 +1,5 @@
 from pathlib import Path
+import tempfile
 
 from evals import eval_v1
 
@@ -8,9 +9,15 @@ def _write_json(path: Path, payload) -> None:
     path.write_text(eval_v1.json.dumps(payload, indent=2), encoding="utf-8")
 
 
-def test_collect_seed_items_filters_generic_noise_and_keeps_curated(monkeypatch, tmp_path):
-    monkeypatch.chdir(tmp_path)
-    db_dir = tmp_path / "databases" / "tenant_a"
+def _scratch_dir() -> Path:
+    return Path(tempfile.mkdtemp())
+
+
+def test_collect_seed_items_filters_generic_noise_and_keeps_curated(monkeypatch):
+    temp_path = _scratch_dir()
+    monkeypatch.chdir(temp_path)
+    monkeypatch.setattr(eval_v1, "_load_document_rows", lambda _db_name: [])
+    db_dir = temp_path / "databases" / "tenant_a"
 
     _write_json(
         db_dir / "faqs.json",
@@ -49,9 +56,11 @@ def test_collect_seed_items_filters_generic_noise_and_keeps_curated(monkeypatch,
     assert "What is 2+2?" not in questions
 
 
-def test_collect_eval_items_keeps_only_grounded_candidates(monkeypatch, tmp_path):
-    monkeypatch.chdir(tmp_path)
-    db_dir = tmp_path / "databases" / "tenant_b"
+def test_collect_eval_items_keeps_only_grounded_candidates(monkeypatch):
+    temp_path = _scratch_dir()
+    monkeypatch.chdir(temp_path)
+    monkeypatch.setattr(eval_v1, "_load_document_rows", lambda _db_name: [])
+    db_dir = temp_path / "databases" / "tenant_b"
 
     _write_json(
         db_dir / "analytics.json",
@@ -86,9 +95,11 @@ def test_collect_eval_items_keeps_only_grounded_candidates(monkeypatch, tmp_path
     assert "What is your CEO's favorite color?" not in questions
 
 
-def test_faq_items_still_need_retrieval_support(monkeypatch, tmp_path):
-    monkeypatch.chdir(tmp_path)
-    db_dir = tmp_path / "databases" / "tenant_c"
+def test_faq_items_still_need_retrieval_support(monkeypatch):
+    temp_path = _scratch_dir()
+    monkeypatch.chdir(temp_path)
+    monkeypatch.setattr(eval_v1, "_load_document_rows", lambda _db_name: [])
+    db_dir = temp_path / "databases" / "tenant_c"
 
     _write_json(
         db_dir / "faqs.json",
@@ -142,8 +153,10 @@ def test_build_summary_does_not_fake_idk_score():
     assert summary["score_meanings"]["idk"] == "Not exercised in this run."
 
 
-def test_finalize_selection_uses_stable_core_and_rotates_discovery(monkeypatch, tmp_path):
-    monkeypatch.chdir(tmp_path)
+def test_finalize_selection_uses_stable_core_and_rotates_discovery(monkeypatch):
+    temp_path = _scratch_dir()
+    monkeypatch.chdir(temp_path)
+    monkeypatch.setattr(eval_v1, "_load_document_rows", lambda _db_name: [])
 
     core_pool = [
         eval_v1.EvalItem(q="What is AgentFactory?", source="faq", frequency=1000, difficulty="easy", candidate_key="faq::1"),
@@ -168,3 +181,25 @@ def test_finalize_selection_uses_stable_core_and_rotates_discovery(monkeypatch, 
     assert first_discovery != second_discovery
     assert len(first_discovery) == 2
     assert len(second_discovery) == 2
+
+
+def test_chunk_state_file_is_module_relative():
+    path = eval_v1._chunk_state_file("tenant_x")
+
+    assert path.parent == eval_v1.EVALS_DIR / "state"
+    assert path.name == "tenant_x_rotation.json"
+
+
+def test_preflight_retrieve_raises_on_owner_auth_failure(monkeypatch):
+    class FakeResponse:
+        status_code = 403
+
+    monkeypatch.setattr(eval_v1.requests, "post", lambda *args, **kwargs: FakeResponse())
+
+    item = eval_v1.EvalItem(q="What is AgentFactory?")
+
+    try:
+        eval_v1._preflight_retrieve("http://example.test", "wrong", item)
+        assert False, "Expected EvalAuthError"
+    except eval_v1.EvalAuthError as exc:
+        assert "Owner auth failed" in str(exc)
