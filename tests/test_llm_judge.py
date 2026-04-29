@@ -215,3 +215,4 @@ def test_judge_recalibrates_to_answer_class_transition(monkeypatch):
     assert verdict.likely_failure_source == "answer_generation_drift"
     assert verdict.exact_failure_step == "answer_class_transition"
     assert verdict.confidence is not None and verdict.confidence >= 0.88
+    assert verdict.self_check_status == "deterministic_confirmed"

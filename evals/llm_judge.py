@@ -421,6 +421,12 @@ def judge_answer(
             guard_decisions=guard_decisions,
             answer_artifacts=answer_artifacts,
         )
+        evidence_step, _ = _strongest_failure_step(guard_decisions, answer_artifacts, retrieval_diagnosis=retrieval_diagnosis)
+        if evidence_step:
+            verdict.self_check_status = "deterministic_confirmed"
+            verdict.self_check_note = "Trace and guard evidence directly confirm the failure step."
+            _write_cache(cache_key, verdict)
+            return verdict
         recheck_payload = _recheck_payload(
             question,
             context,
