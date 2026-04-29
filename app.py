@@ -3749,6 +3749,11 @@ def _filter_eval_tests_for_tenant(tests: list[dict], db_name: str) -> tuple[list
         kept.append(test)
     return kept, dropped
 
+
+def _owner_eval_judge_key(data: dict | None) -> str:
+    request_key = str((data or {}).get("judge_key") or "").strip()
+    return request_key or os.getenv("JUDGE_API_KEY", "").strip()
+
 def _norm_text(s: str) -> str:
     s = (s or "").lower()
     s = re.sub(r"[^a-z0-9\\s]+", " ", s)
@@ -4172,7 +4177,7 @@ async def admin_run_evals(request: Request):
     retrieval_metric_values: list[float] = []
     answer_metric_values: list[float] = []
     idk_metric_values: list[float] = []
-    judge_key = os.getenv("JUDGE_API_KEY", "").strip()
+    judge_key = _owner_eval_judge_key(data)
     prompt_snapshot = ""
     if judge_key:
         prompt_snapshot = "\n".join(
@@ -4260,6 +4265,7 @@ async def admin_run_evals(request: Request):
                     row["retrieve"]["reason"] = retrieval_eval["reason"]
                 if row["checks"]["retrieval"]:
                     retrieval_pass += 1
+                row["retrieval_status"] = "PASS" if row["checks"]["retrieval"] else "FAIL"
 
         if mode in ("chat", "both"):
             try:
@@ -4333,6 +4339,7 @@ async def admin_run_evals(request: Request):
                     row["answer"]["reason"] = idk_reason
                 if row["checks"]["idk"]:
                     idk_pass += 1
+                row["idk_status"] = "PASS" if row["checks"]["idk"] else "FAIL"
 
             if etype == "ANSWER":
                 answer_total += 1
@@ -4396,6 +4403,7 @@ async def admin_run_evals(request: Request):
                     row["answer"]["reason"] = answer_reason
                 if row["checks"]["answer"]:
                     answer_pass += 1
+                row["answer_status"] = "PASS" if row["checks"]["answer"] else "FAIL"
 
         if row["checks"].get("retrieval") is False:
             row["diagnosis"] = "retrieval_incomplete" if row["retrieve"].get("metrics", {}).get("context_recall", 1) < 0.5 else "weak_top_k"
@@ -4409,6 +4417,7 @@ async def admin_run_evals(request: Request):
             row["diagnosis"] = "answer_irrelevant"
         elif row["checks"].get("idk") is False:
             row["diagnosis"] = "idk_mismatch"
+        row["overall_status"] = "FAIL" if any(v is False for v in row["checks"].values()) else ("PASS" if any(v is True for v in row["checks"].values()) else "")
         row["likely_cause"] = _eval_likely_cause(row)
 
         rows.append(row)

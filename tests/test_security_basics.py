@@ -141,8 +141,13 @@ def test_owner_gates_evals_run_and_smoke_owner_run(app_module, client, two_tenan
         def similarity_search(self, q, k):
             return [_Doc("https://example.com/source1")]
 
+    async def _fake_eval_retrieve_docs(q, tenant_db, k=8):
+        return (1, [{"source": "https://example.com/source1", "preview": "about this topic"}], ["https://example.com/source1"])
+
     monkeypatch.setattr(app_module, "_get_or_create_db", lambda name: _DummyDB(), raising=True)
     monkeypatch.setattr(app_module, "_owner_eval_blocker", lambda name: "", raising=True)
+    monkeypatch.setattr(app_module, "_filter_eval_tests_for_tenant", lambda tests, db_name: (tests, 0), raising=True)
+    monkeypatch.setattr(app_module, "_eval_retrieve_docs", _fake_eval_retrieve_docs, raising=True)
 
     ok = client.post(
         "/admin/evals/run",
@@ -161,6 +166,7 @@ def test_owner_gates_evals_run_and_smoke_owner_run(app_module, client, two_tenan
     data = ok.json()
     assert data["db"] == "a"
     assert "scores" in data and "overall" in data["scores"]
+    assert data["results"][0]["overall_status"] in ("PASS", "FAIL")
 
 
 def test_owner_evals_run_fallback_prefers_saved_or_kb_strategy(app_module, client, two_tenants, monkeypatch):
@@ -194,3 +200,9 @@ def test_owner_evals_run_fallback_prefers_saved_or_kb_strategy(app_module, clien
         json={"password": "ownerpw", "db_name": "a", "mode": "retrieve"},
     )
     assert seen["strategy"] == "kb"
+
+
+def test_owner_eval_judge_key_prefers_request_value(app_module, monkeypatch):
+    monkeypatch.setattr(app_module.os, "getenv", lambda key, default="": "env-judge-key" if key == "JUDGE_API_KEY" else default, raising=True)
+    assert app_module._owner_eval_judge_key({"judge_key": "request-key"}) == "request-key"
+    assert app_module._owner_eval_judge_key({}) == "env-judge-key"
