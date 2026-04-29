@@ -4132,6 +4132,7 @@ async def admin_run_evals(request: Request):
 
     # Allow explicit test injection (used by pytest). Not exposed in admin UI.
     tests = data.get("tests")
+    eval_set = {}
     if not isinstance(tests, list) or not tests:
         eval_set = _load_eval_set(db_name)
         tests = eval_set.get("tests") if isinstance(eval_set, dict) else None
@@ -4148,7 +4149,12 @@ async def admin_run_evals(request: Request):
     tenant_db = _get_or_create_db(db_name)
 
     if not isinstance(tests, list) or not tests:
-        strategy = (data.get("strategy") or "analytics").strip().lower()
+        saved_strategy = ""
+        if isinstance(eval_set, dict):
+            saved_strategy = str(eval_set.get("strategy") or "").strip().lower()
+        strategy = (data.get("strategy") or saved_strategy or "kb").strip().lower()
+        if strategy not in ("kb", "analytics"):
+            strategy = "kb"
         tests = await _build_owner_eval_tests(base_url, password, db_name, count=count, strategy=strategy)
         tests, dropped = _filter_eval_tests_for_tenant(tests, db_name)
         if dropped:

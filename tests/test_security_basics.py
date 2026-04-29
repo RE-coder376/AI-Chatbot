@@ -161,3 +161,36 @@ def test_owner_gates_evals_run_and_smoke_owner_run(app_module, client, two_tenan
     data = ok.json()
     assert data["db"] == "a"
     assert "scores" in data and "overall" in data["scores"]
+
+
+def test_owner_evals_run_fallback_prefers_saved_or_kb_strategy(app_module, client, two_tenants, monkeypatch):
+    token_resp = client.get("/admin/csrf-token", headers={"Authorization": "Bearer ownerpw", "X-Admin-DB": "a"})
+    assert token_resp.status_code == 200
+    token = token_resp.json()["csrf_token"]
+
+    class _DummyDB:
+        def similarity_search(self, q, k):
+            return []
+
+    seen = {}
+
+    async def _fake_build(base_url, owner_password, db_name, count, strategy="kb"):
+        seen["strategy"] = strategy
+        return [{"id": "t1", "difficulty": "easy", "q": "What is AgentFactory?", "expect": {"type": "ANSWER", "expected_source": ""}}]
+
+    async def _fake_eval_retrieve_docs(q, tenant_db, k=8):
+        return (0, [], [])
+
+    monkeypatch.setattr(app_module, "_get_or_create_db", lambda name: _DummyDB(), raising=True)
+    monkeypatch.setattr(app_module, "_owner_eval_blocker", lambda name: "", raising=True)
+    monkeypatch.setattr(app_module, "_load_eval_set", lambda name: {"strategy": "kb", "tests": []}, raising=True)
+    monkeypatch.setattr(app_module, "_build_owner_eval_tests", _fake_build, raising=True)
+    monkeypatch.setattr(app_module, "_filter_eval_tests_for_tenant", lambda tests, db_name: (tests, 0), raising=True)
+    monkeypatch.setattr(app_module, "_eval_retrieve_docs", _fake_eval_retrieve_docs, raising=True)
+
+    ok = client.post(
+        "/admin/evals/run",
+        headers={"Authorization": "Bearer ownerpw", "X-Admin-DB": "a", "X-CSRF-Token": token},
+        json={"password": "ownerpw", "db_name": "a", "mode": "retrieve"},
+    )
+    assert seen["strategy"] == "kb"
