@@ -11,7 +11,9 @@ def _write_json(path: Path, payload) -> None:
 
 
 def _scratch_dir() -> Path:
-    return Path(tempfile.mkdtemp())
+    path = Path("tests") / "_tmp" / next(tempfile._get_candidate_names())
+    path.mkdir(parents=True, exist_ok=True)
+    return path
 
 
 def test_collect_seed_items_filters_generic_noise_and_keeps_curated(monkeypatch):
@@ -73,6 +75,40 @@ def test_subscription_questions_are_not_globally_filtered(monkeypatch):
     items = eval_v1._collect_seed_items("tenant_subs", 10)
 
     assert [item.q for item in items] == ["How do I cancel my subscription plan?"]
+
+
+def test_load_analytics_candidates_filters_cross_tenant_pollution(monkeypatch):
+    temp_path = _scratch_dir()
+    monkeypatch.setattr(eval_v1, "DATABASES_DIR", temp_path / "databases")
+    db_dir = temp_path / "databases" / "agentfactory"
+
+    _write_json(
+        db_dir / "config.json",
+        {
+            "business_name": "AgentFactory by Panaversity",
+            "topics": "AI agent development, courses, pricing, curriculum, team",
+            "business_description": "Platform for learning to build AI agents.",
+        },
+    )
+    _write_json(
+        db_dir / "analytics.json",
+        {
+            "questions": {
+                "What is AgentFactory?": 5,
+                "What courses are available?": 4,
+                "Which laptop has the most RAM under $700?": 9,
+                "What are the top 3 highest rated anime of all time on MAL?": 7,
+            }
+        },
+    )
+
+    items = eval_v1._load_analytics_candidates("agentfactory")
+    questions = [item.q for item in items]
+
+    assert "What is AgentFactory?" in questions
+    assert "What courses are available?" in questions
+    assert "Which laptop has the most RAM under $700?" not in questions
+    assert "What are the top 3 highest rated anime of all time on MAL?" not in questions
 
 
 def test_collect_eval_items_keeps_only_grounded_candidates(monkeypatch):

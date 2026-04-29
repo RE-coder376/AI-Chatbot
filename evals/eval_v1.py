@@ -1,6 +1,7 @@
 import argparse
 import hashlib
 import json
+import logging
 import os
 import re
 import sqlite3
@@ -17,6 +18,7 @@ from services.config import get_config
 EVALS_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = EVALS_DIR.parent
 DATABASES_DIR = PROJECT_ROOT / "databases"
+logger = logging.getLogger(__name__)
 
 
 IDK_SIGS = (
@@ -195,16 +197,62 @@ def _load_faq_items(db_name: str) -> list[EvalItem]:
     return items
 
 
+def _analytics_candidates_path(db_name: str) -> Path:
+    db_dir = (DATABASES_DIR / db_name).resolve()
+    analytics_path = (db_dir / "analytics.json").resolve()
+    if analytics_path.parent != db_dir:
+        raise RuntimeError(f"Unsafe analytics path resolved for '{db_name}': {analytics_path}")
+    return analytics_path
+
+
+def _tenant_scope_tokens(db_name: str) -> set[str]:
+    cfg = get_config(db_name)
+    scope_text = " ".join(
+        [
+            str(cfg.get("business_name") or ""),
+            str(cfg.get("topics") or ""),
+            str(cfg.get("business_description") or ""),
+        ]
+    )
+    return _token_set(scope_text)
+
+
+def _is_tenant_relevant_question(question: str, db_name: str, scope_tokens: set[str] | None = None) -> bool:
+    q_tokens = _token_set(question)
+    if not q_tokens:
+        return False
+    scope_tokens = scope_tokens if scope_tokens is not None else _tenant_scope_tokens(db_name)
+    if not scope_tokens:
+        return True
+    overlap = q_tokens & scope_tokens
+    if overlap:
+        return True
+    generic_ok = {
+        "course", "courses", "program", "programs", "curriculum", "pricing", "price",
+        "enrollment", "enrolment", "team", "leader", "leadership", "support",
+        "contact", "chapter", "chapters", "module", "modules", "agent", "agents",
+        "education", "learning", "learn", "class", "classes", "subscription",
+        "subscriptions", "plan", "plans", "cancel", "billing",
+    }
+    return bool(q_tokens & generic_ok)
+
+
 def _load_analytics_candidates(db_name: str) -> list[EvalItem]:
-    db_dir = DATABASES_DIR / db_name
-    analytics = _read_json(db_dir / "analytics.json") or {}
+    analytics_path = _analytics_candidates_path(db_name)
+    logger.info("[EVAL] Loading analytics candidates for '%s' from %s", db_name, analytics_path)
+    analytics = _read_json(analytics_path) or {}
     questions = Counter()
+    scope_tokens = _tenant_scope_tokens(db_name)
+    offscope_filtered = 0
 
     q_counts = analytics.get("questions") or {}
     if isinstance(q_counts, dict):
         for q, count in q_counts.items():
             qn = _normalize_question(q)
             if not qn or not _looks_like_good_question(qn):
+                continue
+            if not _is_tenant_relevant_question(qn, db_name, scope_tokens):
+                offscope_filtered += 1
                 continue
             try:
                 questions[qn] += int(count or 0)
@@ -219,7 +267,18 @@ def _load_analytics_candidates(db_name: str) -> list[EvalItem]:
             qn = _normalize_question(entry.get("q", ""))
             if not qn or not _looks_like_good_question(qn):
                 continue
+            if not _is_tenant_relevant_question(qn, db_name, scope_tokens):
+                offscope_filtered += 1
+                continue
             questions[qn] += 1
+
+    if offscope_filtered:
+        logger.warning(
+            "[EVAL] Filtered %s off-tenant analytics questions for '%s' from %s",
+            offscope_filtered,
+            db_name,
+            analytics_path,
+        )
 
     items = [
         EvalItem(
