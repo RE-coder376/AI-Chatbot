@@ -237,6 +237,11 @@ def _is_tenant_relevant_question(question: str, db_name: str, scope_tokens: set[
     return bool(q_tokens & generic_ok)
 
 
+def _is_tenant_relevant_text(text: str, db_name: str, scope_tokens: set[str] | None = None) -> bool:
+    qn = _normalize_question(text)
+    return bool(qn) and _is_tenant_relevant_question(qn, db_name, scope_tokens)
+
+
 def _load_analytics_candidates(db_name: str) -> list[EvalItem]:
     analytics_path = _analytics_candidates_path(db_name)
     logger.info("[EVAL] Loading analytics candidates for '%s' from %s", db_name, analytics_path)

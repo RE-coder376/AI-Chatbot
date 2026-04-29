@@ -3791,15 +3791,22 @@ def _filter_eval_tests_for_tenant(tests: list[dict], db_name: str) -> tuple[list
             continue
         q = str(test.get("q") or "").strip()
         source = str(test.get("source") or "").strip().lower()
+        reference_text = str(test.get("reference_answer") or test.get("reference_preview") or "").strip()
+        question_in_scope = _eval_v1._is_tenant_relevant_text(q, db_name, scope_tokens)
+        reference_in_scope = _eval_v1._is_tenant_relevant_text(reference_text, db_name, scope_tokens) if reference_text else False
+        q_scope_overlap = bool(_eval_v1._token_set(q) & scope_tokens)
+        ref_scope_overlap = bool(_eval_v1._token_set(reference_text) & scope_tokens) if reference_text else False
         if source in {"chunk_topic", "embedded_qa", "faq", "knowledge_gap"}:
             if not _eval_v1._looks_like_good_question(q):
+                dropped += 1
+                continue
+            if not question_in_scope and reference_text and not reference_in_scope:
                 dropped += 1
                 continue
             kept.append(test)
             continue
         if source == "analytics":
-            q_tokens = _eval_v1._token_set(q)
-            if not q_tokens or not (q_tokens & scope_tokens):
+            if not q_scope_overlap and not ref_scope_overlap:
                 dropped += 1
                 continue
         elif not _eval_v1._is_tenant_relevant_eval_question(q, db_name):
@@ -4431,6 +4438,19 @@ async def admin_run_evals(request: Request):
                 )
                 judge_verdict = _eval_v1.JudgeVerdict(error="judge_disabled")
                 deterministic_status, _, _ = _eval_v1._grade_answer(eval_item, row["answer"]["text"] or "")
+                context_recall = float((row["retrieve"].get("metrics") or {}).get("context_recall") or 0.0)
+                if row["checks"].get("retrieval") is True:
+                    judge_retrieval_diagnosis = "retrieval_ok"
+                elif context_recall < 0.5:
+                    judge_retrieval_diagnosis = "retrieval_incomplete"
+                else:
+                    judge_retrieval_diagnosis = "weak_top_k"
+                answer_debug = (row["answer"].get("workflow_debug") or {})
+                guard_decisions = dict((answer_debug.get("guard_decisions") or {}))
+                answer_artifacts = dict((answer_debug.get("answer_artifacts") or {}))
+                guard_decisions["deterministic_retrieval_status"] = row.get("retrieval_status") or ""
+                guard_decisions["deterministic_retrieval_diagnosis"] = judge_retrieval_diagnosis
+                guard_decisions["deterministic_answer_class"] = _eval_v1._answer_class(row["answer"]["text"] or "")
                 should_judge = bool(judge_key) and (
                     deterministic_status != "PASS" or row["checks"].get("retrieval") is False
                 )
@@ -4443,10 +4463,10 @@ async def admin_run_evals(request: Request):
                         judge_key,
                         prompt_context=prompt_snapshot,
                         retrieval_metrics=row["retrieve"].get("metrics") or {},
-                        retrieval_diagnosis=row.get("diagnosis") or "",
+                        retrieval_diagnosis=judge_retrieval_diagnosis,
                         workflow_trace=_trace_summary_text(row["answer"].get("workflow_trace") or {}),
-                        guard_decisions=((row["answer"].get("workflow_debug") or {}).get("guard_decisions") or {}),
-                        answer_artifacts=((row["answer"].get("workflow_debug") or {}).get("answer_artifacts") or {}),
+                        guard_decisions=guard_decisions,
+                        answer_artifacts=answer_artifacts,
                     )
                 row["judge"] = judge_verdict.to_dict()
                 answer_metrics = _eval_v1._answer_metrics(eval_item, row["answer"]["text"] or "", judge_verdict=judge_verdict)

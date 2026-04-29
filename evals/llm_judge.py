@@ -186,6 +186,9 @@ def _request_payload(
         f"Chatbot Answer:\n{answer}\n\n"
         "If the workflow trace, guard decisions, or answer artifacts clearly show a guard, fallback, source suppression, rewrite, post-processing branch, or answer-class toggle, use that evidence directly instead of hedging. "
         "Only blame retrieval when the trace and deterministic retrieval signals support that conclusion. "
+        "If deterministic retrieval diagnosis is retrieval_ok but the final answer class is IDK or REFUSE, do NOT label this retrieval_incomplete unless the trace explicitly shows a retrieval guard or empty-context failure. "
+        "In that case prefer prompt_overconstraint or answer_generation_drift depending on whether the answer was suppressed or changed after generation. "
+        "When you suspect prompt or guardrail pressure, root_cause_note must quote one exact guard name or exact phrase from the system prompt snapshot if available. "
         "Return a JSON object with exactly these keys:\n"
         "- faithfulness_score: number from 0 to 1\n"
         "- answer_relevance_score: number from 0 to 1\n"
@@ -308,9 +311,20 @@ def _strongest_failure_step(guard_decisions: dict | None, answer_artifacts: dict
     if exit_guard:
         if exit_guard == "sparse_kb_context_miss":
             return "guard:sparse_kb_context_miss", "retrieval_incomplete"
+        if exit_guard == "llm_all_attempts_failed":
+            return "guard:llm_all_attempts_failed", "answer_generation_drift"
         if exit_guard in {"general_oos", "coding_scope", "translation", "persona_lock", "off_topic_pre_retrieval"}:
             return f"guard:{exit_guard}", "scope_mismatch"
         return f"guard:{exit_guard}", "prompt_overconstraint"
+    deterministic_retrieval = str(decisions.get("deterministic_retrieval_diagnosis") or retrieval_diagnosis or "").strip()
+    cleaned_class = str(decisions.get("cleaned_answer_class") or decisions.get("deterministic_answer_class") or "").strip()
+    if deterministic_retrieval == "retrieval_ok" and cleaned_class in {"IDK", "REFUSE"}:
+        suppressed = str(decisions.get("source_suppressed_reason") or "").strip()
+        if suppressed == "idk":
+            return "source_suppression:idk", "prompt_overconstraint"
+        if bool(decisions.get("answer_class_changed")):
+            return "answer_class_transition", "answer_generation_drift"
+        return "generation_output", "prompt_overconstraint"
     if bool(decisions.get("validator_rewrite_triggered")):
         return "validator_rewrite", "answer_generation_drift"
     if bool(decisions.get("answer_class_changed")) and str(decisions.get("raw_answer_class") or "") == "ANSWER":
@@ -343,6 +357,16 @@ def _recalibrate_verdict(
         verdict.reason = verdict.reason or "The answer changed class after generation."
         verdict.root_cause_note = verdict.root_cause_note or "The raw model answer looked usable, but a later cleanup/reclassification step flipped it away from an ANSWER."
         verdict.fix_hint = verdict.fix_hint or "Inspect the cleanup and answer-class rules that run after the LLM output is produced."
+    if evidence_step == "source_suppression:idk" and verdict.likely_failure_source != "prompt_overconstraint":
+        verdict.likely_failure_source = "prompt_overconstraint"
+        verdict.reason = verdict.reason or "Retrieval succeeded, but the answer still fell into the IDK suppression path."
+        verdict.root_cause_note = verdict.root_cause_note or "Deterministic retrieval marked retrieval_ok, but the final workflow still hit 'source_suppression:idk'. That points to an over-conservative post-generation guardrail path rather than missing retrieval."
+        verdict.fix_hint = verdict.fix_hint or "Relax the post-generation IDK/scope rule when retrieval is already marked retrieval_ok."
+    if evidence_step == "guard:llm_all_attempts_failed" and verdict.likely_failure_source != "answer_generation_drift":
+        verdict.likely_failure_source = "answer_generation_drift"
+        verdict.reason = verdict.reason or "Answer generation never completed successfully."
+        verdict.root_cause_note = verdict.root_cause_note or "The workflow exited through 'guard:llm_all_attempts_failed', so the bot fell back before a grounded answer could be completed."
+        verdict.fix_hint = verdict.fix_hint or "Stabilize the generation provider path or reduce retry exhaustion before fallback."
     if evidence_step.startswith("guard:") and verdict.likely_failure_source in {"none", "answer_generation_drift"}:
         verdict.likely_failure_source = evidence_source
     if evidence_step:

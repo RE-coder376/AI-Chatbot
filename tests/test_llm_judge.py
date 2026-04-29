@@ -216,3 +216,58 @@ def test_judge_recalibrates_to_answer_class_transition(monkeypatch):
     assert verdict.exact_failure_step == "answer_class_transition"
     assert verdict.confidence is not None and verdict.confidence >= 0.88
     assert verdict.self_check_status == "deterministic_confirmed"
+
+
+def test_judge_recalibrates_retrieval_ok_idk_to_prompt_overconstraint(monkeypatch):
+    scratch = _scratch_dir()
+    monkeypatch.setattr(llm_judge, "JUDGE_CACHE_DIR", scratch / "judge_cache")
+
+    class FakeResponse:
+        status_code = 200
+
+        def json(self):
+            return {
+                "choices": [
+                    {
+                        "message": {
+                            "content": llm_judge.json.dumps(
+                                {
+                                    "faithfulness_score": 0.3,
+                                    "answer_relevance_score": 0.3,
+                                    "likely_failure_source": "retrieval_incomplete",
+                                    "confidence": 0.4,
+                                    "reason": "generic retrieval miss",
+                                    "exact_failure_step": "",
+                                    "root_cause_note": "",
+                                    "fix_hint": "",
+                                    "self_check_status": "confirmed",
+                                    "self_check_note": "",
+                                    "error": "",
+                                }
+                            )
+                        }
+                    }
+                ]
+            }
+
+    monkeypatch.setattr(llm_judge.requests, "post", lambda *args, **kwargs: FakeResponse())
+
+    verdict = llm_judge.judge_answer(
+        "q",
+        "ctx",
+        "I don't have enough information to answer that.",
+        "ref",
+        "key-one",
+        retrieval_diagnosis="retrieval_ok",
+        guard_decisions={
+            "deterministic_retrieval_diagnosis": "retrieval_ok",
+            "cleaned_answer_class": "IDK",
+            "source_suppressed_reason": "idk",
+        },
+        answer_artifacts={"raw_llm_answer": "I don't know", "cleaned_answer": "I don't know"},
+    )
+
+    assert verdict.likely_failure_source == "prompt_overconstraint"
+    assert verdict.exact_failure_step == "source_suppression:idk"
+    assert verdict.self_check_status == "deterministic_confirmed"
+    assert "retrieval_ok" in verdict.root_cause_note

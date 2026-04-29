@@ -211,10 +211,11 @@ def test_owner_eval_judge_key_prefers_request_value(app_module, monkeypatch):
 
 def test_filter_eval_tests_for_tenant_trusts_tenant_local_chunk_sources(app_module):
     tests = [
-        {"q": "What is Build Merging Skill?", "source": "chunk_topic"},
+        {"q": "What is Build Merging Skill?", "source": "chunk_topic", "reference_answer": "Build merging skill helps combine agent outputs in the curriculum."},
+        {"q": "What premium fountain pens do you stock?", "source": "chunk_topic", "reference_answer": "We stock luxury fountain pens and ink refills."},
         {"q": "What premium fountain pens do you stock and what's the price range?", "source": "analytics"},
     ]
     kept, dropped = app_module._filter_eval_tests_for_tenant(tests, "agentfactory")
     assert len(kept) == 1
     assert kept[0]["source"] == "chunk_topic"
-    assert dropped == 1
+    assert dropped == 2
