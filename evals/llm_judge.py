@@ -30,6 +30,8 @@ class JudgeVerdict:
     answer_relevance_score: float | None = None
     likely_failure_source: str = "none"
     reason: str = ""
+    root_cause_note: str = ""
+    fix_hint: str = ""
     error: str = ""
 
     def to_dict(self) -> dict:
@@ -52,13 +54,16 @@ def _coerce_keys(api_key: str | list[str] | tuple[str, ...] | None) -> list[str]
     return keys
 
 
-def _cache_key(question: str, context: str, answer: str, reference: str) -> str:
+def _cache_key(question: str, context: str, answer: str, reference: str, prompt_context: str = "", retrieval_metrics: dict | None = None, retrieval_diagnosis: str = "") -> str:
     payload = {
         "model": JUDGE_MODEL,
         "question": question,
         "context": context,
         "answer": answer,
         "reference": reference,
+        "prompt_context": prompt_context,
+        "retrieval_metrics": retrieval_metrics or {},
+        "retrieval_diagnosis": retrieval_diagnosis,
     }
     blob = json.dumps(payload, sort_keys=True, ensure_ascii=True).encode("utf-8")
     return hashlib.sha256(blob).hexdigest()
@@ -115,11 +120,13 @@ def _normalize_verdict(payload: dict) -> JudgeVerdict:
         answer_relevance_score=_clamp_score(payload.get("answer_relevance_score")),
         likely_failure_source=_normalize_failure_source(payload.get("likely_failure_source")),
         reason=str(payload.get("reason") or "").strip(),
+        root_cause_note=str(payload.get("root_cause_note") or "").strip(),
+        fix_hint=str(payload.get("fix_hint") or "").strip(),
         error=str(payload.get("error") or "").strip(),
     )
 
 
-def _request_payload(question: str, context: str, answer: str, reference: str) -> dict:
+def _request_payload(question: str, context: str, answer: str, reference: str, prompt_context: str = "", retrieval_metrics: dict | None = None, retrieval_diagnosis: str = "") -> dict:
     system_prompt = (
         "You are a strict RAG evaluation judge. "
         "Return JSON only. "
@@ -133,12 +140,17 @@ def _request_payload(question: str, context: str, answer: str, reference: str) -
         f"Question:\n{question}\n\n"
         f"Retrieved Context:\n{context}\n\n"
         f"Reference Answer:\n{reference}\n\n"
+        f"System Prompt Snapshot:\n{prompt_context or '(not provided)'}\n\n"
+        f"Deterministic Retrieval Signals:\n{json.dumps(retrieval_metrics or {}, ensure_ascii=True)}\n\n"
+        f"Deterministic Retrieval Diagnosis:\n{retrieval_diagnosis or 'none'}\n\n"
         f"Chatbot Answer:\n{answer}\n\n"
         "Return a JSON object with exactly these keys:\n"
         "- faithfulness_score: number from 0 to 1\n"
         "- answer_relevance_score: number from 0 to 1\n"
         "- likely_failure_source: one of none, retrieval_incomplete, prompt_overconstraint, answer_generation_drift, scope_mismatch, question_bad\n"
         "- reason: short explanation\n"
+        "- root_cause_note: explain the most likely prompt, retrieval, or generation issue\n"
+        "- fix_hint: short concrete fix direction\n"
         "- error: empty string unless you cannot judge\n"
     )
     return {
@@ -160,17 +172,17 @@ def _should_rotate(status_code: int, payload: dict | None) -> bool:
     return "rate limit" in message or "temporarily unavailable" in message or "overloaded" in err_type
 
 
-def judge_answer(question: str, context: str, answer: str, reference: str, api_key) -> JudgeVerdict:
+def judge_answer(question: str, context: str, answer: str, reference: str, api_key, prompt_context: str = "", retrieval_metrics: dict | None = None, retrieval_diagnosis: str = "") -> JudgeVerdict:
     keys = _coerce_keys(api_key)
     if not keys:
         return JudgeVerdict(error="judge_disabled")
 
-    cache_key = _cache_key(question, context, answer, reference)
+    cache_key = _cache_key(question, context, answer, reference, prompt_context=prompt_context, retrieval_metrics=retrieval_metrics, retrieval_diagnosis=retrieval_diagnosis)
     cached = _read_cache(cache_key)
     if cached is not None:
         return cached
 
-    payload = _request_payload(question, context, answer, reference)
+    payload = _request_payload(question, context, answer, reference, prompt_context=prompt_context, retrieval_metrics=retrieval_metrics, retrieval_diagnosis=retrieval_diagnosis)
     last_error = "judge_unavailable"
     for key in keys:
         try:

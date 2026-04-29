@@ -3727,6 +3727,16 @@ def _eval_docs_preview(doc_rows: list[dict], limit: int = 3000) -> str:
 
 
 def _eval_likely_cause(row: dict) -> str:
+    judge = row.get("judge") or {}
+    if judge and str(judge.get("likely_failure_source") or "none") != "none":
+        note = str(judge.get("root_cause_note") or "").strip()
+        fix = str(judge.get("fix_hint") or "").strip()
+        if note and fix:
+            return f"{note} Suggested fix: {fix}"
+        if note:
+            return note
+        if fix:
+            return f"Suggested fix: {fix}"
     diagnosis = str(row.get("diagnosis") or "")
     retrieve = row.get("retrieve") or {}
     answer = row.get("answer") or {}
@@ -4045,6 +4055,18 @@ async def admin_run_evals(request: Request):
     retrieval_metric_values: list[float] = []
     answer_metric_values: list[float] = []
     idk_metric_values: list[float] = []
+    judge_key = os.getenv("JUDGE_API_KEY", "").strip()
+    prompt_snapshot = ""
+    if judge_key:
+        prompt_snapshot = "\n".join(
+            [
+                f"bot_name={cfg.get('bot_name', 'AI Assistant')}",
+                f"business_name={cfg.get('business_name', db_name)}",
+                f"topics={cfg.get('topics', 'general information')}",
+                "core_rules=no_fabrication; tier3_idk_when_no_kb_match; scope_guard_in_scope_only; refusal_for_prompt_injection; identity_lock",
+                f"secondary_prompt={str(cfg.get('secondary_prompt', '')).strip()[:1200]}",
+            ]
+        )
 
     for t in tests:
         if not isinstance(t, dict):
@@ -4080,6 +4102,7 @@ async def admin_run_evals(request: Request):
             "retrieve": {"sources": [], "doc_count": None, "docs": [], "metrics": {}},
             "answer": {"text": "", "present_facts": [], "missing_facts": [], "metrics": {}},
             "diagnosis": "",
+            "judge": {"error": "judge_disabled", "likely_failure_source": "none"},
         }
 
         if mode in ("retrieve", "both"):
@@ -4207,15 +4230,31 @@ async def admin_run_evals(request: Request):
                     retrieve_context_preview=preview_text,
                     retrieve_sources=list(row["retrieve"].get("sources") or []),
                 )
-                answer_metrics = _eval_v1._answer_metrics(eval_item, row["answer"]["text"] or "")
-                answer_ok, answer_reason, _ = _eval_v1._grade_answer(eval_item, row["answer"]["text"] or "")
+                judge_verdict = _eval_v1.JudgeVerdict(error="judge_disabled")
+                if judge_key:
+                    judge_verdict = _eval_v1.judge_answer(
+                        q,
+                        preview_text,
+                        row["answer"]["text"] or "",
+                        ref_text,
+                        judge_key,
+                        prompt_context=prompt_snapshot,
+                        retrieval_metrics=row["retrieve"].get("metrics") or {},
+                        retrieval_diagnosis=row.get("diagnosis") or "",
+                    )
+                row["judge"] = judge_verdict.to_dict()
+                answer_metrics = _eval_v1._answer_metrics(eval_item, row["answer"]["text"] or "", judge_verdict=judge_verdict)
+                answer_ok, answer_reason, _ = _eval_v1._grade_answer(eval_item, row["answer"]["text"] or "", judge_verdict=judge_verdict)
                 row["checks"]["answer"] = (answer_ok == "PASS")
                 row["answer"]["metrics"] = {
                     "faithfulness": answer_metrics["faithfulness"],
                     "answer_relevance": answer_metrics["answer_relevance"],
+                    "deterministic_faithfulness": answer_metrics["deterministic_faithfulness"],
+                    "deterministic_answer_relevance": answer_metrics["deterministic_answer_relevance"],
                     "context_recall": answer_metrics["context_recall"],
                     "token_hits": answer_metrics["token_hits"],
                     "statement_count": len(answer_metrics["statements"]),
+                    "judge_used": answer_metrics["judge_used"],
                 }
                 row["answer"]["score"] = round(
                     0.50 * float(answer_metrics["faithfulness"] or 0.0)
@@ -4262,6 +4301,9 @@ async def admin_run_evals(request: Request):
     overall = round(0.45 * retrieval_score + 0.45 * answer_score + 0.10 * idk_score, 1) if mode in ("chat", "both") else retrieval_score
     diagnosis_counts = dict(Counter((row.get("diagnosis") or "pass") for row in rows))
     likely_cause_counts = dict(Counter((row.get("likely_cause") or "unknown") for row in rows if row.get("overall_status") == "FAIL"))
+    failure_source_mix = dict(Counter(((row.get("judge") or {}).get("likely_failure_source") or "none") for row in rows if row.get("overall_status") == "FAIL" and ((row.get("judge") or {}).get("likely_failure_source") or "none") != "none"))
+    root_cause_mix = dict(Counter(((row.get("judge") or {}).get("root_cause_note") or "") for row in rows if row.get("overall_status") == "FAIL" and ((row.get("judge") or {}).get("root_cause_note") or "")))
+    fix_hint_mix = dict(Counter(((row.get("judge") or {}).get("fix_hint") or "") for row in rows if row.get("overall_status") == "FAIL" and ((row.get("judge") or {}).get("fix_hint") or "")))
     question_type_counts = dict(Counter((row.get("question_type") or "unknown") for row in rows))
 
     run_id = _now_run_id()
@@ -4271,7 +4313,14 @@ async def admin_run_evals(request: Request):
         "mode": mode,
         "scores": {"overall": overall, "retrieval": retrieval_score, "answer": answer_score, "idk": idk_score},
         "counts": {"total": len(rows), "retrieval_total": retrieval_total, "answer_total": answer_total, "idk_total": idk_total},
-        "summary": {"diagnosis_counts": diagnosis_counts, "likely_cause_counts": likely_cause_counts, "question_type_counts": question_type_counts},
+        "summary": {
+            "diagnosis_counts": diagnosis_counts,
+            "likely_cause_counts": likely_cause_counts,
+            "question_type_counts": question_type_counts,
+            "failure_source_mix": failure_source_mix,
+            "root_cause_mix": root_cause_mix,
+            "fix_hint_mix": fix_hint_mix,
+        },
         "generated_at": datetime.utcnow().isoformat() + "Z",
         "results": rows,
     }

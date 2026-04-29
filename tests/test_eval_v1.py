@@ -431,7 +431,7 @@ def test_build_summary_includes_failure_source_mix():
             "idk_status": "SKIP",
             "overall_status": "FAIL",
             "answer_diagnosis": "answer_not_faithful",
-            "judge": {"likely_failure_source": "prompt_overconstraint"},
+            "judge": {"likely_failure_source": "prompt_overconstraint", "root_cause_note": "Tier 3 IDK rule is too aggressive.", "fix_hint": "Relax scope guard for grounded answers."},
         },
         {
             "retrieval_status": "PASS",
@@ -439,7 +439,7 @@ def test_build_summary_includes_failure_source_mix():
             "idk_status": "SKIP",
             "overall_status": "FAIL",
             "answer_diagnosis": "answer_irrelevant",
-            "judge": {"likely_failure_source": "answer_generation_drift"},
+            "judge": {"likely_failure_source": "answer_generation_drift", "root_cause_note": "Answer ignored the main question focus.", "fix_hint": "Tighten response-format prompt."},
         },
     ]
 
@@ -448,6 +448,14 @@ def test_build_summary_includes_failure_source_mix():
     assert summary["failure_source_mix"] == {
         "prompt_overconstraint": 1,
         "answer_generation_drift": 1,
+    }
+    assert summary["root_cause_mix"] == {
+        "Tier 3 IDK rule is too aggressive.": 1,
+        "Answer ignored the main question focus.": 1,
+    }
+    assert summary["fix_hint_mix"] == {
+        "Relax scope guard for grounded answers.": 1,
+        "Tighten response-format prompt.": 1,
     }
 
 

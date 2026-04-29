@@ -72,6 +72,8 @@ def test_judge_answer_rotates_keys_on_rate_limit(monkeypatch):
                                     "answer_relevance_score": 0.8,
                                     "likely_failure_source": "none",
                                     "reason": "Grounded answer.",
+                                    "root_cause_note": "",
+                                    "fix_hint": "",
                                     "error": "",
                                 }
                             )

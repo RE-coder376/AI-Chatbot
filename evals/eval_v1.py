@@ -12,6 +12,7 @@ from pathlib import Path
 
 import requests
 from evals.llm_judge import JudgeVerdict, judge_answer
+from services.config import get_config
 
 EVALS_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = EVALS_DIR.parent
@@ -912,6 +913,20 @@ def _reference_text_for(item: EvalItem) -> str:
     return item.reference_answer or item.retrieve_context_preview
 
 
+def _judge_prompt_snapshot(db_name: str) -> str:
+    cfg = get_config(db_name)
+    parts = [
+        f"bot_name={cfg.get('bot_name', 'AI Assistant')}",
+        f"business_name={cfg.get('business_name', db_name or 'the company')}",
+        f"topics={cfg.get('topics', 'general information')}",
+        "core_rules=no_fabrication; tier3_idk_when_no_kb_match; scope_guard_in_scope_only; refusal_for_prompt_injection; identity_lock",
+    ]
+    secondary_prompt = str(cfg.get("secondary_prompt") or "").strip()
+    if secondary_prompt:
+        parts.append(f"secondary_prompt={secondary_prompt[:1200]}")
+    return "\n".join(parts)
+
+
 def _source_match(actual_source: str, expected_source: str) -> bool:
     actual = (actual_source or "").strip().lower()
     expected = (expected_source or "").strip().lower()
@@ -1234,6 +1249,20 @@ def _build_summary(results: list[dict]) -> dict:
             if r.get("overall_status") == "FAIL" and ((r.get("judge") or {}).get("likely_failure_source") or "none") != "none"
         )
     )
+    root_cause_mix = dict(
+        Counter(
+            ((r.get("judge") or {}).get("root_cause_note") or "")
+            for r in results
+            if r.get("overall_status") == "FAIL" and ((r.get("judge") or {}).get("root_cause_note") or "")
+        )
+    )
+    fix_hint_mix = dict(
+        Counter(
+            ((r.get("judge") or {}).get("fix_hint") or "")
+            for r in results
+            if r.get("overall_status") == "FAIL" and ((r.get("judge") or {}).get("fix_hint") or "")
+        )
+    )
 
     retrieval_score = _score_of(retrieval_statuses)
     answer_score = _score_of(answer_statuses)
@@ -1256,6 +1285,8 @@ def _build_summary(results: list[dict]) -> dict:
         "selection_mix": dict(Counter(r.get("selection_bucket", "unknown") for r in results)),
         "failure_breakdown": failure_breakdown,
         "failure_source_mix": failure_source_mix,
+        "root_cause_mix": root_cause_mix,
+        "fix_hint_mix": fix_hint_mix,
         "score_meanings": {
             "overall": _score_meaning(overall_score),
             "retrieval": _score_meaning(retrieval_score),
@@ -1279,6 +1310,7 @@ def main() -> int:
 
     db = args.db.strip()
     judge_key = (args.judge_key or os.getenv("JUDGE_API_KEY") or "").strip()
+    prompt_snapshot = _judge_prompt_snapshot(db) if args.judge else ""
 
     r = requests.post(
         f"{args.base_url}/admin/databases/set-active",
@@ -1360,6 +1392,9 @@ def main() -> int:
                         ans_s,
                         _reference_text_for(item),
                         judge_key,
+                        prompt_context=prompt_snapshot,
+                        retrieval_metrics=row.get("retrieval_metrics") or {},
+                        retrieval_diagnosis=row.get("retrieval_diagnosis") or "",
                     )
                 else:
                     judge_verdict = JudgeVerdict(error="judge_skipped_non_answer")
