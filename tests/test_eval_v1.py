@@ -2,6 +2,7 @@ from pathlib import Path
 import tempfile
 
 from evals import eval_v1
+from evals.llm_judge import JudgeVerdict
 
 
 def _write_json(path: Path, payload) -> None:
@@ -420,6 +421,85 @@ def test_build_summary_includes_failure_breakdown():
         "weak_top_k": 1,
         "grounded_but_answered_idk": 1,
     }
+
+
+def test_build_summary_includes_failure_source_mix():
+    results = [
+        {
+            "retrieval_status": "PASS",
+            "answer_status": "FAIL",
+            "idk_status": "SKIP",
+            "overall_status": "FAIL",
+            "answer_diagnosis": "answer_not_faithful",
+            "judge": {"likely_failure_source": "prompt_overconstraint"},
+        },
+        {
+            "retrieval_status": "PASS",
+            "answer_status": "FAIL",
+            "idk_status": "SKIP",
+            "overall_status": "FAIL",
+            "answer_diagnosis": "answer_irrelevant",
+            "judge": {"likely_failure_source": "answer_generation_drift"},
+        },
+    ]
+
+    summary = eval_v1._build_summary(results)
+
+    assert summary["failure_source_mix"] == {
+        "prompt_overconstraint": 1,
+        "answer_generation_drift": 1,
+    }
+
+
+def test_grade_answer_uses_judge_scores_when_available():
+    item = eval_v1.EvalItem(
+        q="What is the refund policy?",
+        expect="ANSWER",
+        source="faq",
+        reference_answer="Refunds are allowed within 7 days for unused items with proof of purchase.",
+        retrieve_doc_count=3,
+        retrieve_context_length=240,
+        retrieve_context_preview="Refunds are allowed within 7 days for unused items with proof of purchase.",
+    )
+
+    verdict = JudgeVerdict(
+        faithfulness_score=0.92,
+        answer_relevance_score=0.88,
+        likely_failure_source="none",
+    )
+    metrics = eval_v1._answer_metrics(
+        item,
+        "You have a week to return unused items, and proof of purchase is required.",
+        judge_verdict=verdict,
+    )
+
+    assert metrics["judge_used"] is True
+    assert metrics["faithfulness"] == 0.92
+    assert metrics["answer_relevance"] == 0.88
+    assert metrics["deterministic_faithfulness"] != metrics["faithfulness"] or metrics["deterministic_answer_relevance"] != metrics["answer_relevance"]
+
+
+def test_grade_answer_falls_back_when_judge_errors():
+    item = eval_v1.EvalItem(
+        q="What is the refund policy?",
+        expect="ANSWER",
+        source="faq",
+        reference_answer="Refunds are allowed within 7 days for unused items with proof of purchase.",
+        retrieve_doc_count=3,
+        retrieve_context_length=240,
+        retrieve_context_preview="Refunds are allowed within 7 days for unused items with proof of purchase.",
+    )
+
+    verdict = JudgeVerdict(error="judge_http_429")
+    metrics = eval_v1._answer_metrics(
+        item,
+        "Refunds are allowed within 7 days for unused items, and you need proof of purchase.",
+        judge_verdict=verdict,
+    )
+
+    assert metrics["judge_used"] is False
+    assert metrics["faithfulness"] == metrics["deterministic_faithfulness"]
+    assert metrics["answer_relevance"] == metrics["deterministic_answer_relevance"]
 
 
 def test_finalize_selection_uses_stable_core_and_rotates_discovery(monkeypatch):

@@ -1,6 +1,7 @@
 import argparse
 import hashlib
 import json
+import os
 import re
 import sqlite3
 import time
@@ -10,6 +11,7 @@ from datetime import datetime
 from pathlib import Path
 
 import requests
+from evals.llm_judge import JudgeVerdict, judge_answer
 
 EVALS_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = EVALS_DIR.parent
@@ -1105,7 +1107,7 @@ def _grade_retrieval(item: EvalItem, doc_rows: list[dict] | None = None, expecte
     }
 
 
-def _answer_metrics(item: EvalItem, answer_text: str) -> dict:
+def _answer_metrics(item: EvalItem, answer_text: str, judge_verdict: JudgeVerdict | None = None) -> dict:
     answer_class = _answer_class(answer_text)
     reference_text = _reference_text_for(item)
     overlap = _overlap_score(answer_text, reference_text)
@@ -1132,8 +1134,18 @@ def _answer_metrics(item: EvalItem, answer_text: str) -> dict:
             relevant += 1
 
     total = len(statements)
-    faithfulness = round(supported / total, 3) if total else 0.0
-    answer_relevance = round(relevant / total, 3) if total else 0.0
+    deterministic_faithfulness = round(supported / total, 3) if total else 0.0
+    deterministic_answer_relevance = round(relevant / total, 3) if total else 0.0
+    faithfulness = deterministic_faithfulness
+    answer_relevance = deterministic_answer_relevance
+    judge_used = False
+    if judge_verdict and not judge_verdict.error:
+        if judge_verdict.faithfulness_score is not None:
+            faithfulness = judge_verdict.faithfulness_score
+            judge_used = True
+        if judge_verdict.answer_relevance_score is not None:
+            answer_relevance = judge_verdict.answer_relevance_score
+            judge_used = True
     return {
         "answer_class": answer_class,
         "overlap": overlap,
@@ -1141,14 +1153,17 @@ def _answer_metrics(item: EvalItem, answer_text: str) -> dict:
         "statements": statements,
         "faithfulness": faithfulness,
         "answer_relevance": answer_relevance,
+        "deterministic_faithfulness": deterministic_faithfulness,
+        "deterministic_answer_relevance": deterministic_answer_relevance,
         "context_recall": _context_recall(item),
         "support_scores": support_scores,
         "relevance_scores": relevance_scores,
+        "judge_used": judge_used,
     }
 
 
-def _grade_answer(item: EvalItem, answer_text: str) -> tuple[str, str | None, float]:
-    metrics = _answer_metrics(item, answer_text)
+def _grade_answer(item: EvalItem, answer_text: str, judge_verdict: JudgeVerdict | None = None) -> tuple[str, str | None, float]:
+    metrics = _answer_metrics(item, answer_text, judge_verdict=judge_verdict)
     answer_class = metrics["answer_class"]
     overlap = metrics["overlap"]
     token_hits = metrics["token_hits"]
@@ -1212,6 +1227,13 @@ def _build_summary(results: list[dict]) -> dict:
             if r.get("overall_status") == "FAIL"
         )
     )
+    failure_source_mix = dict(
+        Counter(
+            ((r.get("judge") or {}).get("likely_failure_source") or "none")
+            for r in results
+            if r.get("overall_status") == "FAIL" and ((r.get("judge") or {}).get("likely_failure_source") or "none") != "none"
+        )
+    )
 
     retrieval_score = _score_of(retrieval_statuses)
     answer_score = _score_of(answer_statuses)
@@ -1233,6 +1255,7 @@ def _build_summary(results: list[dict]) -> dict:
         "diagnosis": diagnosis,
         "selection_mix": dict(Counter(r.get("selection_bucket", "unknown") for r in results)),
         "failure_breakdown": failure_breakdown,
+        "failure_source_mix": failure_source_mix,
         "score_meanings": {
             "overall": _score_meaning(overall_score),
             "retrieval": _score_meaning(retrieval_score),
@@ -1250,9 +1273,12 @@ def main() -> int:
     ap.add_argument("--count", type=int, default=10)
     ap.add_argument("--mode", choices=("retrieve", "chat", "both"), default="both")
     ap.add_argument("--out-dir", default="evals/results")
+    ap.add_argument("--judge", action="store_true", help="Enable Groq-based LLM judging for semantic answer metrics.")
+    ap.add_argument("--judge-key", default="", help="Dedicated judge key(s), comma-separated. Falls back to JUDGE_API_KEY env var.")
     args = ap.parse_args()
 
     db = args.db.strip()
+    judge_key = (args.judge_key or os.getenv("JUDGE_API_KEY") or "").strip()
 
     r = requests.post(
         f"{args.base_url}/admin/databases/set-active",
@@ -1285,6 +1311,7 @@ def main() -> int:
             "answer_status": "SKIP",
             "idk_status": "SKIP",
             "overall_status": "SKIP",
+            "judge": JudgeVerdict(error="judge_disabled").to_dict(),
         }
 
         retrieve_pass = None
@@ -1324,17 +1351,34 @@ def main() -> int:
             ans = (cr.json() or {}).get("answer", "")
             ans_s = str(ans).strip()
             answer_class = _answer_class(ans_s)
-            answer_metrics = _answer_metrics(item, ans_s)
-            answer_status, answer_reason, overlap = _grade_answer(item, ans_s)
+            judge_verdict = JudgeVerdict(error="judge_disabled")
+            if args.judge:
+                if answer_class == "ANSWER":
+                    judge_verdict = judge_answer(
+                        item.q,
+                        item.retrieve_context_preview,
+                        ans_s,
+                        _reference_text_for(item),
+                        judge_key,
+                    )
+                else:
+                    judge_verdict = JudgeVerdict(error="judge_skipped_non_answer")
+            answer_metrics = _answer_metrics(item, ans_s, judge_verdict=judge_verdict)
+            answer_status, answer_reason, overlap = _grade_answer(item, ans_s, judge_verdict=judge_verdict)
 
             row["answer_preview"] = ans_s[:400]
             row["answer_class"] = answer_class
             row["answer_overlap"] = round(overlap, 3)
+            row["judge"] = judge_verdict.to_dict()
             row["answer_metrics"] = {
                 "faithfulness": answer_metrics["faithfulness"],
                 "answer_relevance": answer_metrics["answer_relevance"],
+                "deterministic_faithfulness": answer_metrics["deterministic_faithfulness"],
+                "deterministic_answer_relevance": answer_metrics["deterministic_answer_relevance"],
                 "token_hits": answer_metrics["token_hits"],
                 "statement_count": len(answer_metrics["statements"]),
+                "context_recall": answer_metrics["context_recall"],
+                "judge_used": answer_metrics["judge_used"],
             }
             if item.expect == "IDK":
                 row["idk_status"] = answer_status
