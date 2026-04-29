@@ -4430,20 +4430,24 @@ async def admin_run_evals(request: Request):
                     retrieve_sources=list(row["retrieve"].get("sources") or []),
                 )
                 judge_verdict = _eval_v1.JudgeVerdict(error="judge_disabled")
-                if judge_key:
-                        judge_verdict = _eval_v1.judge_answer(
-                            q,
-                            preview_text,
-                            row["answer"]["text"] or "",
-                            ref_text,
-                            judge_key,
-                            prompt_context=prompt_snapshot,
-                            retrieval_metrics=row["retrieve"].get("metrics") or {},
-                            retrieval_diagnosis=row.get("diagnosis") or "",
-                            workflow_trace=_trace_summary_text(row["answer"].get("workflow_trace") or {}),
-                            guard_decisions=((row["answer"].get("workflow_debug") or {}).get("guard_decisions") or {}),
-                            answer_artifacts=((row["answer"].get("workflow_debug") or {}).get("answer_artifacts") or {}),
-                        )
+                deterministic_status, _, _ = _eval_v1._grade_answer(eval_item, row["answer"]["text"] or "")
+                should_judge = bool(judge_key) and (
+                    deterministic_status != "PASS" or row["checks"].get("retrieval") is False
+                )
+                if should_judge:
+                    judge_verdict = _eval_v1.judge_answer(
+                        q,
+                        preview_text,
+                        row["answer"]["text"] or "",
+                        ref_text,
+                        judge_key,
+                        prompt_context=prompt_snapshot,
+                        retrieval_metrics=row["retrieve"].get("metrics") or {},
+                        retrieval_diagnosis=row.get("diagnosis") or "",
+                        workflow_trace=_trace_summary_text(row["answer"].get("workflow_trace") or {}),
+                        guard_decisions=((row["answer"].get("workflow_debug") or {}).get("guard_decisions") or {}),
+                        answer_artifacts=((row["answer"].get("workflow_debug") or {}).get("answer_artifacts") or {}),
+                    )
                 row["judge"] = judge_verdict.to_dict()
                 answer_metrics = _eval_v1._answer_metrics(eval_item, row["answer"]["text"] or "", judge_verdict=judge_verdict)
                 answer_ok, answer_reason, _ = _eval_v1._grade_answer(eval_item, row["answer"]["text"] or "", judge_verdict=judge_verdict)

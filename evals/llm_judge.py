@@ -133,13 +133,16 @@ def _normalize_failure_source(value: str) -> str:
 
 
 def _normalize_verdict(payload: dict) -> JudgeVerdict:
+    exact_failure_step = str(payload.get("exact_failure_step") or "").strip()
+    if exact_failure_step.lower() in {"none", "n/a", "na", "unknown"}:
+        exact_failure_step = ""
     return JudgeVerdict(
         faithfulness_score=_clamp_score(payload.get("faithfulness_score")),
         answer_relevance_score=_clamp_score(payload.get("answer_relevance_score")),
         likely_failure_source=_normalize_failure_source(payload.get("likely_failure_source")),
         confidence=_clamp_score(payload.get("confidence")),
         reason=str(payload.get("reason") or "").strip(),
-        exact_failure_step=str(payload.get("exact_failure_step") or "").strip(),
+        exact_failure_step=exact_failure_step,
         root_cause_note=str(payload.get("root_cause_note") or "").strip(),
         fix_hint=str(payload.get("fix_hint") or "").strip(),
         self_check_status=str(payload.get("self_check_status") or "single_pass").strip() or "single_pass",
