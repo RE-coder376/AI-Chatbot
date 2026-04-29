@@ -698,6 +698,11 @@ def _collect_seed_items(db_name: str, desired_count: int) -> list[EvalItem]:
     return _trim_seed_pool(deduped, desired_count)
 
 
+def _is_tenant_relevant_eval_question(question: str, db_name: str) -> bool:
+    qn = _normalize_question(question)
+    return bool(qn) and _looks_like_good_question(qn) and _is_tenant_relevant_question(qn, db_name)
+
+
 def _trim_seed_pool(items: list[EvalItem], desired_count: int) -> list[EvalItem]:
     if not items:
         return []
@@ -1444,7 +1449,7 @@ def main() -> int:
             answer_class = _answer_class(ans_s)
             judge_verdict = JudgeVerdict(error="judge_disabled")
             if args.judge:
-                if answer_class == "ANSWER":
+                if item.expect == "ANSWER":
                     judge_verdict = judge_answer(
                         item.q,
                         item.retrieve_context_preview,

@@ -3678,6 +3678,23 @@ def _save_eval_set(db_name: str, data: dict) -> None:
     p = _eval_dir(db_name) / _EVAL_SET_FILENAME
     _atomic_write_json(p, data)
 
+
+def _filter_eval_tests_for_tenant(tests: list[dict], db_name: str) -> tuple[list[dict], int]:
+    from evals import eval_v1 as _eval_v1
+
+    kept: list[dict] = []
+    dropped = 0
+    for test in tests or []:
+        if not isinstance(test, dict):
+            dropped += 1
+            continue
+        q = str(test.get("q") or "").strip()
+        if not _eval_v1._is_tenant_relevant_eval_question(q, db_name):
+            dropped += 1
+            continue
+        kept.append(test)
+    return kept, dropped
+
 def _norm_text(s: str) -> str:
     s = (s or "").lower()
     s = re.sub(r"[^a-z0-9\\s]+", " ", s)
@@ -4003,6 +4020,9 @@ async def admin_generate_evals(request: Request):
 
     base_url = str(request.base_url).rstrip("/")
     tests = await _build_owner_eval_tests(base_url, password, db_name, count=count, strategy=strategy)
+    tests, dropped = _filter_eval_tests_for_tenant(tests, db_name)
+    if dropped:
+        logger.warning("[EVAL] Dropped %s off-tenant generated tests for '%s' before saving eval_set.", dropped, db_name)
 
     payload = {
         "db": db_name,
@@ -4031,6 +4051,10 @@ async def admin_run_evals(request: Request):
     if not isinstance(tests, list) or not tests:
         eval_set = _load_eval_set(db_name)
         tests = eval_set.get("tests") if isinstance(eval_set, dict) else None
+    if isinstance(tests, list) and tests:
+        tests, dropped = _filter_eval_tests_for_tenant(tests, db_name)
+        if dropped:
+            logger.warning("[EVAL] Dropped %s stale off-tenant tests from saved eval_set for '%s'.", dropped, db_name)
 
     cfg = get_config(db_name)
     base_url = str(request.base_url).rstrip("/")
@@ -4042,6 +4066,9 @@ async def admin_run_evals(request: Request):
     if not isinstance(tests, list) or not tests:
         strategy = (data.get("strategy") or "analytics").strip().lower()
         tests = await _build_owner_eval_tests(base_url, password, db_name, count=count, strategy=strategy)
+        tests, dropped = _filter_eval_tests_for_tenant(tests, db_name)
+        if dropped:
+            logger.warning("[EVAL] Dropped %s off-tenant fallback-generated tests for '%s'.", dropped, db_name)
 
     tests = tests[:count]
 

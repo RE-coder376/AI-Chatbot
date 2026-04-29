@@ -111,6 +111,23 @@ def test_load_analytics_candidates_filters_cross_tenant_pollution(monkeypatch):
     assert "What are the top 3 highest rated anime of all time on MAL?" not in questions
 
 
+def test_is_tenant_relevant_eval_question_rejects_cross_tenant_queries(monkeypatch):
+    temp_path = _scratch_dir()
+    monkeypatch.setattr(eval_v1, "DATABASES_DIR", temp_path / "databases")
+    db_dir = temp_path / "databases" / "agentfactory"
+    _write_json(
+        db_dir / "config.json",
+        {
+            "business_name": "AgentFactory by Panaversity",
+            "topics": "AI agent development, courses, pricing, curriculum, team",
+            "business_description": "Platform for learning to build AI agents.",
+        },
+    )
+
+    assert eval_v1._is_tenant_relevant_eval_question("What is AgentFactory?", "agentfactory") is True
+    assert eval_v1._is_tenant_relevant_eval_question("What premium fountain pens do you stock?", "agentfactory") is False
+
+
 def test_collect_eval_items_keeps_only_grounded_candidates(monkeypatch):
     temp_path = _scratch_dir()
     monkeypatch.chdir(temp_path)
