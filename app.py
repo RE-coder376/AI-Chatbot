@@ -2853,10 +2853,20 @@ async def _comparative_retrieve(q: str, db) -> tuple:
     return merged, len(merged.split()), list(dict.fromkeys(src_a + src_b))[:5]
 
 
-async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "", page_url: str = "", page_title: str = "", request: Request = None, cfg: dict = None, tenant_db=None, db_name: str = "") -> AsyncGenerator[str, None]:
+async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "", page_url: str = "", page_title: str = "", request: Request = None, cfg: dict = None, tenant_db=None, db_name: str = "", include_debug_artifacts: bool = False) -> AsyncGenerator[str, None]:
     # SSE comment — keeps HF Space proxy alive during retrieval (proxy closes idle connections)
     workflow_trace = {"events": []}
+    workflow_debug = {"guard_decisions": {}, "answer_artifacts": {}}
     _trace_event(workflow_trace, "chat_stream_start", db_name=db_name or _get_active_db())
+    _trace_decision(workflow_debug, "db_name", db_name or _get_active_db())
+    _trace_decision(workflow_debug, "include_debug_artifacts", include_debug_artifacts)
+    def _metadata_payload(capture_lead: bool, sources: list, options=None):
+        payload = {"type": "metadata", "capture_lead": capture_lead, "sources": sources, "workflow_trace": workflow_trace}
+        if options is not None:
+            payload["options"] = options
+        if include_debug_artifacts:
+            payload["workflow_debug"] = workflow_debug
+        return payload
     yield ": keep-alive\n\n"
     # Lazy-load model on first request — but don't block the stream (model download ~2min on Render)
     if local_db is None and _status not in ("ready_no_db",):
@@ -2901,7 +2911,7 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
                  f"Is there something about {topics} I can help you with?")
         if visitor_id: _run_in_bg(save_visitor_turn, visitor_id, "assistant", reply, db_name)
         yield f"data: {json.dumps({'type': 'chunk', 'content': reply})}\n\n"
-        yield f"data: {json.dumps({'type': 'metadata', 'capture_lead': False, 'sources': [], 'workflow_trace': workflow_trace})}\n\n"
+        yield f"data: {json.dumps(_metadata_payload(False, []))}\n\n"
         yield "data: {\"type\": \"done\"}\n\n"
         return
 
@@ -3162,10 +3172,19 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
         context, doc_count, sources = await retrieve_context(q, None, expansion_task=_early_expansion_task, history=history)
         _trace_event(workflow_trace, "retrieval_path", path="api_only")
     _trace_event(workflow_trace, "retrieval_result", doc_count=doc_count, source_count=len(sources or []), context_chars=len(context or ""))
+    _trace_decision(workflow_debug, "retrieval_doc_count", int(doc_count or 0))
+    _trace_decision(workflow_debug, "retrieval_source_count", len(sources or []))
+    _trace_decision(workflow_debug, "is_api_only", bool(_is_api_only))
+    _trace_artifact(workflow_debug, "retrieved_context_preview", context[:4000] if isinstance(context, str) else "")
+    _trace_artifact(workflow_debug, "retrieved_sources", list(sources or [])[:8])
+    context_addresses_query = _context_addresses_query(context, q)
+    _trace_decision(workflow_debug, "context_addresses_query", bool(context_addresses_query))
 
     # ── Sparse KB guard — skip for api-only DBs (no KB, LLM uses training knowledge) ──
-    if not _is_api_only and not _context_addresses_query(context, q):
+    if not _is_api_only and not context_addresses_query:
         _trace_event(workflow_trace, "guard_exit", guard="sparse_kb_context_miss", doc_count=doc_count)
+        _trace_decision(workflow_debug, "exit_guard", "sparse_kb_context_miss")
+        _trace_decision(workflow_debug, "sparse_kb_guard_triggered", True)
         _run_in_bg(log_knowledge_gap, q, db_name)
         topics      = cfg.get("topics", "our services")
         contact     = cfg.get("contact_email", "")
@@ -3182,7 +3201,9 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
         yield f"data: {json.dumps({'type': 'chunk', 'content': idk})}\n\n"
         _lead_on = not cfg.get("disable_lead_box", False)
         quick_opts_idk = await _get_intro_questions(db_name or _get_active_db(), _local_db, cfg)
-        yield f"data: {json.dumps({'type': 'metadata', 'capture_lead': _lead_on, 'sources': [], 'options': quick_opts_idk, 'workflow_trace': workflow_trace})}\n\n"
+        _trace_artifact(workflow_debug, "final_answer", idk[:4000])
+        _trace_decision(workflow_debug, "cleaned_answer_class", "IDK")
+        yield f"data: {json.dumps(_metadata_payload(_lead_on, [], quick_opts_idk))}\n\n"
         yield "data: {\"type\": \"done\"}\n\n"
         return
 
@@ -3190,10 +3211,12 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
     _fast_resp = _fast_format_jikan(context, q)
     if _fast_resp:
         _trace_event(workflow_trace, "guard_exit", guard="fast_response_formatter")
+        _trace_decision(workflow_debug, "exit_guard", "fast_response_formatter")
         if visitor_id: _run_in_bg(save_visitor_turn, visitor_id, "assistant", _fast_resp, db_name)
         yield f"data: {json.dumps({'type': 'chunk', 'content': _fast_resp})}\n\n"
         _lead_on = not cfg.get("disable_lead_box", False)
-        yield f"data: {json.dumps({'type': 'metadata', 'capture_lead': _lead_on, 'sources': sources[:3], 'workflow_trace': workflow_trace})}\n\n"
+        _trace_artifact(workflow_debug, "final_answer", _fast_resp[:4000])
+        yield f"data: {json.dumps(_metadata_payload(_lead_on, sources[:3]))}\n\n"
         yield "data: {\"type\": \"done\"}\n\n"
         return
 
@@ -3226,6 +3249,8 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
                     "Do NOT use any Urdu, Roman Urdu, Hindi, Arabic, or any other language. "
                     "English only — this overrides all other instructions.")
     logger.debug(f"Context length: {len(context)} chars")
+    _trace_artifact(workflow_debug, "system_prompt_final", sys_msg[:12000])
+    _trace_decision(workflow_debug, "history_message_count", len(history[-8:]))
 
     # ── Intent-specific prompt shaping ───────────────────────────────────────
     if intent == "comparative":
@@ -3262,8 +3287,9 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
     # Fast-fail if ALL keys are on cooldown — no point looping through 30
     if not any_key_ready():
         _trace_event(workflow_trace, "guard_exit", guard="no_provider_key_ready")
+        _trace_decision(workflow_debug, "exit_guard", "no_provider_key_ready")
         yield f"data: {json.dumps({'type': 'chunk', 'content': 'I am unable to respond right now. Please try again in a moment.'})}\n\n"
-        yield f"data: {json.dumps({'type': 'metadata', 'capture_lead': False, 'sources': [], 'workflow_trace': workflow_trace})}\n\n"
+        yield f"data: {json.dumps(_metadata_payload(False, []))}\n\n"
         yield "data: {\"type\": \"done\"}\n\n"
         return
 
@@ -3275,8 +3301,9 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
         llm = get_fresh_llm()
         if not llm:
             _trace_event(workflow_trace, "guard_exit", guard="no_llm_instance")
+            _trace_decision(workflow_debug, "exit_guard", "no_llm_instance")
             yield f"data: {json.dumps({'type': 'chunk', 'content': 'Service temporarily unavailable.'})}\n\n"
-            yield f"data: {json.dumps({'type': 'metadata', 'capture_lead': False, 'sources': [], 'workflow_trace': workflow_trace})}\n\n"
+            yield f"data: {json.dumps(_metadata_payload(False, []))}\n\n"
             yield "data: {\"type\": \"done\"}\n\n"
             return
 
@@ -3293,6 +3320,8 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
                     response_buffer.append(chunk.content)
             success = True
             _trace_event(workflow_trace, "llm_attempt_result", attempt=attempt + 1, success=True)
+            _trace_decision(workflow_debug, "llm_attempt_count", attempt + 1)
+            _trace_decision(workflow_debug, "llm_success", True)
             break
         except (TimeoutError, asyncio.TimeoutError):
             logger.warning(f"LLM attempt {attempt+1} timed out (Google SDK internal retry killed) — rotating key")
@@ -3331,6 +3360,8 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
         raw_answer = "".join(response_buffer)
         cleaned = _strip_source_leaks(raw_answer, kb_context=context)
         _trace_event(workflow_trace, "postprocess_strip_source_leaks", changed=(cleaned != raw_answer))
+        _trace_artifact(workflow_debug, "raw_llm_answer", raw_answer[:4000])
+        _trace_artifact(workflow_debug, "cleaned_answer", cleaned[:4000])
         # ── Light answer validator (smart_search DBs) — code-based, zero LLM cost ──
         # Catches hallucinated product features absent from retrieved context
         if "smart_search" in set(cfg.get("features", [])):
@@ -3346,6 +3377,7 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
             if _halluc:
                 logger.warning(f"[Validator] Potential hallucination detected — answer claims feature absent from context")
                 _trace_event(workflow_trace, "validator_rewrite", reason="smart_search_feature_hallucination")
+                _trace_decision(workflow_debug, "validator_rewrite_triggered", True)
                 cleaned = ("I don't have specific details about that in my knowledge base right now. "
                            "Could you rephrase or ask about a specific product by name?")
         if visitor_id: _run_in_bg(save_visitor_turn, visitor_id, "assistant", cleaned, db_name)
@@ -3372,24 +3404,38 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
         raw_is_scope_declined = any(s in raw_lower for s in _scope_sigs)
         raw_answer_class = "REFUSE" if raw_is_scope_declined else ("IDK" if raw_is_idk else "ANSWER")
         cleaned_answer_class = "REFUSE" if is_scope_declined else ("IDK" if is_idk else "ANSWER")
+        _trace_artifact(workflow_debug, "final_answer", cleaned[:4000])
         _trace_event(workflow_trace, "final_answer_flags", is_idk=is_idk, is_scope_declined=is_scope_declined, is_conv=is_conv, is_greeting_resp=is_greeting_resp)
         _trace_event(workflow_trace, "answer_class_transition", raw_class=raw_answer_class, cleaned_class=cleaned_answer_class, changed=(raw_answer_class != cleaned_answer_class))
+        _trace_decision(workflow_debug, "raw_answer_class", raw_answer_class)
+        _trace_decision(workflow_debug, "cleaned_answer_class", cleaned_answer_class)
+        _trace_decision(workflow_debug, "answer_class_changed", raw_answer_class != cleaned_answer_class)
+        _trace_decision(workflow_debug, "final_is_idk", bool(is_idk))
+        _trace_decision(workflow_debug, "final_is_scope_declined", bool(is_scope_declined))
+        _trace_decision(workflow_debug, "final_is_conversation", bool(is_conv))
+        _trace_decision(workflow_debug, "final_is_greeting", bool(is_greeting_resp))
         show_sources = [] if (is_idk or is_conv or is_greeting_resp or is_scope_declined) else sources
         if is_idk:
             _trace_event(workflow_trace, "source_suppression", reason="idk")
+            _trace_decision(workflow_debug, "source_suppressed_reason", "idk")
         elif is_conv:
             _trace_event(workflow_trace, "source_suppression", reason="conversation_memory")
+            _trace_decision(workflow_debug, "source_suppressed_reason", "conversation_memory")
         elif is_greeting_resp:
             _trace_event(workflow_trace, "source_suppression", reason="greeting_style_response")
+            _trace_decision(workflow_debug, "source_suppressed_reason", "greeting_style_response")
         elif is_scope_declined:
             _trace_event(workflow_trace, "source_suppression", reason="scope_declined")
+            _trace_decision(workflow_debug, "source_suppressed_reason", "scope_declined")
         quick_opts = await _get_intro_questions(db_name or _get_active_db(), _local_db, cfg)
         _lead_on = is_lead and not cfg.get("disable_lead_box", False)
-        yield f"data: {json.dumps({'type': 'metadata', 'capture_lead': _lead_on, 'sources': show_sources, 'options': quick_opts, 'workflow_trace': workflow_trace})}\n\n"
+        yield f"data: {json.dumps(_metadata_payload(_lead_on, show_sources, quick_opts))}\n\n"
     else:
         _trace_event(workflow_trace, "guard_exit", guard="llm_all_attempts_failed")
+        _trace_decision(workflow_debug, "exit_guard", "llm_all_attempts_failed")
+        _trace_decision(workflow_debug, "llm_success", False)
         yield f"data: {json.dumps({'type': 'chunk', 'content': 'I am unable to respond right now. Please try again in a moment.'})}\n\n"
-        yield f"data: {json.dumps({'type': 'metadata', 'capture_lead': False, 'sources': [], 'workflow_trace': workflow_trace})}\n\n"
+        yield f"data: {json.dumps(_metadata_payload(False, []))}\n\n"
     yield "data: {\"type\": \"done\"}\n\n"
 
 @app.post("/chat")
@@ -4033,15 +4079,16 @@ async def _eval_retrieve_docs(q: str, tenant_db, k: int = 8) -> tuple[int, list[
     except Exception:
         return (0, [], [])
 
-async def _eval_answer_via_stream(q: str, cfg: dict, tenant_db, db_name: str) -> tuple[str, list[str], dict]:
-    """Consume the production streaming path to extract (answer, sources, workflow_trace)."""
+async def _eval_answer_via_stream(q: str, cfg: dict, tenant_db, db_name: str) -> tuple[str, list[str], dict, dict]:
+    """Consume the production streaming path to extract (answer, sources, workflow_trace, workflow_debug)."""
     async def _run():
         answer_parts: list[str] = []
         sources: list[str] = []
         workflow_trace: dict = {}
+        workflow_debug: dict = {}
         async for chunk in chat_stream_generator(
             q, [], "", "", "",
-            request=None, cfg=cfg, tenant_db=tenant_db, db_name=db_name
+            request=None, cfg=cfg, tenant_db=tenant_db, db_name=db_name, include_debug_artifacts=True
         ):
             if not isinstance(chunk, str):
                 continue
@@ -4063,7 +4110,10 @@ async def _eval_answer_via_stream(q: str, cfg: dict, tenant_db, db_name: str) ->
                     trace = obj.get("workflow_trace")
                     if isinstance(trace, dict):
                         workflow_trace = trace
-        return ("".join(answer_parts).strip(), sources, workflow_trace)
+                    debug = obj.get("workflow_debug")
+                    if isinstance(debug, dict):
+                        workflow_debug = debug
+        return ("".join(answer_parts).strip(), sources, workflow_trace, workflow_debug)
     return await asyncio.wait_for(_run(), timeout=120)
 
 
@@ -4073,6 +4123,16 @@ def _trace_event(trace: dict, event: str, **details):
     if details:
         payload["details"] = details
     events.append(payload)
+
+
+def _trace_decision(debug: dict, key: str, value):
+    decisions = debug.setdefault("guard_decisions", {})
+    decisions[key] = value
+
+
+def _trace_artifact(debug: dict, key: str, value):
+    artifacts = debug.setdefault("answer_artifacts", {})
+    artifacts[key] = value
 
 
 def _trace_summary_text(trace: dict) -> str:
@@ -4282,9 +4342,10 @@ async def admin_run_evals(request: Request):
 
         if mode in ("chat", "both"):
             try:
-                ans, chat_sources, workflow_trace = await _eval_answer_via_stream(q, cfg, tenant_db, db_name)
+                ans, chat_sources, workflow_trace, workflow_debug = await _eval_answer_via_stream(q, cfg, tenant_db, db_name)
                 row["answer"]["text"] = ans[:4000]
                 row["answer"]["workflow_trace"] = workflow_trace
+                row["answer"]["workflow_debug"] = workflow_debug
                 if chat_sources:
                     row["retrieve"]["sources"] = chat_sources[:8]
                     if etype == "ANSWER" and row["checks"]["retrieval"] is None:
@@ -4380,6 +4441,8 @@ async def admin_run_evals(request: Request):
                             retrieval_metrics=row["retrieve"].get("metrics") or {},
                             retrieval_diagnosis=row.get("diagnosis") or "",
                             workflow_trace=_trace_summary_text(row["answer"].get("workflow_trace") or {}),
+                            guard_decisions=((row["answer"].get("workflow_debug") or {}).get("guard_decisions") or {}),
+                            answer_artifacts=((row["answer"].get("workflow_debug") or {}).get("answer_artifacts") or {}),
                         )
                 row["judge"] = judge_verdict.to_dict()
                 answer_metrics = _eval_v1._answer_metrics(eval_item, row["answer"]["text"] or "", judge_verdict=judge_verdict)
@@ -4443,9 +4506,11 @@ async def admin_run_evals(request: Request):
     diagnosis_counts = dict(Counter((row.get("diagnosis") or "pass") for row in rows))
     likely_cause_counts = dict(Counter((row.get("likely_cause") or "unknown") for row in rows if row.get("overall_status") == "FAIL"))
     failure_source_mix = dict(Counter(((row.get("judge") or {}).get("likely_failure_source") or "none") for row in rows if row.get("overall_status") == "FAIL" and ((row.get("judge") or {}).get("likely_failure_source") or "none") != "none"))
+    failure_step_mix = dict(Counter(((row.get("judge") or {}).get("exact_failure_step") or "") for row in rows if row.get("overall_status") == "FAIL" and ((row.get("judge") or {}).get("exact_failure_step") or "")))
     root_cause_mix = dict(Counter(((row.get("judge") or {}).get("root_cause_note") or "") for row in rows if row.get("overall_status") == "FAIL" and ((row.get("judge") or {}).get("root_cause_note") or "")))
     fix_hint_mix = dict(Counter(((row.get("judge") or {}).get("fix_hint") or "") for row in rows if row.get("overall_status") == "FAIL" and ((row.get("judge") or {}).get("fix_hint") or "")))
     question_type_counts = dict(Counter((row.get("question_type") or "unknown") for row in rows))
+    judge_confidences = [float((row.get("judge") or {}).get("confidence")) for row in rows if (row.get("judge") or {}).get("confidence") is not None]
 
     run_id = _now_run_id()
     run_payload = {
@@ -4459,8 +4524,10 @@ async def admin_run_evals(request: Request):
             "likely_cause_counts": likely_cause_counts,
             "question_type_counts": question_type_counts,
             "failure_source_mix": failure_source_mix,
+            "failure_step_mix": failure_step_mix,
             "root_cause_mix": root_cause_mix,
             "fix_hint_mix": fix_hint_mix,
+            "judge_confidence_mean": round(sum(judge_confidences) / len(judge_confidences), 3) if judge_confidences else None,
         },
         "generated_at": datetime.utcnow().isoformat() + "Z",
         "results": rows,

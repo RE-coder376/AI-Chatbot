@@ -41,15 +41,16 @@ def test_widget_key_routing_valid_key_200(app_module, client, two_tenants, monke
 def test_eval_answer_via_stream_captures_workflow_trace(app_module, monkeypatch):
     async def _fake_stream(*args, **kwargs):
         yield 'data: {"type":"chunk","content":"I do not have details."}\n\n'
-        yield 'data: {"type":"metadata","capture_lead":false,"sources":["https://example.test/doc"],"workflow_trace":{"events":[{"event":"guard_exit","details":{"guard":"sparse_kb_context_miss"}}]}}\n\n'
+        yield 'data: {"type":"metadata","capture_lead":false,"sources":["https://example.test/doc"],"workflow_trace":{"events":[{"event":"guard_exit","details":{"guard":"sparse_kb_context_miss"}}]},"workflow_debug":{"guard_decisions":{"exit_guard":"sparse_kb_context_miss"},"answer_artifacts":{"system_prompt_final":"prompt","raw_llm_answer":"raw"}}}\n\n'
         yield 'data: {"type":"done"}\n\n'
 
     monkeypatch.setattr(app_module, "chat_stream_generator", _fake_stream, raising=True)
-    answer, sources, workflow_trace = asyncio.run(app_module._eval_answer_via_stream("q", {}, object(), "a"))
+    answer, sources, workflow_trace, workflow_debug = asyncio.run(app_module._eval_answer_via_stream("q", {}, object(), "a"))
 
     assert answer == "I do not have details."
     assert sources == ["https://example.test/doc"]
     assert workflow_trace["events"][0]["event"] == "guard_exit"
+    assert workflow_debug["guard_decisions"]["exit_guard"] == "sparse_kb_context_miss"
 
 
 def test_csrf_blocks_write_without_token(app_module, client, two_tenants):

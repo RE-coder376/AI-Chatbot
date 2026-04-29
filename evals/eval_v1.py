@@ -1313,6 +1313,13 @@ def _build_summary(results: list[dict]) -> dict:
             if r.get("overall_status") == "FAIL" and ((r.get("judge") or {}).get("likely_failure_source") or "none") != "none"
         )
     )
+    failure_step_mix = dict(
+        Counter(
+            ((r.get("judge") or {}).get("exact_failure_step") or "")
+            for r in results
+            if r.get("overall_status") == "FAIL" and ((r.get("judge") or {}).get("exact_failure_step") or "")
+        )
+    )
     root_cause_mix = dict(
         Counter(
             ((r.get("judge") or {}).get("root_cause_note") or "")
@@ -1327,6 +1334,7 @@ def _build_summary(results: list[dict]) -> dict:
             if r.get("overall_status") == "FAIL" and ((r.get("judge") or {}).get("fix_hint") or "")
         )
     )
+    judge_confidences = [float((r.get("judge") or {}).get("confidence")) for r in results if (r.get("judge") or {}).get("confidence") is not None]
 
     retrieval_score = _score_of(retrieval_statuses)
     answer_score = _score_of(answer_statuses)
@@ -1349,8 +1357,10 @@ def _build_summary(results: list[dict]) -> dict:
         "selection_mix": dict(Counter(r.get("selection_bucket", "unknown") for r in results)),
         "failure_breakdown": failure_breakdown,
         "failure_source_mix": failure_source_mix,
+        "failure_step_mix": failure_step_mix,
         "root_cause_mix": root_cause_mix,
         "fix_hint_mix": fix_hint_mix,
+        "judge_confidence_mean": round(sum(judge_confidences) / len(judge_confidences), 3) if judge_confidences else None,
         "score_meanings": {
             "overall": _score_meaning(overall_score),
             "retrieval": _score_meaning(retrieval_score),
