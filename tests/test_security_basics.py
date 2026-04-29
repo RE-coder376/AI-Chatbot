@@ -206,3 +206,14 @@ def test_owner_eval_judge_key_prefers_request_value(app_module, monkeypatch):
     monkeypatch.setattr(app_module.os, "getenv", lambda key, default="": "env-judge-key" if key == "JUDGE_API_KEY" else default, raising=True)
     assert app_module._owner_eval_judge_key({"judge_key": "request-key"}) == "request-key"
     assert app_module._owner_eval_judge_key({}) == "env-judge-key"
+
+
+def test_filter_eval_tests_for_tenant_trusts_tenant_local_chunk_sources(app_module):
+    tests = [
+        {"q": "What is Build Merging Skill?", "source": "chunk_topic"},
+        {"q": "What premium fountain pens do you stock and what's the price range?", "source": "analytics"},
+    ]
+    kept, dropped = app_module._filter_eval_tests_for_tenant(tests, "agentfactory")
+    assert len(kept) == 1
+    assert kept[0]["source"] == "chunk_topic"
+    assert dropped == 1

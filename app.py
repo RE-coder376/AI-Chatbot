@@ -3738,12 +3738,25 @@ def _filter_eval_tests_for_tenant(tests: list[dict], db_name: str) -> tuple[list
 
     kept: list[dict] = []
     dropped = 0
+    scope_tokens = _eval_v1._tenant_scope_tokens(db_name)
     for test in tests or []:
         if not isinstance(test, dict):
             dropped += 1
             continue
         q = str(test.get("q") or "").strip()
-        if not _eval_v1._is_tenant_relevant_eval_question(q, db_name):
+        source = str(test.get("source") or "").strip().lower()
+        if source in {"chunk_topic", "embedded_qa", "faq", "knowledge_gap"}:
+            if not _eval_v1._looks_like_good_question(q):
+                dropped += 1
+                continue
+            kept.append(test)
+            continue
+        if source == "analytics":
+            q_tokens = _eval_v1._token_set(q)
+            if not q_tokens or not (q_tokens & scope_tokens):
+                dropped += 1
+                continue
+        elif not _eval_v1._is_tenant_relevant_eval_question(q, db_name):
             dropped += 1
             continue
         kept.append(test)
