@@ -151,6 +151,28 @@ def _normalize_verdict(payload: dict) -> JudgeVerdict:
     )
 
 
+def _prompt_rule_hint(prompt_context: str, failure_source: str, evidence_step: str = "") -> str:
+    prompt = str(prompt_context or "")
+    lower = prompt.lower()
+    if failure_source == "prompt_overconstraint":
+        if "tier3_idk_when_no_kb_match" in lower:
+            return "tier3_idk_when_no_kb_match"
+        if "scope_guard_in_scope_only" in lower:
+            return "scope_guard_in_scope_only"
+        if "rule 3 = tier 3" in lower:
+            return "Rule 3 = Tier 3"
+        if "scope guard" in lower:
+            return "scope guard"
+    if failure_source == "scope_mismatch":
+        if "scope_guard_in_scope_only" in lower:
+            return "scope_guard_in_scope_only"
+        if "refusal_for_prompt_injection" in lower and "prompt_injection" in evidence_step:
+            return "refusal_for_prompt_injection"
+        if "identity_lock" in lower:
+            return "identity_lock"
+    return ""
+
+
 def _request_payload(
     question: str,
     context: str,
@@ -339,6 +361,74 @@ def _strongest_failure_step(guard_decisions: dict | None, answer_artifacts: dict
     if raw_answer and cleaned_answer:
         return "generation_output", "answer_generation_drift"
     return "", "none"
+
+
+def derive_fallback_verdict(
+    retrieval_diagnosis: str = "",
+    guard_decisions: dict | None = None,
+    answer_artifacts: dict | None = None,
+    prompt_context: str = "",
+    retrieval_metrics: dict | None = None,
+) -> JudgeVerdict:
+    evidence_step, evidence_source = _strongest_failure_step(
+        guard_decisions,
+        answer_artifacts,
+        retrieval_diagnosis=retrieval_diagnosis,
+    )
+    metrics = retrieval_metrics or {}
+    context_recall = metrics.get("context_recall")
+    avg_precision = metrics.get("average_precision")
+    rule_hint = _prompt_rule_hint(prompt_context, evidence_source, evidence_step=evidence_step)
+    reason = ""
+    root = ""
+    fix = ""
+    if evidence_source == "retrieval_incomplete":
+        reason = "Deterministic retrieval signals show the answer context was incomplete."
+        root = (
+            f"The workflow points to '{evidence_step or 'retrieval'}', and retrieval signals "
+            f"(context_recall={context_recall}, average_precision={avg_precision}) show the retrieved set did not cover enough answer-bearing content."
+        )
+        fix = "Improve chunk coverage or retrieval depth so the answer context includes the missing facts."
+    elif evidence_source == "prompt_overconstraint":
+        reason = "The bot had usable context but still backed off into an IDK/refusal path."
+        root = (
+            f"The workflow hit '{evidence_step or 'generation_output'}' after retrieval_ok, which means the answer was suppressed after context was available."
+        )
+        if rule_hint:
+            root += f" The likely blocking prompt rule is '{rule_hint}'."
+        fix = "Relax the IDK/scope guard when retrieval is already marked retrieval_ok and the answer is in-domain."
+    elif evidence_source == "answer_generation_drift":
+        raw = str((answer_artifacts or {}).get("raw_llm_answer") or "").strip()
+        cleaned = str((answer_artifacts or {}).get("cleaned_answer") or "").strip()
+        reason = "The answer drifted or was degraded after retrieval succeeded."
+        root = f"The workflow points to '{evidence_step or 'generation_output'}'."
+        if raw and cleaned and raw != cleaned:
+            root += " The raw model answer and cleaned answer diverged, so a post-generation step likely changed the outcome."
+        fix = "Inspect the post-generation cleanup, validation, and answer-class rules for this branch."
+    elif evidence_source == "scope_mismatch":
+        reason = "The workflow exited through a scope or guard branch before a grounded answer was completed."
+        root = f"The workflow exited at '{evidence_step or 'scope_guard'}'."
+        if rule_hint:
+            root += f" The likely governing prompt rule is '{rule_hint}'."
+        fix = "Tighten off-topic detection but avoid routing valid in-domain questions into scope refusal branches."
+    elif evidence_source == "question_bad":
+        reason = "The eval question itself does not look trustworthy enough to diagnose the bot."
+        root = "The row appears malformed or off-domain, so the failure is more likely in eval question generation than chatbot behavior."
+        fix = "Drop or regenerate this eval question before using it as a product-quality signal."
+    else:
+        return JudgeVerdict(error="no_deterministic_failure_source")
+
+    return JudgeVerdict(
+        likely_failure_source=evidence_source,
+        confidence=0.9 if evidence_step else 0.78,
+        reason=reason,
+        exact_failure_step=evidence_step,
+        root_cause_note=root,
+        fix_hint=fix,
+        self_check_status="deterministic_confirmed" if evidence_step else "deterministic_fallback",
+        self_check_note="Derived from workflow trace, deterministic retrieval signals, and answer artifacts.",
+        error="",
+    )
 
 
 def _recalibrate_verdict(

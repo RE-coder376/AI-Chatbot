@@ -4454,6 +4454,13 @@ async def admin_run_evals(request: Request):
                 should_judge = bool(judge_key) and (
                     deterministic_status != "PASS" or row["checks"].get("retrieval") is False
                 )
+                fallback_judge_verdict = _eval_v1.derive_fallback_verdict(
+                    retrieval_diagnosis=judge_retrieval_diagnosis,
+                    guard_decisions=guard_decisions,
+                    answer_artifacts=answer_artifacts,
+                    prompt_context=prompt_snapshot,
+                    retrieval_metrics=row["retrieve"].get("metrics") or {},
+                )
                 if should_judge:
                     judge_verdict = _eval_v1.judge_answer(
                         q,
@@ -4468,6 +4475,20 @@ async def admin_run_evals(request: Request):
                         guard_decisions=guard_decisions,
                         answer_artifacts=answer_artifacts,
                     )
+                if fallback_judge_verdict.error == "":
+                    if judge_verdict.error or judge_verdict.likely_failure_source == "none":
+                        judge_verdict = fallback_judge_verdict
+                    else:
+                        if not judge_verdict.exact_failure_step and fallback_judge_verdict.exact_failure_step:
+                            judge_verdict.exact_failure_step = fallback_judge_verdict.exact_failure_step
+                        if not judge_verdict.root_cause_note and fallback_judge_verdict.root_cause_note:
+                            judge_verdict.root_cause_note = fallback_judge_verdict.root_cause_note
+                        if not judge_verdict.fix_hint and fallback_judge_verdict.fix_hint:
+                            judge_verdict.fix_hint = fallback_judge_verdict.fix_hint
+                        if judge_verdict.confidence is None and fallback_judge_verdict.confidence is not None:
+                            judge_verdict.confidence = fallback_judge_verdict.confidence
+                        if not judge_verdict.reason and fallback_judge_verdict.reason:
+                            judge_verdict.reason = fallback_judge_verdict.reason
                 row["judge"] = judge_verdict.to_dict()
                 answer_metrics = _eval_v1._answer_metrics(eval_item, row["answer"]["text"] or "", judge_verdict=judge_verdict)
                 answer_ok, answer_reason, _ = _eval_v1._grade_answer(eval_item, row["answer"]["text"] or "", judge_verdict=judge_verdict)

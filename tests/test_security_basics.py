@@ -1,6 +1,7 @@
 import asyncio
 
 import pytest
+from evals import eval_v1
 
 
 def test_health_ok(client):
@@ -272,3 +273,63 @@ def test_filter_eval_tests_for_tenant_trusts_tenant_local_chunk_sources(app_modu
     assert len(kept) == 1
     assert kept[0]["source"] == "chunk_topic"
     assert dropped == 2
+
+
+def test_admin_run_evals_uses_deterministic_fallback_when_judge_errors(app_module, client, two_tenants, monkeypatch):
+    token_resp = client.get("/admin/csrf-token", headers={"Authorization": "Bearer ownerpw", "X-Admin-DB": "a"})
+    token = token_resp.json()["csrf_token"]
+
+    class _DummyDB:
+        def similarity_search(self, q, k):
+            return []
+
+    async def _fake_build(base_url, owner_password, db_name, count, strategy="kb"):
+        return [{"id": "t1", "difficulty": "easy", "q": "How does the curriculum work?", "expect": {"type": "ANSWER"}, "source": "chunk_topic"}]
+
+    async def _fake_eval_answer(*args, **kwargs):
+        return (
+            "I don't have enough information right now.",
+            [],
+            {"events": []},
+            {
+                "guard_decisions": {
+                    "deterministic_retrieval_diagnosis": "retrieval_ok",
+                    "cleaned_answer_class": "IDK",
+                    "source_suppressed_reason": "idk",
+                },
+                "answer_artifacts": {
+                    "raw_llm_answer": "The curriculum is organized in guided chapters.",
+                    "cleaned_answer": "I don't have enough information right now.",
+                },
+            },
+        )
+
+    async def _fake_eval_retrieve_docs(q, tenant_db, k=8):
+        return (
+            1,
+            [{"source": "https://example.com/curriculum", "preview": "The curriculum is organized in guided chapters with projects."}],
+            ["https://example.com/curriculum"],
+        )
+
+    class _JudgeError:
+        def __call__(self, *args, **kwargs):
+            return eval_v1.JudgeVerdict(error="judge_retryable_http_429")
+
+    monkeypatch.setattr(app_module, "_get_or_create_db", lambda name: _DummyDB(), raising=True)
+    monkeypatch.setattr(app_module, "_owner_eval_blocker", lambda name: "", raising=True)
+    monkeypatch.setattr(app_module, "_build_owner_eval_tests", _fake_build, raising=True)
+    monkeypatch.setattr(app_module, "_filter_eval_tests_for_tenant", lambda tests, db_name: (tests, 0), raising=True)
+    monkeypatch.setattr(app_module, "_eval_answer_via_stream", _fake_eval_answer, raising=True)
+    monkeypatch.setattr(app_module, "_eval_retrieve_docs", _fake_eval_retrieve_docs, raising=True)
+    monkeypatch.setattr(eval_v1, "judge_answer", _JudgeError(), raising=True)
+
+    r = client.post(
+        "/admin/evals/run",
+        headers={"Authorization": "Bearer ownerpw", "X-Admin-DB": "a", "X-CSRF-Token": token},
+        json={"password": "ownerpw", "db_name": "a", "mode": "chat", "strategy": "kb", "judge_key": "separate-key", "count": 1},
+    )
+
+    assert r.status_code == 200
+    row = r.json()["results"][0]
+    assert row["judge"]["likely_failure_source"] == "prompt_overconstraint"
+    assert row["judge"]["exact_failure_step"] == "source_suppression:idk"

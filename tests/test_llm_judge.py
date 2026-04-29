@@ -271,3 +271,22 @@ def test_judge_recalibrates_retrieval_ok_idk_to_prompt_overconstraint(monkeypatc
     assert verdict.exact_failure_step == "source_suppression:idk"
     assert verdict.self_check_status == "deterministic_confirmed"
     assert "retrieval_ok" in verdict.root_cause_note
+
+
+def test_derive_fallback_verdict_quotes_prompt_rule_for_overconstraint():
+    verdict = llm_judge.derive_fallback_verdict(
+        retrieval_diagnosis="retrieval_ok",
+        guard_decisions={
+            "deterministic_retrieval_diagnosis": "retrieval_ok",
+            "cleaned_answer_class": "IDK",
+            "source_suppressed_reason": "idk",
+        },
+        answer_artifacts={"raw_llm_answer": "Useful grounded answer", "cleaned_answer": "I don't have enough information."},
+        prompt_context="core_rules=no_fabrication; tier3_idk_when_no_kb_match; scope_guard_in_scope_only",
+        retrieval_metrics={"context_recall": 0.88, "average_precision": 1.0},
+    )
+
+    assert verdict.likely_failure_source == "prompt_overconstraint"
+    assert verdict.exact_failure_step == "source_suppression:idk"
+    assert "tier3_idk_when_no_kb_match" in verdict.root_cause_note
+    assert verdict.self_check_status == "deterministic_confirmed"

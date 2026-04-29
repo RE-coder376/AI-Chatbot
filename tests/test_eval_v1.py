@@ -60,6 +60,58 @@ def test_collect_seed_items_filters_generic_noise_and_keeps_curated(monkeypatch)
     assert "What is 2+2?" not in questions
 
 
+def test_load_gap_candidates_filters_cross_tenant_pollution(monkeypatch):
+    temp_path = _scratch_dir()
+    monkeypatch.setattr(eval_v1, "DATABASES_DIR", temp_path / "databases")
+    db_dir = temp_path / "databases" / "agentfactory"
+    _write_json(
+        db_dir / "config.json",
+        {
+            "business_name": "AgentFactory by Panaversity",
+            "topics": "AI agent development, courses, pricing, curriculum, team",
+            "business_description": "Platform for learning to build AI agents.",
+        },
+    )
+    _write_json(
+        db_dir / "knowledge_gaps.json",
+        [
+            {"question": "What is spec-driven development?"},
+            {"question": "What premium fountain pens do you stock?"},
+            {"question": "What educational toys do you have for a 2-year-old under 3000 PKR?"},
+        ],
+    )
+
+    items = eval_v1._load_gap_candidates("agentfactory")
+
+    assert [item.q for item in items] == ["What is spec-driven development?"]
+
+
+def test_load_doc_qa_fallbacks_filters_cross_tenant_embedded_qa(monkeypatch):
+    temp_path = _scratch_dir()
+    monkeypatch.setattr(eval_v1, "DATABASES_DIR", temp_path / "databases")
+    db_dir = temp_path / "databases" / "agentfactory"
+    _write_json(
+        db_dir / "config.json",
+        {
+            "business_name": "AgentFactory by Panaversity",
+            "topics": "AI agent development, courses, pricing, curriculum, team",
+            "business_description": "Platform for learning to build AI agents.",
+        },
+    )
+    monkeypatch.setattr(
+        eval_v1,
+        "_load_document_rows",
+        lambda _db_name: [
+            ("1", "Q: What is AgentFactory? A: AgentFactory is an AI agent learning platform."),
+            ("2", "Q: What premium fountain pens do you stock? A: We carry luxury fountain pens and journals."),
+        ],
+    )
+
+    items = eval_v1._load_doc_qa_fallbacks("agentfactory", 10)
+
+    assert [item.q for item in items] == ["What is AgentFactory?"]
+
+
 def test_subscription_questions_are_not_globally_filtered(monkeypatch):
     temp_path = _scratch_dir()
     monkeypatch.chdir(temp_path)
@@ -129,11 +181,19 @@ def test_is_tenant_relevant_eval_question_rejects_cross_tenant_queries(monkeypat
 
 
 def test_collect_eval_items_keeps_only_grounded_candidates(monkeypatch):
-    temp_path = _scratch_dir()
+    temp_path = _scratch_dir().resolve()
     monkeypatch.chdir(temp_path)
-    monkeypatch.setattr(eval_v1, "DATABASES_DIR", temp_path / "databases")
+    monkeypatch.setattr(eval_v1, "DATABASES_DIR", (temp_path / "databases").resolve())
     monkeypatch.setattr(eval_v1, "_load_document_rows", lambda _db_name: [])
-    db_dir = temp_path / "databases" / "tenant_b"
+    db_dir = eval_v1.DATABASES_DIR / "tenant_b"
+    _write_json(
+        db_dir / "config.json",
+        {
+            "business_name": "Tenant B Logistics",
+            "topics": "refund policy, shipping, delivery, returns",
+            "business_description": "Support help for refunds and shipping questions.",
+        },
+    )
 
     _write_json(
         db_dir / "analytics.json",
@@ -708,6 +768,15 @@ def test_make_chunk_question_prefers_process_wording_for_step_chunks():
     assert q == "What is the process for Spec And Build Your First Tool?"
 
 
+def test_make_chunk_question_uses_prerequisite_wording_when_reference_supports_it():
+    q = eval_v1._make_chunk_question(
+        "Chapter 65: Enable File Checkpointing",
+        "Chapter 65: Enable File Checkpointing. Prerequisites include a configured storage backend and an enabled checkpoint worker before you start the setup.",
+    )
+
+    assert q == "What are the prerequisites for Chapter 65: Enable File Checkpointing?"
+
+
 def test_make_chunk_question_skips_quiz_like_topics():
     q = eval_v1._make_chunk_question(
         "Chapter Quiz",
@@ -715,6 +784,18 @@ def test_make_chunk_question_skips_quiz_like_topics():
     )
 
     assert q == ""
+
+
+def test_trim_seed_pool_does_not_force_minimum_of_ten():
+    items = [
+        eval_v1.EvalItem(q="What is AgentFactory?", source="faq", frequency=1000, difficulty="easy"),
+        eval_v1.EvalItem(q="How does the curriculum work?", source="analytics", frequency=10, difficulty="medium"),
+        eval_v1.EvalItem(q="What does Chapter 1 cover?", source="chunk_topic", frequency=2, difficulty="hard"),
+    ]
+
+    trimmed = eval_v1._trim_seed_pool(items, 3)
+
+    assert 3 <= len(trimmed) <= 6
 
 
 def test_chunk_reference_answer_prefers_clean_semantic_sentences():

@@ -12,7 +12,7 @@ from datetime import datetime
 from pathlib import Path
 
 import requests
-from evals.llm_judge import JudgeVerdict, judge_answer
+from evals.llm_judge import JudgeVerdict, derive_fallback_verdict, judge_answer
 from services.config import get_config
 
 EVALS_DIR = Path(__file__).resolve().parent
@@ -176,6 +176,7 @@ def _load_faq_items(db_name: str) -> list[EvalItem]:
     db_dir = DATABASES_DIR / db_name
     faqs = _read_json(db_dir / "faqs.json") or []
     items: list[EvalItem] = []
+    scope_tokens = _tenant_scope_tokens(db_name)
     if not isinstance(faqs, list):
         return items
     for faq in faqs:
@@ -184,6 +185,11 @@ def _load_faq_items(db_name: str) -> list[EvalItem]:
         q = _normalize_question(faq.get("question", ""))
         a = _normalize_question(faq.get("answer", ""))
         if not q or not a or _looks_like_oos_or_noise(q):
+            continue
+        if not (
+            _is_tenant_relevant_question(q, db_name, scope_tokens)
+            or _is_tenant_relevant_text(a, db_name, scope_tokens)
+        ):
             continue
         items.append(
             EvalItem(
@@ -301,6 +307,7 @@ def _load_gap_candidates(db_name: str) -> list[EvalItem]:
     db_dir = DATABASES_DIR / db_name
     gaps = _read_json(db_dir / "knowledge_gaps.json") or []
     items: list[EvalItem] = []
+    scope_tokens = _tenant_scope_tokens(db_name)
     if not isinstance(gaps, list):
         return items
     for gap in gaps:
@@ -308,6 +315,8 @@ def _load_gap_candidates(db_name: str) -> list[EvalItem]:
             continue
         q = _normalize_question(gap.get("question", ""))
         if not q or not _looks_like_good_question(q):
+            continue
+        if not _is_tenant_relevant_question(q, db_name, scope_tokens):
             continue
         items.append(
             EvalItem(
@@ -383,6 +392,7 @@ def _unpack_doc_row(row) -> tuple[str, str, str]:
 def _load_doc_qa_fallbacks(db_name: str, limit: int) -> list[EvalItem]:
     items: list[EvalItem] = []
     rows = _load_document_rows(db_name)
+    scope_tokens = _tenant_scope_tokens(db_name)
     if not rows:
         return items
 
@@ -394,6 +404,11 @@ def _load_doc_qa_fallbacks(db_name: str, limit: int) -> list[EvalItem]:
         q = _normalize_question(match.group(1))
         a = _normalize_question(match.group(2))
         if not q or not a or not _looks_like_good_question(q):
+            continue
+        if not (
+            _is_tenant_relevant_question(q, db_name, scope_tokens)
+            or _is_tenant_relevant_text(a, db_name, scope_tokens)
+        ):
             continue
         items.append(
             EvalItem(
@@ -614,11 +629,19 @@ def _make_chunk_question(topic: str, chunk_text: str) -> str:
         return ""
     text = _clean_chunk_text(chunk_text).lower()
     low_topic = topic.lower()
+    reference = _chunk_reference_answer(topic, chunk_text)
+    ref_lower = reference.lower()
     if re.search(r"\b(quiz|exercise|worksheet|assignment|prompt \d+|module \d+)\b", low_topic):
         return ""
     if re.search(r"\b(what you are learning|exercise \d+|prompt \d+|producer vs consumer)\b", text):
         return ""
-    if re.search(r"\b(step 1|step 2|follow these steps|to create|to build|to add|to configure|to set up)\b", text):
+    if re.search(r"\b(prerequisite|prerequisites|requirement|requirements)\b", ref_lower):
+        question = f"What are the prerequisites for {topic}?"
+    elif re.search(r"\b(price|pricing|cost|fee|fees)\b", ref_lower):
+        question = f"What is the pricing for {topic}?"
+    elif re.search(r"\b(duration|timeline|week|weeks|month|months|hours|complete|finish)\b", ref_lower):
+        question = f"How long does {topic} take to complete?"
+    elif re.search(r"\b(step 1|step 2|follow these steps|to create|to build|to add|to configure|to set up)\b", text):
         if re.search(r"\bchapter\s+\d+\b", low_topic, re.I):
             question = f"What is the process covered in {topic}?"
         elif len(topic.split()) <= 4:
@@ -628,13 +651,13 @@ def _make_chunk_question(topic: str, chunk_text: str) -> str:
     elif re.search(r"\bcompare|difference|versus|vs\.?\b", low_topic, re.I):
         question = f"What is the difference explained in {topic}?"
     elif re.search(r"\bchapter\s+\d+\b", low_topic, re.I):
-        question = f"What is the main idea of {topic}?"
+        question = f"What does {topic} cover?"
     elif len(topic.split()) <= 4:
         question = f"What is {topic}?"
     elif re.search(r"\b(policy|workflow|system|framework|review|management|configuration)\b", low_topic):
         question = f"How does {topic} work?"
     else:
-        question = f"What is the main idea of {topic}?"
+        question = f"What does {topic} cover?"
     return question if _looks_like_good_question(question) else ""
 
 
@@ -712,7 +735,7 @@ def _trim_seed_pool(items: list[EvalItem], desired_count: int) -> list[EvalItem]
     if not items:
         return []
 
-    desired_count = max(10, desired_count)
+    desired_count = max(1, desired_count)
     per_source_cap = {
         "faq": max(4, desired_count),
         "embedded_qa": max(6, desired_count),
@@ -726,7 +749,7 @@ def _trim_seed_pool(items: list[EvalItem], desired_count: int) -> list[EvalItem]
         group.sort(key=_source_priority)
         trimmed.extend(_select_diverse_items(group, per_source_cap.get(source, desired_count)))
 
-    target = max(desired_count, 30)
+    target = max(desired_count, min(max(desired_count * 2, 12), 30))
     trimmed.sort(key=_source_priority)
     selected = _select_diverse_items(trimmed, target)
     if len(selected) >= target:
