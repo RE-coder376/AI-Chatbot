@@ -2855,6 +2855,8 @@ async def _comparative_retrieve(q: str, db) -> tuple:
 
 async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "", page_url: str = "", page_title: str = "", request: Request = None, cfg: dict = None, tenant_db=None, db_name: str = "") -> AsyncGenerator[str, None]:
     # SSE comment — keeps HF Space proxy alive during retrieval (proxy closes idle connections)
+    workflow_trace = {"events": []}
+    _trace_event(workflow_trace, "chat_stream_start", db_name=db_name or _get_active_db())
     yield ": keep-alive\n\n"
     # Lazy-load model on first request — but don't block the stream (model download ~2min on Render)
     if local_db is None and _status not in ("ready_no_db",):
@@ -2872,6 +2874,7 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
     user_lang = detect_language(q)
     intent    = classify_intent(q)
     is_urdu   = user_lang in ("Urdu Script", "Roman Urdu")
+    _trace_event(workflow_trace, "intent_classified", intent=intent, user_lang=user_lang, is_api_only=_is_api_only)
 
     # Fire entity extraction + intent expansion early — both run in parallel with
     # off-topic checks below, so by the time retrieve_context is called they may be done.
@@ -2890,6 +2893,7 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
         re.IGNORECASE
     )
     if _OFF_TOPIC_RE.search(q):
+        _trace_event(workflow_trace, "guard_exit", guard="off_topic_pre_retrieval")
         business = cfg.get("business_name", "the company")
         topics   = cfg.get("topics", "our products and services")
         reply = (f"I specialize in {topics} for {business}. "
@@ -2897,7 +2901,7 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
                  f"Is there something about {topics} I can help you with?")
         if visitor_id: _run_in_bg(save_visitor_turn, visitor_id, "assistant", reply, db_name)
         yield f"data: {json.dumps({'type': 'chunk', 'content': reply})}\n\n"
-        yield f"data: {json.dumps({'type': 'metadata', 'capture_lead': False, 'sources': []})}\n\n"
+        yield f"data: {json.dumps({'type': 'metadata', 'capture_lead': False, 'sources': [], 'workflow_trace': workflow_trace})}\n\n"
         yield "data: {\"type\": \"done\"}\n\n"
         return
 
@@ -2911,12 +2915,13 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
         re.IGNORECASE
     )
     if _PROMPT_RE.search(q):
+        _trace_event(workflow_trace, "guard_exit", guard="prompt_injection")
         bot_name = cfg.get("bot_name", "Assistant")
         topics   = cfg.get("topics", "our products and services")
         reply = f"I'm {bot_name}, here to help with {topics}. What can I assist you with today?"
         if visitor_id: _run_in_bg(save_visitor_turn, visitor_id, "assistant", reply, db_name)
         yield f"data: {json.dumps({'type': 'chunk', 'content': reply})}\n\n"
-        yield f"data: {json.dumps({'type': 'metadata', 'capture_lead': False, 'sources': []})}\n\n"
+        yield f"data: {json.dumps({'type': 'metadata', 'capture_lead': False, 'sources': [], 'workflow_trace': workflow_trace})}\n\n"
         yield "data: {\"type\": \"done\"}\n\n"
         return
 
@@ -2927,6 +2932,7 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
         re.IGNORECASE
     )
     if _TRANS_RE.search(q):
+        _trace_event(workflow_trace, "guard_exit", guard="translation")
         bot_name = cfg.get("bot_name", "Assistant")
         business = cfg.get("business_name", "the company")
         topics   = cfg.get("topics", "our products and services")
@@ -2935,7 +2941,7 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
                  f"I can help you with {topics} — what would you like to know?")
         if visitor_id: _run_in_bg(save_visitor_turn, visitor_id, "assistant", reply, db_name)
         yield f"data: {json.dumps({'type': 'chunk', 'content': reply})}\n\n"
-        yield f"data: {json.dumps({'type': 'metadata', 'capture_lead': False, 'sources': []})}\n\n"
+        yield f"data: {json.dumps({'type': 'metadata', 'capture_lead': False, 'sources': [], 'workflow_trace': workflow_trace})}\n\n"
         yield "data: {\"type\": \"done\"}\n\n"
         return
 
@@ -2947,13 +2953,14 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
         re.IGNORECASE
     )
     if _PERSONA_RE.search(q):
+        _trace_event(workflow_trace, "guard_exit", guard="persona_lock")
         bot_name = cfg.get("bot_name", "Assistant")
         business = cfg.get("business_name", "the company")
         reply = (f"I'm {bot_name}, the assistant for {business}. "
                  f"My identity is set by the admin and cannot be changed through chat.")
         if visitor_id: _run_in_bg(save_visitor_turn, visitor_id, "assistant", reply, db_name)
         yield f"data: {json.dumps({'type': 'chunk', 'content': reply})}\n\n"
-        yield f"data: {json.dumps({'type': 'metadata', 'capture_lead': False, 'sources': []})}\n\n"
+        yield f"data: {json.dumps({'type': 'metadata', 'capture_lead': False, 'sources': [], 'workflow_trace': workflow_trace})}\n\n"
         yield "data: {\"type\": \"done\"}\n\n"
         return
 
@@ -2967,6 +2974,7 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
         re.IGNORECASE
     )
     if _CODE_RE.search(q):
+        _trace_event(workflow_trace, "guard_exit", guard="coding_scope")
         bot_name = cfg.get("bot_name", "Assistant")
         business = cfg.get("business_name", "the company")
         topics   = cfg.get("topics", "our products and services")
@@ -2975,7 +2983,7 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
                  f"I can help you with {topics} — what would you like to know?")
         if visitor_id: _run_in_bg(save_visitor_turn, visitor_id, "assistant", reply, db_name)
         yield f"data: {json.dumps({'type': 'chunk', 'content': reply})}\n\n"
-        yield f"data: {json.dumps({'type': 'metadata', 'capture_lead': False, 'sources': []})}\n\n"
+        yield f"data: {json.dumps({'type': 'metadata', 'capture_lead': False, 'sources': [], 'workflow_trace': workflow_trace})}\n\n"
         yield "data: {\"type\": \"done\"}\n\n"
         return
 
@@ -2996,6 +3004,7 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
         re.IGNORECASE
     )
     if _OOS_RE.search(q) and not _PRODUCT_Q_RE.search(q):
+        _trace_event(workflow_trace, "guard_exit", guard="general_oos")
         bot_name = cfg.get("bot_name", "Assistant")
         business = cfg.get("business_name", "the company")
         topics   = cfg.get("topics", "our products and services")
@@ -3004,12 +3013,13 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
                  f"Is there something about {topics} I can help you with?")
         if visitor_id: _run_in_bg(save_visitor_turn, visitor_id, "assistant", reply, db_name)
         yield f"data: {json.dumps({'type': 'chunk', 'content': reply})}\n\n"
-        yield f"data: {json.dumps({'type': 'metadata', 'capture_lead': False, 'sources': []})}\n\n"
+        yield f"data: {json.dumps({'type': 'metadata', 'capture_lead': False, 'sources': [], 'workflow_trace': workflow_trace})}\n\n"
         yield "data: {\"type\": \"done\"}\n\n"
         return
 
     # ── Greeting — no retrieval needed ───────────────────────────────────────
     if intent == "greeting":
+        _trace_event(workflow_trace, "guard_exit", guard="greeting_fast_path")
         bot_name = cfg.get("bot_name", "Assistant")
         _biz     = cfg.get("business_name", "")
         topics   = cfg.get("topics", "") or (_biz if _biz else "our products and services")
@@ -3020,7 +3030,7 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
             reply = f"Hello! I'm {bot_name}. I can help you with {topics}. What would you like to know?"
         if visitor_id: _run_in_bg(save_visitor_turn, visitor_id, "assistant", reply, db_name)
         yield f"data: {json.dumps({'type': 'chunk', 'content': reply})}\n\n"
-        yield f"data: {json.dumps({'type': 'metadata', 'capture_lead': False, 'sources': [], 'options': quick_opts})}\n\n"
+        yield f"data: {json.dumps({'type': 'metadata', 'capture_lead': False, 'sources': [], 'options': quick_opts, 'workflow_trace': workflow_trace})}\n\n"
         yield "data: {\"type\": \"done\"}\n\n"
         return
 
@@ -3032,6 +3042,7 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
         re.IGNORECASE
     )
     if _CONV_MEM_RE.search(q) and history:
+        _trace_event(workflow_trace, "retrieval_path", path="conversation_memory")
         # Let LLM answer purely from history — inject minimal context, no KB
         messages_mem = [SystemMessage(content=
             f"You are {cfg.get('bot_name','Assistant')}, a helpful assistant for "
@@ -3045,20 +3056,26 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
         messages_mem.append(HumanMessage(content=q))
         try:
             llm_mem = get_fresh_llm()
+            if not llm_mem:
+                _trace_event(workflow_trace, "guard_exit", guard="memory_path_no_llm")
+                raise RuntimeError("memory_path_no_llm")
             reply_mem = ""
             async with asyncio.timeout(30):
                 async for chunk in llm_mem.astream(messages_mem):
                     reply_mem += chunk.content
                     yield f"data: {json.dumps({'type':'chunk','content':chunk.content})}\n\n"
             if visitor_id: _run_in_bg(save_visitor_turn, visitor_id, "assistant", reply_mem, db_name)
-            yield f"data: {json.dumps({'type':'metadata','capture_lead':False,'sources':[]})}\n\n"
+            _trace_event(workflow_trace, "guard_exit", guard="conversation_memory_answer")
+            yield f"data: {json.dumps({'type':'metadata','capture_lead':False,'sources':[],'workflow_trace':workflow_trace})}\n\n"
             yield "data: {\"type\": \"done\"}\n\n"
             return
         except (Exception, asyncio.TimeoutError):
+            _trace_event(workflow_trace, "guard_exit", guard="conversation_memory_fallback")
             pass  # fall through to normal path if LLM fails
 
     # ── Small talk / meta — bot identity + capability questions ─────────────
     if intent == "small_talk":
+        _trace_event(workflow_trace, "guard_exit", guard="small_talk_fast_path")
         bot_name = cfg.get("bot_name", "Assistant")
         business = cfg.get("business_name", "")
         topics   = cfg.get("topics", "") or (f"{business}" if business else "our products and services")
@@ -3074,12 +3091,13 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
                      f"What would you like to know?")
         if visitor_id: _run_in_bg(save_visitor_turn, visitor_id, "assistant", reply, db_name)
         yield f"data: {json.dumps({'type': 'chunk', 'content': reply})}\n\n"
-        yield f"data: {json.dumps({'type': 'metadata', 'capture_lead': False, 'sources': [], 'options': quick_opts})}\n\n"
+        yield f"data: {json.dumps({'type': 'metadata', 'capture_lead': False, 'sources': [], 'options': quick_opts, 'workflow_trace': workflow_trace})}\n\n"
         yield "data: {\"type\": \"done\"}\n\n"
         return
 
     # ── Complaint — skip FAQ, go straight to empathy + escalation ────────────
     if intent == "complaint":
+        _trace_event(workflow_trace, "guard_exit", guard="complaint_fast_path")
         contact = cfg.get("contact_email", "") or cfg.get("whatsapp_number", "")
         contact_str = f" Please reach us at {contact} so we can resolve this." if contact else ""
         if is_urdu:
@@ -3092,12 +3110,13 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
         if visitor_id: _run_in_bg(save_visitor_turn, visitor_id, "assistant", reply, db_name)
         yield f"data: {json.dumps({'type': 'chunk', 'content': reply})}\n\n"
         _lead_on = not cfg.get("disable_lead_box", False)
-        yield f"data: {json.dumps({'type': 'metadata', 'capture_lead': _lead_on, 'sources': []})}\n\n"
+        yield f"data: {json.dumps({'type': 'metadata', 'capture_lead': _lead_on, 'sources': [], 'workflow_trace': workflow_trace})}\n\n"
         yield "data: {\"type\": \"done\"}\n\n"
         return
 
     # ── Ambiguous — ask for clarification before retrieval ────────────────────
     if intent == "ambiguous":
+        _trace_event(workflow_trace, "guard_exit", guard="ambiguous_fast_path")
         topics = cfg.get("topics", "our products and services")
         quick_opts = await _get_intro_questions(db_name or _get_active_db(), _local_db, cfg)
         if is_urdu:
@@ -3107,7 +3126,7 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
                      f"a specific product, or something else related to {topics}?")
         if visitor_id: _run_in_bg(save_visitor_turn, visitor_id, "assistant", reply, db_name)
         yield f"data: {json.dumps({'type': 'chunk', 'content': reply})}\n\n"
-        yield f"data: {json.dumps({'type': 'metadata', 'capture_lead': False, 'sources': [], 'options': quick_opts})}\n\n"
+        yield f"data: {json.dumps({'type': 'metadata', 'capture_lead': False, 'sources': [], 'options': quick_opts, 'workflow_trace': workflow_trace})}\n\n"
         yield "data: {\"type\": \"done\"}\n\n"
         return
 
@@ -3130,17 +3149,23 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
         if intent == "comparative":
             _early_expansion_task.cancel()
             context, doc_count, sources = await _comparative_retrieve(q, _local_db)
+            _trace_event(workflow_trace, "retrieval_path", path="comparative")
         elif intent == "multi_part":
             _early_expansion_task.cancel()
             context, doc_count, sources = await _decompose_and_retrieve(q, _local_db)
+            _trace_event(workflow_trace, "retrieval_path", path="multi_part")
         else:
             context, doc_count, sources = await retrieve_context(q, _local_db, expansion_task=_early_expansion_task, history=history)
+            _trace_event(workflow_trace, "retrieval_path", path="standard")
     else:
         # API-only DB (no ChromaDB) — still run retrieve_context for live API fetch
         context, doc_count, sources = await retrieve_context(q, None, expansion_task=_early_expansion_task, history=history)
+        _trace_event(workflow_trace, "retrieval_path", path="api_only")
+    _trace_event(workflow_trace, "retrieval_result", doc_count=doc_count, source_count=len(sources or []), context_chars=len(context or ""))
 
     # ── Sparse KB guard — skip for api-only DBs (no KB, LLM uses training knowledge) ──
     if not _is_api_only and not _context_addresses_query(context, q):
+        _trace_event(workflow_trace, "guard_exit", guard="sparse_kb_context_miss", doc_count=doc_count)
         _run_in_bg(log_knowledge_gap, q, db_name)
         topics      = cfg.get("topics", "our services")
         contact     = cfg.get("contact_email", "")
@@ -3157,17 +3182,18 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
         yield f"data: {json.dumps({'type': 'chunk', 'content': idk})}\n\n"
         _lead_on = not cfg.get("disable_lead_box", False)
         quick_opts_idk = await _get_intro_questions(db_name or _get_active_db(), _local_db, cfg)
-        yield f"data: {json.dumps({'type': 'metadata', 'capture_lead': _lead_on, 'sources': [], 'options': quick_opts_idk})}\n\n"
+        yield f"data: {json.dumps({'type': 'metadata', 'capture_lead': _lead_on, 'sources': [], 'options': quick_opts_idk, 'workflow_trace': workflow_trace})}\n\n"
         yield "data: {\"type\": \"done\"}\n\n"
         return
 
     # ── Fast path: bypass LLM for structured Jikan responses ─────────────────
     _fast_resp = _fast_format_jikan(context, q)
     if _fast_resp:
+        _trace_event(workflow_trace, "guard_exit", guard="fast_response_formatter")
         if visitor_id: _run_in_bg(save_visitor_turn, visitor_id, "assistant", _fast_resp, db_name)
         yield f"data: {json.dumps({'type': 'chunk', 'content': _fast_resp})}\n\n"
         _lead_on = not cfg.get("disable_lead_box", False)
-        yield f"data: {json.dumps({'type': 'metadata', 'capture_lead': _lead_on, 'sources': sources[:3]})}\n\n"
+        yield f"data: {json.dumps({'type': 'metadata', 'capture_lead': _lead_on, 'sources': sources[:3], 'workflow_trace': workflow_trace})}\n\n"
         yield "data: {\"type\": \"done\"}\n\n"
         return
 
@@ -3235,7 +3261,9 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
     
     # Fast-fail if ALL keys are on cooldown — no point looping through 30
     if not any_key_ready():
+        _trace_event(workflow_trace, "guard_exit", guard="no_provider_key_ready")
         yield f"data: {json.dumps({'type': 'chunk', 'content': 'I am unable to respond right now. Please try again in a moment.'})}\n\n"
+        yield f"data: {json.dumps({'type': 'metadata', 'capture_lead': False, 'sources': [], 'workflow_trace': workflow_trace})}\n\n"
         yield "data: {\"type\": \"done\"}\n\n"
         return
 
@@ -3246,13 +3274,17 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
     for attempt in range(max_retries):
         llm = get_fresh_llm()
         if not llm:
+            _trace_event(workflow_trace, "guard_exit", guard="no_llm_instance")
             yield f"data: {json.dumps({'type': 'chunk', 'content': 'Service temporarily unavailable.'})}\n\n"
+            yield f"data: {json.dumps({'type': 'metadata', 'capture_lead': False, 'sources': [], 'workflow_trace': workflow_trace})}\n\n"
+            yield "data: {\"type\": \"done\"}\n\n"
             return
 
         response_buffer = []
         _should_rotate = False
         _exc_for_mark = None
         try:
+            _trace_event(workflow_trace, "llm_attempt", attempt=attempt + 1)
             async with asyncio.timeout(6):  # Hard kill — prevents hung connections (max_tokens=512, should stream in <5s)
                 async for chunk in llm.astream(messages):
                     if request and await request.is_disconnected():
@@ -3260,14 +3292,17 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
                         return
                     response_buffer.append(chunk.content)
             success = True
+            _trace_event(workflow_trace, "llm_attempt_result", attempt=attempt + 1, success=True)
             break
         except (TimeoutError, asyncio.TimeoutError):
             logger.warning(f"LLM attempt {attempt+1} timed out (Google SDK internal retry killed) — rotating key")
+            _trace_event(workflow_trace, "llm_attempt_result", attempt=attempt + 1, success=False, error="timeout")
             _should_rotate = True
         except Exception as e:
             _exc_for_mark = e
             err_str = str(e).lower()
             logger.warning(f"LLM attempt {attempt+1} error type={type(e).__name__}: {str(e)[:200]}")
+            _trace_event(workflow_trace, "llm_attempt_result", attempt=attempt + 1, success=False, error=type(e).__name__)
             # Rotate on ALL provider errors — only permanent auth failures get marked differently
             _should_rotate = True
             if any(p in err_str for p in ["invalid_api_key", "incorrect api key", "unauthorized", "401 "]):
@@ -3293,7 +3328,9 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
     is_lead = any(kw in q.lower() for kw in lead_keywords)
 
     if success:
-        cleaned = _strip_source_leaks("".join(response_buffer), kb_context=context)
+        raw_answer = "".join(response_buffer)
+        cleaned = _strip_source_leaks(raw_answer, kb_context=context)
+        _trace_event(workflow_trace, "postprocess_strip_source_leaks", changed=(cleaned != raw_answer))
         # ── Light answer validator (smart_search DBs) — code-based, zero LLM cost ──
         # Catches hallucinated product features absent from retrieved context
         if "smart_search" in set(cfg.get("features", [])):
@@ -3308,6 +3345,7 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
                 _halluc = True
             if _halluc:
                 logger.warning(f"[Validator] Potential hallucination detected — answer claims feature absent from context")
+                _trace_event(workflow_trace, "validator_rewrite", reason="smart_search_feature_hallucination")
                 cleaned = ("I don't have specific details about that in my knowledge base right now. "
                            "Could you rephrase or ask about a specific product by name?")
         if visitor_id: _run_in_bg(save_visitor_turn, visitor_id, "assistant", cleaned, db_name)
@@ -3329,13 +3367,29 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
         _scope_sigs = ["i specialize in helping with", "for other topics, i'd suggest",
                        "outside that scope", "not able to translate", "general search engine"]
         is_scope_declined = any(s in cleaned.lower() for s in _scope_sigs)
+        raw_lower = raw_answer.lower()
+        raw_is_idk = any(s in raw_lower for s in _idk_sigs)
+        raw_is_scope_declined = any(s in raw_lower for s in _scope_sigs)
+        raw_answer_class = "REFUSE" if raw_is_scope_declined else ("IDK" if raw_is_idk else "ANSWER")
+        cleaned_answer_class = "REFUSE" if is_scope_declined else ("IDK" if is_idk else "ANSWER")
+        _trace_event(workflow_trace, "final_answer_flags", is_idk=is_idk, is_scope_declined=is_scope_declined, is_conv=is_conv, is_greeting_resp=is_greeting_resp)
+        _trace_event(workflow_trace, "answer_class_transition", raw_class=raw_answer_class, cleaned_class=cleaned_answer_class, changed=(raw_answer_class != cleaned_answer_class))
         show_sources = [] if (is_idk or is_conv or is_greeting_resp or is_scope_declined) else sources
+        if is_idk:
+            _trace_event(workflow_trace, "source_suppression", reason="idk")
+        elif is_conv:
+            _trace_event(workflow_trace, "source_suppression", reason="conversation_memory")
+        elif is_greeting_resp:
+            _trace_event(workflow_trace, "source_suppression", reason="greeting_style_response")
+        elif is_scope_declined:
+            _trace_event(workflow_trace, "source_suppression", reason="scope_declined")
         quick_opts = await _get_intro_questions(db_name or _get_active_db(), _local_db, cfg)
         _lead_on = is_lead and not cfg.get("disable_lead_box", False)
-        yield f"data: {json.dumps({'type': 'metadata', 'capture_lead': _lead_on, 'sources': show_sources, 'options': quick_opts})}\n\n"
+        yield f"data: {json.dumps({'type': 'metadata', 'capture_lead': _lead_on, 'sources': show_sources, 'options': quick_opts, 'workflow_trace': workflow_trace})}\n\n"
     else:
+        _trace_event(workflow_trace, "guard_exit", guard="llm_all_attempts_failed")
         yield f"data: {json.dumps({'type': 'chunk', 'content': 'I am unable to respond right now. Please try again in a moment.'})}\n\n"
-        yield f"data: {json.dumps({'type': 'metadata', 'capture_lead': False, 'sources': []})}\n\n"
+        yield f"data: {json.dumps({'type': 'metadata', 'capture_lead': False, 'sources': [], 'workflow_trace': workflow_trace})}\n\n"
     yield "data: {\"type\": \"done\"}\n\n"
 
 @app.post("/chat")
@@ -3961,11 +4015,12 @@ async def _eval_retrieve_docs(q: str, tenant_db, k: int = 8) -> tuple[int, list[
     except Exception:
         return (0, [], [])
 
-async def _eval_answer_via_stream(q: str, cfg: dict, tenant_db, db_name: str) -> tuple[str, list[str]]:
-    """Consume the production streaming path to extract (answer, sources)."""
+async def _eval_answer_via_stream(q: str, cfg: dict, tenant_db, db_name: str) -> tuple[str, list[str], dict]:
+    """Consume the production streaming path to extract (answer, sources, workflow_trace)."""
     async def _run():
         answer_parts: list[str] = []
         sources: list[str] = []
+        workflow_trace: dict = {}
         async for chunk in chat_stream_generator(
             q, [], "", "", "",
             request=None, cfg=cfg, tenant_db=tenant_db, db_name=db_name
@@ -3987,8 +4042,37 @@ async def _eval_answer_via_stream(q: str, cfg: dict, tenant_db, db_name: str) ->
                     srcs = obj.get("sources") or []
                     if isinstance(srcs, list):
                         sources = [str(s) for s in srcs if isinstance(s, str)]
-        return ("".join(answer_parts).strip(), sources)
+                    trace = obj.get("workflow_trace")
+                    if isinstance(trace, dict):
+                        workflow_trace = trace
+        return ("".join(answer_parts).strip(), sources, workflow_trace)
     return await asyncio.wait_for(_run(), timeout=120)
+
+
+def _trace_event(trace: dict, event: str, **details):
+    events = trace.setdefault("events", [])
+    payload = {"event": event}
+    if details:
+        payload["details"] = details
+    events.append(payload)
+
+
+def _trace_summary_text(trace: dict) -> str:
+    if not isinstance(trace, dict):
+        return ""
+    lines = []
+    for ev in trace.get("events", []):
+        if not isinstance(ev, dict):
+            continue
+        event = str(ev.get("event") or "").strip()
+        details = ev.get("details") or {}
+        if not event:
+            continue
+        if details:
+            lines.append(f"{event}: {json.dumps(details, ensure_ascii=True, sort_keys=True)}")
+        else:
+            lines.append(event)
+    return "\n".join(lines[:80])
 
 def _sources_hit_expected(sources: list[str], expected_source: str) -> bool:
     if not expected_source:
@@ -4173,8 +4257,9 @@ async def admin_run_evals(request: Request):
 
         if mode in ("chat", "both"):
             try:
-                ans, chat_sources = await _eval_answer_via_stream(q, cfg, tenant_db, db_name)
+                ans, chat_sources, workflow_trace = await _eval_answer_via_stream(q, cfg, tenant_db, db_name)
                 row["answer"]["text"] = ans[:4000]
+                row["answer"]["workflow_trace"] = workflow_trace
                 if chat_sources:
                     row["retrieve"]["sources"] = chat_sources[:8]
                     if etype == "ANSWER" and row["checks"]["retrieval"] is None:
@@ -4259,16 +4344,17 @@ async def admin_run_evals(request: Request):
                 )
                 judge_verdict = _eval_v1.JudgeVerdict(error="judge_disabled")
                 if judge_key:
-                    judge_verdict = _eval_v1.judge_answer(
-                        q,
-                        preview_text,
-                        row["answer"]["text"] or "",
-                        ref_text,
-                        judge_key,
-                        prompt_context=prompt_snapshot,
-                        retrieval_metrics=row["retrieve"].get("metrics") or {},
-                        retrieval_diagnosis=row.get("diagnosis") or "",
-                    )
+                        judge_verdict = _eval_v1.judge_answer(
+                            q,
+                            preview_text,
+                            row["answer"]["text"] or "",
+                            ref_text,
+                            judge_key,
+                            prompt_context=prompt_snapshot,
+                            retrieval_metrics=row["retrieve"].get("metrics") or {},
+                            retrieval_diagnosis=row.get("diagnosis") or "",
+                            workflow_trace=_trace_summary_text(row["answer"].get("workflow_trace") or {}),
+                        )
                 row["judge"] = judge_verdict.to_dict()
                 answer_metrics = _eval_v1._answer_metrics(eval_item, row["answer"]["text"] or "", judge_verdict=judge_verdict)
                 answer_ok, answer_reason, _ = _eval_v1._grade_answer(eval_item, row["answer"]["text"] or "", judge_verdict=judge_verdict)

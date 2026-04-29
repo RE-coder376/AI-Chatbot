@@ -54,7 +54,7 @@ def _coerce_keys(api_key: str | list[str] | tuple[str, ...] | None) -> list[str]
     return keys
 
 
-def _cache_key(question: str, context: str, answer: str, reference: str, prompt_context: str = "", retrieval_metrics: dict | None = None, retrieval_diagnosis: str = "") -> str:
+def _cache_key(question: str, context: str, answer: str, reference: str, prompt_context: str = "", retrieval_metrics: dict | None = None, retrieval_diagnosis: str = "", workflow_trace: str = "") -> str:
     payload = {
         "model": JUDGE_MODEL,
         "question": question,
@@ -64,6 +64,7 @@ def _cache_key(question: str, context: str, answer: str, reference: str, prompt_
         "prompt_context": prompt_context,
         "retrieval_metrics": retrieval_metrics or {},
         "retrieval_diagnosis": retrieval_diagnosis,
+        "workflow_trace": workflow_trace,
     }
     blob = json.dumps(payload, sort_keys=True, ensure_ascii=True).encode("utf-8")
     return hashlib.sha256(blob).hexdigest()
@@ -126,12 +127,13 @@ def _normalize_verdict(payload: dict) -> JudgeVerdict:
     )
 
 
-def _request_payload(question: str, context: str, answer: str, reference: str, prompt_context: str = "", retrieval_metrics: dict | None = None, retrieval_diagnosis: str = "") -> dict:
+def _request_payload(question: str, context: str, answer: str, reference: str, prompt_context: str = "", retrieval_metrics: dict | None = None, retrieval_diagnosis: str = "", workflow_trace: str = "") -> dict:
     system_prompt = (
         "You are a strict RAG evaluation judge. "
         "Return JSON only. "
         "Score whether the answer is faithful to the retrieved context and relevant to the user's question. "
-        "Do not judge retrieval ranking. "
+        "You are also a workflow debugger: use the provided trace to identify the exact branch or guard that most likely caused the final answer shape. "
+        "Do not judge retrieval ranking beyond the supplied deterministic signals. "
         "Use likely_failure_source only from: "
         "none, retrieval_incomplete, prompt_overconstraint, answer_generation_drift, scope_mismatch, question_bad."
     )
@@ -143,7 +145,10 @@ def _request_payload(question: str, context: str, answer: str, reference: str, p
         f"System Prompt Snapshot:\n{prompt_context or '(not provided)'}\n\n"
         f"Deterministic Retrieval Signals:\n{json.dumps(retrieval_metrics or {}, ensure_ascii=True)}\n\n"
         f"Deterministic Retrieval Diagnosis:\n{retrieval_diagnosis or 'none'}\n\n"
+        f"Answer Generation Workflow Trace:\n{workflow_trace or '(not provided)'}\n\n"
         f"Chatbot Answer:\n{answer}\n\n"
+        "If the workflow trace clearly shows a guard, fallback, source suppression, rewrite, or post-processing branch, use that evidence directly instead of hedging. "
+        "Only blame retrieval when the trace and deterministic retrieval signals support that conclusion. "
         "Return a JSON object with exactly these keys:\n"
         "- faithfulness_score: number from 0 to 1\n"
         "- answer_relevance_score: number from 0 to 1\n"
@@ -172,17 +177,17 @@ def _should_rotate(status_code: int, payload: dict | None) -> bool:
     return "rate limit" in message or "temporarily unavailable" in message or "overloaded" in err_type
 
 
-def judge_answer(question: str, context: str, answer: str, reference: str, api_key, prompt_context: str = "", retrieval_metrics: dict | None = None, retrieval_diagnosis: str = "") -> JudgeVerdict:
+def judge_answer(question: str, context: str, answer: str, reference: str, api_key, prompt_context: str = "", retrieval_metrics: dict | None = None, retrieval_diagnosis: str = "", workflow_trace: str = "") -> JudgeVerdict:
     keys = _coerce_keys(api_key)
     if not keys:
         return JudgeVerdict(error="judge_disabled")
 
-    cache_key = _cache_key(question, context, answer, reference, prompt_context=prompt_context, retrieval_metrics=retrieval_metrics, retrieval_diagnosis=retrieval_diagnosis)
+    cache_key = _cache_key(question, context, answer, reference, prompt_context=prompt_context, retrieval_metrics=retrieval_metrics, retrieval_diagnosis=retrieval_diagnosis, workflow_trace=workflow_trace)
     cached = _read_cache(cache_key)
     if cached is not None:
         return cached
 
-    payload = _request_payload(question, context, answer, reference, prompt_context=prompt_context, retrieval_metrics=retrieval_metrics, retrieval_diagnosis=retrieval_diagnosis)
+    payload = _request_payload(question, context, answer, reference, prompt_context=prompt_context, retrieval_metrics=retrieval_metrics, retrieval_diagnosis=retrieval_diagnosis, workflow_trace=workflow_trace)
     last_error = "judge_unavailable"
     for key in keys:
         try:

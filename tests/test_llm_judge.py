@@ -91,3 +91,56 @@ def test_judge_answer_rotates_keys_on_rate_limit(monkeypatch):
     assert verdict.faithfulness_score == 0.9
     assert verdict.answer_relevance_score == 0.8
     assert verdict.error == ""
+
+
+def test_judge_answer_payload_includes_workflow_trace(monkeypatch):
+    captured = {}
+    scratch = _scratch_dir()
+    monkeypatch.setattr(llm_judge, "JUDGE_CACHE_DIR", scratch / "judge_cache")
+
+    class FakeResponse:
+        status_code = 200
+
+        def json(self):
+            return {
+                "choices": [
+                    {
+                        "message": {
+                            "content": llm_judge.json.dumps(
+                                {
+                                    "faithfulness_score": 1,
+                                    "answer_relevance_score": 1,
+                                    "likely_failure_source": "prompt_overconstraint",
+                                    "reason": "trace points to a guard",
+                                    "root_cause_note": "scope guard fired after retrieval",
+                                    "fix_hint": "relax scope guard when context is strong",
+                                    "error": "",
+                                }
+                            )
+                        }
+                    }
+                ]
+            }
+
+    def fake_post(url, headers=None, json=None, timeout=None):
+        captured["payload"] = json
+        return FakeResponse()
+
+    monkeypatch.setattr(llm_judge.requests, "post", fake_post)
+
+    verdict = llm_judge.judge_answer(
+        "q",
+        "ctx",
+        "ans",
+        "ref",
+        "key-one",
+        prompt_context="prompt snapshot",
+        retrieval_metrics={"average_precision": 1.0},
+        retrieval_diagnosis="weak_top_k",
+        workflow_trace="guard_exit: {\"guard\": \"scope_declined\"}",
+    )
+
+    user_content = captured["payload"]["messages"][1]["content"]
+    assert "Answer Generation Workflow Trace" in user_content
+    assert "scope_declined" in user_content
+    assert verdict.likely_failure_source == "prompt_overconstraint"
