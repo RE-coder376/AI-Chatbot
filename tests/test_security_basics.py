@@ -209,6 +209,59 @@ def test_owner_eval_judge_key_prefers_request_value(app_module, monkeypatch):
     assert app_module._owner_eval_judge_key({}) == "env-judge-key"
 
 
+def test_admin_generate_evals_respects_requested_count(app_module, client, two_tenants, monkeypatch):
+    token_resp = client.get("/admin/csrf-token", headers={"Authorization": "Bearer ownerpw", "X-Admin-DB": "a"})
+    token = token_resp.json()["csrf_token"]
+    seen = {}
+
+    async def _fake_build(base_url, owner_password, db_name, count, strategy="kb"):
+        seen["count"] = count
+        return [{"q": f"Q{i}", "source": "chunk_topic"} for i in range(count)]
+
+    monkeypatch.setattr(app_module, "_owner_eval_blocker", lambda name: "", raising=True)
+    monkeypatch.setattr(app_module, "_build_owner_eval_tests", _fake_build, raising=True)
+    monkeypatch.setattr(app_module, "_filter_eval_tests_for_tenant", lambda tests, db_name: (tests, 0), raising=True)
+
+    r = client.post(
+        "/admin/evals/generate",
+        headers={"Authorization": "Bearer ownerpw", "X-Admin-DB": "a", "X-CSRF-Token": token},
+        json={"password": "ownerpw", "db_name": "a", "count": 5, "strategy": "kb"},
+    )
+    assert r.status_code == 200
+    assert seen["count"] == 5
+    assert r.json()["count"] == 5
+
+
+def test_admin_run_evals_respects_requested_count(app_module, client, two_tenants, monkeypatch):
+    token_resp = client.get("/admin/csrf-token", headers={"Authorization": "Bearer ownerpw", "X-Admin-DB": "a"})
+    token = token_resp.json()["csrf_token"]
+    seen = {}
+
+    async def _fake_build(base_url, owner_password, db_name, count, strategy="kb"):
+        seen["count"] = count
+        return [{"id": f"t{i}", "q": f"Q{i}", "expect": {"type": "ANSWER"}, "source": "chunk_topic"} for i in range(count)]
+
+    async def _fake_eval_answer(*args, **kwargs):
+        return ("answer", [], {"events": []}, {"guard_decisions": {}, "answer_artifacts": {}})
+
+    monkeypatch.setattr(app_module, "_owner_eval_blocker", lambda name: "", raising=True)
+    monkeypatch.setattr(app_module, "_load_eval_set", lambda name: {}, raising=True)
+    monkeypatch.setattr(app_module, "_build_owner_eval_tests", _fake_build, raising=True)
+    monkeypatch.setattr(app_module, "_filter_eval_tests_for_tenant", lambda tests, db_name: (tests, 0), raising=True)
+    monkeypatch.setattr(app_module, "_get_or_create_db", lambda name: object(), raising=True)
+    monkeypatch.setattr(app_module, "_eval_answer_via_stream", _fake_eval_answer, raising=True)
+    monkeypatch.setattr(app_module, "_eval_retrieve_docs", lambda q, tenant_db, k=8: (0, [], []), raising=True)
+
+    r = client.post(
+        "/admin/evals/run",
+        headers={"Authorization": "Bearer ownerpw", "X-Admin-DB": "a", "X-CSRF-Token": token},
+        json={"password": "ownerpw", "db_name": "a", "count": 5, "mode": "chat", "strategy": "kb"},
+    )
+    assert r.status_code == 200
+    assert seen["count"] == 5
+    assert r.json()["counts"]["total"] == 5
+
+
 def test_filter_eval_tests_for_tenant_trusts_tenant_local_chunk_sources(app_module):
     tests = [
         {"q": "What is Build Merging Skill?", "source": "chunk_topic", "reference_answer": "Build merging skill helps combine agent outputs in the curriculum."},

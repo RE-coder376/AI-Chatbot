@@ -4179,7 +4179,7 @@ async def admin_generate_evals(request: Request):
 
     db_name = _validate_db_name((data.get("db_name") or "").strip() or _get_active_db())
     cfg = get_config(db_name)
-    count = max(10, min(int(data.get("count", 12) or 12), 20))
+    count = max(1, min(int(data.get("count", 12) or 12), 20))
     strategy = (data.get("strategy") or "kb").strip().lower()
     if strategy not in ("kb", "analytics"):
         strategy = "kb"
@@ -4213,7 +4213,7 @@ async def admin_run_evals(request: Request):
     mode = (data.get("mode") or "retrieve").strip().lower()
     if mode not in ("retrieve", "chat", "both"):
         mode = "retrieve"
-    count = max(8, min(int(data.get("count", 12) or 12), 20))
+    count = max(1, min(int(data.get("count", 12) or 12), 20))
 
     # Allow explicit test injection (used by pytest). Not exposed in admin UI.
     tests = data.get("tests")
