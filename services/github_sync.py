@@ -106,10 +106,6 @@ def _github_sync_download(load_db_callback=None):
             db_extract_dir.mkdir(exist_ok=True)
             with zipfile.ZipFile(tmp_zip, "r") as z:
                 for member in z.namelist():
-                    # Always extract config.json from zip — zip is uploaded after every admin change
-                    # so it always has the latest settings (auto-crawl, passwords, etc.)
-                    # The committed config.json in git is just a fallback default
-                    # Strip leading db_name/ prefix if present (handle both zip formats)
                     rel = member[len(db_name)+1:] if member.startswith(f"{db_name}/") else member
                     rel = rel.replace("\\", "/")  # normalize Windows backslash paths
                     if not rel:
@@ -119,6 +115,25 @@ def _github_sync_download(load_db_callback=None):
                     if member.endswith("/"):
                         dest.mkdir(exist_ok=True)
                     else:
+                        # For config.json: only extract from zip if the existing file on disk
+                        # is missing or has empty business_name/topics (i.e. the zip has better data).
+                        # The committed repo config.json is the authoritative source — never
+                        # let an older zip silently overwrite it with blank/default values.
+                        if rel == "config.json" and dest.exists():
+                            try:
+                                import json as _json
+                                existing = _json.loads(dest.read_text(encoding="utf-8"))
+                                zip_bytes = z.read(member)
+                                incoming = _json.loads(zip_bytes.decode("utf-8"))
+                                # Keep existing if it has richer identity fields
+                                if existing.get("business_name") and not incoming.get("business_name"):
+                                    logger.info(f"[GH-SYNC] Skipping config.json for {db_name} — zip has empty business_name, keeping existing")
+                                    continue
+                                if existing.get("topics") and not incoming.get("topics"):
+                                    logger.info(f"[GH-SYNC] Skipping config.json for {db_name} — zip has empty topics, keeping existing")
+                                    continue
+                            except Exception:
+                                pass  # fall through to normal extraction
                         tmp_dest = dest.with_name(dest.name + ".tmp_sync")
                         with z.open(member) as src, open(tmp_dest, "wb") as dst:
                             dst.write(src.read())

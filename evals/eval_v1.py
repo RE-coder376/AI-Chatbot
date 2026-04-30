@@ -264,33 +264,39 @@ def _is_tenant_relevant_question(question: str, db_name: str, scope_tokens: set[
     scope_tokens = scope_tokens if scope_tokens is not None else _tenant_scope_tokens(db_name)
     if not scope_tokens:
         return True
-    # Hard OOS signals: product/retail domain words that clearly don't belong to edu/AI platforms
-    hard_oos = {
-        "fountain", "pen", "pens", "stationery", "notebook", "notebooks", "ink", "pencil",
-        "pencils", "laptop", "laptops", "phone", "phones", "gaming", "gpu", "touchscreen",
-        "anime", "manga", "manga", "episode", "episodes", "airing",
-    }
-    if q_tokens & hard_oos:
-        return False
-    overlap = q_tokens & scope_tokens
+    # Hard OOS signals: words that clearly belong to a different tenant's domain.
+    # Only applied when the DB is NOT a retail/product DB (scope has no product tokens).
+    scope_is_retail = bool(scope_tokens & {"toy", "toys", "baby", "kids", "product", "products",
+                                           "shop", "store", "buy", "sell", "price", "prices"})
+    if not scope_is_retail:
+        hard_oos = {
+            "fountain", "pen", "pens", "stationery", "ink", "pencil", "pencils",
+            "laptop", "laptops", "phone", "phones", "gaming", "gpu", "touchscreen",
+            "anime", "manga", "episode", "episodes", "airing",
+        }
+        if q_tokens & hard_oos:
+            return False
+    # Expand scope with simple singular/plural variants to catch "car" vs "cars" etc.
+    scope_expanded = set(scope_tokens)
+    for t in scope_tokens:
+        if t.endswith("s") and len(t) > 3:
+            scope_expanded.add(t[:-1])
+        elif len(t) > 2:
+            scope_expanded.add(t + "s")
+    overlap = q_tokens & scope_expanded
     if overlap:
         return True
+    # Generic business terms valid for any tenant (no edu gate)
     generic_ok = {
-        "course", "courses", "program", "programs", "curriculum", "pricing", "price",
+        "price", "pricing", "cost", "warranty", "return", "refund", "shipping",
+        "delivery", "stock", "available", "availability", "sale", "discount",
+        "course", "courses", "program", "programs", "curriculum",
         "enrollment", "enrolment", "team", "leader", "leadership", "support",
         "contact", "chapter", "chapters", "module", "modules", "agent", "agents",
         "education", "learning", "learn", "class", "classes", "subscription",
         "subscriptions", "plan", "plans", "cancel", "billing",
     }
-    tenant_is_edu = bool(
-        scope_tokens
-        & {
-            "course", "courses", "curriculum", "chapter", "chapters", "module", "modules",
-            "education", "learning", "learn", "student", "students", "academy",
-            "school", "bootcamp", "agent", "agents",
-        }
-    )
-    return tenant_is_edu and bool(q_tokens & generic_ok)
+    return bool(q_tokens & generic_ok)
 
 
 def _is_tenant_relevant_text(text: str, db_name: str, scope_tokens: set[str] | None = None) -> bool:
