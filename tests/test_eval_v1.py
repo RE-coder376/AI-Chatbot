@@ -75,6 +75,16 @@ def test_tenant_scope_tokens_infers_from_sources_when_config_missing(monkeypatch
 
     assert "mystery" in tokens or "store" in tokens
     assert "webscraper" in tokens
+    assert "laptop" in tokens or "tablet" in tokens
+
+
+def test_is_tenant_relevant_question_does_not_treat_course_words_as_global_scope():
+    store_scope = {"store", "webscraper", "laptops", "phones", "electronics"}
+    assert not eval_v1._is_tenant_relevant_question(
+        "What does Give Your Employee An Identity cover?",
+        "store",
+        store_scope,
+    )
 
 
 def test_load_gap_candidates_filters_cross_tenant_pollution(monkeypatch):

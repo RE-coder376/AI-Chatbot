@@ -318,7 +318,12 @@ def test_admin_run_evals_chat_mode_scores_retrieval_even_when_sources_are_suppre
     assert data["scores"]["retrieval"] >= 0.0
 
 
-def test_filter_eval_tests_for_tenant_trusts_tenant_local_chunk_sources(app_module):
+def test_filter_eval_tests_for_tenant_trusts_tenant_local_chunk_sources(app_module, monkeypatch):
+    monkeypatch.setattr(
+        eval_v1,
+        "_tenant_scope_tokens",
+        lambda db_name: {"agentfactory", "curriculum", "agent", "agents", "build", "learning"},
+    )
     tests = [
         {"q": "What is Build Merging Skill?", "source": "chunk_topic", "reference_answer": "Build merging skill helps combine agent outputs in the curriculum."},
         {"q": "What premium fountain pens do you stock?", "source": "chunk_topic", "reference_answer": "We stock luxury fountain pens and ink refills."},
@@ -328,6 +333,38 @@ def test_filter_eval_tests_for_tenant_trusts_tenant_local_chunk_sources(app_modu
     assert len(kept) == 1
     assert kept[0]["source"] == "chunk_topic"
     assert dropped == 2
+
+
+def test_filter_eval_tests_for_tenant_uses_expect_reference_and_expected_source(app_module, monkeypatch):
+    monkeypatch.setattr(
+        eval_v1,
+        "_tenant_scope_tokens",
+        lambda db_name: {"store", "web", "scraper", "laptops", "phones", "electronics"},
+    )
+    tests = [
+        {
+            "q": "What does Give Your Employee An Identity cover?",
+            "source": "chunk_topic",
+            "expect": {
+                "reference_text": "This chapter covers identity design in the AgentFactory curriculum.",
+                "expected_source": "https://agentfactory.panaversity.org/chapters/give-your-employee-an-identity",
+            },
+        },
+        {
+            "q": "What is the pricing for ASUS VivoBook laptops?",
+            "source": "chunk_topic",
+            "expect": {
+                "reference_text": "The store lists ASUS VivoBook laptop prices and specs.",
+                "expected_source": "https://webscraper.io/test-sites/e-commerce/allinone/computers/laptops",
+            },
+        },
+    ]
+
+    kept, dropped = app_module._filter_eval_tests_for_tenant(tests, "store")
+
+    assert len(kept) == 1
+    assert kept[0]["q"] == "What is the pricing for ASUS VivoBook laptops?"
+    assert dropped == 1
 
 
 def test_admin_run_evals_uses_deterministic_fallback_when_judge_errors(app_module, client, two_tenants, monkeypatch):

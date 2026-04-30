@@ -227,16 +227,30 @@ def _tenant_scope_tokens(db_name: str) -> set[str]:
     # and the tenant name itself so eval generation stays tenant-local instead
     # of inheriting unrelated global/root config.
     inferred = set(_token_set(db_name.replace("_", " ").replace("-", " ")))
+    inferred_counts: Counter[str] = Counter()
     try:
         rows = _load_document_rows(db_name)
         for row in rows[:100]:
-            _, _, source = _unpack_doc_row(row)
+            _, text, source = _unpack_doc_row(row)
             if not source:
-                continue
-            host = source.split("://", 1)[-1].split("/", 1)[0]
-            host = host.replace("www.", "").replace(".", " ").replace("-", " ")
-            inferred.update(_token_set(host))
-            if len(inferred) >= 12:
+                pass
+            else:
+                host = source.split("://", 1)[-1].split("/", 1)[0]
+                host = host.replace("www.", "").replace(".", " ").replace("-", " ")
+                inferred.update(_token_set(host))
+            for tok in _token_set(text):
+                if len(tok) < 4:
+                    continue
+                if tok in {
+                    "this", "that", "with", "from", "your", "have", "will", "into", "about",
+                    "chapter", "chapters", "course", "courses", "module", "modules", "lesson",
+                    "lessons", "price", "pricing", "product", "products", "agent", "agents",
+                }:
+                    continue
+                inferred_counts[tok] += 1
+        for tok, _count in inferred_counts.most_common(10):
+            inferred.add(tok)
+            if len(inferred) >= 16:
                 break
     except Exception:
         pass
@@ -268,7 +282,15 @@ def _is_tenant_relevant_question(question: str, db_name: str, scope_tokens: set[
         "education", "learning", "learn", "class", "classes", "subscription",
         "subscriptions", "plan", "plans", "cancel", "billing",
     }
-    return bool(q_tokens & generic_ok)
+    tenant_is_edu = bool(
+        scope_tokens
+        & {
+            "course", "courses", "curriculum", "chapter", "chapters", "module", "modules",
+            "education", "learning", "learn", "student", "students", "academy",
+            "school", "bootcamp", "agent", "agents",
+        }
+    )
+    return tenant_is_edu and bool(q_tokens & generic_ok)
 
 
 def _is_tenant_relevant_text(text: str, db_name: str, scope_tokens: set[str] | None = None) -> bool:

@@ -3782,6 +3782,18 @@ def _save_eval_set(db_name: str, data: dict) -> None:
 def _filter_eval_tests_for_tenant(tests: list[dict], db_name: str) -> tuple[list[dict], int]:
     from evals import eval_v1 as _eval_v1
 
+    def _source_scope_overlap(source_text: str) -> bool:
+        if not source_text:
+            return False
+        expanded = (
+            source_text.replace("://", " ")
+            .replace("/", " ")
+            .replace(".", " ")
+            .replace("-", " ")
+            .replace("_", " ")
+        )
+        return bool(_eval_v1._token_set(expanded) & scope_tokens)
+
     kept: list[dict] = []
     dropped = 0
     scope_tokens = _eval_v1._tenant_scope_tokens(db_name)
@@ -3791,22 +3803,34 @@ def _filter_eval_tests_for_tenant(tests: list[dict], db_name: str) -> tuple[list
             continue
         q = str(test.get("q") or "").strip()
         source = str(test.get("source") or "").strip().lower()
-        reference_text = str(test.get("reference_answer") or test.get("reference_preview") or "").strip()
+        expect = test.get("expect") if isinstance(test.get("expect"), dict) else {}
+        reference_text = str(
+            test.get("reference_answer")
+            or test.get("reference_preview")
+            or expect.get("reference_text")
+            or ""
+        ).strip()
+        expected_source = str(
+            test.get("expected_source")
+            or expect.get("expected_source")
+            or ""
+        ).strip()
         question_in_scope = _eval_v1._is_tenant_relevant_text(q, db_name, scope_tokens)
         reference_in_scope = _eval_v1._is_tenant_relevant_text(reference_text, db_name, scope_tokens) if reference_text else False
+        expected_source_in_scope = _source_scope_overlap(expected_source)
         q_scope_overlap = bool(_eval_v1._token_set(q) & scope_tokens)
         ref_scope_overlap = bool(_eval_v1._token_set(reference_text) & scope_tokens) if reference_text else False
         if source in {"chunk_topic", "embedded_qa", "faq", "knowledge_gap"}:
             if not _eval_v1._looks_like_good_question(q):
                 dropped += 1
                 continue
-            if not question_in_scope and reference_text and not reference_in_scope:
+            if not question_in_scope and not reference_in_scope and not expected_source_in_scope:
                 dropped += 1
                 continue
             kept.append(test)
             continue
         if source == "analytics":
-            if not q_scope_overlap and not ref_scope_overlap:
+            if not q_scope_overlap and not ref_scope_overlap and not expected_source_in_scope:
                 dropped += 1
                 continue
         elif not _eval_v1._is_tenant_relevant_eval_question(q, db_name):
