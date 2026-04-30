@@ -87,6 +87,19 @@ def test_is_tenant_relevant_question_does_not_treat_course_words_as_global_scope
     )
 
 
+def test_extract_chunk_topic_handles_product_chunks():
+    text = (
+        'Product: IdeaTab A3500L Black Price: $88.99 RAM: 8GB Display: 7" IPS '
+        'OS: Android 4.2 Full specs: IdeaTab A3500L Black, 7" IPS, Quad-Core 1.2GHz, 8GB, Android 4.2'
+    )
+
+    topic = eval_v1._extract_chunk_topic(text, "https://webscraper.io/test-sites/e-commerce/allinone/computers/tablets")
+    question = eval_v1._make_chunk_question(topic, text)
+
+    assert topic == "IdeaTab A3500L Black"
+    assert question == "What is the pricing for IdeaTab A3500L Black?"
+
+
 def test_load_gap_candidates_filters_cross_tenant_pollution(monkeypatch):
     temp_path = _scratch_dir()
     monkeypatch.setattr(eval_v1, "DATABASES_DIR", temp_path / "databases")

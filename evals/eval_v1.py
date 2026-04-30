@@ -604,6 +604,18 @@ def _extract_chunk_topic(text: str, source: str = "") -> str:
     if not cleaned:
         return ""
 
+    product_specs = re.search(r"Full specs:\s*([^,]{3,80})", cleaned, re.I)
+    if product_specs:
+        topic = _normalize_question(product_specs.group(1))
+        if _looks_like_good_topic(topic):
+            return topic
+
+    product = re.search(r"Product:\s*([A-Za-z0-9/&+'\"().,\- ]{3,90}?)\s+Price:", cleaned, re.I)
+    if product:
+        topic = _normalize_question(product.group(1))
+        if _looks_like_good_topic(topic) and topic.lower() not in {"black", "blue", "white", "silver", "gold"}:
+            return topic
+
     chapter = re.search(
         r"(Chapter\s+\d+\s*:\s*(?:[A-Z][A-Za-z0-9/&,\-()']*\s*){1,8})",
         cleaned,
