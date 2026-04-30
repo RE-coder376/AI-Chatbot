@@ -60,6 +60,23 @@ def test_collect_seed_items_filters_generic_noise_and_keeps_curated(monkeypatch)
     assert "What is 2+2?" not in questions
 
 
+def test_tenant_scope_tokens_infers_from_sources_when_config_missing(monkeypatch):
+    monkeypatch.setattr(eval_v1, "get_config", lambda _db_name="": {"business_name": "", "topics": [], "business_description": ""})
+    monkeypatch.setattr(
+        eval_v1,
+        "_load_document_rows",
+        lambda _db_name: [
+            ("1", "Laptop product details and pricing.", "https://webscraper.io/test-sites/e-commerce/allinone/computers/laptops"),
+            ("2", "Tablet specs and prices.", "https://webscraper.io/test-sites/e-commerce/allinone/computers/tablets"),
+        ],
+    )
+
+    tokens = eval_v1._tenant_scope_tokens("mystery_store")
+
+    assert "mystery" in tokens or "store" in tokens
+    assert "webscraper" in tokens
+
+
 def test_load_gap_candidates_filters_cross_tenant_pollution(monkeypatch):
     temp_path = _scratch_dir()
     monkeypatch.setattr(eval_v1, "DATABASES_DIR", temp_path / "databases")

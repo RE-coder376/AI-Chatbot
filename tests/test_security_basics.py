@@ -276,6 +276,48 @@ def test_admin_run_evals_respects_requested_count(app_module, client, two_tenant
     assert r.json()["counts"]["total"] == 5
 
 
+def test_admin_run_evals_chat_mode_scores_retrieval_even_when_sources_are_suppressed(app_module, client, two_tenants, monkeypatch):
+    token_resp = client.get("/admin/csrf-token", headers={"Authorization": "Bearer ownerpw", "X-Admin-DB": "a"})
+    token = token_resp.json()["csrf_token"]
+
+    async def _fake_build(base_url, owner_password, db_name, count, strategy="kb"):
+        return [{"id": "t1", "difficulty": "easy", "q": "What is AgentFactory?", "expect": {"type": "ANSWER"}, "source": "chunk_topic"}]
+
+    async def _fake_eval_answer(*args, **kwargs):
+        return (
+            "I don't have enough information right now.",
+            [],
+            {"events": []},
+            {"guard_decisions": {"cleaned_answer_class": "IDK", "source_suppressed_reason": "idk"}, "answer_artifacts": {"raw_llm_answer": "Grounded answer", "cleaned_answer": "I don't have enough information right now."}},
+        )
+
+    async def _fake_eval_retrieve_docs(q, tenant_db, k=8):
+        return (
+            2,
+            [{"source": "https://example.com/source1", "preview": "AgentFactory is an AI agent learning platform with guided chapters."}],
+            ["https://example.com/source1"],
+        )
+
+    monkeypatch.setattr(app_module, "_owner_eval_blocker", lambda name: "", raising=True)
+    monkeypatch.setattr(app_module, "_build_owner_eval_tests", _fake_build, raising=True)
+    monkeypatch.setattr(app_module, "_filter_eval_tests_for_tenant", lambda tests, db_name: (tests, 0), raising=True)
+    monkeypatch.setattr(app_module, "_get_or_create_db", lambda name: object(), raising=True)
+    monkeypatch.setattr(app_module, "_eval_answer_via_stream", _fake_eval_answer, raising=True)
+    monkeypatch.setattr(app_module, "_eval_retrieve_docs", _fake_eval_retrieve_docs, raising=True)
+
+    r = client.post(
+        "/admin/evals/run",
+        headers={"Authorization": "Bearer ownerpw", "X-Admin-DB": "a", "X-CSRF-Token": token},
+        json={"password": "ownerpw", "db_name": "a", "count": 1, "mode": "chat", "strategy": "kb"},
+    )
+
+    assert r.status_code == 200
+    data = r.json()
+    assert data["counts"]["retrieval_total"] == 1
+    assert data["results"][0]["retrieval_status"] in ("PASS", "FAIL")
+    assert data["scores"]["retrieval"] >= 0.0
+
+
 def test_filter_eval_tests_for_tenant_trusts_tenant_local_chunk_sources(app_module):
     tests = [
         {"q": "What is Build Merging Skill?", "source": "chunk_topic", "reference_answer": "Build merging skill helps combine agent outputs in the curriculum."},

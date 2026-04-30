@@ -220,7 +220,27 @@ def _tenant_scope_tokens(db_name: str) -> set[str]:
             str(cfg.get("business_description") or ""),
         ]
     )
-    return _token_set(scope_text)
+    tokens = _token_set(scope_text)
+    if tokens:
+        return tokens
+    # Fallback for DBs missing config.json: infer scope from stored source URLs
+    # and the tenant name itself so eval generation stays tenant-local instead
+    # of inheriting unrelated global/root config.
+    inferred = set(_token_set(db_name.replace("_", " ").replace("-", " ")))
+    try:
+        rows = _load_document_rows(db_name)
+        for row in rows[:100]:
+            _, _, source = _unpack_doc_row(row)
+            if not source:
+                continue
+            host = source.split("://", 1)[-1].split("/", 1)[0]
+            host = host.replace("www.", "").replace(".", " ").replace("-", " ")
+            inferred.update(_token_set(host))
+            if len(inferred) >= 12:
+                break
+    except Exception:
+        pass
+    return inferred
 
 
 def _is_tenant_relevant_question(question: str, db_name: str, scope_tokens: set[str] | None = None) -> bool:

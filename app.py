@@ -4359,6 +4359,44 @@ async def admin_run_evals(request: Request):
                 row["retrieval_status"] = "PASS" if row["checks"]["retrieval"] else "FAIL"
 
         if mode in ("chat", "both"):
+            if etype == "ANSWER" and row["checks"]["retrieval"] is None:
+                doc_count, doc_rows, sources = await _eval_retrieve_docs(q, tenant_db, k=8)
+                row["retrieve"]["doc_count"] = doc_count
+                row["retrieve"]["docs"] = doc_rows
+                row["retrieve"]["sources"] = sources
+                retrieval_total += 1
+                eval_item = _eval_v1.EvalItem(
+                    q=q,
+                    expect="ANSWER",
+                    source=str(t.get("source") or "analytics"),
+                    reference_answer=reference_text or " ".join(str(f) for f in key_facts[:8]),
+                    retrieve_doc_count=int(doc_count or 0),
+                    retrieve_context_length=len(_eval_docs_preview(doc_rows, limit=3000)),
+                    retrieve_context_preview=_eval_docs_preview(doc_rows, limit=3000),
+                    retrieve_sources=list(sources or []),
+                )
+                retrieval_eval = _eval_v1._grade_retrieval(eval_item, doc_rows, expected_source=expected_source)
+                row["retrieve"]["metrics"] = {
+                    "hit": retrieval_eval.get("hit"),
+                    "precision_at_3": retrieval_eval.get("precision_at_3"),
+                    "average_precision": retrieval_eval.get("average_precision"),
+                    "first_relevant_rank": retrieval_eval.get("first_relevant_rank"),
+                    "context_recall": retrieval_eval.get("context_recall"),
+                    "ranked_verdicts": retrieval_eval.get("ranked_verdicts", []),
+                }
+                row["retrieve"]["score"] = round(
+                    0.55 * float(retrieval_eval.get("average_precision") or 0.0)
+                    + 0.20 * float(retrieval_eval.get("precision_at_3") or 0.0)
+                    + 0.25 * float(retrieval_eval.get("context_recall") or 0.0),
+                    3,
+                )
+                retrieval_metric_values.append(row["retrieve"]["score"])
+                row["checks"]["retrieval"] = (retrieval_eval["status"] == "PASS")
+                if retrieval_eval.get("reason"):
+                    row["retrieve"]["reason"] = retrieval_eval["reason"]
+                if row["checks"]["retrieval"]:
+                    retrieval_pass += 1
+                row["retrieval_status"] = "PASS" if row["checks"]["retrieval"] else "FAIL"
             try:
                 ans, chat_sources, workflow_trace, workflow_debug = await _eval_answer_via_stream(q, cfg, tenant_db, db_name)
                 row["answer"]["text"] = ans[:4000]
@@ -4367,38 +4405,8 @@ async def admin_run_evals(request: Request):
                 if chat_sources:
                     row["retrieve"]["sources"] = chat_sources[:8]
                     if etype == "ANSWER" and row["checks"]["retrieval"] is None:
-                        retrieval_total += 1
-                        eval_item = _eval_v1.EvalItem(
-                            q=q,
-                            expect="ANSWER",
-                            source=str(t.get("source") or "analytics"),
-                            reference_answer=reference_text or " ".join(str(f) for f in key_facts[:8]),
-                            retrieve_doc_count=int(row["retrieve"].get("doc_count") or 0),
-                            retrieve_context_length=len(_eval_docs_preview(row["retrieve"].get("docs") or [], limit=3000)),
-                            retrieve_context_preview=_eval_docs_preview(row["retrieve"].get("docs") or [], limit=3000),
-                            retrieve_sources=list(chat_sources or []),
-                        )
-                        retrieval_eval = _eval_v1._grade_retrieval(eval_item, row["retrieve"].get("docs") or [], expected_source=expected_source)
-                        row["retrieve"]["metrics"] = {
-                            "hit": retrieval_eval.get("hit"),
-                            "precision_at_3": retrieval_eval.get("precision_at_3"),
-                            "average_precision": retrieval_eval.get("average_precision"),
-                            "first_relevant_rank": retrieval_eval.get("first_relevant_rank"),
-                            "context_recall": retrieval_eval.get("context_recall"),
-                            "ranked_verdicts": retrieval_eval.get("ranked_verdicts", []),
-                        }
-                        row["retrieve"]["score"] = round(
-                            0.55 * float(retrieval_eval.get("average_precision") or 0.0)
-                            + 0.20 * float(retrieval_eval.get("precision_at_3") or 0.0)
-                            + 0.25 * float(retrieval_eval.get("context_recall") or 0.0),
-                            3,
-                        )
-                        retrieval_metric_values.append(row["retrieve"]["score"])
-                        row["checks"]["retrieval"] = (retrieval_eval["status"] == "PASS")
-                        if retrieval_eval.get("reason"):
-                            row["retrieve"]["reason"] = retrieval_eval["reason"]
-                        if row["checks"]["retrieval"]:
-                            retrieval_pass += 1
+                        row["checks"]["retrieval"] = True
+                        row["retrieval_status"] = "PASS"
             except Exception as e:
                 row["answer"]["error"] = str(e)[:180]
 

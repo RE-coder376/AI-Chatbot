@@ -120,11 +120,13 @@ def get_config(db_name: str = "") -> dict:
         root = {"admin_password": "", "bot_name": "AI Assistant",
                 "business_name": "Our Company", "branding": {}}
     active = db_name or (ACTIVE_DB_FILE.read_text(encoding="utf-8").strip() if ACTIVE_DB_FILE.exists() else "")
+    db_cfg_loaded = False
     if active:
         db_cfg_file = DATABASES_DIR / active / "config.json"
         if db_cfg_file.exists():
             try:
                 db_cfg = json.loads(db_cfg_file.read_text(encoding="utf-8-sig"))
+                db_cfg_loaded = True
                 for k, v in db_cfg.items():
                     if v != "" and v is not None:
                         if k == "branding" and isinstance(v, dict) and isinstance(root.get("branding"), dict):
@@ -140,6 +142,16 @@ def get_config(db_name: str = "") -> dict:
         for k, v in _load_db_secrets(active).items():
             if v != "" and v is not None:
                 root[k] = v
+        if db_name and not db_cfg_loaded:
+            # When a specific tenant is requested but has no readable config.json,
+            # avoid leaking the root tenant's business identity/topics into eval
+            # scoping and prompt shaping. Keep only generic defaults plus secrets.
+            root["business_name"] = active
+            root["topics"] = root.get("topics") if isinstance(root.get("topics"), list) else []
+            root["business_description"] = ""
+            branding = root.get("branding")
+            if isinstance(branding, dict):
+                root["branding"] = dict(branding)
     # NOTE: ADMIN_PASSWORD env var is intentionally NOT overlaid here — it's the super-admin
     # password checked separately in admin_auth(). Overlaying it would break per-DB client auth.
     env_smtp = os.getenv("SMTP_PASSWORD")
