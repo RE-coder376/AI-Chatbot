@@ -34,6 +34,10 @@ IDK_SIGS = (
     "not available",
     "not in my knowledge base",
     "not in the knowledge base",
+    # Server-side transient errors (rate limit, no keys) — not genuine answers
+    "unable to respond right now",
+    "i am unable to respond",
+    "please try again in a moment",
 )
 
 REFUSE_SIGS = (
@@ -1079,7 +1083,9 @@ def _overlap_score(a: str, b: str) -> float:
 
 
 def _reference_text_for(item: EvalItem) -> str:
-    return item.reference_answer or item.retrieve_context_preview
+    # Never use retrieve_context_preview as reference — it's circular (doc matches itself).
+    # Fall back to the question so verdict scoring checks if doc answers the query.
+    return item.reference_answer or item.q
 
 
 def _judge_prompt_snapshot(db_name: str) -> str:
