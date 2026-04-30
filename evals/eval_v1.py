@@ -431,10 +431,12 @@ def _load_document_rows_via_sqlite(db_name: str) -> list[tuple[str, str, str]]:
 
 
 def _load_document_rows(db_name: str) -> list[tuple[str, str, str]]:
-    rows = _load_document_rows_via_chroma(db_name)
+    # Try SQLite first (read-only, no file lock conflict with running server).
+    # Fall back to ChromaDB client only if SQLite finds nothing.
+    rows = _load_document_rows_via_sqlite(db_name)
     if rows:
         return rows
-    return _load_document_rows_via_sqlite(db_name)
+    return _load_document_rows_via_chroma(db_name)
 
 
 def _unpack_doc_row(row) -> tuple[str, str, str]:
