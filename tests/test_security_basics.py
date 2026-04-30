@@ -394,6 +394,30 @@ def test_filter_eval_tests_for_tenant_uses_expect_reference_and_expected_source(
     assert dropped == 1
 
 
+def test_filter_eval_tests_for_tenant_keeps_runtime_grounded_rows(app_module, monkeypatch):
+    monkeypatch.setattr(
+        eval_v1,
+        "_tenant_scope_tokens",
+        lambda db_name: {"store"},
+    )
+    tests = [
+        {
+            "q": "What is the pricing for Acer Spin 5 SP513-51 Black?",
+            "source": "chunk_topic",
+            "runtime_grounded": True,
+            "expect": {
+                "reference_text": "Acer Spin 5 SP513-51 Black pricing and specs are listed in the store.",
+                "expected_source": "https://webscraper.io/test-sites/e-commerce/allinone/computers/laptops",
+            },
+        }
+    ]
+
+    kept, dropped = app_module._filter_eval_tests_for_tenant(tests, "store")
+
+    assert len(kept) == 1
+    assert dropped == 0
+
+
 def test_admin_run_evals_uses_deterministic_fallback_when_judge_errors(app_module, client, two_tenants, monkeypatch):
     token_resp = client.get("/admin/csrf-token", headers={"Authorization": "Bearer ownerpw", "X-Admin-DB": "a"})
     token = token_resp.json()["csrf_token"]

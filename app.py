@@ -3815,6 +3815,7 @@ def _filter_eval_tests_for_tenant(tests: list[dict], db_name: str) -> tuple[list
             or expect.get("expected_source")
             or ""
         ).strip()
+        runtime_grounded = bool(test.get("runtime_grounded"))
         question_in_scope = _eval_v1._is_tenant_relevant_text(q, db_name, scope_tokens)
         reference_in_scope = _eval_v1._is_tenant_relevant_text(reference_text, db_name, scope_tokens) if reference_text else False
         expected_source_in_scope = _source_scope_overlap(expected_source)
@@ -3823,6 +3824,9 @@ def _filter_eval_tests_for_tenant(tests: list[dict], db_name: str) -> tuple[list
         if source in {"chunk_topic", "embedded_qa", "faq", "knowledge_gap"}:
             if not _eval_v1._looks_like_good_question(q):
                 dropped += 1
+                continue
+            if runtime_grounded and expected_source:
+                kept.append(test)
                 continue
             if not question_in_scope and not reference_in_scope and not expected_source_in_scope:
                 dropped += 1
@@ -4060,6 +4064,7 @@ async def _build_owner_eval_tests(base_url: str, owner_password: str, db_name: s
             "difficulty": item.difficulty,
             "source": item.source,
             "selection_bucket": item.selection_bucket,
+            "runtime_grounded": bool(str(item.candidate_key or "").startswith("runtime_chunk::")),
             "q": item.q,
             "expect": {
                 "type": item.expect,
@@ -4081,6 +4086,7 @@ async def _build_owner_eval_tests(base_url: str, owner_password: str, db_name: s
             "difficulty": item.difficulty,
             "source": item.source,
             "selection_bucket": item.selection_bucket,
+            "runtime_grounded": bool(str(item.candidate_key or "").startswith("runtime_chunk::")),
             "q": item.q,
             "expect": {
                 "type": item.expect,
