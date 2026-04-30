@@ -5,6 +5,7 @@ app.py — Universal Digital FTE Production Server (Multi-Client Standard)
 import os
 import gc
 import sys
+import inspect
 import json
 import logging
 import time
@@ -3779,7 +3780,180 @@ def _save_eval_set(db_name: str, data: dict) -> None:
     _atomic_write_json(p, data)
 
 
-def _filter_eval_tests_for_tenant(tests: list[dict], db_name: str) -> tuple[list[dict], int]:
+def _runtime_eval_probes(db_name: str) -> list[str]:
+    base = [db_name, "pricing", "price", "product", "products", "specs", "support", "policy", "course", "chapter"]
+    return [probe for probe in base if probe]
+
+
+async def _runtime_tenant_evidence(tenant_db, db_name: str, probes: list[str] | None = None, k: int = 6, limit: int = 24) -> list[dict]:
+    probes = probes or _runtime_eval_probes(db_name)
+    rows: list[dict] = []
+    seen = set()
+    for probe in probes:
+        retrieval = _eval_retrieve_docs(probe, tenant_db, k=k)
+        if inspect.isawaitable(retrieval):
+            retrieval = await retrieval
+        doc_count, doc_rows, _sources = retrieval
+        if not doc_count or not doc_rows:
+            continue
+        for row in doc_rows:
+            source = str((row or {}).get("source") or "").strip()
+            preview = str((row or {}).get("preview") or "").strip()
+            key = (source.lower(), preview[:220].lower())
+            if key in seen:
+                continue
+            seen.add(key)
+            rows.append({"source": source, "preview": preview, "probe": probe})
+            if len(rows) >= limit:
+                return rows
+    return rows
+
+
+async def _await_maybe(value):
+    if inspect.isawaitable(value):
+        return await value
+    return value
+
+
+async def _safe_runtime_tenant_audit(tenant_db, db_name: str, cfg: dict) -> dict:
+    try:
+        evidence_rows = await _runtime_tenant_evidence(tenant_db, db_name) if tenant_db is not None else []
+        return _build_runtime_tenant_fingerprint(db_name, cfg, evidence_rows)
+    except Exception as exc:
+        logger.warning("[EVAL] Runtime tenant audit failed for '%s': %s", db_name, exc)
+        return {
+            "db_name": db_name,
+            "status": "audit_failed",
+            "config_is_generic": False,
+            "config_mismatch": False,
+            "runtime_only": False,
+            "scope_tokens": [],
+            "source_hosts": [],
+            "dominant_host": "",
+            "sample_count": 0,
+            "notes": [f"Runtime tenant audit failed: {type(exc).__name__}"],
+        }
+
+
+def _build_runtime_tenant_fingerprint(db_name: str, cfg: dict, evidence_rows: list[dict]) -> dict:
+    from evals import eval_v1 as _eval_v1
+
+    generic_config_names = {"", "our company", db_name.lower()}
+    generic_runtime_tokens = {
+        "www", "http", "https", "com", "org", "net", "pk", "io", "docs", "doc", "blog",
+        "product", "products", "price", "pricing", "course", "courses", "chapter", "chapters",
+        "module", "modules", "support", "policy", "service", "services", "page", "pages",
+        "learn", "learning", "general", "information", "company",
+    }
+    scope_counts: Counter[str] = Counter()
+    host_counts: Counter[str] = Counter()
+    static_scope = set(_eval_v1._tenant_scope_tokens(db_name))
+    for token in static_scope:
+        if len(token) >= 4:
+            scope_counts[token] += 2
+    for token in _eval_v1._token_set(db_name.replace("_", " ").replace("-", " ")):
+        if len(token) >= 3:
+            scope_counts[token] += 2
+
+    for row in evidence_rows or []:
+        source = str((row or {}).get("source") or "").strip()
+        preview = str((row or {}).get("preview") or "").strip()
+        if source:
+            host = source.split("://", 1)[-1].split("/", 1)[0].lower().replace("www.", "")
+            if host:
+                host_counts[host] += 1
+                host_tokens = _eval_v1._token_set(host.replace(".", " ").replace("-", " ").replace("_", " "))
+                for token in host_tokens:
+                    if token not in generic_runtime_tokens:
+                        scope_counts[token] += 4
+        for token in _eval_v1._token_set(preview):
+            if len(token) < 4 or token in generic_runtime_tokens:
+                continue
+            scope_counts[token] += 1
+
+    ordered_tokens = [token for token, _count in scope_counts.most_common(24)]
+    source_hosts = [host for host, _count in host_counts.most_common(6)]
+    business_name = str(cfg.get("business_name") or "").strip()
+    config_is_generic = business_name.lower() in generic_config_names
+    config_tokens = _eval_v1._token_set(
+        " ".join(
+            [
+                business_name,
+                str(cfg.get("topics") or ""),
+                str(cfg.get("business_description") or ""),
+            ]
+        )
+    )
+    runtime_only = bool(evidence_rows) and config_is_generic
+    config_mismatch = bool(evidence_rows) and bool(config_tokens) and not bool(config_tokens & set(ordered_tokens))
+    if not evidence_rows:
+        status = "no_runtime_evidence"
+    elif runtime_only:
+        status = "runtime_only"
+    elif config_mismatch:
+        status = "config_mismatch"
+    else:
+        status = "healthy"
+    notes = []
+    if runtime_only:
+        notes.append("Tenant branding/config is generic, so eval is using runtime chunk identity.")
+    if config_mismatch:
+        notes.append("Runtime sources disagree with configured tenant identity.")
+    if not ordered_tokens:
+        notes.append("Runtime fingerprint is weak; question generation may fall back to generic seeds.")
+    return {
+        "db_name": db_name,
+        "status": status,
+        "config_is_generic": config_is_generic,
+        "config_mismatch": config_mismatch,
+        "runtime_only": runtime_only,
+        "scope_tokens": ordered_tokens,
+        "source_hosts": source_hosts,
+        "dominant_host": source_hosts[0] if source_hosts else "",
+        "sample_count": len(evidence_rows or []),
+        "notes": notes,
+    }
+
+
+def _runtime_test_matches_fingerprint(test: dict, fingerprint: dict | None) -> bool:
+    from evals import eval_v1 as _eval_v1
+
+    if not fingerprint:
+        return True
+    scope_tokens = set(fingerprint.get("scope_tokens") or [])
+    source_hosts = [str(host).lower() for host in (fingerprint.get("source_hosts") or []) if host]
+    if not scope_tokens and not source_hosts:
+        return True
+    q = str(test.get("q") or "").strip()
+    source = str(test.get("source") or "").strip().lower()
+    expect = test.get("expect") if isinstance(test.get("expect"), dict) else {}
+    reference_text = str(
+        test.get("reference_answer")
+        or test.get("reference_preview")
+        or expect.get("reference_text")
+        or ""
+    ).strip()
+    expected_source = str(
+        test.get("expected_source")
+        or expect.get("expected_source")
+        or ""
+    ).strip().lower()
+    runtime_grounded = bool(test.get("runtime_grounded"))
+    if expected_source and any(host in expected_source for host in source_hosts):
+        return True
+    if runtime_grounded and expected_source:
+        return True
+    if source in {"chunk_topic", "embedded_qa", "faq", "knowledge_gap"}:
+        return (
+            _eval_v1._is_tenant_relevant_text(q, fingerprint.get("db_name") or "", scope_tokens)
+            or _eval_v1._is_tenant_relevant_text(reference_text, fingerprint.get("db_name") or "", scope_tokens)
+        )
+    q_tokens = _eval_v1._token_set(q)
+    ref_tokens = _eval_v1._token_set(reference_text)
+    return bool((q_tokens | ref_tokens) & scope_tokens)
+
+
+def _filter_eval_tests_for_tenant(tests: list[dict], db_name: str, fingerprint: dict | None = None) -> tuple[list[dict], int]:
     from evals import eval_v1 as _eval_v1
 
     def _source_scope_overlap(source_text: str) -> bool:
@@ -3792,13 +3966,21 @@ def _filter_eval_tests_for_tenant(tests: list[dict], db_name: str) -> tuple[list
             .replace("-", " ")
             .replace("_", " ")
         )
-        return bool(_eval_v1._token_set(expanded) & scope_tokens)
+        if bool(_eval_v1._token_set(expanded) & scope_tokens):
+            return True
+        source_hosts = [str(host).lower() for host in (fingerprint or {}).get("source_hosts", []) if host]
+        source_lower = source_text.lower()
+        return any(host in source_lower for host in source_hosts)
 
     kept: list[dict] = []
     dropped = 0
-    scope_tokens = _eval_v1._tenant_scope_tokens(db_name)
+    runtime_scope = set((fingerprint or {}).get("scope_tokens") or [])
+    scope_tokens = runtime_scope or _eval_v1._tenant_scope_tokens(db_name)
     for test in tests or []:
         if not isinstance(test, dict):
+            dropped += 1
+            continue
+        if fingerprint and not _runtime_test_matches_fingerprint(test, fingerprint):
             dropped += 1
             continue
         q = str(test.get("q") or "").strip()
@@ -4011,10 +4193,23 @@ async def _build_owner_eval_tests(base_url: str, owner_password: str, db_name: s
     tenant_db = _get_or_create_db(db_name)
     if tenant_db is None:
         return []
+    evidence_rows = await _runtime_tenant_evidence(tenant_db, db_name)
+    tenant_audit = await _safe_runtime_tenant_audit(tenant_db, db_name, get_config(db_name))
+    runtime_scope_tokens = set(tenant_audit.get("scope_tokens") or [])
 
     seeds = _eval_v1._collect_seed_items(db_name, max(desired_count * 4, 20))
+    if runtime_scope_tokens:
+        scoped_seeds = []
+        for item in seeds:
+            if (
+                _eval_v1._is_tenant_relevant_text(item.q, db_name, runtime_scope_tokens)
+                or _eval_v1._is_tenant_relevant_text(item.reference_answer, db_name, runtime_scope_tokens)
+            ):
+                scoped_seeds.append(item)
+        if scoped_seeds:
+            seeds = scoped_seeds
     if len(seeds) < desired_count:
-        runtime_items = await _runtime_chunk_seed_items(tenant_db, db_name, desired_count)
+        runtime_items = await _runtime_chunk_seed_items(tenant_db, db_name, desired_count, evidence_rows=evidence_rows, fingerprint=tenant_audit)
         seen_keys = {item.q.lower() for item in seeds}
         for item in runtime_items:
             key = item.q.lower()
@@ -4065,6 +4260,7 @@ async def _build_owner_eval_tests(base_url: str, owner_password: str, db_name: s
             "source": item.source,
             "selection_bucket": item.selection_bucket,
             "runtime_grounded": bool(str(item.candidate_key or "").startswith("runtime_chunk::")),
+            "question_confidence": "high" if bool(item.retrieve_sources) else "medium",
             "q": item.q,
             "expect": {
                 "type": item.expect,
@@ -4087,6 +4283,7 @@ async def _build_owner_eval_tests(base_url: str, owner_password: str, db_name: s
             "source": item.source,
             "selection_bucket": item.selection_bucket,
             "runtime_grounded": bool(str(item.candidate_key or "").startswith("runtime_chunk::")),
+            "question_confidence": "high" if bool(item.retrieve_sources) else "medium",
             "q": item.q,
             "expect": {
                 "type": item.expect,
@@ -4098,27 +4295,30 @@ async def _build_owner_eval_tests(base_url: str, owner_password: str, db_name: s
     return tests[:count]
 
 
-async def _runtime_chunk_seed_items(tenant_db, db_name: str, desired_count: int):
+async def _runtime_chunk_seed_items(tenant_db, db_name: str, desired_count: int, evidence_rows: list[dict] | None = None, fingerprint: dict | None = None):
     from evals import eval_v1 as _eval_v1
 
-    probes = [
-        db_name,
-        "price",
-        "pricing",
-        "product",
-        "specs",
-        "support",
-        "course",
-        "chapter",
-        "policy",
-    ]
+    probes = _runtime_eval_probes(db_name)
     items = []
     seen_questions = set()
     max_items = max(desired_count * 4, 16)
+    grouped_rows: dict[str, list[dict]] = {}
+    if evidence_rows:
+        for row in evidence_rows:
+            grouped_rows.setdefault(str((row or {}).get("probe") or db_name), []).append(dict(row))
+    if not grouped_rows:
+        for probe in probes:
+            doc_count, doc_rows, _sources = await _eval_retrieve_docs(probe, tenant_db, k=6)
+            if not doc_count or not doc_rows:
+                continue
+            grouped_rows[probe] = [{**row, "probe": probe} for row in doc_rows]
+    runtime_scope_tokens = set((fingerprint or {}).get("scope_tokens") or [])
     for probe in probes:
-        doc_count, doc_rows, sources = await _eval_retrieve_docs(probe, tenant_db, k=6)
-        if not doc_count or not doc_rows:
+        doc_rows = grouped_rows.get(probe) or []
+        if not doc_rows:
             continue
+        sources = [str((row or {}).get("source") or "").strip() for row in doc_rows if str((row or {}).get("source") or "").strip()]
+        doc_count = len(doc_rows)
         for idx, row in enumerate(doc_rows):
             preview = str((row or {}).get("preview") or "").strip()
             source = str((row or {}).get("source") or "").strip()
@@ -4127,6 +4327,11 @@ async def _runtime_chunk_seed_items(tenant_db, db_name: str, desired_count: int)
                 continue
             question = _eval_v1._make_chunk_question(topic, preview)
             if not question:
+                continue
+            if runtime_scope_tokens and not (
+                _eval_v1._is_tenant_relevant_text(question, db_name, runtime_scope_tokens)
+                or _eval_v1._is_tenant_relevant_text(preview, db_name, runtime_scope_tokens)
+            ):
                 continue
             qkey = question.lower()
             if qkey in seen_questions:
@@ -4291,8 +4496,10 @@ async def admin_generate_evals(request: Request):
         return JSONResponse({"detail": blocker}, status_code=503)
 
     base_url = str(request.base_url).rstrip("/")
+    tenant_db = _get_or_create_db(db_name)
+    tenant_audit = await _safe_runtime_tenant_audit(tenant_db, db_name, cfg)
     tests = await _build_owner_eval_tests(base_url, password, db_name, count=count, strategy=strategy)
-    tests, dropped = _filter_eval_tests_for_tenant(tests, db_name)
+    tests, dropped = _filter_eval_tests_for_tenant(tests, db_name, tenant_audit)
     if dropped:
         logger.warning("[EVAL] Dropped %s off-tenant generated tests for '%s' before saving eval_set.", dropped, db_name)
 
@@ -4300,11 +4507,13 @@ async def admin_generate_evals(request: Request):
         "db": db_name,
         "strategy": strategy,
         "count": len(tests),
+        "tenant_audit": tenant_audit,
+        "runtime_grounded_count": sum(1 for test in tests if test.get("runtime_grounded")),
         "tests": tests,
         "generated_at": datetime.utcnow().isoformat() + "Z",
     }
     _save_eval_set(db_name, payload)
-    return {"success": True, "db": db_name, "count": len(tests)}
+    return {"success": True, "db": db_name, "count": len(tests), "tenant_audit": tenant_audit}
 
 @app.post("/admin/evals/run")
 async def admin_run_evals(request: Request):
@@ -4321,11 +4530,13 @@ async def admin_run_evals(request: Request):
     # Allow explicit test injection (used by pytest). Not exposed in admin UI.
     tests = data.get("tests")
     eval_set = {}
+    tenant_audit = None
     if not isinstance(tests, list) or not tests:
         eval_set = _load_eval_set(db_name)
         tests = eval_set.get("tests") if isinstance(eval_set, dict) else None
+        tenant_audit = eval_set.get("tenant_audit") if isinstance(eval_set, dict) else None
     if isinstance(tests, list) and tests:
-        tests, dropped = _filter_eval_tests_for_tenant(tests, db_name)
+        tests, dropped = _filter_eval_tests_for_tenant(tests, db_name, tenant_audit)
         if dropped:
             logger.warning("[EVAL] Dropped %s stale off-tenant tests from saved eval_set for '%s'.", dropped, db_name)
 
@@ -4335,6 +4546,8 @@ async def admin_run_evals(request: Request):
     if blocker:
         return JSONResponse({"detail": blocker}, status_code=503)
     tenant_db = _get_or_create_db(db_name)
+    if not tenant_audit:
+        tenant_audit = await _safe_runtime_tenant_audit(tenant_db, db_name, cfg)
 
     if not isinstance(tests, list) or not tests:
         saved_strategy = ""
@@ -4344,7 +4557,7 @@ async def admin_run_evals(request: Request):
         if strategy not in ("kb", "analytics"):
             strategy = "kb"
         tests = await _build_owner_eval_tests(base_url, password, db_name, count=count, strategy=strategy)
-        tests, dropped = _filter_eval_tests_for_tenant(tests, db_name)
+        tests, dropped = _filter_eval_tests_for_tenant(tests, db_name, tenant_audit)
         if dropped:
             logger.warning("[EVAL] Dropped %s off-tenant fallback-generated tests for '%s'.", dropped, db_name)
 
@@ -4399,6 +4612,7 @@ async def admin_run_evals(request: Request):
             "id": t.get("id") or f"t_{len(rows)}",
             "source": t.get("source") or "",
             "selection_bucket": t.get("selection_bucket") or "",
+            "question_confidence": t.get("question_confidence") or "",
             "difficulty": difficulty,
             "question_type": _eval_v1._question_type(q),
             "q": q,
@@ -4412,7 +4626,7 @@ async def admin_run_evals(request: Request):
         }
 
         if mode in ("retrieve", "both"):
-            doc_count, doc_rows, sources = await _eval_retrieve_docs(q, tenant_db, k=8)
+            doc_count, doc_rows, sources = await _await_maybe(_eval_retrieve_docs(q, tenant_db, k=8))
             row["retrieve"]["doc_count"] = doc_count
             row["retrieve"]["docs"] = doc_rows
             row["retrieve"]["sources"] = sources
@@ -4453,7 +4667,7 @@ async def admin_run_evals(request: Request):
 
         if mode in ("chat", "both"):
             if etype == "ANSWER" and row["checks"]["retrieval"] is None:
-                doc_count, doc_rows, sources = await _eval_retrieve_docs(q, tenant_db, k=8)
+                doc_count, doc_rows, sources = await _await_maybe(_eval_retrieve_docs(q, tenant_db, k=8))
                 row["retrieve"]["doc_count"] = doc_count
                 row["retrieve"]["docs"] = doc_rows
                 row["retrieve"]["sources"] = sources
@@ -4667,7 +4881,10 @@ async def admin_run_evals(request: Request):
     root_cause_mix = dict(Counter(((row.get("judge") or {}).get("root_cause_note") or "") for row in rows if row.get("overall_status") == "FAIL" and ((row.get("judge") or {}).get("root_cause_note") or "")))
     fix_hint_mix = dict(Counter(((row.get("judge") or {}).get("fix_hint") or "") for row in rows if row.get("overall_status") == "FAIL" and ((row.get("judge") or {}).get("fix_hint") or "")))
     question_type_counts = dict(Counter((row.get("question_type") or "unknown") for row in rows))
+    question_confidence_counts = dict(Counter((row.get("question_confidence") or "unknown") for row in rows))
     judge_confidences = [float((row.get("judge") or {}).get("confidence")) for row in rows if (row.get("judge") or {}).get("confidence") is not None]
+    judge_unavailable_rows = sum(1 for row in rows if str((row.get("judge") or {}).get("error") or "").startswith("judge_"))
+    runtime_grounded_rows = sum(1 for test in tests if isinstance(test, dict) and test.get("runtime_grounded"))
 
     run_id = _now_run_id()
     run_payload = {
@@ -4677,13 +4894,17 @@ async def admin_run_evals(request: Request):
         "scores": {"overall": overall, "retrieval": retrieval_score, "answer": answer_score, "idk": idk_score},
         "counts": {"total": len(rows), "retrieval_total": retrieval_total, "answer_total": answer_total, "idk_total": idk_total},
         "summary": {
+            "tenant_audit": tenant_audit or {},
             "diagnosis_counts": diagnosis_counts,
             "likely_cause_counts": likely_cause_counts,
             "question_type_counts": question_type_counts,
+            "question_confidence_counts": question_confidence_counts,
             "failure_source_mix": failure_source_mix,
             "failure_step_mix": failure_step_mix,
             "root_cause_mix": root_cause_mix,
             "fix_hint_mix": fix_hint_mix,
+            "runtime_grounded_rows": runtime_grounded_rows,
+            "judge_unavailable_rows": judge_unavailable_rows,
             "judge_confidence_mean": round(sum(judge_confidences) / len(judge_confidences), 3) if judge_confidences else None,
         },
         "generated_at": datetime.utcnow().isoformat() + "Z",

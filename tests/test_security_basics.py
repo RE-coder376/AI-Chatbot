@@ -35,7 +35,7 @@ def test_widget_key_routing_valid_key_200(app_module, client, two_tenants, monke
         headers={"X-Widget-Key": two_tenants["a"]["wk"]},
         json={"question": "hi", "history": [], "stream": True},
     )
-    assert r.status_code == 200
+    assert r.status_code == 200, r.text
     assert "data:" in r.text
 
 
@@ -160,7 +160,11 @@ def test_owner_gates_evals_run_and_smoke_owner_run(app_module, client, two_tenan
 
     monkeypatch.setattr(app_module, "_get_or_create_db", lambda name: _DummyDB(), raising=True)
     monkeypatch.setattr(app_module, "_owner_eval_blocker", lambda name: "", raising=True)
-    monkeypatch.setattr(app_module, "_filter_eval_tests_for_tenant", lambda tests, db_name: (tests, 0), raising=True)
+    monkeypatch.setattr(app_module, "_filter_eval_tests_for_tenant", lambda tests, db_name, fingerprint=None: (tests, 0), raising=True)
+    async def _fake_audit(*args, **kwargs):
+        return {}
+    monkeypatch.setattr(app_module, "_safe_runtime_tenant_audit", _fake_audit, raising=True)
+    monkeypatch.setattr(app_module, "_owner_eval_judge_key", lambda data=None: "", raising=True)
     monkeypatch.setattr(app_module, "_eval_retrieve_docs", _fake_eval_retrieve_docs, raising=True)
 
     ok = client.post(
@@ -206,7 +210,10 @@ def test_owner_evals_run_fallback_prefers_saved_or_kb_strategy(app_module, clien
     monkeypatch.setattr(app_module, "_owner_eval_blocker", lambda name: "", raising=True)
     monkeypatch.setattr(app_module, "_load_eval_set", lambda name: {"strategy": "kb", "tests": []}, raising=True)
     monkeypatch.setattr(app_module, "_build_owner_eval_tests", _fake_build, raising=True)
-    monkeypatch.setattr(app_module, "_filter_eval_tests_for_tenant", lambda tests, db_name: (tests, 0), raising=True)
+    monkeypatch.setattr(app_module, "_filter_eval_tests_for_tenant", lambda tests, db_name, fingerprint=None: (tests, 0), raising=True)
+    async def _fake_audit(*args, **kwargs):
+        return {}
+    monkeypatch.setattr(app_module, "_safe_runtime_tenant_audit", _fake_audit, raising=True)
     monkeypatch.setattr(app_module, "_eval_retrieve_docs", _fake_eval_retrieve_docs, raising=True)
 
     ok = client.post(
@@ -234,14 +241,17 @@ def test_admin_generate_evals_respects_requested_count(app_module, client, two_t
 
     monkeypatch.setattr(app_module, "_owner_eval_blocker", lambda name: "", raising=True)
     monkeypatch.setattr(app_module, "_build_owner_eval_tests", _fake_build, raising=True)
-    monkeypatch.setattr(app_module, "_filter_eval_tests_for_tenant", lambda tests, db_name: (tests, 0), raising=True)
+    monkeypatch.setattr(app_module, "_filter_eval_tests_for_tenant", lambda tests, db_name, fingerprint=None: (tests, 0), raising=True)
+    async def _fake_audit(*args, **kwargs):
+        return {}
+    monkeypatch.setattr(app_module, "_safe_runtime_tenant_audit", _fake_audit, raising=True)
 
     r = client.post(
         "/admin/evals/generate",
         headers={"Authorization": "Bearer ownerpw", "X-Admin-DB": "a", "X-CSRF-Token": token},
         json={"password": "ownerpw", "db_name": "a", "count": 5, "strategy": "kb"},
     )
-    assert r.status_code == 200
+    assert r.status_code == 200, r.text
     assert seen["count"] == 5
     assert r.json()["count"] == 5
 
@@ -261,7 +271,11 @@ def test_admin_run_evals_respects_requested_count(app_module, client, two_tenant
     monkeypatch.setattr(app_module, "_owner_eval_blocker", lambda name: "", raising=True)
     monkeypatch.setattr(app_module, "_load_eval_set", lambda name: {}, raising=True)
     monkeypatch.setattr(app_module, "_build_owner_eval_tests", _fake_build, raising=True)
-    monkeypatch.setattr(app_module, "_filter_eval_tests_for_tenant", lambda tests, db_name: (tests, 0), raising=True)
+    monkeypatch.setattr(app_module, "_filter_eval_tests_for_tenant", lambda tests, db_name, fingerprint=None: (tests, 0), raising=True)
+    async def _fake_audit(*args, **kwargs):
+        return {}
+    monkeypatch.setattr(app_module, "_safe_runtime_tenant_audit", _fake_audit, raising=True)
+    monkeypatch.setattr(app_module, "_owner_eval_judge_key", lambda data=None: "", raising=True)
     monkeypatch.setattr(app_module, "_get_or_create_db", lambda name: object(), raising=True)
     monkeypatch.setattr(app_module, "_eval_answer_via_stream", _fake_eval_answer, raising=True)
     monkeypatch.setattr(app_module, "_eval_retrieve_docs", lambda q, tenant_db, k=8: (0, [], []), raising=True)
@@ -300,7 +314,11 @@ def test_admin_run_evals_chat_mode_scores_retrieval_even_when_sources_are_suppre
 
     monkeypatch.setattr(app_module, "_owner_eval_blocker", lambda name: "", raising=True)
     monkeypatch.setattr(app_module, "_build_owner_eval_tests", _fake_build, raising=True)
-    monkeypatch.setattr(app_module, "_filter_eval_tests_for_tenant", lambda tests, db_name: (tests, 0), raising=True)
+    monkeypatch.setattr(app_module, "_filter_eval_tests_for_tenant", lambda tests, db_name, fingerprint=None: (tests, 0), raising=True)
+    async def _fake_audit(*args, **kwargs):
+        return {}
+    monkeypatch.setattr(app_module, "_safe_runtime_tenant_audit", _fake_audit, raising=True)
+    monkeypatch.setattr(app_module, "_owner_eval_judge_key", lambda data=None: "", raising=True)
     monkeypatch.setattr(app_module, "_get_or_create_db", lambda name: object(), raising=True)
     monkeypatch.setattr(app_module, "_eval_answer_via_stream", _fake_eval_answer, raising=True)
     monkeypatch.setattr(app_module, "_eval_retrieve_docs", _fake_eval_retrieve_docs, raising=True)
@@ -418,6 +436,65 @@ def test_filter_eval_tests_for_tenant_keeps_runtime_grounded_rows(app_module, mo
     assert dropped == 0
 
 
+def test_filter_eval_tests_for_tenant_uses_runtime_fingerprint_when_config_is_generic(app_module, monkeypatch):
+    monkeypatch.setattr(eval_v1, "_tenant_scope_tokens", lambda db_name: {"store"}, raising=True)
+    fingerprint = {
+        "db_name": "store",
+        "scope_tokens": ["stationery", "journal", "pen", "planner"],
+        "source_hosts": ["stationerystudio.pk"],
+        "status": "runtime_only",
+    }
+    tests = [
+        {
+            "q": "What is the pricing for Daily Journal Planner?",
+            "source": "chunk_topic",
+            "expect": {
+                "reference_text": "Daily Journal Planner is listed with stationery details.",
+                "expected_source": "https://stationerystudio.pk/products/daily-journal-planner",
+            },
+        },
+        {
+            "q": "What is the pricing for ASUS VivoBook laptops?",
+            "source": "chunk_topic",
+            "expect": {
+                "reference_text": "Laptop product pricing is available.",
+                "expected_source": "https://webscraper.io/test-sites/e-commerce/allinone/computers/laptops",
+            },
+        },
+    ]
+
+    kept, dropped = app_module._filter_eval_tests_for_tenant(tests, "store", fingerprint)
+
+    assert len(kept) == 1
+    assert kept[0]["q"] == "What is the pricing for Daily Journal Planner?"
+    assert dropped == 1
+
+
+def test_build_runtime_tenant_fingerprint_marks_runtime_only_when_config_is_generic(app_module, monkeypatch):
+    monkeypatch.setattr(
+        app_module,
+        "get_config",
+        lambda db_name="": {"business_name": "Our Company", "topics": "", "business_description": ""},
+        raising=True,
+    )
+    fingerprint = app_module._build_runtime_tenant_fingerprint(
+        "store",
+        {"business_name": "Our Company", "topics": "", "business_description": ""},
+        [
+            {
+                "source": "https://stationerystudio.pk/products/daily-journal-planner",
+                "preview": "Daily Journal Planner with stationery details and weekly planning pages.",
+                "probe": "product",
+            }
+        ],
+    )
+
+    assert fingerprint["status"] == "runtime_only"
+    assert fingerprint["config_is_generic"] is True
+    assert "stationerystudio.pk" in fingerprint["source_hosts"]
+    assert "stationery" in fingerprint["scope_tokens"] or "journal" in fingerprint["scope_tokens"]
+
+
 def test_admin_run_evals_uses_deterministic_fallback_when_judge_errors(app_module, client, two_tenants, monkeypatch):
     token_resp = client.get("/admin/csrf-token", headers={"Authorization": "Bearer ownerpw", "X-Admin-DB": "a"})
     token = token_resp.json()["csrf_token"]
@@ -461,7 +538,10 @@ def test_admin_run_evals_uses_deterministic_fallback_when_judge_errors(app_modul
     monkeypatch.setattr(app_module, "_get_or_create_db", lambda name: _DummyDB(), raising=True)
     monkeypatch.setattr(app_module, "_owner_eval_blocker", lambda name: "", raising=True)
     monkeypatch.setattr(app_module, "_build_owner_eval_tests", _fake_build, raising=True)
-    monkeypatch.setattr(app_module, "_filter_eval_tests_for_tenant", lambda tests, db_name: (tests, 0), raising=True)
+    monkeypatch.setattr(app_module, "_filter_eval_tests_for_tenant", lambda tests, db_name, fingerprint=None: (tests, 0), raising=True)
+    async def _fake_audit(*args, **kwargs):
+        return {}
+    monkeypatch.setattr(app_module, "_safe_runtime_tenant_audit", _fake_audit, raising=True)
     monkeypatch.setattr(app_module, "_eval_answer_via_stream", _fake_eval_answer, raising=True)
     monkeypatch.setattr(app_module, "_eval_retrieve_docs", _fake_eval_retrieve_docs, raising=True)
     monkeypatch.setattr(eval_v1, "judge_answer", _JudgeError(), raising=True)
