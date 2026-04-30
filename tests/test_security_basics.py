@@ -54,6 +54,18 @@ def test_eval_answer_via_stream_captures_workflow_trace(app_module, monkeypatch)
     assert workflow_debug["guard_decisions"]["exit_guard"] == "sparse_kb_context_miss"
 
 
+def test_json_safe_converts_non_serializable_values(app_module):
+    payload = {
+        "items": {"a", "b"},
+        "nested": {"obj": object()},
+    }
+
+    safe = app_module._json_safe(payload)
+
+    assert isinstance(safe["items"], list)
+    assert isinstance(safe["nested"]["obj"], str)
+
+
 def test_csrf_blocks_write_without_token(app_module, client, two_tenants):
     # POST /admin/branding is CSRF protected. Without X-CSRF-Token, middleware should block.
     r = client.post(
@@ -169,6 +181,7 @@ def test_owner_gates_evals_run_and_smoke_owner_run(app_module, client, two_tenan
     assert data["db"] == "a"
     assert "scores" in data and "overall" in data["scores"]
     assert data["results"][0]["overall_status"] in ("PASS", "FAIL")
+    assert data["results"][0]["question"] == "What is this about?"
 
 
 def test_owner_evals_run_fallback_prefers_saved_or_kb_strategy(app_module, client, two_tenants, monkeypatch):

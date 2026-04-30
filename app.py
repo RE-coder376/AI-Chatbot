@@ -3859,6 +3859,16 @@ def _mean_score_0_10(values: list[float]) -> float:
     return round(10.0 * (sum(vals) / len(vals)), 1)
 
 
+def _json_safe(value):
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, dict):
+        return {str(k): _json_safe(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_json_safe(v) for v in value]
+    return str(value)
+
+
 def _eval_docs_preview(doc_rows: list[dict], limit: int = 3000) -> str:
     parts: list[str] = []
     for row in doc_rows or []:
@@ -4299,6 +4309,7 @@ async def admin_run_evals(request: Request):
             "difficulty": difficulty,
             "question_type": _eval_v1._question_type(q),
             "q": q,
+            "question": q,
             "expect": {"type": etype, "expected_source": expected_source, "key_facts": key_facts[:8], "reference_text": reference_text[:1500]},
             "checks": {"retrieval": None, "answer": None, "idk": None},
             "retrieve": {"sources": [], "doc_count": None, "docs": [], "metrics": {}},
@@ -4578,8 +4589,12 @@ async def admin_run_evals(request: Request):
         "results": rows,
     }
     out_path = _eval_runs_dir(db_name) / f"run_{run_id}.json"
-    _atomic_write_json(out_path, run_payload)
-    return run_payload
+    safe_payload = _json_safe(run_payload)
+    try:
+        _atomic_write_json(out_path, safe_payload)
+    except Exception as exc:
+        logger.warning("[EVAL] Failed to write eval run artifact for '%s': %s", db_name, exc)
+    return safe_payload
 
 
 @app.get("/config")

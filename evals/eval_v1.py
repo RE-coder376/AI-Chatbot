@@ -230,6 +230,14 @@ def _is_tenant_relevant_question(question: str, db_name: str, scope_tokens: set[
     scope_tokens = scope_tokens if scope_tokens is not None else _tenant_scope_tokens(db_name)
     if not scope_tokens:
         return True
+    # Hard OOS signals: product/retail domain words that clearly don't belong to edu/AI platforms
+    hard_oos = {
+        "fountain", "pen", "pens", "stationery", "notebook", "notebooks", "ink", "pencil",
+        "pencils", "laptop", "laptops", "phone", "phones", "gaming", "gpu", "touchscreen",
+        "anime", "manga", "manga", "episode", "episodes", "airing",
+    }
+    if q_tokens & hard_oos:
+        return False
     overlap = q_tokens & scope_tokens
     if overlap:
         return True
@@ -792,7 +800,14 @@ def _preflight_retrieve(base_url: str, password: str, item: EvalItem) -> EvalIte
 
 
 def _is_grounded(item: EvalItem) -> bool:
-    min_context = 80 if item.source in {"faq", "embedded_qa"} else 120
+    # FAQs/embedded QA are pre-verified; analytics items need higher bar to avoid
+    # navigation-only matches (e.g. chapter title in TOC != chapter content in KB).
+    if item.source in {"faq", "embedded_qa"}:
+        min_context = 80
+        min_overlap = 0.08
+    else:
+        min_context = 300
+        min_overlap = 0.15
     if not (item.retrieve_doc_count > 0 and item.retrieve_context_length >= min_context):
         return False
     preview = (item.retrieve_context_preview or "").strip()
@@ -801,7 +816,7 @@ def _is_grounded(item: EvalItem) -> bool:
     overlap = _overlap_score(item.q, preview)
     ref = (item.reference_answer or "").strip()
     ref_overlap = _overlap_score(ref, preview) if ref else 0.0
-    return overlap >= 0.08 or ref_overlap >= 0.08
+    return overlap >= min_overlap or ref_overlap >= min_overlap
 
 
 def _select_diverse_items(items: list[EvalItem], count: int) -> list[EvalItem]:
