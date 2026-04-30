@@ -291,9 +291,14 @@ def _is_tenant_relevant_question(question: str, db_name: str, scope_tokens: set[
     if overlap:
         return True
     # Generic business terms valid for any tenant (no edu gate)
+    # Retail logistics terms only valid when the DB is retail — otherwise they
+    # leak questions like "same-day delivery in Karachi" into edu/SaaS DBs.
+    retail_only = {"shipping", "delivery", "stock", "warranty", "return", "refund",
+                   "availability", "sale", "discount", "store", "stores"}
     generic_ok = {
-        "price", "pricing", "cost", "warranty", "return", "refund", "shipping",
-        "delivery", "stock", "available", "availability", "sale", "discount",
+        "price", "pricing", "cost",
+        *(retail_only if scope_is_retail else set()),
+        "available",
         "course", "courses", "program", "programs", "curriculum",
         "enrollment", "enrolment", "team", "leader", "leadership", "support",
         "contact", "chapter", "chapters", "module", "modules", "agent", "agents",
@@ -882,7 +887,16 @@ def _is_grounded(item: EvalItem) -> bool:
     overlap = _overlap_score(item.q, preview)
     ref = (item.reference_answer or "").strip()
     ref_overlap = _overlap_score(ref, preview) if ref else 0.0
-    return overlap >= min_overlap or ref_overlap >= min_overlap
+    grounded = overlap >= min_overlap or ref_overlap >= min_overlap
+    if not grounded:
+        return False
+    if item.source == "analytics" and not item.reference_answer:
+        generic_tokens = {"what", "how", "does", "can", "tell", "explain", "describe", "show"}
+        q_content_tokens = _token_set(item.q) - generic_tokens
+        ctx_tokens = _token_set(preview)
+        if len(q_content_tokens & ctx_tokens) < 2:
+            return False
+    return True
 
 
 def _select_diverse_items(items: list[EvalItem], count: int) -> list[EvalItem]:
@@ -1460,6 +1474,7 @@ def _build_summary(results: list[dict]) -> dict:
         diagnosis = "This run stayed inside tenant knowledge and the scoring signals are aligned."
 
     return {
+        "total_questions": len(results),
         "overall_score": overall_score,
         "retrieval_score": retrieval_score,
         "answer_score": answer_score,
