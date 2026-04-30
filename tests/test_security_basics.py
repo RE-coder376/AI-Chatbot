@@ -318,6 +318,33 @@ def test_admin_run_evals_chat_mode_scores_retrieval_even_when_sources_are_suppre
     assert data["scores"]["retrieval"] >= 0.0
 
 
+def test_runtime_chunk_seed_items_generates_product_questions(app_module):
+    class _DummyDB:
+        pass
+
+    async def _run():
+        return await app_module._runtime_chunk_seed_items(_DummyDB(), "store", 3)
+
+    async def _fake_eval_retrieve_docs(q, tenant_db, k=6):
+        return (
+            2,
+            [
+                {
+                    "source": "https://webscraper.io/test-sites/e-commerce/allinone/computers/laptops",
+                    "preview": 'Product: Acer Spin 5 SP513-51 Black Price: $999.99 Full specs: Acer Spin 5 SP513-51 Black, 13.3", 8GB, Windows 10',
+                }
+            ],
+            ["https://webscraper.io/test-sites/e-commerce/allinone/computers/laptops"],
+        )
+
+    setattr(app_module, "_eval_retrieve_docs", _fake_eval_retrieve_docs)
+    items = asyncio.run(_run())
+
+    assert items
+    assert items[0].q == "What is the pricing for Acer Spin 5 SP513-51 Black?"
+    assert items[0].source == "chunk_topic"
+
+
 def test_filter_eval_tests_for_tenant_trusts_tenant_local_chunk_sources(app_module, monkeypatch):
     monkeypatch.setattr(
         eval_v1,

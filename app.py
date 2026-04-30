@@ -4004,12 +4004,21 @@ async def _build_owner_eval_tests(base_url: str, owner_password: str, db_name: s
     from evals import eval_v1 as _eval_v1
 
     desired_count = max(3, min(int(count or 12), 25))
-    seeds = _eval_v1._collect_seed_items(db_name, max(desired_count * 4, 20))
-    if not seeds:
-        return []
-
     tenant_db = _get_or_create_db(db_name)
     if tenant_db is None:
+        return []
+
+    seeds = _eval_v1._collect_seed_items(db_name, max(desired_count * 4, 20))
+    if len(seeds) < desired_count:
+        runtime_items = await _runtime_chunk_seed_items(tenant_db, db_name, desired_count)
+        seen_keys = {item.q.lower() for item in seeds}
+        for item in runtime_items:
+            key = item.q.lower()
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
+            seeds.append(item)
+    if not seeds:
         return []
 
     preflighted = []
@@ -4081,6 +4090,60 @@ async def _build_owner_eval_tests(base_url: str, owner_password: str, db_name: s
             },
         })
     return tests[:count]
+
+
+async def _runtime_chunk_seed_items(tenant_db, db_name: str, desired_count: int):
+    from evals import eval_v1 as _eval_v1
+
+    probes = [
+        db_name,
+        "price",
+        "pricing",
+        "product",
+        "specs",
+        "support",
+        "course",
+        "chapter",
+        "policy",
+    ]
+    items = []
+    seen_questions = set()
+    max_items = max(desired_count * 4, 16)
+    for probe in probes:
+        doc_count, doc_rows, sources = await _eval_retrieve_docs(probe, tenant_db, k=6)
+        if not doc_count or not doc_rows:
+            continue
+        for idx, row in enumerate(doc_rows):
+            preview = str((row or {}).get("preview") or "").strip()
+            source = str((row or {}).get("source") or "").strip()
+            topic = _eval_v1._extract_chunk_topic(preview, source)
+            if not topic:
+                continue
+            question = _eval_v1._make_chunk_question(topic, preview)
+            if not question:
+                continue
+            qkey = question.lower()
+            if qkey in seen_questions:
+                continue
+            seen_questions.add(qkey)
+            reference = _eval_v1._chunk_reference_answer(topic, preview)
+            item = _eval_v1.EvalItem(
+                q=question,
+                expect=_eval_v1._infer_expectation_from_reference(reference),
+                source="chunk_topic",
+                difficulty=_eval_v1._difficulty_for_question(question),
+                reference_answer=reference,
+                frequency=2,
+                candidate_key=f"runtime_chunk::{probe}::{idx}::{qkey}",
+            )
+            item.retrieve_doc_count = int(doc_count or 0)
+            item.retrieve_sources = list(sources or [])[:5]
+            item.retrieve_context_preview = _eval_docs_preview(doc_rows, limit=3000)
+            item.retrieve_context_length = len(item.retrieve_context_preview)
+            items.append(item)
+            if len(items) >= max_items:
+                return items
+    return items
 
 def _collect_eval_items_from_analytics(db_name: str, count: int = 12) -> list[dict]:
     return []
