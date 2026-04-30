@@ -123,14 +123,10 @@ def _github_sync_download(load_db_callback=None):
                             try:
                                 import json as _json
                                 existing = _json.loads(dest.read_text(encoding="utf-8"))
-                                zip_bytes = z.read(member)
-                                incoming = _json.loads(zip_bytes.decode("utf-8"))
-                                # Keep existing if it has richer identity fields
-                                if existing.get("business_name") and not incoming.get("business_name"):
-                                    logger.info(f"[GH-SYNC] Skipping config.json for {db_name} — zip has empty business_name, keeping existing")
-                                    continue
-                                if existing.get("topics") and not incoming.get("topics"):
-                                    logger.info(f"[GH-SYNC] Skipping config.json for {db_name} — zip has empty topics, keeping existing")
+                                # Repo config is authoritative. If it has identity fields set,
+                                # never let an older zip overwrite them (zip may have stale defaults).
+                                if existing.get("business_name") or existing.get("topics"):
+                                    logger.info(f"[GH-SYNC] Skipping config.json for {db_name} — keeping committed repo version")
                                     continue
                             except Exception:
                                 pass  # fall through to normal extraction
