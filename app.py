@@ -964,7 +964,7 @@ def _enrich_docs_metadata(docs: list) -> list:
                 doc.metadata = extracted
     return docs
 
-async def retrieve_context(q: str, db, k: int = 15, fast: bool = False, expansion_task=None, history: list = None) -> tuple:
+async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansion_task=None, history: list = None) -> tuple:
     """Multilingual Retrieval: Handles English and Urdu in the same vector space.
     Returns (context_text, doc_count, sources) so callers can cite sources.
     fast=True skips the LLM expansion step (used for sub-queries in multi-part decomposition)."""
@@ -1081,10 +1081,9 @@ async def retrieve_context(q: str, db, k: int = 15, fast: bool = False, expansio
     else:
         _entity_task = asyncio.create_task(_extract_search_entity(q))
 
-    seen, results = set(), []
-    # Seed seen with rescued chunks so similarity doesn't duplicate them
-    for r in rescue_results:
-        seen.add(r.page_content[:100])
+    seen = set()  # used only by _has_product_meta price filter below
+    _bm25_raw: list = []
+    _vector_raw: list = []
 
     # ── Product catalog metadata filter ──────────────────────────────────────
     # Detects structured product chunks (has price metadata) and builds a
@@ -1214,25 +1213,35 @@ async def retrieve_context(q: str, db, k: int = 15, fast: bool = False, expansio
                 if _pk not in seen:
                     seen.add(_pk)
                     policy_results.append(_pr)
-        for idx, res in enumerate(_main_results):
-            if isinstance(res, Exception):
-                logger.error(f"Retrieval error (task {idx}): {res}")
-                continue
-            for r in res:
-                key = r.page_content[:100]
-                if key not in seen:
-                    # Post-filter: drop chunks that exceed price constraint
-                    if _max_price is not None:
-                        _chunk_price = r.metadata.get("price") if r.metadata else None
-                        if _chunk_price is not None and _chunk_price > _max_price:
-                            continue
-                    seen.add(key)
-                    results.append(r)
+        # Combine in priority order: BM25 exact matches first, then rescue, then vector.
+        # Dedup in order so highest-priority group wins. This ensures the BM25 best
+        # match (e.g. "Marabu Chalky Chic") appears at position 0 in the context,
+        # not buried after 20+ generic same-brand docs from rescue.
+        _bm25_idx = len(_search_tasks)  # BM25 is last in _gather_tasks
+        _bm25_raw = [] if isinstance(_main_results[_bm25_idx], Exception) else _main_results[_bm25_idx]
+        _vector_raw = []
+        for _vi, _vr in enumerate(_main_results):
+            if _vi != _bm25_idx and not isinstance(_vr, Exception):
+                _vector_raw.extend(_vr)
+        if isinstance(_main_results[_bm25_idx], Exception):
+            logger.error(f"BM25 retrieval error: {_main_results[_bm25_idx]}")
 
-    # ── Product catalog: post-filter BEFORE cap — applied to ALL results ────
-    # Must run before [:25] cap so keyword rescue doesn't crowd out filtered hits.
-    # policy_results prepended so they always appear in context for policy queries.
-    _combined_before_cap = policy_results + rescue_results + results
+    # ── Product catalog: build combined list in priority order ────────────────
+    # policy → BM25 (lexical exact match) → rescue (term-contains) → vector
+    _comb_seen: set = set()
+    _combined_before_cap: list = []
+    for _grp in (policy_results, _bm25_raw, rescue_results, _vector_raw):
+        for _r in _grp:
+            _k = _r.page_content[:100]
+            if _k in _comb_seen:
+                continue
+            # Post-filter: drop chunks exceeding price constraint
+            if _max_price is not None:
+                _cp = _r.metadata.get("price") if _r.metadata else None
+                if _cp is not None and _cp > _max_price:
+                    continue
+            _comb_seen.add(_k)
+            _combined_before_cap.append(_r)
     if _has_product_meta and (_required_flags or _ram_min_req is not None or _max_price is not None):
         _post_filtered = []
         for r in _combined_before_cap:
@@ -1251,10 +1260,10 @@ async def retrieve_context(q: str, db, k: int = 15, fast: bool = False, expansio
                 if _pval is not None and _pval > _max_price:
                     continue
             _post_filtered.append(r)
-        top = _post_filtered[:25]
+        top = _post_filtered[:40]
         logger.info(f"[META-FILTER] post-filter: {len(top)} chunks remain")
     else:
-        top = _combined_before_cap[:25]
+        top = _combined_before_cap[:40]
 
     # ── Product catalog: dedup + GPU ranking ─────────────────────────────────
     if _has_product_meta:
@@ -1683,8 +1692,8 @@ def any_key_ready() -> bool:
         return True  # assume ready if check fails
 
 # Per-model context window budgets (chars, conservative — leaves room for system prompt + history)
-# Cerebras llama3.1-8b has a hard 8K token limit; skip it when context is large
-_CEREBRAS_MAX_CONTEXT_CHARS = 1500
+# Cerebras llama3.1-8b: 8K tokens ≈ 6000 chars usable for context
+_CEREBRAS_MAX_CONTEXT_CHARS = 6000
 # Groq free tier returns HTTP 413 when request payload is too large (~50k chars context)
 _GROQ_MAX_CONTEXT_CHARS = 20000
 
