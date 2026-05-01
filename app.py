@@ -522,22 +522,20 @@ ANSWER TIER FRAMEWORK — EXECUTE THIS DECISION LOGIC BEFORE EVERY RESPONSE:
   - NEVER invent prices, availability, or features not present in the retrieved KB.
   - If fewer than 2 relevant items exist in KB context, skip to Tier 3.
 
-▸ TIER 2 — CONTEXTUAL INFERENCE (strict — ALL 5 conditions must be true simultaneously):
-  (a) The EXACT SUBJECT of the question (specific product name / person / concept) IS explicitly named in the KB — theme similarity alone does NOT qualify.
+▸ TIER 2 — CONTEXTUAL INFERENCE (use when KB names the subject but lacks the specific detail):
+  (a) The EXACT SUBJECT of the question (specific product / person / concept) IS explicitly named in the KB — theme similarity alone does NOT qualify.
   (b) The specific detail asked is NOT directly stated in the KB.
-  (c) The fact you would add is universally established, scientifically or factually accepted (not estimated, not opinion, not industry-specific).
-  (d) The fact falls squarely within {topics} — NOT adjacent domains, NOT general retail, NOT general business norms.
-  (e) You are ≥90% certain this fact is universally true with zero reasonable exceptions.
+  (c) The fact you would add is commonly understood or generally accepted within the {topics} domain (industry norms, standard properties, typical usage — not just pure science).
+  (d) You are ≥70% confident this is generally true for the subject described in KB.
   Action: Answer using KB for the subject + signal inference clearly with: "generally", "typically", "based on standard [category] properties".
   NEVER state prices, availability, stock, shipping times, warranties, or policies via world knowledge.
 
   TIER 2 HARD GATES — if ANY one of these is true, you MUST use Tier 3 instead:
   ✗ The subject is not explicitly named in the KB (broad topic match alone = FAIL)
   ✗ The fact requires business-specific knowledge (pricing, stock, policies, team info)
-  ✗ The fact is an estimate, average, or varies by product
-  ✗ Less than 90% universal certainty
-  ✗ The knowledge domain differs from {topics}
-  ✗ The question could be answered differently for {biz_name} specifically
+  ✗ The fact is an estimate, average, or varies significantly by product
+  ✗ Less than 70% confidence
+  ✗ The question could be answered very differently for {biz_name} specifically
 
 ▸ TIER 3 — POLITE IDK (use when Tier 1 and Tier 2 both fail):
   Action: "I don't have specific details about [exact topic] in my knowledge base right now. I can help with [related in-scope topic] — would that be useful?"
@@ -2682,8 +2680,9 @@ def _context_addresses_query(context: str, q: str) -> bool:
         if user_mentioned_concept and context_has_synonym:
             return True
 
-    # 3. Trust results if we have substantial context (let LLM decide)
-    if len(context.strip()) > 200:
+    # 3. Trust results if we have substantial context AND no extractable keywords
+    # (keywords present but none matched = context is irrelevant nav/TOC text)
+    if len(context.strip()) > 200 and not keywords:
         return True
     
     # 4. Trust LLM for very short queries if we found at least some info
@@ -3313,7 +3312,7 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
         _exc_for_mark = None
         try:
             _trace_event(workflow_trace, "llm_attempt", attempt=attempt + 1)
-            async with asyncio.timeout(6):  # Hard kill — prevents hung connections (max_tokens=512, should stream in <5s)
+            async with asyncio.timeout(12):  # Hard kill — prevents hung connections; 12s allows slower providers (Sambanova/Mistral)
                 async for chunk in llm.astream(messages):
                     if request and await request.is_disconnected():
                         logger.info("Client disconnected mid-stream — aborting LLM call")
@@ -3383,10 +3382,14 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
                            "Could you rephrase or ask about a specific product by name?")
         if visitor_id: _run_in_bg(save_visitor_turn, visitor_id, "assistant", cleaned, db_name)
         yield f"data: {json.dumps({'type': 'chunk', 'content': cleaned})}\n\n"
-        # Suppress sources and log gap if LLM indicated it doesn't have the info
+        # Suppress sources and log gap if LLM indicated it doesn't have the info.
+        # Only classify IDK if the signal appears early (< 80 chars) or answer is very short.
+        # Avoids collapsing grounded answers that mention one missing detail at the end.
         _idk_sigs = ["don't have", "do not have", "not available", "no information",
                      "cannot find", "can't find", "not sure about", "no specific", "not in my"]
-        is_idk = any(s in cleaned.lower() for s in _idk_sigs)
+        _cl_lower = cleaned.lower()
+        _idk_pos = next((i for s in _idk_sigs if (i := _cl_lower.find(s)) >= 0), -1)
+        is_idk = _idk_pos >= 0 and (_idk_pos < 80 or len(cleaned) < 150)
         if is_idk: _run_in_bg(log_knowledge_gap, q, db_name)
         # Suppress sources for conversational/memory queries — answered from history, not KB
         _conv_sigs = ["what is my name", "what's my name", "my name is", "you called me",
