@@ -2680,9 +2680,8 @@ def _context_addresses_query(context: str, q: str) -> bool:
         if user_mentioned_concept and context_has_synonym:
             return True
 
-    # 3. Trust results if we have substantial context AND no extractable keywords
-    # (keywords present but none matched = context is irrelevant nav/TOC text)
-    if len(context.strip()) > 200 and not keywords:
+    # 3. Trust results if we have substantial context (let LLM decide relevance)
+    if len(context.strip()) > 200:
         return True
     
     # 4. Trust LLM for very short queries if we found at least some info
