@@ -63,6 +63,9 @@ def _github_sync_download(load_db_callback=None):
             _github_sync_result.clear()
             _github_sync_result.update({"status": "failed", "detail": f"Release fetch {resp.status_code} — PAT may be expired"})
             logger.error(f"[GH-SYNC] Release not found ({resp.status_code}): {resp.text[:200]}")
+            if load_db_callback:
+                logger.info("[GH-SYNC] Sync failed — loading local DB anyway")
+                threading.Thread(target=load_db_callback, daemon=True).start()
             return
         assets = resp.json().get("assets", [])
         zip_assets = [a for a in assets if a["name"].endswith(".zip")]
