@@ -141,22 +141,44 @@
   .eval-row-meta { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 10px; }
   .eval-answer-box {
     white-space: pre-wrap; background: #0f172a; color: #e2e8f0;
-    border-radius: 12px; padding: 12px; margin-top: 12px;
+    border-radius: 12px; padding: 12px;
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
     font-size: 12px; line-height: 1.5;
+  }
+  .eval-section { margin-top: 14px; }
+  .eval-section-title {
+    font-size: 11px; font-weight: 800; color: var(--text-muted);
+    text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 8px;
+  }
+  .eval-section-grid { display:grid; grid-template-columns: 1fr 1fr; gap:12px; }
+  .eval-panel {
+    border:1px solid var(--border); border-radius:12px; padding:12px; background:#fff;
+  }
+  .eval-panel h4 {
+    font-size:11px; text-transform:uppercase; letter-spacing:0.05em; color:var(--text-muted); margin-bottom:8px;
+  }
+  .eval-plain-box {
+    white-space: pre-wrap; font-size: 13px; line-height: 1.55; color: var(--text-main);
+    background:#f8fafc; border:1px solid var(--border); border-radius:12px; padding:12px;
+  }
+  .eval-answer-box.answer-expected {
+    background:#f8fafc; color:var(--text-main); border:1px solid var(--border); font-family:inherit;
   }
   .eval-facts { margin-top: 12px; display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
   .eval-facts .panel { border: 1px solid var(--border); border-radius: 12px; padding: 12px; background: #fff; }
   .eval-facts h4 { font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-muted); margin-bottom: 8px; }
 .eval-fact { font-size: 12px; padding: 8px 10px; border-radius: 10px; background: #f8fafc; border: 1px solid var(--border); margin-bottom: 8px; }
 .eval-src { font-size: 12px; color: var(--text-muted); margin-top: 8px; }
-.eval-mini-grid { display:grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap:8px; margin-top:12px; }
+.eval-mini-grid { display:grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap:8px; margin-top:12px; }
 .eval-mini-card { border:1px solid var(--border); border-radius:10px; padding:10px 12px; background:#fff; }
 .eval-mini-card .k { font-size:11px; color:var(--text-muted); text-transform:uppercase; letter-spacing:.04em; }
-.eval-mini-card .v { font-size:16px; font-weight:800; margin-top:4px; }
+.eval-mini-card .v { font-size:14px; font-weight:800; margin-top:4px; line-height:1.35; white-space:pre-wrap; }
 .eval-summary-grid { display:grid; grid-template-columns: 1fr 1fr; gap:12px; margin-top:12px; }
 .eval-summary-panel { border:1px solid var(--border); border-radius:10px; padding:12px; background:#fff; }
 .eval-summary-panel h4 { font-size:11px; text-transform:uppercase; letter-spacing:.05em; color:var(--text-muted); margin-bottom:8px; }
+  @media (max-width: 860px) {
+    .eval-section-grid, .eval-facts, .eval-summary-grid { grid-template-columns: 1fr; }
+  }
   /* Client mode — hide owner-only sections */
   body.client-mode #card-tests,
   body.client-mode #card-evals,
@@ -196,10 +218,38 @@
         </div>
         <button class="secondary" style="width:auto;margin:0;padding:8px 12px;" onclick="hideEvalOverlay()">Close</button>
       </div>
-<div id="eval-detail-src" class="eval-src"></div>
-<div id="eval-detail-answer" class="eval-answer-box"></div>
-<div id="eval-detail-metrics" class="eval-mini-grid"></div>
-<div class="eval-facts">
+      <div id="eval-detail-src" class="eval-src"></div>
+      <div class="eval-section">
+        <div class="eval-section-title">Expected vs Actual</div>
+        <div class="eval-section-grid">
+          <div class="eval-panel">
+            <h4>Expected Answer / Reference</h4>
+            <div id="eval-detail-expected" class="eval-answer-box answer-expected"></div>
+          </div>
+          <div class="eval-panel">
+            <h4>Bot Answer</h4>
+            <div id="eval-detail-answer" class="eval-answer-box"></div>
+          </div>
+        </div>
+      </div>
+      <div class="eval-section">
+        <div class="eval-section-title">Diagnosis</div>
+        <div class="eval-section-grid">
+          <div class="eval-panel">
+            <h4>What Broke</h4>
+            <div id="eval-detail-diagnosis" class="eval-plain-box"></div>
+          </div>
+          <div class="eval-panel">
+            <h4>Likely Cause</h4>
+            <div id="eval-detail-cause" class="eval-plain-box"></div>
+          </div>
+        </div>
+      </div>
+      <div class="eval-section">
+        <div class="eval-section-title">Metrics</div>
+        <div id="eval-detail-metrics" class="eval-mini-grid"></div>
+      </div>
+      <div class="eval-facts">
         <div class="panel">
           <h4>Key Facts Present</h4>
           <div id="eval-detail-present"></div>
@@ -209,8 +259,8 @@
           <div id="eval-detail-missing"></div>
         </div>
       </div>
-      <div style="margin-top:12px;">
-        <div style="font-size:11px;font-weight:800;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.05em;margin-bottom:8px;">Retrieved Sources</div>
+      <div class="eval-section">
+        <div class="eval-section-title">Retrieved Sources</div>
         <div id="eval-detail-sources"></div>
       </div>
     </div>
@@ -833,15 +883,25 @@
     });
   });
 
+  window._crawlPollState = window._crawlPollState || {
+    db_name: '',
+    pass: '',
+    offset: 0,
+    running: false,
+    token: 0,
+  };
+
   // When user returns to tab: resume polling if a crawl was in progress
   document.addEventListener('visibilitychange', async () => {
     if (document.hidden) return;
     const db_name = window._activeCrawlDb;
     const pass    = window._activeCrawlPass;
     if (!db_name || !pass) return;
+    if (window._crawlPollState?.running) return;
     // Check server — if still running, resume polling UI
     try {
-      const r = await fetch(`${API}/admin/crawl-status?db_name=${encodeURIComponent(db_name)}&password=${encodeURIComponent(pass)}&offset=0`);
+      const resumeOffset = Number(window._crawlPollState?.offset || 0);
+      const r = await fetch(`${API}/admin/crawl-status?db_name=${encodeURIComponent(db_name)}&password=${encodeURIComponent(pass)}&offset=${resumeOffset}`);
       if (!r.ok) return;
       const data = await r.json();
       if (!data.running && !data.done) return;
@@ -851,7 +911,16 @@
         statusEl.innerHTML = '<div style="margin-bottom:10px;display:flex;align-items:center;gap:10px;">🔄 Reconnected — crawl still running... <button onclick="cancelActiveCrawl()" style="background:#dc2626;color:#fff;border:none;padding:3px 10px;border-radius:8px;font-size:11px;cursor:pointer;">⏹ Cancel</button></div><div id="crawl-logs" style="font-family:monospace; font-size:10px; background:#1e293b; color:#86efac; padding:12px; border-radius:12px; max-height:200px; overflow-y:auto; line-height:1.4;"></div>';
       }
       const logsEl = document.getElementById('crawl-logs');
-      if (logsEl && !data.done) _pollCrawlStatus(db_name, pass, logsEl, statusEl);
+      if (logsEl && !data.done) {
+        window._crawlPollState = {
+          db_name,
+          pass,
+          offset: resumeOffset,
+          running: false,
+          token: Number(window._crawlPollState?.token || 0),
+        };
+        _pollCrawlStatus(db_name, pass, logsEl, statusEl);
+      }
     } catch (_) {}
   });
 
@@ -2184,14 +2253,32 @@
     // Poll /admin/crawl-status every 2s — works even if tab is backgrounded or refreshed
     window._activeCrawlDb = db_name;
     window._activeCrawlPass = pass;
+    window._crawlPollState = {
+      db_name,
+      pass,
+      offset: 0,
+      running: false,
+      token: Number(window._crawlPollState?.token || 0),
+    };
     await _pollCrawlStatus(db_name, pass, logsEl, statusEl);
   }
 
   async function _pollCrawlStatus(db_name, pass, logsEl, statusEl) {
-    let offset = 0;
+    const state = window._crawlPollState || {};
+    if (state.running && state.db_name === db_name) return;
+    const token = Number(state.token || 0) + 1;
+    window._crawlPollState = {
+      db_name,
+      pass,
+      offset: Number(state.offset || 0),
+      running: true,
+      token,
+    };
     while (true) {
       try {
-        const r = await fetch(`${API}/admin/crawl-status?db_name=${encodeURIComponent(db_name)}&password=${encodeURIComponent(pass)}&offset=${offset}`);
+        if (!window._crawlPollState || window._crawlPollState.token !== token) return;
+        const currentOffset = Number(window._crawlPollState.offset || 0);
+        const r = await fetch(`${API}/admin/crawl-status?db_name=${encodeURIComponent(db_name)}&password=${encodeURIComponent(pass)}&offset=${currentOffset}`);
         if (!r.ok) { await new Promise(res => setTimeout(res, 3000)); continue; }
         const data = await r.json();
         for (const msg of (data.logs || [])) {
@@ -2202,9 +2289,15 @@
           logsEl.scrollTop = logsEl.scrollHeight;
           if (statusEl.firstChild) statusEl.firstChild.textContent = `⚙️ ${msg}`;
         }
-        offset = data.total;
+        if (window._crawlPollState && window._crawlPollState.token === token) {
+          window._crawlPollState.offset = Number(data.total || currentOffset);
+        }
         if (data.done) {
           window._activeCrawlDb = null;
+          window._activeCrawlPass = null;
+          if (window._crawlPollState && window._crawlPollState.token === token) {
+            window._crawlPollState.running = false;
+          }
           const isError = data.error || (logsEl.lastChild?.textContent || '').includes('❌');
           if (isError) {
             showStatus('crawl', '❌ Crawl failed — see logs above', 'error', true);
@@ -2233,6 +2326,9 @@
         }
       } catch (_) {}
       await new Promise(res => setTimeout(res, 2000));
+    }
+    if (window._crawlPollState && window._crawlPollState.token === token) {
+      window._crawlPollState.running = false;
     }
   }
 
@@ -2324,22 +2420,46 @@
 
     const srcEl = document.getElementById('eval-detail-src');
     const expSrc = row.expect?.expected_source || '';
+    const retrieveSources = row.retrieve?.sources || [];
     srcEl.textContent = expSrc ? `Expected source: ${expSrc}` : '';
+    if (retrieveSources.length) {
+      srcEl.textContent += `${srcEl.textContent ? '  •  ' : ''}Top retrieved: ${retrieveSources[0]}`;
+    }
+
+    const expectedEl = document.getElementById('eval-detail-expected');
+    const expectedRef = row.expect?.reference_text || row.expect?.reference_answer || '';
+    expectedEl.textContent = expectedRef || 'No explicit expected answer was stored for this row.';
 
     const ansEl = document.getElementById('eval-detail-answer');
-    ansEl.textContent = row.answer?.text || '';
+    ansEl.textContent = row.answer?.text || 'No answer captured.';
+
+    const diagEl = document.getElementById('eval-detail-diagnosis');
+    const diagParts = [
+      `Diagnosis: ${row.diagnosis || 'pass'}`,
+      row.judge?.exact_failure_step ? `Failure step: ${row.judge.exact_failure_step}` : '',
+      row.judge?.likely_failure_source && row.judge?.likely_failure_source !== 'none' ? `Judge source: ${row.judge.likely_failure_source}` : '',
+    ].filter(Boolean);
+    diagEl.textContent = diagParts.join('\n') || 'No diagnosis available.';
+
+    const causeEl = document.getElementById('eval-detail-cause');
+    const causeParts = [
+      row.likely_cause || '',
+      row.judge?.root_cause_note ? `Root cause: ${row.judge.root_cause_note}` : '',
+      row.judge?.fix_hint ? `Suggested fix: ${row.judge.fix_hint}` : '',
+    ].filter(Boolean);
+    causeEl.textContent = causeParts.join('\n\n') || 'No likely-cause hint available.';
 
     const metricsEl = document.getElementById('eval-detail-metrics');
     metricsEl.innerHTML = '';
     const metricCards = [
-      { k: 'Diagnosis', v: row.diagnosis || 'pass' },
-      { k: 'Likely Cause', v: row.likely_cause || '—' },
       { k: 'Retrieval Score', v: row.retrieve?.score != null ? `${Number(row.retrieve.score).toFixed(2)}` : '—' },
       { k: 'Avg Precision', v: row.retrieve?.metrics?.average_precision != null ? `${Number(row.retrieve.metrics.average_precision).toFixed(2)}` : '—' },
       { k: 'Precision@3', v: row.retrieve?.metrics?.precision_at_3 != null ? `${Number(row.retrieve.metrics.precision_at_3).toFixed(2)}` : '—' },
       { k: 'Context Recall', v: row.retrieve?.metrics?.context_recall != null ? `${Number(row.retrieve.metrics.context_recall).toFixed(2)}` : '—' },
       { k: 'Faithfulness', v: row.answer?.metrics?.faithfulness != null ? `${Number(row.answer.metrics.faithfulness).toFixed(2)}` : '—' },
       { k: 'Answer Relevance', v: row.answer?.metrics?.answer_relevance != null ? `${Number(row.answer.metrics.answer_relevance).toFixed(2)}` : '—' },
+      { k: 'Judge Confidence', v: row.judge?.confidence != null ? `${Number(row.judge.confidence).toFixed(2)}` : '—' },
+      { k: 'Expected Type', v: row.expect?.type || '—' },
     ];
     metricCards.forEach(m => {
       const card = document.createElement('div');
