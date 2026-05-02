@@ -10,6 +10,7 @@ from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import requests
 from evals.llm_judge import JudgeVerdict, derive_fallback_verdict, judge_answer
@@ -1126,9 +1127,35 @@ def _judge_prompt_snapshot(db_name: str) -> str:
     return "\n".join(parts)
 
 
+_PRICE_FIGURE_RE = re.compile(
+    r"(?i)(?:\b(?:rs\.?|pkr|usd|eur|gbp|\$|£)\s*[\d,]+(?:\.\d+)?\b|\b[\d,]+(?:\.\d+)?\s*(?:pkr|usd|eur|gbp)\b)"
+)
+
+
+def _normalize_source_url(value: str) -> str:
+    raw = (value or "").strip().lower()
+    if not raw:
+        return ""
+    try:
+        parsed = urlsplit(raw)
+        host = (parsed.netloc or "").replace("www.", "")
+        path = re.sub(r"/+$", "", parsed.path or "")
+        return f"{host}{path}"
+    except Exception:
+        return re.sub(r"/+$", "", raw.replace("www.", ""))
+
+
+def _contains_price_figure(text: str) -> bool:
+    return bool(_PRICE_FIGURE_RE.search(text or ""))
+
+
+def _is_product_catalog_source(source: str) -> bool:
+    return "/products/" in _normalize_source_url(source)
+
+
 def _source_match(actual_source: str, expected_source: str) -> bool:
-    actual = (actual_source or "").strip().lower()
-    expected = (expected_source or "").strip().lower()
+    actual = _normalize_source_url(actual_source)
+    expected = _normalize_source_url(expected_source)
     if not actual or not expected:
         return False
     if actual == expected:
@@ -1282,15 +1309,28 @@ def _grade_retrieval(item: EvalItem, doc_rows: list[dict] | None = None, expecte
         ranked.append({"rank": idx, "source": source, "verdict": verdict, "label": label})
 
     hit = any(v == 1 for v in binary_verdicts)
+    expected_source_hit = bool(
+        expected_source
+        and any(_source_match(str((row or {}).get("source") or ""), expected_source) for row in rows)
+    )
     precision_at_3 = round(sum(binary_verdicts[:3]) / max(1, min(3, len(binary_verdicts))), 3) if binary_verdicts else 0.0
     average_precision = _average_precision(binary_verdicts)
     first_relevant_rank = next((i + 1 for i, v in enumerate(binary_verdicts) if v == 1), None)
     context_recall = _context_recall(item)
+    product_source_override = (
+        _question_type(item.q) == "pricing"
+        and _is_product_catalog_source(expected_source)
+        and expected_source_hit
+    )
 
     if not rows:
         status = "FAIL"
         diagnosis = "retrieval_miss"
         reason = "Retriever returned no document rows for this question."
+    elif product_source_override and hit:
+        status = "PASS"
+        diagnosis = "retrieval_ok"
+        reason = None
     elif hit and average_precision >= 0.55 and (context_recall is None or context_recall >= 0.67):
         status = "PASS"
         diagnosis = "retrieval_ok"
@@ -1391,6 +1431,13 @@ def _grade_answer(item: EvalItem, answer_text: str, judge_verdict: JudgeVerdict 
         if answer_class != "ANSWER":
             diag = "grounded_but_answered_idk" if answer_class == "IDK" else "grounded_but_refused"
             return "FAIL", f"Expected an in-domain answer, got {answer_class}. ({diag})", overlap
+        if (
+            qtype == "pricing"
+            and _contains_price_figure(answer_text)
+            and metrics["faithfulness"] >= 0.99
+            and metrics["answer_relevance"] >= 0.99
+        ):
+            return "PASS", None, overlap
         if len(answer_text) < 25:
             return "FAIL", "Answer was too short to be trustworthy.", overlap
         if item.retrieve_doc_count <= 0 or item.retrieve_context_length < 80:

@@ -1,4 +1,5 @@
 import asyncio
+from types import SimpleNamespace
 
 import pytest
 from evals import eval_v1
@@ -52,6 +53,28 @@ def test_eval_answer_via_stream_captures_workflow_trace(app_module, monkeypatch)
     assert sources == ["https://example.test/doc"]
     assert workflow_trace["events"][0]["event"] == "guard_exit"
     assert workflow_debug["guard_decisions"]["exit_guard"] == "sparse_kb_context_miss"
+
+
+def test_product_query_rerank_score_prefers_exact_product_slug(app_module):
+    exact = SimpleNamespace(
+        metadata={"source": "https://www.thestationerycompany.pk/products/piano-wipe-easy-whiteboard-marker-pack-of-12"},
+        page_content="Piano Wipe Easy Whiteboard Marker Pack Of 12 Rs.1,200",
+    )
+    neighbor = SimpleNamespace(
+        metadata={"source": "https://www.thestationerycompany.pk/products/piano-wipe-easy-70-whiteboard-marker-single-piece"},
+        page_content="Piano Wipe-Easy 70 Whiteboard Marker Single Piece Rs.125",
+    )
+
+    exact_score = app_module._product_query_rerank_score(
+        "What is the price of Piano Wipe Easy Whiteboard Marker Pack Of 12?",
+        exact,
+    )
+    neighbor_score = app_module._product_query_rerank_score(
+        "What is the price of Piano Wipe Easy Whiteboard Marker Pack Of 12?",
+        neighbor,
+    )
+
+    assert exact_score > neighbor_score
 
 
 def test_json_safe_converts_non_serializable_values(app_module):

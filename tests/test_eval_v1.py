@@ -412,6 +412,37 @@ def test_grade_retrieval_fails_when_context_is_incomplete():
     assert result["context_recall"] < 0.8
 
 
+def test_grade_retrieval_passes_product_url_hit_even_with_noisy_reference():
+    item = eval_v1.EvalItem(
+        q="What is the price of Daler Rowney Turpentine Oil?",
+        expect="ANSWER",
+        source="chunk_topic",
+        reference_answer=(
+            "Name: Daler Rowney Turpentine Oil Category: Turpentine Oil "
+            "Daler Rowney Turpentine Oil Rs.2,045 You may also like Car Stationery set 5 in one Rs.450 "
+            "M&G Stationery Tape 97322 Rs.560 Wooden Pen Stand Rs.4,085"
+        ),
+        retrieve_context_preview="Daler Rowney Turpentine Oil Rs.2,045 Dilutes oil color and cleans brushes.",
+        retrieve_sources=["https://www.thestationerycompany.pk/products/daler-rowney-turpentine-oil"],
+    )
+
+    result = eval_v1._grade_retrieval(
+        item,
+        [
+            {
+                "source": "https://www.thestationerycompany.pk/products/daler-rowney-turpentine-oil",
+                "preview": "Daler Rowney Turpentine Oil Rs.2,045 Dilutes oil color and cleans brushes.",
+            }
+        ],
+        expected_source="https://www.thestationerycompany.pk/products/daler-rowney-turpentine-oil",
+    )
+
+    assert result["hit"] is True
+    assert result["context_recall"] == 0.0
+    assert result["status"] == "PASS"
+    assert result["diagnosis"] == "retrieval_ok"
+
+
 def test_grade_retrieval_fails_when_relevant_chunk_is_buried():
     item = eval_v1.EvalItem(
         q="How do refunds work?",
@@ -436,6 +467,29 @@ def test_grade_retrieval_fails_when_relevant_chunk_is_buried():
     assert result["status"] == "FAIL"
     assert result["diagnosis"] == "weak_top_k"
     assert result["average_precision"] < 0.55
+
+
+def test_grade_answer_accepts_short_pricing_answer_when_judge_is_perfect():
+    item = eval_v1.EvalItem(
+        q="What is the price of Daler Rowney Turpentine Oil?",
+        expect="ANSWER",
+        source="chunk_topic",
+        reference_answer="Daler Rowney Turpentine Oil Rs.2,045",
+        retrieve_doc_count=2,
+        retrieve_context_length=160,
+        retrieve_context_preview="Daler Rowney Turpentine Oil Rs.2,045 Dilutes oil color to a thin wash.",
+        retrieve_sources=["https://www.thestationerycompany.pk/products/daler-rowney-turpentine-oil"],
+    )
+    verdict = JudgeVerdict(
+        faithfulness_score=1.0,
+        answer_relevance_score=1.0,
+        likely_failure_source="none",
+    )
+
+    status, reason, _ = eval_v1._grade_answer(item, "Rs.2,045", judge_verdict=verdict)
+
+    assert status == "PASS"
+    assert reason is None
 
 
 def test_grade_answer_classifies_refuse_consistently():

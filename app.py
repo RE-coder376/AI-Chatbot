@@ -412,6 +412,40 @@ def _check_is_product_db(db, db_name: str = "") -> bool:
         _product_db_cache[db_name] = result
     return result
 
+
+_PRODUCT_QUERY_STOP = {
+    "what", "is", "the", "price", "pricing", "cost", "of", "for", "a", "an", "item", "product",
+    "products", "much", "how", "does", "do", "you", "have", "tell", "me", "about", "details",
+}
+
+
+def _product_query_rerank_score(question: str, doc) -> float:
+    source = str(((getattr(doc, "metadata", None) or {}).get("source")) or "")
+    text = str(getattr(doc, "page_content", "") or "")
+    if not source and not text:
+        return 0.0
+    q_tokens = {
+        t for t in re.findall(r"[a-z0-9]+", (question or "").lower())
+        if len(t) >= 2 and t not in _PRODUCT_QUERY_STOP
+    }
+    source_tokens = set(re.findall(r"[a-z0-9]+", source.lower().replace("-", " ").replace("_", " ")))
+    head_tokens = set(re.findall(r"[a-z0-9]+", text[:500].lower()))
+    combined_tokens = source_tokens | head_tokens
+    overlap = len(q_tokens & combined_tokens)
+    slug_overlap = len(q_tokens & source_tokens)
+    head_overlap = len(q_tokens & head_tokens)
+    q_numbers = set(re.findall(r"\b\d+\b", question or ""))
+    doc_numbers = set(re.findall(r"\b\d+\b", f"{source} {text[:500]}"))
+    numbers_hit = len(q_numbers & doc_numbers)
+    normalized_q = re.sub(r"\s+", " ", re.sub(r"[^a-z0-9]+", " ", (question or "").lower())).strip()
+    normalized_doc = re.sub(r"\s+", " ", re.sub(r"[^a-z0-9]+", " ", f"{source} {text[:500]}".lower())).strip()
+    score = overlap + (slug_overlap * 3.0) + (head_overlap * 1.25) + (numbers_hit * 2.0)
+    if normalized_q and normalized_q in normalized_doc:
+        score += 8.0
+    if re.search(r"\b(price|pricing|cost)\b", question or "", re.I) and re.search(r"(?i)\b(?:rs\.?|pkr|\$)\s*[\d,]+", text[:500]):
+        score += 1.0
+    return score
+
 def get_system_prompt(cfg, context, doc_count: int = 0, is_urdu: bool = False, user_lang: str = "English", is_product_db: bool = False):
     bot_name = cfg.get("bot_name", "AI Assistant")
     biz_name = cfg.get("business_name", "the company")
@@ -1218,13 +1252,14 @@ async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansio
         # match (e.g. "Marabu Chalky Chic") appears at position 0 in the context,
         # not buried after 20+ generic same-brand docs from rescue.
         _bm25_idx = len(_search_tasks)  # BM25 is last in _gather_tasks
-        _bm25_raw = [] if isinstance(_main_results[_bm25_idx], Exception) else _main_results[_bm25_idx]
+        _bm25_result = _main_results[_bm25_idx] if len(_main_results) > _bm25_idx else []
+        _bm25_raw = [] if isinstance(_bm25_result, Exception) else _bm25_result
         _vector_raw = []
         for _vi, _vr in enumerate(_main_results):
             if _vi != _bm25_idx and not isinstance(_vr, Exception):
                 _vector_raw.extend(_vr)
-        if isinstance(_main_results[_bm25_idx], Exception):
-            logger.error(f"BM25 retrieval error: {_main_results[_bm25_idx]}")
+        if isinstance(_bm25_result, Exception):
+            logger.error(f"BM25 retrieval error: {_bm25_result}")
 
     # ── Product catalog: build combined list in priority order ────────────────
     # policy → BM25 (lexical exact match) → rescue (term-contains) → vector
@@ -1278,6 +1313,14 @@ async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansio
         # For "best gaming / highest VRAM" queries: sort by GPU VRAM descending in Python
         if re.search(r'\bbest\b.*\bgaming\b|\bhighest\b.*\b(?:gpu|vram)\b|\bmost\s+powerful\b', q, re.I):
             top.sort(key=lambda r: r.metadata.get('gpu_vram_gb', 0) if r.metadata else 0, reverse=True)
+    # Product-title rerank: exact product pages should outrank same-brand neighbors for
+    # pricing/detail questions like "Pack Of 12" even on DBs whose chunks are URL/text-only.
+    _has_productish_sources = any(
+        "/products/" in str(((getattr(r, "metadata", None) or {}).get("source")) or "").lower()
+        for r in top[:20]
+    )
+    if _has_productish_sources and re.search(r"\b(price|pricing|cost|how much|sku|size|color|pack|piece|pieces)\b", q, re.I):
+        top.sort(key=lambda r: _product_query_rerank_score(q, r), reverse=True)
     sources = []
     for r in top:
         src = r.metadata.get("source", "")
