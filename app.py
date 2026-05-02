@@ -4048,7 +4048,7 @@ def _owner_eval_judge_keys(data: dict | None) -> list[str]:
     # Fall back to all active Groq keys from keys.json
     try:
         all_keys = json.loads(KEYS_FILE.read_text(encoding="utf-8")) if KEYS_FILE.exists() else []
-        return [k["api_key"] for k in all_keys if k.get("provider") == "groq" and k.get("status") == "active" and k.get("api_key")]
+        return [k["key"] for k in all_keys if k.get("provider") == "groq" and k.get("status") == "active" and k.get("key")]
     except Exception:
         return []
 
