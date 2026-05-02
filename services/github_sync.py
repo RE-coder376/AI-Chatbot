@@ -395,6 +395,34 @@ def _github_sync_upload(db_name: str):
         tmp_zip.unlink(missing_ok=True)
 
 
+def _github_clear_db_data(db_name: str):
+    """Persist an emptied DB to GitHub while keeping the DB itself alive.
+    Uploads the current DB folder (typically config-only after clear-data)
+    and removes small crawl-state backups that could otherwise repopulate state."""
+    import requests as _req
+    pat = os.environ.get("GITHUB_PAT", "").strip()
+    if not pat:
+        return
+    _github_sync_upload(db_name)
+    api_hdr = {"Authorization": f"token {pat}", "User-Agent": "chatbot-sync"}
+    for fname in [f"crawl_times_{db_name}.json", f"crawled_urls_{db_name}.txt"]:
+        try:
+            r = _req.get(
+                f"https://api.github.com/repos/{_GITHUB_USERNAME}/{_GITHUB_REPO}/contents/{fname}",
+                headers=api_hdr, timeout=10
+            )
+            if r.status_code == 200:
+                sha = r.json().get("sha")
+                _req.delete(
+                    f"https://api.github.com/repos/{_GITHUB_USERNAME}/{_GITHUB_REPO}/contents/{fname}",
+                    json={"message": f"clear-db-data: remove {fname}", "sha": sha},
+                    headers=api_hdr, timeout=15
+                )
+                logger.info(f"[GH-SYNC] Cleared backup file {fname} for {db_name}")
+        except Exception as e:
+            logger.warning(f"[GH-SYNC] Could not clear backup {fname} for {db_name}: {e}")
+
+
 def _github_sync_delete(db_name: str):
     """Remove DB zip from GitHub releases when a DB is deleted."""
     import requests as _req

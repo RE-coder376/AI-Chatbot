@@ -163,7 +163,7 @@ from services.github_sync import (
     _github_sync_result, _github_repo_url, _git,
     _github_sync_download, _github_backup_crawled_urls,
     _github_backup_crawl_times, _github_upload_active_db,
-    _github_sync_upload, _github_sync_delete,
+    _github_sync_upload, _github_sync_delete, _github_clear_db_data,
 )
 
 def _write_crawl_status(db_name: str, status: str):
@@ -5672,8 +5672,15 @@ async def clear_db_data(request: Request, password: str = Form(...), name: str =
     _intro_q_cache.pop(name, None)
     _bm25_cache.pop(name, None)
     _db_instance_cache.pop(name, None)
-    threading.Thread(target=_github_sync_upload, args=(name,), daemon=True).start()
-    return {"success": True, "message": f"All knowledge chunks cleared from '{name}'."}
+    try:
+        await asyncio.to_thread(_github_clear_db_data, name)
+    except Exception as _gh_clear_e:
+        logger.warning(f"[CLEAR-DB] GitHub clear sync failed for '{name}': {_gh_clear_e}")
+        return {
+            "success": True,
+            "message": f"All knowledge chunks cleared from '{name}', but GitHub empty-state sync failed: {_gh_clear_e}"
+        }
+    return {"success": True, "message": f"All knowledge chunks cleared from '{name}' locally and on GitHub."}
 
 @app.post("/admin/sync-github")
 async def sync_github(request: Request):
