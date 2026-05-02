@@ -4038,19 +4038,14 @@ def _filter_eval_tests_for_tenant(tests: list[dict], db_name: str, fingerprint: 
 
 
 def _owner_eval_judge_keys(data: dict | None) -> list[str]:
-    """Return judge keys: explicit request key, or all active Groq keys from keys.json."""
+    """Return judge-only keys: explicit request key(s), or JUDGE_API_KEY env var (comma-separated)."""
     request_key = str((data or {}).get("judge_key") or "").strip()
     if request_key:
-        return [request_key]
+        return [k.strip() for k in request_key.split(",") if k.strip()]
     env_key = os.getenv("JUDGE_API_KEY", "").strip()
     if env_key:
-        return [env_key]
-    # Fall back to all active Groq keys from keys.json
-    try:
-        all_keys = json.loads(KEYS_FILE.read_text(encoding="utf-8")) if KEYS_FILE.exists() else []
-        return [k["key"] for k in all_keys if k.get("provider") == "groq" and k.get("status") == "active" and k.get("key")]
-    except Exception:
-        return []
+        return [k.strip() for k in env_key.split(",") if k.strip()]
+    return []
 
 def _norm_text(s: str) -> str:
     s = (s or "").lower()
