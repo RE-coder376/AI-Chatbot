@@ -7870,7 +7870,9 @@ async def crawl_site(data: dict, request: Request):
                         )
                     if not chunks:
                         return
-                    await log_queue.put(f"[{worker_label}] [chroma-flush] writing batch of {len(chunks)} chunks from {len(batch)} pages")
+                    _flush_msg = f"[{worker_label}] [chroma-flush] writing batch of {len(chunks)} chunks from {len(batch)} pages"
+                    logger.info(f"[CRAWL] {_flush_msg}")
+                    await log_queue.put(_flush_msg)
                     async with chroma_write_lock:
                         try:
                             await _chroma_run(chroma_db.add_documents, chunks)
@@ -7878,7 +7880,9 @@ async def crawl_site(data: dict, request: Request):
                             logger.warning(f"[CRAWL] [{worker_label}] [chroma-flush-error] {type(_flush_e).__name__}: {_flush_e}")
                             await log_queue.put(f"[{worker_label}] [chroma-flush-error] {type(_flush_e).__name__}: {_flush_e}")
                             raise
-                    await log_queue.put(f"[{worker_label}] [chroma-flush-done] wrote {len(chunks)} chunks")
+                    _flush_done = f"[{worker_label}] [chroma-flush-done] wrote {len(chunks)} chunks"
+                    logger.info(f"[CRAWL] {_flush_done}")
+                    await log_queue.put(_flush_done)
                     total_chunks += len(chunks)
 
                 PARALLEL = 4  # Conservative: avoids Shopify/CDN rate-limiting (was 20 → blocked after ~200 pages)
@@ -7985,7 +7989,9 @@ async def crawl_site(data: dict, request: Request):
                                 await log_queue.put(f"[{worker_label}] [ocr-budget-timeout] exceeded {_ocr_total_budget:.1f}s on {page_url[:70]}")
                                 break
                             try:
-                                await log_queue.put(f"[{worker_label}] [ocr] image {img_idx}/{len(img_urls)} {img_url[:70]}")
+                                _ocr_img_msg = f"[{worker_label}] [ocr] image {img_idx}/{len(img_urls)} {img_url[:70]}"
+                                logger.info(f"[CRAWL] {_ocr_img_msg}")
+                                await log_queue.put(_ocr_img_msg)
                                 r = await asyncio.to_thread(
                                     _req.get, img_url, timeout=8, headers={"User-Agent": ua}
                                 )
@@ -8046,18 +8052,24 @@ async def crawl_site(data: dict, request: Request):
                                 text = _fast.get("text") or ""
                                 title = _fast.get("title") or cur_url.rstrip("/").split("/")[-1].replace("-", " ").title()
                                 page_meta = _fast.get("page_meta") or {}
-                                await log_queue.put(f"[{worker_label}] [http-extract-ok] {cur_url[:70]}")
+                                _http_ok_msg = f"[{worker_label}] [http-extract-ok] {cur_url[:70]}"
+                                logger.info(f"[CRAWL] {_http_ok_msg}")
+                                await log_queue.put(_http_ok_msg)
                         except Exception:
                             pass
                         if len(text) < 300:
                             # --- Playwright: full JS render + lazy scroll ---
-                            await log_queue.put(f"[{worker_label}] [playwright-fallback] starting {cur_url[:70]}")
+                            _pw_fallback_msg = f"[{worker_label}] [playwright-fallback] starting {cur_url[:70]}"
+                            logger.info(f"[CRAWL] {_pw_fallback_msg}")
+                            await log_queue.put(_pw_fallback_msg)
                             pg = await ctx.new_page()
                             await pg.set_default_timeout(15000)  # Hard cap all Playwright ops — prevents hung evaluate/goto on WAF slow-drip
                             await stealth(pg)
                             for attempt in range(5):
                                 try:
-                                    await log_queue.put(f"[{worker_label}] [playwright-attempt] {attempt + 1}/5 {cur_url[:70]}")
+                                    _pw_attempt_msg = f"[{worker_label}] [playwright-attempt] {attempt + 1}/5 {cur_url[:70]}"
+                                    logger.info(f"[CRAWL] {_pw_attempt_msg}")
+                                    await log_queue.put(_pw_attempt_msg)
                                     await pg.goto(cur_url, wait_until="domcontentloaded", timeout=15000)
                                     # Quick JSON-LD check — if it gives content, skip expensive networkidle wait
                                     quick_text = await pg.evaluate("""() => {
@@ -8207,13 +8219,19 @@ async def crawl_site(data: dict, request: Request):
                                     if len(text) < 200:
                                         text = f"{title}. {meta_desc}. {text}".strip()
                                     # OCR: append text extracted from page images
-                                    await log_queue.put(f"[{worker_label}] [ocr-start] {cur_url[:70]}")
+                                    _ocr_start_msg = f"[{worker_label}] [ocr-start] {cur_url[:70]}"
+                                    logger.info(f"[CRAWL] {_ocr_start_msg}")
+                                    await log_queue.put(_ocr_start_msg)
                                     ocr_text = await _ocr_page_images(pg, worker_label, cur_url)
                                     if ocr_text:
                                         text = f"{text} {ocr_text}".strip()
-                                        await log_queue.put(f"[{worker_label}] [ocr-done] appended OCR text for {cur_url[:70]}")
+                                        _ocr_done_msg = f"[{worker_label}] [ocr-done] appended OCR text for {cur_url[:70]}"
+                                        logger.info(f"[CRAWL] {_ocr_done_msg}")
+                                        await log_queue.put(_ocr_done_msg)
                                     else:
-                                        await log_queue.put(f"[{worker_label}] [ocr-done] no OCR text added for {cur_url[:70]}")
+                                        _ocr_none_msg = f"[{worker_label}] [ocr-done] no OCR text added for {cur_url[:70]}"
+                                        logger.info(f"[CRAWL] {_ocr_none_msg}")
+                                        await log_queue.put(_ocr_none_msg)
                                     text, page_meta = _prepare_crawl_page(text or "", cur_url, title_hint=title)
                                     text = re.sub(r'\s+', ' ', _clean_text(text or "")).strip()
                                     # Store sidebar navigation ONCE as a standalone "Site Structure" doc
@@ -8228,7 +8246,9 @@ async def crawl_site(data: dict, request: Request):
                                     break
                                 except Exception as e:
                                     if attempt < 4:
-                                        await log_queue.put(f"[{worker_label}] [playwright-retry] {attempt + 1}/5 failed for {cur_url[:70]}: {type(e).__name__}")
+                                        _pw_retry_msg = f"[{worker_label}] [playwright-retry] {attempt + 1}/5 failed for {cur_url[:70]}: {type(e).__name__}"
+                                        logger.warning(f"[CRAWL] {_pw_retry_msg}")
+                                        await log_queue.put(_pw_retry_msg)
                                         await asyncio.sleep(1 * (attempt + 1))
                                     else:
                                         logger.warning(f"Crawl error [{attempt+1}/5] {cur_url}: {e}")
