@@ -702,6 +702,409 @@ def _clean_text(text: str) -> str:
     """Strip invisible Unicode characters that break retrieval."""
     return _INVISIBLE_CHARS.sub('', text)
 
+
+_PRODUCT_PRICE_CAPTURE_RE = re.compile(
+    r'(?i)\b(?:rs\.?\s*|pkr\s*|\$\s*)([\d,]+(?:\.\d{1,2})?)\b'
+)
+_PRODUCT_PRICE_LINE_RE = re.compile(
+    r'(?i)\b(?:price|sale price|regular price)\s*:\s*(rs\.?\s*|pkr\s*|\$\s*)?([\d,]+(?:\.\d{1,2})?)'
+)
+_PRODUCT_AVAIL_RE = re.compile(
+    r'(?i)\b(in stock|out of stock|sold out|available|unavailable|pre[- ]?order)\b'
+)
+_STRUCTURAL_URL_RE = re.compile(
+    r'(?i)(?:/|#)(?:login|sign-?in|register|signup|account|profile|progress|dashboard|flashcards?|quiz(?:zes)?|exercise|exercises|leaderboard|help|support|guide|site-navigation|toc)(?:/|$|#)'
+)
+_STRUCTURAL_TEXT_RE = re.compile(
+    r'(?i)\b(sign in|log in|register|my account|your profile|dashboard|leaderboard|flashcards?|quiz(?:zes)?|exercise|progress|continue learning|toggle theme|skip to main content)\b'
+)
+_STORE_BOILERPLATE_PATTERNS = [
+    re.compile(r'(?is)\byou may also like\b.*?(?=(?:\bproduct\b|\bdescription\b|\breviews?\b|\Z))'),
+    re.compile(r'(?is)\brecently viewed\b.*?(?=(?:\bproduct\b|\bdescription\b|\breviews?\b|\Z))'),
+    re.compile(r'(?is)\bcustomers also bought\b.*?(?=(?:\bproduct\b|\bdescription\b|\breviews?\b|\Z))'),
+    re.compile(r'(?is)\byour cart\b.*?(?=(?:\bcheckout\b|\bcontinue shopping\b|\Z))'),
+    re.compile(r'(?is)\bsubtotal\b.*?(?=(?:\bcheckout\b|\bcontinue shopping\b|\Z))'),
+    re.compile(r'(?is)\badd to wishlist\b'),
+    re.compile(r'(?is)\bfree shipping on orders over\b[^\n\.!]*'),
+    re.compile(r'(?is)\buse code\s+[A-Z0-9_-]+\s+for\s+\d+% off\b'),
+]
+_CONTAMINATION_HINTS_RE = re.compile(
+    r'(?i)\b(designer wear|premium fashion|men(?:\'s)? fashion|women(?:\'s)? fashion|apparel|clothing collection|footwear|shoes|handbags?)\b'
+)
+_GENERIC_SECTION_SPLIT_RE = re.compile(
+    r'(?m)^(?=(?:Q:|Question:|How |What |Why |When |Where |Who |Can |Do |Is |Are |Does |Should ))',
+    re.I,
+)
+_POLICY_URL_RE = re.compile(r'(?i)(?:/|#)(?:privacy|refund|return|shipping|delivery|warranty|policy|policies|terms)(?:/|$|#)')
+_CATEGORY_URL_RE = re.compile(r'(?i)(?:/|#)(?:collections?|categories?|category|shop)(?:/|$|#)')
+_ARTICLE_URL_RE = re.compile(r'(?i)(?:/|#)(?:blog|blogs|article|articles|lesson|lessons|chapter|chapters|docs|guide|guides|resources?)(?:/|$|#)')
+_POLICY_TEXT_RE = re.compile(r'(?i)\b(refund policy|return policy|shipping policy|privacy policy|terms of service|warranty policy|delivery policy)\b')
+_CATEGORY_TEXT_RE = re.compile(r'(?i)\b(sort by|filter|showing \d+|product type|collections?|categories?)\b')
+_BOILERPLATE_SIGNAL_RE = re.compile(
+    r'(?i)\b(you may also like|recently viewed|customers also bought|your cart|subtotal|checkout|wishlist|free shipping|use code|all rights reserved|privacy policy|terms of service)\b'
+)
+_NAV_CONTROL_RE = re.compile(
+    r'(?i)\b(home|menu|search|login|sign in|register|profile|dashboard|toggle theme|wishlist|cart|checkout|compare|share)\b'
+)
+
+
+def _canonical_product_title(text: str) -> str:
+    text = re.sub(r'(?i)^product:\s*', '', text or "").strip()
+    text = re.sub(r'\s+', ' ', text)
+    text = re.sub(r'(?i)\b(?:size|color|colour|variant|pack of|pcs?|pieces?)\b.*$', '', text).strip(" -,:")
+    return text
+
+
+def _dedupe_repeated_lines(text: str) -> str:
+    lines = [ln.strip() for ln in re.split(r'[\r\n]+', text or "") if ln.strip()]
+    if not lines:
+        return text or ""
+    counts = Counter(lines)
+    kept = []
+    for ln in lines:
+        if counts[ln] >= 3:
+            if ln not in kept:
+                kept.append(ln)
+            continue
+        kept.append(ln)
+    return "\n".join(kept)
+
+
+def _strip_storefront_boilerplate(text: str) -> str:
+    cleaned = text or ""
+    cleaned = _dedupe_repeated_lines(cleaned)
+    for pat in _STORE_BOILERPLATE_PATTERNS:
+        cleaned = pat.sub(" ", cleaned)
+    cleaned = re.sub(
+        r'(?im)^(?:checkout|wishlist|compare|share|follow us|all rights reserved|privacy policy|terms of service)\s*$',
+        ' ',
+        cleaned,
+    )
+    cleaned = re.sub(r'(?i)\b(?:add to cart|buy now)\b(?:\s+\b(?:add to cart|buy now)\b)+', ' ', cleaned)
+    cleaned = re.sub(r'\s+', ' ', cleaned)
+    return _clean_text(cleaned).strip()
+
+
+def _trusted_content_metrics(text: str) -> dict:
+    body = _clean_text(text or "")
+    sentence_count = len(re.findall(r'[.!?]', body))
+    prose_chars = len(body)
+    paragraphs = [p.strip() for p in re.split(r'[\r\n]+', body) if p.strip()]
+    nav_hits = len(_NAV_CONTROL_RE.findall(body))
+    policy_hits = len(_POLICY_TEXT_RE.findall(body))
+    category_hits = len(_CATEGORY_TEXT_RE.findall(body))
+    return {
+        "sentence_count": sentence_count,
+        "prose_chars": prose_chars,
+        "paragraph_count": len(paragraphs),
+        "nav_hits": nav_hits,
+        "policy_hits": policy_hits,
+        "category_hits": category_hits,
+    }
+
+
+def _looks_structural_page(url: str, text: str) -> bool:
+    source = (url or "").lower()
+    body = _clean_text(text or "")
+    if _STRUCTURAL_URL_RE.search(source):
+        return True
+    metrics = _trusted_content_metrics(body)
+    if metrics["prose_chars"] < 120:
+        return False
+    if _STRUCTURAL_TEXT_RE.search(body):
+        topic_hits = len(re.findall(r'(?i)\b(chapter|lesson|module|flashcard|quiz|exercise)\b', body))
+        if metrics["sentence_count"] <= 2 or topic_hits >= 6:
+            return True
+    if metrics["nav_hits"] >= 8 and metrics["sentence_count"] <= 2:
+        return True
+    return False
+
+
+def _looks_like_product_page(url: str, text: str) -> bool:
+    source = (url or "").lower()
+    body = text or ""
+    if "/products/" in source or re.search(r'(?i)\b@type\b.*\bproduct\b', body):
+        return True
+    if _PRODUCT_PRICE_CAPTURE_RE.search(body) and re.search(r'(?i)\b(add to cart|sku|availability|brand|product|variant)\b', body):
+        return True
+    return False
+
+
+def _extract_product_summary(text: str, url: str, title_hint: str = "") -> dict:
+    body = _strip_storefront_boilerplate(text or "")
+    title = ""
+    used_structured_fields = []
+    body_fallback_used = False
+    title_match = re.search(r'(?i)\bname:\s*([^\n\.]{4,180})', body)
+    if title_match:
+        title = title_match.group(1).strip(" -:")
+        used_structured_fields.append("name")
+    if not title:
+        title = (title_hint or "").strip()
+        if title:
+            used_structured_fields.append("title_hint")
+    if not title:
+        slug = (url or "").rstrip("/").split("/")[-1]
+        title = re.sub(r'[-_]+', ' ', slug).strip().title()
+    price_label = ""
+    price_num = None
+    pm = _PRODUCT_PRICE_LINE_RE.search(body) or _PRODUCT_PRICE_CAPTURE_RE.search(body)
+    if pm:
+        if pm.re is _PRODUCT_PRICE_LINE_RE:
+            currency = (pm.group(1) or "").strip() or "Rs."
+            digits = pm.group(2)
+        else:
+            whole = pm.group(0)
+            digits = pm.group(1)
+            currency = whole.replace(digits, "").strip() or "Rs."
+        price_label = f"{currency}{digits}"
+        used_structured_fields.append("price")
+        try:
+            price_num = float(digits.replace(",", ""))
+        except Exception:
+            price_num = None
+    avail = ""
+    am = _PRODUCT_AVAIL_RE.search(body)
+    if am:
+        avail = am.group(1).strip()
+        used_structured_fields.append("availability")
+    desc = ""
+    dm = re.search(r'(?i)\bdescription:\s*([^\n]{20,600})', body)
+    if dm:
+        desc = dm.group(1).strip()
+        used_structured_fields.append("description")
+    if not desc:
+        body_fallback_used = True
+        sentences = re.split(r'(?<=[.!?])\s+', body)
+        useful = []
+        for sent in sentences:
+            s = sent.strip()
+            if len(s) < 25:
+                continue
+            if re.search(r'(?i)\b(add to cart|wishlist|recently viewed|you may also like|customers also bought|checkout|subtotal)\b', s):
+                continue
+            useful.append(s)
+            if len(" ".join(useful)) >= 420:
+                break
+        desc = " ".join(useful[:3]).strip()
+    contaminated = bool(_CONTAMINATION_HINTS_RE.search(body))
+    return {
+        "title": title.strip(),
+        "price_label": price_label.strip(),
+        "price_num": price_num,
+        "availability": avail,
+        "description": desc[:900],
+        "contaminated": contaminated,
+        "used_structured_fields": list(dict.fromkeys(used_structured_fields)),
+        "body_fallback_used": body_fallback_used,
+    }
+
+
+def _classify_page_type(url: str, cleaned: str, product_like: bool, structural: bool) -> str:
+    source = (url or "").lower()
+    if product_like:
+        return "product"
+    if structural:
+        return "structural"
+    if _POLICY_URL_RE.search(source) or _POLICY_TEXT_RE.search(cleaned):
+        return "policy"
+    if len(_GENERIC_SECTION_SPLIT_RE.split(cleaned)) >= 3:
+        return "faq"
+    metrics = _trusted_content_metrics(cleaned)
+    if _CATEGORY_URL_RE.search(source) or (metrics["category_hits"] >= 2 and metrics["sentence_count"] <= 2):
+        return "category"
+    if _ARTICLE_URL_RE.search(source) or (
+        metrics["prose_chars"] > 300 and metrics["sentence_count"] >= 2 and metrics["nav_hits"] <= max(2, metrics["sentence_count"])
+    ):
+        return "article"
+    return "unknown"
+
+
+def _quality_score(
+    cleaned: str,
+    *,
+    page_type: str,
+    used_structured_fields: list[str] | None = None,
+    body_fallback_used: bool = False,
+    structural: bool = False,
+    contaminated: bool = False,
+    had_boilerplate: bool = False,
+) -> float:
+    score = 0.0
+    used_structured_fields = used_structured_fields or []
+    metrics = _trusted_content_metrics(cleaned)
+    if used_structured_fields:
+        score += 0.4
+    if any(f in used_structured_fields for f in ("price", "availability", "description")):
+        score += 0.2
+    if metrics["prose_chars"] > 200:
+        score += 0.2
+    if not had_boilerplate:
+        score += 0.2
+    if body_fallback_used:
+        score -= 0.1
+    if structural or contaminated:
+        score = min(score, 0.2)
+    if page_type == "unknown":
+        score = min(score, 0.49)
+    return round(max(0.0, min(1.0, score)), 2)
+
+
+def _page_classifier_confidence(
+    cleaned: str,
+    *,
+    page_type: str,
+    product_like: bool = False,
+    structural: bool = False,
+    used_structured_fields: list[str] | None = None,
+    body_fallback_used: bool = False,
+) -> float:
+    used_structured_fields = used_structured_fields or []
+    metrics = _trusted_content_metrics(cleaned)
+    if page_type == "product":
+        conf = 0.55
+        if product_like:
+            conf += 0.15
+        conf += min(0.2, 0.05 * len(used_structured_fields))
+        if body_fallback_used:
+            conf -= 0.1
+        return round(max(0.2, min(0.98, conf)), 2)
+    if page_type == "structural":
+        conf = 0.6 if structural else 0.45
+        if metrics["nav_hits"] >= 8:
+            conf += 0.15
+        return round(max(0.2, min(0.98, conf)), 2)
+    if page_type == "faq":
+        conf = 0.7 if len(_GENERIC_SECTION_SPLIT_RE.split(cleaned)) >= 3 else 0.5
+        return round(max(0.2, min(0.98, conf)), 2)
+    if page_type == "policy":
+        conf = 0.75 if metrics["policy_hits"] else 0.55
+        return round(max(0.2, min(0.98, conf)), 2)
+    if page_type == "category":
+        conf = 0.65 if metrics["category_hits"] else 0.5
+        return round(max(0.2, min(0.98, conf)), 2)
+    if page_type == "article":
+        conf = 0.55
+        if metrics["prose_chars"] > 300:
+            conf += 0.15
+        if metrics["sentence_count"] >= 3:
+            conf += 0.1
+        return round(max(0.2, min(0.98, conf)), 2)
+    return 0.35
+
+
+def _prepare_crawl_page(text: str, url: str, title_hint: str = "") -> tuple[str, dict]:
+    raw = _clean_text(text or "")
+    product_like = _looks_like_product_page(url, raw)
+    cleaned = _strip_storefront_boilerplate(raw) if product_like else _dedupe_repeated_lines(raw)
+    cleaned = _clean_text(cleaned)
+    had_boilerplate = cleaned != raw and bool(_BOILERPLATE_SIGNAL_RE.search(raw))
+    structural = _looks_structural_page(url, cleaned)
+    page_type = _classify_page_type(url, cleaned, product_like, structural)
+    meta = {
+        "structural": structural,
+        "page_type": page_type,
+        "contaminated": False,
+        "used_structured_fields": [],
+        "body_fallback_used": False,
+        "had_boilerplate": had_boilerplate,
+        "extraction_mode": "body_text",
+    }
+    if product_like:
+        product = _extract_product_summary(cleaned, url, title_hint=title_hint)
+        meta["product"] = product
+        meta["contaminated"] = bool(product.get("contaminated"))
+        meta["used_structured_fields"] = list(product.get("used_structured_fields") or [])
+        meta["body_fallback_used"] = bool(product.get("body_fallback_used"))
+        meta["extraction_mode"] = "structured_product" if meta["used_structured_fields"] else "body_text"
+    meta["quality_score"] = _quality_score(
+        cleaned,
+        page_type=meta["page_type"],
+        used_structured_fields=meta.get("used_structured_fields") or [],
+        body_fallback_used=bool(meta.get("body_fallback_used")),
+        structural=bool(meta.get("structural")),
+        contaminated=bool(meta.get("contaminated")),
+        had_boilerplate=bool(meta.get("had_boilerplate")),
+    )
+    meta["page_classifier_confidence"] = _page_classifier_confidence(
+        cleaned,
+        page_type=meta["page_type"],
+        product_like=product_like,
+        structural=bool(meta.get("structural")),
+        used_structured_fields=meta.get("used_structured_fields") or [],
+        body_fallback_used=bool(meta.get("body_fallback_used")),
+    )
+    quarantine_reason = ""
+    retrieve_eligible = True
+    if meta["page_type"] in {"structural", "category"}:
+        retrieve_eligible = False
+        quarantine_reason = meta["page_type"]
+    elif meta.get("contaminated"):
+        retrieve_eligible = False
+        quarantine_reason = "contaminated"
+    elif meta["page_type"] == "product" and meta.get("body_fallback_used") and len(meta.get("used_structured_fields") or []) < 2:
+        retrieve_eligible = False
+        meta["quality_score"] = min(float(meta.get("quality_score") or 0.0), 0.35)
+        quarantine_reason = "weak_product_fallback"
+    elif float(meta.get("quality_score") or 0.0) < 0.5:
+        retrieve_eligible = False
+        quarantine_reason = "low_quality"
+    meta["retrieve_eligible"] = retrieve_eligible
+    meta["quarantine_reason"] = quarantine_reason
+    return cleaned.strip(), meta
+
+
+def _merge_variant_docs(docs: list) -> list:
+    if not docs:
+        return docs
+    grouped = {}
+    for doc in docs:
+        meta = getattr(doc, "metadata", None) or {}
+        title = _canonical_product_title(meta.get("product_title") or "")
+        if not title:
+            grouped[id(doc)] = [doc]
+            continue
+        price_key = str(meta.get("price") or "").strip()
+        key = (title.lower(), price_key)
+        grouped.setdefault(key, []).append(doc)
+    merged = []
+    for group in grouped.values():
+        if len(group) == 1:
+            merged.extend(group)
+            continue
+        base = group[0]
+        variants = []
+        for doc in group:
+            text = getattr(doc, "page_content", "") or ""
+            mm = re.findall(r'(?i)\b(?:color|colour|size|variant|pack(?: of)?|piece(?:s)?)\b[^\n,;]*', text)
+            variants.extend(v.strip() for v in mm if v.strip())
+        uniq_variants = list(dict.fromkeys(variants))
+        if uniq_variants:
+            base.page_content = f"{base.page_content}\nVariants: {'; '.join(uniq_variants[:8])}".strip()
+            base.metadata["variant_count"] = len(uniq_variants)
+        base.metadata["dedup_applied"] = len(group) > 1
+        merged.append(base)
+    return merged
+
+
+def _retrieval_visible_doc(doc) -> bool:
+    meta = (getattr(doc, "metadata", None) or {})
+    if meta.get("structural") or meta.get("contaminated"):
+        return False
+    if meta.get("content_type") == "category":
+        return False
+    if meta.get("retrieve_eligible") is False:
+        return False
+    try:
+        if meta.get("quality_score") is not None and float(meta.get("quality_score") or 0.0) < 0.5:
+            return False
+    except Exception:
+        pass
+    source = str(meta.get("source") or "")
+    if "#site-navigation" in source:
+        return False
+    return True
+
 _ROLE_TERMS = {"ceo", "cto", "coo", "cfo", "cpo", "vp", "founder", "author", "director",
                "president", "chairman", "head", "lead", "chief"}
 
@@ -752,12 +1155,12 @@ async def _smart_search_expand(q: str, history: list = None) -> tuple:
         return "", []
 
 # ── Product spec extraction regexes (used by smart chunker) ──────────────────
-_PROD_PRICE_RE  = re.compile(r'\$(\d[\d,]*\.?\d*)')
+_PROD_PRICE_RE  = re.compile(r'(?i)(?:\$|rs\.?\s*|pkr\s*)(\d[\d,]*\.?\d*)')
 _PROD_SPEC_RE   = re.compile(r'\b(?:processor|cpu|ram|memory|storage|ssd|hdd|gpu|graphics|display|battery|os|android|windows|linux|screen)\b', re.I)
-_PROD_SPLIT_RE  = re.compile(r'\$(\d[\d,]*\.?\d*)\s+([A-Z][A-Za-z0-9 \(\)\-\.]+?(?:,[^\$]{10,400}?))(?=\s*\$|\s*\Z)', re.S)
+_PROD_SPLIT_RE  = re.compile(r'(?i)(?:\$|rs\.?\s*|pkr\s*)(\d[\d,]*\.?\d*)\s+([A-Z][A-Za-z0-9 \(\)\-\.]+?(?:,[^\$]{10,400}?))(?=\s*(?:\$|rs\.?\s*|pkr\s*)|\s*\Z)', re.S)
 _FAQ_SPLIT_RE   = re.compile(r'(?m)^(?=(?:Q:|Question:|How |What |Why |When |Where |Who |Can |Do |Is |Are |Does |Should ))', re.I)
 
-def _smart_chunk_page(text: str, url: str, chunk_size: int = 400, chunk_step: int = 320) -> list:
+def _smart_chunk_page(text: str, url: str, chunk_size: int = 400, chunk_step: int = 320, page_meta: dict | None = None) -> list:
     from langchain_core.documents import Document
     """
     Smart page chunker. Three modes, tried in order:
@@ -768,6 +1171,52 @@ def _smart_chunk_page(text: str, url: str, chunk_size: int = 400, chunk_step: in
     """
     clean = _clean_text(text)
     docs  = []
+    page_meta = page_meta or {}
+    _base_meta = {"source": url}
+    if page_meta.get("structural"):
+        _base_meta["structural"] = True
+    if page_meta.get("contaminated"):
+        _base_meta["contaminated"] = True
+    if page_meta.get("page_type"):
+        _base_meta["content_type"] = page_meta["page_type"]
+    if "quality_score" in page_meta:
+        _base_meta["quality_score"] = page_meta.get("quality_score")
+    if "page_classifier_confidence" in page_meta:
+        _base_meta["page_classifier_confidence"] = page_meta.get("page_classifier_confidence")
+    if page_meta.get("used_structured_fields"):
+        _base_meta["used_structured_fields"] = list(page_meta.get("used_structured_fields") or [])
+    if "body_fallback_used" in page_meta:
+        _base_meta["body_fallback_used"] = bool(page_meta.get("body_fallback_used"))
+    if "retrieve_eligible" in page_meta:
+        _base_meta["retrieve_eligible"] = bool(page_meta.get("retrieve_eligible"))
+    if page_meta.get("quarantine_reason"):
+        _base_meta["quarantine_reason"] = page_meta.get("quarantine_reason")
+    if page_meta.get("extraction_mode"):
+        _base_meta["extraction_mode"] = page_meta.get("extraction_mode")
+    _base_meta["dedup_applied"] = False
+
+    product_meta = page_meta.get("product") or {}
+    if page_meta.get("page_type") == "product" and product_meta.get("title") and (product_meta.get("price_label") or product_meta.get("description")):
+        lines = [f"Product: {product_meta['title']}"]
+        if product_meta.get("price_label"):
+            lines.append(f"Price: {product_meta['price_label']}")
+        if product_meta.get("availability"):
+            lines.append(f"Availability: {product_meta['availability']}")
+        if product_meta.get("description"):
+            lines.append(f"Description: {product_meta['description']}")
+            lines.append(f"Full specs: {product_meta['title']}, {product_meta['description']}")
+        _prod_text = "\n".join(lines).strip()
+        _prod_meta = dict(_base_meta)
+        _prod_meta["product_title"] = product_meta["title"]
+        if product_meta.get("price_num") is not None:
+            _prod_meta["price"] = product_meta["price_num"]
+        if product_meta.get("availability"):
+            _prod_meta["availability"] = product_meta["availability"]
+        _prod_meta["used_structured_fields"] = list(product_meta.get("used_structured_fields") or _base_meta.get("used_structured_fields") or [])
+        _prod_meta["body_fallback_used"] = bool(product_meta.get("body_fallback_used"))
+        _prod_meta.update(_extract_product_metadata(_prod_text))
+        docs.append(Document(page_content=_prod_text, metadata=_prod_meta))
+        return _merge_variant_docs(docs)
 
     # ── Mode 1: product page ──────────────────────────────────────────────────
     if len(_PROD_PRICE_RE.findall(clean)) >= 1 and _PROD_SPEC_RE.search(clean):
@@ -817,11 +1266,12 @@ def _smart_chunk_page(text: str, url: str, chunk_size: int = 400, chunk_step: in
                 if specs:
                     lines.append(f"Full specs: {name}, {specs}")
                 _prod_text = "\n".join(lines)
-                _prod_meta = {"source": url, "price": price_num}
+                _prod_meta = dict(_base_meta)
+                _prod_meta.update({"price": price_num, "product_title": name})
                 _prod_meta.update(_extract_product_metadata(_prod_text))
                 docs.append(Document(page_content=_prod_text, metadata=_prod_meta))
             if docs:
-                return docs
+                return _merge_variant_docs(docs)
 
     # ── Mode 2: FAQ / section page ────────────────────────────────────────────
     sections = _FAQ_SPLIT_RE.split(clean)
@@ -829,7 +1279,7 @@ def _smart_chunk_page(text: str, url: str, chunk_size: int = 400, chunk_step: in
         for sec in sections:
             sec = sec.strip()
             if len(sec) > 40:
-                docs.append(Document(page_content=sec[:2000], metadata={"source": url}))
+                docs.append(Document(page_content=sec[:2000], metadata=dict(_base_meta)))
         if docs:
             return docs
 
@@ -838,7 +1288,7 @@ def _smart_chunk_page(text: str, url: str, chunk_size: int = 400, chunk_step: in
     for j in range(0, max(1, len(words)), chunk_step):
         chunk = " ".join(words[j:j + chunk_size])
         if len(chunk) > 20:
-            docs.append(Document(page_content=chunk, metadata={"source": url}))
+            docs.append(Document(page_content=chunk, metadata=dict(_base_meta)))
         if j + chunk_size >= len(words):
             break
     return docs
@@ -968,7 +1418,7 @@ async def async_intent_aware_expansion(q: str) -> list:
 def _extract_product_metadata(text: str) -> dict:
     """Parse product-catalog chunk text into structured ChromaDB metadata fields."""
     meta = {}
-    pm = re.search(r'Price:\s*\$?([\d,]+\.?\d*)', text)
+    pm = re.search(r'Price:\s*(?:\$|rs\.?\s*|pkr\s*)?([\d,]+\.?\d*)', text, re.I)
     if pm:
         try: meta['price'] = float(pm.group(1).replace(',', ''))
         except: pass
@@ -1267,6 +1717,8 @@ async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansio
     _combined_before_cap: list = []
     for _grp in (policy_results, _bm25_raw, rescue_results, _vector_raw):
         for _r in _grp:
+            if not _retrieval_visible_doc(_r):
+                continue
             _k = _r.page_content[:100]
             if _k in _comb_seen:
                 continue
@@ -2300,7 +2752,8 @@ async def _auto_crawl_db(db_name: str, url: str, max_pages: int = 0) -> int:
                         await asyncio.to_thread(lambda u=page_url: db.delete(where={"source": u}))
                     except Exception as _del_e:
                         logger.debug(f"[AUTO-CRAWL] Could not delete old chunks for {page_url}: {_del_e}")
-                    _pending_docs.extend(_smart_chunk_page(text, page_url))
+                    text, page_meta = _prepare_crawl_page(text, page_url)
+                    _pending_docs.extend(_smart_chunk_page(text, page_url, page_meta=page_meta))
                     added += 1
                     # Batch write every 100 docs — prevents unbounded RAM + avoids single huge write at end
                     if len(_pending_docs) >= 100:
@@ -4434,6 +4887,7 @@ async def _eval_retrieve_docs(q: str, tenant_db, k: int = 8) -> tuple[int, list[
     """LLM-free retrieval for evals (embeddings only). Returns (doc_count, docs[], sources[])."""
     try:
         docs = await asyncio.to_thread(tenant_db.similarity_search, q, k)
+        docs = [d for d in (docs or []) if _retrieval_visible_doc(d)]
         sources: list[str] = []
         doc_rows: list[dict] = []
         for d in docs or []:
@@ -7401,10 +7855,11 @@ async def crawl_site(data: dict, request: Request):
                         if "#site-navigation" in p["url"]:
                             full_text = _clean_text(p["text"])[:8000]  # ~2000 tokens, within embedding limit
                             if len(full_text) > 20:
-                                chunks.append(Document(page_content=full_text, metadata={"source": p["url"]}))
+                                chunks.append(Document(page_content=full_text, metadata={"source": p["url"], "structural": True, "content_type": "site_navigation"}))
                             continue
+                        _page_meta = p.get("page_meta") or {}
                         chunks.extend(
-                            _smart_chunk_page(p["text"], p["url"], chunk_size, chunk_step)
+                            _smart_chunk_page(p["text"], p["url"], chunk_size, chunk_step, page_meta=_page_meta)
                         )
                     if not chunks:
                         return
@@ -7462,9 +7917,10 @@ async def crawl_site(data: dict, request: Request):
                         clean = re.sub(r'<[^>]+>', ' ', clean)
                         clean = re.sub(r'\s+', ' ', clean).strip()
                         combined = f"{title_text}. {ld_text} {clean}".strip()
+                        combined, page_meta = _prepare_crawl_page(combined, page_url, title_hint=title_text)
                         combined = re.sub(r'\s+', ' ', _clean_text(combined))
                         if len(combined) > 300:
-                            return combined
+                            return {"text": combined, "title": title_text, "page_meta": page_meta}
                         return None
                     except Exception:
                         return None
@@ -7548,14 +8004,16 @@ async def crawl_site(data: dict, request: Request):
 
                         text = ""
                         title = ""
+                        page_meta = {}
                         # Fast path: try httpx first (Shopify/WordPress server-render fine without browser).
                         # Falls through to Playwright only if httpx returns < 300 chars.
                         await asyncio.sleep(random.uniform(0.3, 0.8))  # Polite delay — avoids CDN rate-limit
                         try:
-                            _fast_text = await _requests_extract(cur_url)
-                            if _fast_text and len(_fast_text) >= 300:
-                                text = _fast_text
-                                title = cur_url.rstrip("/").split("/")[-1].replace("-", " ").title()
+                            _fast = await _requests_extract(cur_url)
+                            if _fast and len((_fast.get("text") or "")) >= 300:
+                                text = _fast.get("text") or ""
+                                title = _fast.get("title") or cur_url.rstrip("/").split("/")[-1].replace("-", " ").title()
+                                page_meta = _fast.get("page_meta") or {}
                         except Exception:
                             pass
                         if len(text) < 300:
@@ -7709,6 +8167,7 @@ async def crawl_site(data: dict, request: Request):
                                         text = _parsed.get("body", "")
                                     except Exception:
                                         pass  # text stays as raw string fallback
+                                    text, page_meta = _prepare_crawl_page(text or "", cur_url, title_hint=title)
                                     text = re.sub(r'\s+', ' ', _clean_text(text or "")).strip()
                                     if len(text) < 200:
                                         text = f"{title}. {meta_desc}. {text}".strip()
@@ -7716,6 +8175,8 @@ async def crawl_site(data: dict, request: Request):
                                     ocr_text = await _ocr_page_images(pg)
                                     if ocr_text:
                                         text = f"{text} {ocr_text}".strip()
+                                    text, page_meta = _prepare_crawl_page(text or "", cur_url, title_hint=title)
+                                    text = re.sub(r'\s+', ' ', _clean_text(text or "")).strip()
                                     # Store sidebar navigation ONCE as a standalone "Site Structure" doc
                                     if sidebar_raw and len(sidebar_raw) > 200:
                                         import hashlib as _hlib
@@ -7724,7 +8185,7 @@ async def crawl_site(data: dict, request: Request):
                                             seen_sidebar_hashes.add(_sb_key)
                                             _sb_text = re.sub(r'\s+', ' ', sidebar_raw).strip()
                                             async with flush_lock:
-                                                pending_pages.append({"url": f"{cur_url}#site-navigation", "text": f"SITE NAVIGATION AND STRUCTURE:\n{_sb_text}"})
+                                                pending_pages.append({"url": f"{cur_url}#site-navigation", "text": f"SITE NAVIGATION AND STRUCTURE:\n{_sb_text}", "page_meta": {"structural": True, "page_type": "site_navigation"}})
                                     break
                                 except Exception as e:
                                     if attempt < 4:
@@ -7749,7 +8210,7 @@ async def crawl_site(data: dict, request: Request):
                                 seen_content_hashes.add(content_key)
                                 batch_to_flush = None
                                 async with flush_lock:
-                                    pending_pages.append({"url": cur_url, "text": text})
+                                    pending_pages.append({"url": cur_url, "text": text, "page_meta": page_meta})
                                     page_index.append((cur_url, title))
                                     await log_queue.put(f"[{completed}/{len(to_crawl)}] ✅ {cur_url[:70]} ({len(text)} chars)")
                                     if len(pending_pages) >= 5:

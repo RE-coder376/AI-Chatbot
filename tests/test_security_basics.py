@@ -77,6 +77,139 @@ def test_product_query_rerank_score_prefers_exact_product_slug(app_module):
     assert exact_score > neighbor_score
 
 
+def test_prepare_crawl_page_strips_storefront_boilerplate_and_detects_product(app_module):
+    raw = (
+        "Piano Wipe Easy Whiteboard Marker Pack Of 12. "
+        "Price: Rs.1,200. Availability: In stock. Description: Smooth whiteboard markers for classrooms. "
+        "You may also like Fancy Pen Set. Recently viewed Random Notebook. Your cart Subtotal Checkout."
+    )
+
+    cleaned, meta = app_module._prepare_crawl_page(
+        raw,
+        "https://www.thestationerycompany.pk/products/piano-wipe-easy-whiteboard-marker-pack-of-12",
+        title_hint="Piano Wipe Easy Whiteboard Marker Pack Of 12",
+    )
+
+    assert "You may also like" not in cleaned
+    assert "Recently viewed" not in cleaned
+    assert meta["page_type"] == "product"
+    assert meta["product"]["price_label"].lower().startswith("rs.")
+    assert meta["quality_score"] >= 0.6
+    assert "price" in meta["used_structured_fields"]
+    assert meta["retrieve_eligible"] is True
+    assert meta["extraction_mode"] == "structured_product"
+
+
+def test_smart_chunk_page_uses_structured_product_summary_for_rs_pages(app_module):
+    text = (
+        "Name: Daler Rowney Turpentine Oil. Price: Rs.2,045. "
+        "Availability: In stock. Description: Artist-grade turpentine oil for paint thinning."
+    )
+    clean, meta = app_module._prepare_crawl_page(
+        text,
+        "https://www.thestationerycompany.pk/products/daler-rowney-turpentine-oil",
+        title_hint="Daler Rowney Turpentine Oil",
+    )
+
+    docs = app_module._smart_chunk_page(
+        clean,
+        "https://www.thestationerycompany.pk/products/daler-rowney-turpentine-oil",
+        page_meta=meta,
+    )
+
+    assert len(docs) == 1
+    assert "Product: Daler Rowney Turpentine Oil" in docs[0].page_content
+    assert "Price: Rs.2,045" in docs[0].page_content
+    assert docs[0].metadata["price"] == 2045.0
+
+
+def test_retrieval_visible_doc_hides_structural_and_contaminated_chunks(app_module):
+    structural = SimpleNamespace(
+        metadata={"source": "https://example.com/profile", "structural": True},
+        page_content="Profile progress dashboard",
+    )
+    contaminated = SimpleNamespace(
+        metadata={"source": "https://example.com/products/x", "contaminated": True},
+        page_content="premium fashion designer wear",
+    )
+    normal = SimpleNamespace(
+        metadata={"source": "https://example.com/products/y"},
+        page_content="Real product content",
+    )
+
+    assert app_module._retrieval_visible_doc(structural) is False
+    assert app_module._retrieval_visible_doc(contaminated) is False
+    assert app_module._retrieval_visible_doc(normal) is True
+
+
+def test_prepare_crawl_page_unknown_fallback_stays_low_confidence(app_module):
+    cleaned, meta = app_module._prepare_crawl_page(
+        "Widget Widget hello compare share click here",
+        "https://example.com/misc/widget",
+        title_hint="Widget",
+    )
+
+    assert cleaned
+    assert meta["page_type"] == "unknown"
+    assert meta["quality_score"] < 0.5
+    assert meta["retrieve_eligible"] is False
+    assert meta["quarantine_reason"] == "low_quality"
+
+
+def test_merge_variant_docs_dedups_same_title_and_price(app_module):
+    doc_a = SimpleNamespace(
+        metadata={
+            "source": "https://example.com/products/a",
+            "product_title": "Piano Marker",
+            "price": 1200.0,
+        },
+        page_content="Product: Piano Marker\nPrice: Rs.1,200\nVariant: Blue",
+    )
+    doc_b = SimpleNamespace(
+        metadata={
+            "source": "https://example.com/products/b",
+            "product_title": "Piano Marker",
+            "price": 1200.0,
+        },
+        page_content="Product: Piano Marker\nPrice: Rs.1,200\nVariant: Red",
+    )
+
+    merged = app_module._merge_variant_docs([doc_a, doc_b])
+
+    assert len(merged) == 1
+    assert merged[0].metadata["variant_count"] == 2
+    assert "Variants:" in merged[0].page_content
+    assert merged[0].metadata["dedup_applied"] is True
+
+
+def test_prepare_crawl_page_category_is_structural_lite(app_module):
+    cleaned, meta = app_module._prepare_crawl_page(
+        "Category: Markers Sort by Featured Showing 1 to 24 Product type marker collections filters.",
+        "https://example.com/collections/markers",
+        title_hint="Markers",
+    )
+
+    assert cleaned
+    assert meta["page_type"] == "category"
+    assert meta["retrieve_eligible"] is False
+    assert meta["quarantine_reason"] == "category"
+
+
+def test_prepare_crawl_page_weak_product_fallback_gets_quarantined(app_module):
+    cleaned, meta = app_module._prepare_crawl_page(
+        "Piano Marker Pack of 12. Smooth marker for school use.",
+        "https://example.com/products/piano-marker-pack-of-12",
+        title_hint="Piano Marker Pack of 12",
+    )
+
+    assert cleaned
+    assert meta["page_type"] == "product"
+    assert meta["body_fallback_used"] is True
+    assert meta["retrieve_eligible"] is False
+    assert meta["quarantine_reason"] == "weak_product_fallback"
+    assert meta["quality_score"] < 0.5
+
+
 def test_json_safe_converts_non_serializable_values(app_module):
     payload = {
         "items": {"a", "b"},
