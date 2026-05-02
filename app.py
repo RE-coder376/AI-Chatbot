@@ -7845,7 +7845,7 @@ async def crawl_site(data: dict, request: Request):
                 seen_sidebar_hashes: set = set()  # store each unique sidebar nav ONCE as standalone doc
                 page_index: list = []  # [(url, title)] — for auto site-index doc
 
-                async def _flush_pages(batch):
+                async def _flush_pages(batch, worker_label="crawl"):
                     nonlocal chroma_db, total_chunks
                     chunks = []
                     for p in batch:
@@ -7863,8 +7863,15 @@ async def crawl_site(data: dict, request: Request):
                         )
                     if not chunks:
                         return
+                    await log_queue.put(f"[{worker_label}] [chroma-flush] writing batch of {len(chunks)} chunks from {len(batch)} pages")
                     async with chroma_write_lock:
-                        await _chroma_run(chroma_db.add_documents, chunks)
+                        try:
+                            await _chroma_run(chroma_db.add_documents, chunks)
+                        except Exception as _flush_e:
+                            logger.warning(f"[CRAWL] [{worker_label}] [chroma-flush-error] {type(_flush_e).__name__}: {_flush_e}")
+                            await log_queue.put(f"[{worker_label}] [chroma-flush-error] {type(_flush_e).__name__}: {_flush_e}")
+                            raise
+                    await log_queue.put(f"[{worker_label}] [chroma-flush-done] wrote {len(chunks)} chunks")
                     total_chunks += len(chunks)
 
                 PARALLEL = 4  # Conservative: avoids Shopify/CDN rate-limiting (was 20 → blocked after ~200 pages)
@@ -7947,12 +7954,16 @@ async def crawl_site(data: dict, request: Request):
                         logger.warning(f"[PDF] {pdf_url}: {_e}")
                         return None
 
-                async def _ocr_page_images(pg):
+                async def _ocr_page_images(pg, worker_label, page_url):
                     """Extract text from images on a Playwright page using OCR."""
                     try:
                         import pytesseract
                         from PIL import Image
                         import io as _io
+                        _ocr_loop = asyncio.get_running_loop()
+                        _ocr_started = time.perf_counter()
+                        _ocr_total_budget = 15.0
+                        _ocr_per_image = 5.0
                         img_urls = await pg.evaluate(r"""() =>
                             Array.from(document.querySelectorAll('img'))
                                 .filter(i => i.naturalWidth > 150 && i.naturalHeight > 150)
@@ -7961,27 +7972,41 @@ async def crawl_site(data: dict, request: Request):
                                 .slice(0, 8)
                         """)
                         texts = []
-                        for img_url in img_urls:
+                        for img_idx, img_url in enumerate(img_urls, start=1):
+                            if (time.perf_counter() - _ocr_started) >= _ocr_total_budget:
+                                logger.warning(f"[CRAWL] [{worker_label}] [ocr-budget-timeout] {page_url[:120]} exceeded {_ocr_total_budget:.1f}s total OCR budget")
+                                await log_queue.put(f"[{worker_label}] [ocr-budget-timeout] exceeded {_ocr_total_budget:.1f}s on {page_url[:70]}")
+                                break
                             try:
+                                await log_queue.put(f"[{worker_label}] [ocr] image {img_idx}/{len(img_urls)} {img_url[:70]}")
                                 r = await asyncio.to_thread(
                                     _req.get, img_url, timeout=8, headers={"User-Agent": ua}
                                 )
                                 if r.status_code == 200:
                                     img = Image.open(_io.BytesIO(r.content))
-                                    ocr_text = await asyncio.to_thread(
-                                        pytesseract.image_to_string, img
+                                    remaining_budget = max(0.5, _ocr_total_budget - (time.perf_counter() - _ocr_started))
+                                    ocr_text = await asyncio.wait_for(
+                                        _ocr_loop.run_in_executor(None, pytesseract.image_to_string, img),
+                                        timeout=min(_ocr_per_image, remaining_budget)
                                     )
                                     if len(ocr_text.strip()) > 20:
                                         texts.append(ocr_text.strip())
-                            except Exception:
-                                pass
+                            except asyncio.TimeoutError:
+                                logger.warning(f"[CRAWL] [{worker_label}] [ocr-timeout] image {img_idx}/{len(img_urls)} exceeded {_ocr_per_image:.1f}s for {page_url[:120]}")
+                                await log_queue.put(f"[{worker_label}] [ocr-timeout] skipped image {img_idx}/{len(img_urls)} after >{_ocr_per_image:.1f}s")
+                            except Exception as _ocr_e:
+                                logger.warning(f"[CRAWL] [{worker_label}] [ocr-error] {type(_ocr_e).__name__}: {_ocr_e} on {page_url[:120]}")
+                                await log_queue.put(f"[{worker_label}] [ocr-error] {type(_ocr_e).__name__}: {_ocr_e}")
                         return " ".join(texts)
-                    except Exception:
+                    except Exception as _page_ocr_e:
+                        logger.warning(f"[CRAWL] [{worker_label}] [ocr-page-error] {type(_page_ocr_e).__name__}: {_page_ocr_e} on {page_url[:120]}")
+                        await log_queue.put(f"[{worker_label}] [ocr-page-error] {type(_page_ocr_e).__name__}: {_page_ocr_e}")
                         return ""
 
                 async def _crawl_one(cur_url, idx):
                     nonlocal completed
                     async with sem:
+                        worker_label = f"worker-{idx % PARALLEL + 1}"
                         if _crawl_cancel_events.get(db_name, asyncio.Event()).is_set():
                             completed += 1
                             return
@@ -7996,7 +8021,7 @@ async def crawl_site(data: dict, request: Request):
                                     if len(pending_pages) >= 5:
                                         batch = pending_pages[:]
                                         pending_pages.clear()
-                                        await _flush_pages(batch)
+                                        await _flush_pages(batch, worker_label=worker_label)
                                         await log_queue.put(f"💾 Saved batch (5 pages, {total_chunks} total so far)")
                             else:
                                 await log_queue.put(f"[{completed}/{len(to_crawl)}] ⚠️  {cur_url[:70]} (PDF failed)")
@@ -8014,15 +8039,18 @@ async def crawl_site(data: dict, request: Request):
                                 text = _fast.get("text") or ""
                                 title = _fast.get("title") or cur_url.rstrip("/").split("/")[-1].replace("-", " ").title()
                                 page_meta = _fast.get("page_meta") or {}
+                                await log_queue.put(f"[{worker_label}] [http-extract-ok] {cur_url[:70]}")
                         except Exception:
                             pass
                         if len(text) < 300:
                             # --- Playwright: full JS render + lazy scroll ---
+                            await log_queue.put(f"[{worker_label}] [playwright-fallback] starting {cur_url[:70]}")
                             pg = await ctx.new_page()
                             await pg.set_default_timeout(15000)  # Hard cap all Playwright ops — prevents hung evaluate/goto on WAF slow-drip
                             await stealth(pg)
                             for attempt in range(5):
                                 try:
+                                    await log_queue.put(f"[{worker_label}] [playwright-attempt] {attempt + 1}/5 {cur_url[:70]}")
                                     await pg.goto(cur_url, wait_until="domcontentloaded", timeout=15000)
                                     # Quick JSON-LD check — if it gives content, skip expensive networkidle wait
                                     quick_text = await pg.evaluate("""() => {
@@ -8172,9 +8200,13 @@ async def crawl_site(data: dict, request: Request):
                                     if len(text) < 200:
                                         text = f"{title}. {meta_desc}. {text}".strip()
                                     # OCR: append text extracted from page images
-                                    ocr_text = await _ocr_page_images(pg)
+                                    await log_queue.put(f"[{worker_label}] [ocr-start] {cur_url[:70]}")
+                                    ocr_text = await _ocr_page_images(pg, worker_label, cur_url)
                                     if ocr_text:
                                         text = f"{text} {ocr_text}".strip()
+                                        await log_queue.put(f"[{worker_label}] [ocr-done] appended OCR text for {cur_url[:70]}")
+                                    else:
+                                        await log_queue.put(f"[{worker_label}] [ocr-done] no OCR text added for {cur_url[:70]}")
                                     text, page_meta = _prepare_crawl_page(text or "", cur_url, title_hint=title)
                                     text = re.sub(r'\s+', ' ', _clean_text(text or "")).strip()
                                     # Store sidebar navigation ONCE as a standalone "Site Structure" doc
@@ -8189,6 +8221,7 @@ async def crawl_site(data: dict, request: Request):
                                     break
                                 except Exception as e:
                                     if attempt < 4:
+                                        await log_queue.put(f"[{worker_label}] [playwright-retry] {attempt + 1}/5 failed for {cur_url[:70]}: {type(e).__name__}")
                                         await asyncio.sleep(1 * (attempt + 1))
                                     else:
                                         logger.warning(f"Crawl error [{attempt+1}/5] {cur_url}: {e}")
@@ -8218,7 +8251,7 @@ async def crawl_site(data: dict, request: Request):
                                         pending_pages.clear()
                                 # Embed OUTSIDE the lock so other crawl tasks can proceed
                                 if batch_to_flush:
-                                    await _flush_pages(batch_to_flush)
+                                    await _flush_pages(batch_to_flush, worker_label=worker_label)
                                     await log_queue.put(f"💾 Saved batch ({len(batch_to_flush)} pages, {total_chunks} total so far)")
                         else:
                             await log_queue.put(f"[{completed}/{len(to_crawl)}] ⏭️  {cur_url[:70]} ({len(text)} chars - TOO SHORT)")
@@ -8244,7 +8277,7 @@ async def crawl_site(data: dict, request: Request):
                 async with flush_lock:
                     if pending_pages:
                         yield _send(f"💾 Saving final batch ({len(pending_pages)} pages)...")
-                        await _flush_pages(pending_pages)
+                        await _flush_pages(pending_pages, worker_label="final")
 
                 # Auto site-index: one document listing every crawled page + title.
                 # This lets the bot answer "what topics do you cover" / "what pages exist"
