@@ -4037,9 +4037,20 @@ def _filter_eval_tests_for_tenant(tests: list[dict], db_name: str, fingerprint: 
     return kept, dropped
 
 
-def _owner_eval_judge_key(data: dict | None) -> str:
+def _owner_eval_judge_keys(data: dict | None) -> list[str]:
+    """Return judge keys: explicit request key, or all active Groq keys from keys.json."""
     request_key = str((data or {}).get("judge_key") or "").strip()
-    return request_key or os.getenv("JUDGE_API_KEY", "").strip()
+    if request_key:
+        return [request_key]
+    env_key = os.getenv("JUDGE_API_KEY", "").strip()
+    if env_key:
+        return [env_key]
+    # Fall back to all active Groq keys from keys.json
+    try:
+        all_keys = json.loads(KEYS_FILE.read_text(encoding="utf-8")) if KEYS_FILE.exists() else []
+        return [k["api_key"] for k in all_keys if k.get("provider") == "groq" and k.get("status") == "active" and k.get("api_key")]
+    except Exception:
+        return []
 
 def _norm_text(s: str) -> str:
     s = (s or "").lower()
@@ -4584,7 +4595,7 @@ async def admin_run_evals(request: Request):
     retrieval_metric_values: list[float] = []
     answer_metric_values: list[float] = []
     idk_metric_values: list[float] = []
-    judge_key = _owner_eval_judge_key(data)
+    judge_key = _owner_eval_judge_keys(data)
     prompt_snapshot = ""
     if judge_key:
         prompt_snapshot = "\n".join(
