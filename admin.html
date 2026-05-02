@@ -318,6 +318,10 @@
         <div><label>Gmail App Password</label><input type="password" id="ops-smtp-password" placeholder="xxxx xxxx xxxx xxxx" autocomplete="off"/></div>
       </div>
       <p style="font-size:11px;color:var(--text-muted);margin-top:4px;">The contact email above will self-send lead notifications. · <a href="https://myaccount.google.com/apppasswords" target="_blank" style="color:var(--primary)">Get Gmail App Password ↗</a></p>
+
+      <label style="margin-top:24px;">Eval Judge API Keys (owner only)</label>
+      <textarea id="ops-judge-api-key" rows="2" placeholder="gsk_key1,gsk_key2,gsk_key3 — comma-separated Groq keys for LLM judge. Saved to root config, never mixed with bot keys." autocomplete="off" style="font-family:monospace;font-size:11px;resize:vertical;"></textarea>
+      <p style="font-size:11px;color:var(--text-muted);margin-top:4px;">Used only by the eval judge. Rotates on 429. Leave blank to disable LLM judging.</p>
       
       <label style="margin-top:24px;">Weekly Business Hours (UTC)</label>
       <div style="display:flex; align-items:center; gap:10px; margin-bottom:12px;">
@@ -1602,6 +1606,7 @@
       whatsapp_number: document.getElementById('ops-whatsapp').value,
       async_contact_url: document.getElementById('ops-async-url').value,
       smtp_password: document.getElementById('ops-smtp-password').value,
+      judge_api_key: document.getElementById('ops-judge-api-key').value,
       always_open: document.getElementById('ops-always-open').checked,
       hours: {
         weekday: { start: document.getElementById('ops-hours-weekday-start').value, end: document.getElementById('ops-hours-weekday-end').value },
@@ -1626,6 +1631,7 @@
     document.getElementById('ops-whatsapp').value = cfg.whatsapp_number || "";
     document.getElementById('ops-async-url').value = cfg.async_contact_url || "";
     document.getElementById('ops-smtp-password').value = cfg.smtp_password || "";
+    document.getElementById('ops-judge-api-key').value = cfg.judge_api_key || "";
     const always = cfg.always_open || false;
     document.getElementById('ops-always-open').checked = always;
     toggleAlwaysOpen(always);

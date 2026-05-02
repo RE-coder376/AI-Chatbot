@@ -4045,6 +4045,14 @@ def _owner_eval_judge_keys(data: dict | None) -> list[str]:
     env_key = os.getenv("JUDGE_API_KEY", "").strip()
     if env_key:
         return [k.strip() for k in env_key.split(",") if k.strip()]
+    # Fall back to root config.json judge_api_key
+    try:
+        root_cfg = json.loads(CONFIG_FILE.read_text(encoding="utf-8-sig")) if CONFIG_FILE.exists() else {}
+        cfg_key = str(root_cfg.get("judge_api_key") or "").strip()
+        if cfg_key:
+            return [k.strip() for k in cfg_key.split(",") if k.strip()]
+    except Exception:
+        pass
     return []
 
 def _norm_text(s: str) -> str:
@@ -5012,6 +5020,7 @@ def get_branding(request: Request, password: str = ""):
         "hours":           cfg.get("hours", {"weekday": {}, "weekend": {}}),
         "always_open":     cfg.get("always_open", False),
         "db_name":         db_name,
+        "judge_api_key":   (json.loads(CONFIG_FILE.read_text(encoding="utf-8-sig")) if CONFIG_FILE.exists() else {}).get("judge_api_key", "") if _is_owner_password(password) else "",
     }
 
 @app.post("/admin/ops")
@@ -5026,6 +5035,14 @@ async def save_ops(request: Request, data: dict = None):
         return JSONResponse({"detail": "Unauthorized"}, status_code=401)
     updates = {k: data[k] for k in ("contact_email", "whatsapp_number", "async_contact_url", "hours", "always_open", "sender_email", "smtp_password", "smtp_host", "smtp_port", "admin_password") if k in data}
     save_db_config(updates, db_name)
+    # judge_api_key is owner-only — save to root config.json, not per-DB
+    if role == "owner" and "judge_api_key" in data:
+        try:
+            root_cfg = json.loads(CONFIG_FILE.read_text(encoding="utf-8-sig")) if CONFIG_FILE.exists() else {}
+            root_cfg["judge_api_key"] = data["judge_api_key"]
+            CONFIG_FILE.write_text(json.dumps(root_cfg, indent=2, ensure_ascii=False), encoding="utf-8")
+        except Exception as e:
+            logger.warning("Failed to save judge_api_key to root config: %s", e)
     return {"success": True, "message": "Operational settings saved to active DB."}
 
 @app.post("/admin/branding")
