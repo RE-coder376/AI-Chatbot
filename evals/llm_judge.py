@@ -210,6 +210,7 @@ def _request_payload(
         "Only blame retrieval when the trace and deterministic retrieval signals support that conclusion. "
         "If deterministic retrieval diagnosis is retrieval_ok but the final answer class is IDK or REFUSE, do NOT label this retrieval_incomplete unless the trace explicitly shows a retrieval guard or empty-context failure. "
         "In that case prefer prompt_overconstraint or answer_generation_drift depending on whether the answer was suppressed or changed after generation. "
+        "Exception: if the retrieved context preview consists mainly of navigation menus, table-of-contents entries, or repeated header text rather than substantive explanation, classify as retrieval_incomplete even if retrieval_diagnosis is retrieval_ok - false-positive grounding is a known eval system limitation. "
         "When you suspect prompt or guardrail pressure, root_cause_note must quote one exact guard name or exact phrase from the system prompt snapshot if available. "
         "Return a JSON object with exactly these keys:\n"
         "- faithfulness_score: number from 0 to 1\n"
@@ -270,6 +271,7 @@ def _recheck_payload(
         f"First-Pass Verdict:\n{json.dumps(first_pass.to_dict(), ensure_ascii=True)}\n\n"
         "If the first-pass verdict is solid, confirm it. "
         "If the evidence points somewhere else, correct it and explain what evidence forced the correction. "
+        "Exception: if the retrieved context preview consists mainly of navigation menus, table-of-contents entries, or repeated header text rather than substantive explanation, classify as retrieval_incomplete even if retrieval_diagnosis is retrieval_ok - false-positive grounding is a known eval system limitation. "
         "Return a JSON object with exactly these keys:\n"
         "- faithfulness_score\n"
         "- answer_relevance_score\n"
@@ -514,6 +516,7 @@ def judge_answer(
     )
     last_error = "judge_unavailable"
     for key in keys:
+        time.sleep(0.5)
         status_code, body, request_error = _post_json(key, payload)
         if request_error:
             last_error = request_error
@@ -521,6 +524,8 @@ def judge_answer(
         if status_code != 200:
             if _should_rotate(status_code, body):
                 last_error = f"judge_retryable_http_{status_code}"
+                if status_code in {429, 529}:
+                    time.sleep(2)
                 continue
             last_error = f"judge_http_{status_code}"
             continue

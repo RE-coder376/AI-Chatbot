@@ -714,11 +714,21 @@ def _make_chunk_question(topic: str, chunk_text: str) -> str:
         return ""
     if re.search(r"\b(what you are learning|exercise \d+|prompt \d+|producer vs consumer)\b", text):
         return ""
+    # Product-catalog chunk detection (stationery, retail, etc.)
+    is_product_chunk = bool(re.search(r"rs\.?\s*[\d,]+|\bsku\b|\bsku:", text, re.I))
+    if is_product_chunk:
+        if re.search(r"rs\.?\s*[\d,]+", text, re.I):
+            question = f"What is the price of {topic}?"
+        elif re.search(r"\b(color|colour|size|variant|available in)\b", text):
+            question = f"What variants does {topic} come in?"
+        else:
+            question = f"What are the features of {topic}?"
+        return question if _looks_like_good_question(question) else ""
     if re.search(r"\b(prerequisite|prerequisites|requirement|requirements)\b", ref_lower):
         question = f"What are the prerequisites for {topic}?"
     elif re.search(r"\b(price|pricing|cost|fee|fees)\b", ref_lower):
         question = f"What is the pricing for {topic}?"
-    elif re.search(r"\b(duration|timeline|week|weeks|month|months|hours|complete|finish)\b", ref_lower):
+    elif re.search(r"\b(duration|timeline|week|weeks|month|months|hours)\b", ref_lower):
         question = f"How long does {topic} take to complete?"
     elif re.search(r"\b(step 1|step 2|follow these steps|to create|to build|to add|to configure|to set up)\b", text):
         if re.search(r"\bchapter\s+\d+\b", low_topic, re.I):
