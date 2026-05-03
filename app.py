@@ -3858,8 +3858,9 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
     elif (_has_groq or _prov == 'groq') and len(context) > _GROQ_MAX_CONTEXT_CHARS:
         context = context[:_GROQ_MAX_CONTEXT_CHARS]
 
+    is_product_db = _check_is_product_db(_local_db, db_name)
     sys_msg = get_system_prompt(cfg, context, doc_count, is_urdu=is_urdu, user_lang=user_lang,
-                                is_product_db=_check_is_product_db(_local_db, db_name))
+                                is_product_db=is_product_db)
     if page_url:
         sys_msg = f"[Page context: user is on '{page_title or page_url}' — {page_url}]\n\n" + sys_msg
     # Card instruction: LLM can emit [CARD]title|description|url[/CARD] for specific course/product results
