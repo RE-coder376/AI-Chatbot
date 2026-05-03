@@ -4010,19 +4010,14 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
                              ' '.join(_re.findall(r'Rs\.?\s*[\d,]+(?:\.\d+)?\s*PKR', context, _re.I))))
             _ans_nums  = set(_re.findall(r'[\d]+(?:[,\d]*(?:\.\d+)?)?',
                              ' '.join(_re.findall(r'Rs\.?\s*[\d,]+(?:\.\d+)?\s*(?:PKR)?', cleaned, _re.I))))
-            # Condition 1: answer contains a price not in context at all (hallucination)
+            # Only fire when answer contains a price not present anywhere in context (hallucination)
             _halluc = bool(_ans_nums and not _ans_nums.issubset(_ctx_nums))
-            # Condition 2: context has a sale price but answer only mentions regular price (wrong pick)
-            _sale_nums = set(_re.findall(r'[\d]+(?:[,\d]*(?:\.\d+)?)?',
-                             ' '.join(_re.findall(r'Sale price\s*Rs\.?\s*[\d,]+(?:\.\d+)?\s*PKR', context, _re.I))))
-            _wrong_pick = bool(_sale_nums and _ans_nums and not _ans_nums.intersection(_sale_nums))
-            if _halluc or _wrong_pick:
+            if _halluc:
                 _det = _deterministic_price_answer(q, context)
                 if _det:
-                    _reason = "price_hallucination" if _halluc else "regular_price_instead_of_sale"
-                    logger.warning(f"[PriceValidator] {_reason} — overriding with deterministic answer")
-                    _trace_event(workflow_trace, "validator_rewrite", reason=_reason)
-                    _trace_decision(workflow_debug, "price_validator_rewrite", _reason)
+                    logger.warning(f"[PriceValidator] price_hallucination — overriding with deterministic answer")
+                    _trace_event(workflow_trace, "validator_rewrite", reason="price_hallucination")
+                    _trace_decision(workflow_debug, "price_validator_rewrite", "price_hallucination")
                     cleaned = _det
         if visitor_id: _run_in_bg(save_visitor_turn, visitor_id, "assistant", cleaned, db_name)
         yield f"data: {json.dumps({'type': 'chunk', 'content': cleaned})}\n\n"
