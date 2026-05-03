@@ -7526,7 +7526,7 @@ async def get_crawl_log(request: Request):
     password = request.query_params.get("password", "")
     cfg = get_config(db_name) if db_name else get_config()
     admin_auth(password, cfg)
-    log_path = DATABASES_DIR / db_name / "crawl.log"
+    log_path = Path(f"/tmp/crawl_{db_name}.log")
     if not log_path.exists():
         return PlainTextResponse("No crawl log found for this DB.", status_code=404)
     return PlainTextResponse(log_path.read_text(encoding="utf-8", errors="replace"))
@@ -8008,10 +8008,9 @@ async def crawl_site(data: dict, request: Request):
                 PARALLEL = 4  # Conservative: avoids Shopify/CDN rate-limiting (was 20 → blocked after ~200 pages)
                 sem = asyncio.Semaphore(PARALLEL)
                 log_queue = asyncio.Queue()
-                # Write every crawl log line to disk so it survives UI scroll and freezes
-                _crawl_log_path = db_dir / "crawl.log"
+                # Write every crawl log line to /tmp — always writable on HF/Linux
+                _crawl_log_path = Path(f"/tmp/crawl_{db_name}.log")
                 try:
-                    _crawl_log_path.parent.mkdir(parents=True, exist_ok=True)
                     _crawl_log_fh = open(_crawl_log_path, "w", encoding="utf-8", buffering=1)
                 except Exception:
                     _crawl_log_fh = None
