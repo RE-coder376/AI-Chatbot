@@ -33,8 +33,8 @@
                               }
               },
     "always_open":  true,
-    "topics":  "AI agent development, AgentFactory courses, Panaversity programs, AI education, company info, team \u0026 leadership, pricing, enrollment, curriculum",
-    "business_description":  "AgentFactory by Panaversity is a platform for learning to build AI agents and autonomous AI systems. It offers courses, books, and programs taught by Zia Khan (CEO \u0026 founder of Panaversity) and co-authors including Wania Kazmi (AI educator and co-author of the AgentFactory course materials). Panaversity\u0027s mission is to democratize AI-native education.",
+    "topics":  "AI agent development, AgentFactory courses, Panaversity programs, AI education, company info, team & leadership, pricing, enrollment, curriculum, course projects, hands-on tutorials",
+    "business_description":  "AgentFactory by Panaversity is a platform for learning to build AI agents and autonomous AI systems. It offers courses, books, and programs taught by Zia Khan (CEO & founder of Panaversity) and co-authors including Wania Kazmi (AI educator and co-author of the AgentFactory course materials). Panaversity's mission is to democratize AI-native education. The curriculum covers hands-on projects including building AI agents for TaskManager, Legal Ops (intake & monitoring), Business Strategy, Cross-Border Contracts, e-signatures, and more. Questions about these project topics, course modules, and tutorials are fully in scope.",
     "primary_color":  "#64f2a1",
     "welcome_message":  "Hi! I am Agni, your AgentFactory assistant. How can I help you today?",
     "auto_crawl_enabled":  false,

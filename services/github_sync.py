@@ -126,10 +126,29 @@ def _github_sync_download(load_db_callback=None):
                             try:
                                 import json as _json
                                 existing = _json.loads(dest.read_text(encoding="utf-8"))
-                                # Repo config is authoritative. If it has identity fields set,
-                                # never let an older zip overwrite them (zip may have stale defaults).
+                                # Identity fields: committed repo version always wins.
+                                # Operational fields: zip version wins (user saved them via admin panel).
                                 if existing.get("business_name") or existing.get("topics"):
-                                    logger.info(f"[GH-SYNC] Skipping config.json for {db_name} — keeping committed repo version")
+                                    try:
+                                        import zipfile as _zf2
+                                        with zf.open(member) as _zf2src:
+                                            zip_cfg = _json.loads(_zf2src.read().decode("utf-8"))
+                                        _OPERATIONAL_KEYS = {
+                                            "auto_crawl_enabled", "crawl_interval_minutes",
+                                            "crawl_url", "last_crawl_time", "last_crawl_chunks",
+                                            "admin_password", "smtp_host", "smtp_port",
+                                            "sender_email", "always_open", "hours",
+                                            "api_sources", "allowed_origins", "widget_key",
+                                            "judge_api_key",
+                                        }
+                                        merged = dict(existing)
+                                        for k in _OPERATIONAL_KEYS:
+                                            if k in zip_cfg:
+                                                merged[k] = zip_cfg[k]
+                                        dest.write_text(_json.dumps(merged, ensure_ascii=False, indent=4), encoding="utf-8")
+                                        logger.info(f"[GH-SYNC] Merged operational fields from zip into committed config for {db_name}")
+                                    except Exception as _me:
+                                        logger.warning(f"[GH-SYNC] Merge failed for {db_name} config: {_me} — keeping committed")
                                     continue
                             except Exception:
                                 pass  # fall through to normal extraction
