@@ -42,7 +42,7 @@ os.environ["PYTHONWARNINGS"] = "ignore"
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request, HTTPException, Form, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse, FileResponse, JSONResponse, Response
+from fastapi.responses import StreamingResponse, FileResponse, JSONResponse, Response, PlainTextResponse
 from langchain_groq import ChatGroq
 from langchain_openai import ChatOpenAI as _BaseChatOpenAI
 from langchain_core.messages import HumanMessage, SystemMessage, AIMessage
@@ -7520,6 +7520,17 @@ async def get_crawl_status(request: Request):
                          "running": state.get("running", False),
                          "error": state.get("error", False), "total": len(logs)})
 
+@app.get("/admin/crawl-log")
+async def get_crawl_log(request: Request):
+    db_name  = request.query_params.get("db", "").strip()
+    password = request.query_params.get("password", "")
+    cfg = get_config(db_name) if db_name else get_config()
+    admin_auth(password, cfg)
+    log_path = DATABASES_DIR / db_name / "crawl.log"
+    if not log_path.exists():
+        return PlainTextResponse("No crawl log found for this DB.", status_code=404)
+    return PlainTextResponse(log_path.read_text(encoding="utf-8", errors="replace"))
+
 @app.post("/admin/crawl")
 async def crawl_site(data: dict, request: Request):
     db_name_auth = _extract_admin_db(request, data.get("db_name", "").strip())
@@ -7997,6 +8008,13 @@ async def crawl_site(data: dict, request: Request):
                 PARALLEL = 4  # Conservative: avoids Shopify/CDN rate-limiting (was 20 → blocked after ~200 pages)
                 sem = asyncio.Semaphore(PARALLEL)
                 log_queue = asyncio.Queue()
+                # Write every crawl log line to disk so it survives UI scroll and freezes
+                _crawl_log_path = db_dir / "crawl.log"
+                try:
+                    _crawl_log_path.parent.mkdir(parents=True, exist_ok=True)
+                    _crawl_log_fh = open(_crawl_log_path, "w", encoding="utf-8", buffering=1)
+                except Exception:
+                    _crawl_log_fh = None
 
                 async def _requests_extract(page_url):
                     """Fast path: extract content via HTTP request (no Playwright).
@@ -8578,6 +8596,11 @@ async def crawl_site(data: dict, request: Request):
                 while done_count < len(tasks):
                     try:
                         msg = await asyncio.wait_for(log_queue.get(), timeout=1.0)
+                        if _crawl_log_fh:
+                            try:
+                                _crawl_log_fh.write(f"{msg}\n")
+                            except Exception:
+                                pass
                         yield _send(msg)
                     except asyncio.TimeoutError:
                         done_count = sum(1 for t in tasks if t.done())
