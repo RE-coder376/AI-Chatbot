@@ -176,6 +176,58 @@ def _write_crawl_status(db_name: str, status: str):
     except Exception as e:
         logger.warning(f"[CRAWL-STATUS] Could not write status for {db_name}: {e}")
 
+
+def _write_crawl_sidecar_fields(db_name: str, **fields):
+    """Merge arbitrary crawl metadata into the DB's _crawl_times.json sidecar."""
+    try:
+        sidecar = DATABASES_DIR / db_name / "_crawl_times.json"
+        data = json.loads(sidecar.read_text(encoding="utf-8")) if sidecar.exists() else {}
+        data.update(fields)
+        sidecar.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    except Exception as e:
+        logger.warning(f"[CRAWL-STATUS] Could not update crawl sidecar for {db_name}: {e}")
+
+
+def _mark_crawl_failure(db_name: str, error_message: str):
+    """Persist auto-crawl failure metadata with a bounded cooldown to avoid log spam."""
+    try:
+        sidecar = DATABASES_DIR / db_name / "_crawl_times.json"
+        data = json.loads(sidecar.read_text(encoding="utf-8")) if sidecar.exists() else {}
+        fail_count = int(data.get("last_crawl_fail_count", 0) or 0) + 1
+        now_dt = datetime.now(timezone.utc).astimezone(timezone(timedelta(hours=5)))
+        cooldown_m = min(360, max(15, 15 * (2 ** min(fail_count - 1, 4))))
+        retry_dt = now_dt + timedelta(minutes=cooldown_m)
+        data.update({
+            "last_crawl_status": "failed",
+            "last_crawl_error": str(error_message)[:300],
+            "last_crawl_fail_count": fail_count,
+            "last_crawl_failed_at": now_dt.isoformat(),
+            "last_crawl_retry_after": retry_dt.isoformat(),
+        })
+        sidecar.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        logger.warning(
+            f"[CRAWL-STATUS] '{db_name}' marked failed (attempt {fail_count}); "
+            f"cooldown until {retry_dt.isoformat()}"
+        )
+    except Exception as e:
+        logger.warning(f"[CRAWL-STATUS] Could not mark crawl failure for {db_name}: {e}")
+
+
+def _clear_crawl_failure(db_name: str):
+    """Clear failure backoff fields after a successful crawl."""
+    try:
+        sidecar = DATABASES_DIR / db_name / "_crawl_times.json"
+        data = json.loads(sidecar.read_text(encoding="utf-8")) if sidecar.exists() else {}
+        changed = False
+        for key in ("last_crawl_error", "last_crawl_fail_count", "last_crawl_failed_at", "last_crawl_retry_after"):
+            if key in data:
+                data.pop(key, None)
+                changed = True
+        if changed:
+            sidecar.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    except Exception as e:
+        logger.warning(f"[CRAWL-STATUS] Could not clear crawl failure for {db_name}: {e}")
+
 # ──────────────────────────────────────────────────────────────────────────────
 
 _intro_q_cache: dict = {}       # keyed by db_name → list[str]
@@ -2642,7 +2694,7 @@ async def _auto_crawl_db(db_name: str, url: str, max_pages: int = 0) -> int:
                 logger.warning(f"[AUTO-CRAWL] BFS fallback failed for {db_name}: {_bfs_e}")
         if not crawl_urls:
             logger.info(f"[AUTO-CRAWL] '{db_name}': no URLs found — skipping")
-            return 0
+            raise RuntimeError(f"No URLs found for auto-crawl from {url}")
         # Step 2: fetch and re-index all pages — Playwright for JS rendering, one browser for all
         _browser = None
         _pw_ctx = None
@@ -2863,6 +2915,13 @@ async def _auto_scheduler():
                             _sc = json.loads(_sidecar.read_text(encoding="utf-8")) if _sidecar.exists() else {}
                         except Exception:
                             _sc = {}
+                        retry_after_str = _sc.get("last_crawl_retry_after", "")
+                        if retry_after_str:
+                            try:
+                                if now < datetime.fromisoformat(retry_after_str):
+                                    continue
+                            except Exception as e:
+                                logger.debug(f"[SCHEDULER] Crawl retry parse ({db_dir.name}): {e}")
                         last_str = _sc.get("last_crawl_time") or db_cfg.get("last_crawl_time", "")
                         due = True
                         if last_str:
@@ -2883,6 +2942,14 @@ async def _auto_scheduler():
                                         _ct["last_crawl_time"] = _done_iso
                                         _ct["last_crawl_chunks"] = chunks
                                         _ct["last_crawl_completed"] = _done_iso
+                                        _ct["last_crawl_status"] = "success"
+                                        for _key in (
+                                            "last_crawl_error",
+                                            "last_crawl_fail_count",
+                                            "last_crawl_failed_at",
+                                            "last_crawl_retry_after",
+                                        ):
+                                            _ct.pop(_key, None)
                                         _sc.write_text(json.dumps(_ct, indent=2), encoding="utf-8")
                                         _cp = _dir / "config.json"
                                         _cd = json.loads(_cp.read_text(encoding="utf-8")) if _cp.exists() else {}
@@ -2895,9 +2962,11 @@ async def _auto_scheduler():
                                         logger.warning(f"[SCHEDULER] Could not update crawl timestamps: {_ce}")
                                     logger.info(f"[SCHEDULER] '{_name}' crawled: +{chunks} chunks")
                                     _write_crawl_status(_name, "success")
+                                    _clear_crawl_failure(_name)
                                 except Exception as _e:
                                     logger.error(f"[SCHEDULER] Crawl error '{_name}': {_e}")
                                     _write_crawl_status(_name, "failed")
+                                    _mark_crawl_failure(_name, str(_e))
                                 finally:
                                     _queued_crawls.discard(_name)
                             asyncio.create_task(_run_crawl())
