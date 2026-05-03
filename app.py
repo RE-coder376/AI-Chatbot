@@ -194,7 +194,7 @@ def _mark_crawl_failure(db_name: str, error_message: str):
         sidecar = DATABASES_DIR / db_name / "_crawl_times.json"
         data = json.loads(sidecar.read_text(encoding="utf-8")) if sidecar.exists() else {}
         fail_count = int(data.get("last_crawl_fail_count", 0) or 0) + 1
-        now_dt = datetime.now(timezone.utc).astimezone(timezone(timedelta(hours=5)))
+        now_dt = _now_pk()
         cooldown_m = min(360, max(15, 15 * (2 ** min(fail_count - 1, 4))))
         retry_dt = now_dt + timedelta(minutes=cooldown_m)
         data.update({
@@ -213,6 +213,22 @@ def _mark_crawl_failure(db_name: str, error_message: str):
         logger.warning(f"[CRAWL-STATUS] Could not mark crawl failure for {db_name}: {e}")
 
 
+def _now_pk() -> datetime:
+    return datetime.now(timezone.utc).astimezone(timezone(timedelta(hours=5)))
+
+
+def _parse_crawl_dt(value: str) -> datetime | None:
+    if not value:
+        return None
+    try:
+        dt = datetime.fromisoformat(value)
+    except Exception:
+        return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone(timedelta(hours=5)))
+    return dt.astimezone(timezone(timedelta(hours=5)))
+
+
 def _clear_crawl_failure(db_name: str):
     """Clear failure backoff fields after a successful crawl."""
     try:
@@ -227,6 +243,18 @@ def _clear_crawl_failure(db_name: str):
             sidecar.write_text(json.dumps(data, indent=2), encoding="utf-8")
     except Exception as e:
         logger.warning(f"[CRAWL-STATUS] Could not clear crawl failure for {db_name}: {e}")
+
+
+def _is_auto_crawl_blocked(now: datetime, sidecar_data: dict | None = None) -> bool:
+    """Return True while a manual crawl is active or the DB is still in failure cooldown."""
+    if _manual_crawl_active:
+        return True
+    retry_after_str = (sidecar_data or {}).get("last_crawl_retry_after", "")
+    if retry_after_str:
+        retry_after = _parse_crawl_dt(retry_after_str)
+        if retry_after is not None:
+            return now < retry_after
+    return False
 
 # ──────────────────────────────────────────────────────────────────────────────
 
@@ -430,6 +458,7 @@ _crawl_cancel_events: dict = {}  # db_name -> asyncio.Event; set by /admin/crawl
 _crawl_start_times: dict = {}  # db_name -> time.time() when crawl started
 _auto_crawl_sem: asyncio.Semaphore | None = None  # initialized in lifespan; 1 auto-crawl at a time
 _queued_crawls: set = set()  # DBs that have been scheduled but not yet started (waiting for sem)
+_manual_crawl_active: str = ""  # db_name of the currently running manual crawl, if any
 
 def check_rate_limit(ip: str, store: dict, limit: int, window: int = 60) -> bool:
     now = time.time()
@@ -2903,7 +2932,7 @@ async def _auto_scheduler():
                         logger.warning(f"[SCHEDULER] Bad config for {db_dir.name}: {e}")
                         continue
                     db_name = db_dir.name
-                    now = datetime.now()
+                    now = _now_pk()
 
                     # ── Auto-crawl check ──────────────────────────────────
                     if db_cfg.get("auto_crawl_enabled") and db_cfg.get("crawl_url"):
@@ -2915,19 +2944,16 @@ async def _auto_scheduler():
                             _sc = json.loads(_sidecar.read_text(encoding="utf-8")) if _sidecar.exists() else {}
                         except Exception:
                             _sc = {}
-                        retry_after_str = _sc.get("last_crawl_retry_after", "")
-                        if retry_after_str:
-                            try:
-                                if now < datetime.fromisoformat(retry_after_str):
-                                    continue
-                            except Exception as e:
-                                logger.debug(f"[SCHEDULER] Crawl retry parse ({db_dir.name}): {e}")
+                        if _manual_crawl_active:
+                            logger.info(f"[SCHEDULER] Postponing auto-crawl for '{db_name}' while manual crawl '{_manual_crawl_active}' is running")
+                            continue
+                        if _is_auto_crawl_blocked(now, _sc):
+                            continue
                         last_str = _sc.get("last_crawl_time") or db_cfg.get("last_crawl_time", "")
                         due = True
-                        if last_str:
-                            try:
-                                due = now >= datetime.fromisoformat(last_str) + timedelta(minutes=interval_m)
-                            except Exception as e: logger.debug(f"[SCHEDULER] Crawl interval parse ({db_dir.name}): {e}")
+                        _last_dt = _parse_crawl_dt(last_str)
+                        if last_str and _last_dt is not None:
+                            due = now >= _last_dt + timedelta(minutes=interval_m)
                         if due and db_name not in _crawling_dbs and db_name not in _queued_crawls:
                             logger.info(f"[SCHEDULER] Queuing auto-crawl for '{db_name}'...")
                             _queued_crawls.add(db_name)
@@ -7511,12 +7537,13 @@ async def crawl_site(data: dict, request: Request):
         return JSONResponse({"detail": "url and db_name required"}, status_code=400)
 
     async def _stream():
-        global local_db, embeddings_model
+        global local_db, embeddings_model, _manual_crawl_active
         import urllib.parse
         import xml.etree.ElementTree as ET
         import requests as _req
         from langchain_core.documents import Document
         from langchain_chroma import Chroma
+        _manual_registered = False
 
         # --- Enhanced Stealth (Free) ---
         user_agents = [
@@ -7590,6 +7617,14 @@ async def crawl_site(data: dict, request: Request):
             return [u.strip() for u in all_locs if _strip_www(u.strip()).startswith(base_domain)]
 
         try:
+            if _manual_crawl_active and _manual_crawl_active != db_name:
+                yield _send(f"⏳ Manual crawl '{_manual_crawl_active}' is already running. Please wait for it to finish.")
+                yield "data: {\"done\": true}\n\n"
+                return
+            _manual_crawl_active = db_name
+            _manual_registered = True
+            _crawling_dbs.add(db_name)
+            _crawl_start_times[db_name] = time.time()
             from playwright.async_api import async_playwright
             from playwright_stealth import Stealth as _Stealth
             async def stealth(pg): await _Stealth().apply_stealth_async(pg)
@@ -7942,9 +7977,14 @@ async def crawl_site(data: dict, request: Request):
                     _flush_msg = f"[{worker_label}] [chroma-flush] writing batch of {len(chunks)} chunks from {len(batch)} pages"
                     logger.info(f"[CRAWL] {_flush_msg}")
                     await log_queue.put(_flush_msg)
+                    await log_queue.put(f"[{worker_label}] [chroma-flush] waiting for write lock ({len(chunks)} chunks)...")
                     async with chroma_write_lock:
+                        await log_queue.put(f"[{worker_label}] [chroma-flush] lock acquired — embedding {len(chunks)} chunks")
                         try:
-                            await _chroma_run(chroma_db.add_documents, chunks)
+                            await asyncio.wait_for(_chroma_run(chroma_db.add_documents, chunks), timeout=300)
+                        except asyncio.TimeoutError:
+                            logger.warning(f"[CRAWL] [{worker_label}] [chroma-flush-timeout] add_documents exceeded 300s — skipping batch")
+                            await log_queue.put(f"[{worker_label}] [chroma-flush-timeout] 300s exceeded — batch skipped, continuing crawl")
                         except Exception as _flush_e:
                             logger.warning(f"[CRAWL] [{worker_label}] [chroma-flush-error] {type(_flush_e).__name__}: {_flush_e}")
                             await log_queue.put(f"[{worker_label}] [chroma-flush-error] {type(_flush_e).__name__}: {_flush_e}")
@@ -8084,6 +8124,174 @@ async def crawl_site(data: dict, request: Request):
                         logger.warning(f"[CRAWL] [{worker_label}] [ocr-page-error] {type(_page_ocr_e).__name__}: {_page_ocr_e} on {page_url[:120]}")
                         await log_queue.put(f"[{worker_label}] [ocr-page-error] {type(_page_ocr_e).__name__}: {_page_ocr_e}")
                         return ""
+
+                async def _playwright_extract_with_budget(cur_url, worker_label):
+                    pg = await ctx.new_page()
+                    await pg.set_default_timeout(15000)  # Cap individual Playwright ops
+                    await stealth(pg)
+                    try:
+                        async def _run_attempts():
+                            for attempt in range(5):
+                                try:
+                                    _pw_attempt_msg = f"[{worker_label}] [playwright-attempt] {attempt + 1}/5 {cur_url[:70]}"
+                                    logger.info(f"[CRAWL] {_pw_attempt_msg}")
+                                    await log_queue.put(_pw_attempt_msg)
+                                    await pg.goto(cur_url, wait_until="domcontentloaded", timeout=15000)
+                                    quick_text = await pg.evaluate("""() => {
+                                        let out = '';
+                                        for (let s of document.querySelectorAll('script[type="application/ld+json"]')) {
+                                            try { out += s.textContent; } catch(e) {}
+                                        }
+                                        return out;
+                                    }""")
+                                    if not quick_text or len(quick_text.strip()) < 100:
+                                        try:
+                                            await pg.wait_for_function(
+                                                "document.body && document.body.innerText.trim().length > 100",
+                                                timeout=2000
+                                            )
+                                        except Exception:
+                                            pass
+                                    try:
+                                        await pg.evaluate("""() => {
+                                            document.querySelectorAll('details').forEach(d => d.setAttribute('open', ''));
+                                            document.querySelectorAll(
+                                                '.accordion-button, .accordion-trigger, .accordion-header, ' +
+                                                '[data-toggle], .faq-question, .collapse-trigger, summary'
+                                            ).forEach(el => { try { el.click(); } catch(e) {} });
+                                            document.querySelectorAll(
+                                                '[role="tab"]:not([aria-selected="true"]), .tab:not(.active)'
+                                            ).forEach(el => { try { el.click(); } catch(e) {} });
+                                            document.querySelectorAll('button, [role="button"]').forEach(el => {
+                                                const t = (el.innerText || '').toLowerCase().trim();
+                                                if (['show more','read more','load more','see more','view more','expand all'].includes(t)) {
+                                                    try { el.click(); } catch(e) {}
+                                                }
+                                            });
+                                        }""")
+                                        await asyncio.sleep(0.5)
+                                    except Exception:
+                                        pass
+                                    try:
+                                        for _ in range(6):
+                                            await pg.evaluate("window.scrollBy(0, window.innerHeight)")
+                                            await asyncio.sleep(0.25)
+                                        await pg.evaluate("window.scrollTo(0, 0)")
+                                    except Exception:
+                                        pass
+                                    title = await pg.title()
+                                    try:
+                                        meta_desc = await pg.eval_on_selector("meta[name='description']", "el => el.content")
+                                    except Exception:
+                                        meta_desc = ""
+                                    text = await pg.evaluate("""() => {
+                                        let jsonLdText = '';
+                                        for (let script of document.querySelectorAll('script[type="application/ld+json"]')) {
+                                            try {
+                                                const data = JSON.parse(script.textContent);
+                                                const extract = (obj) => {
+                                                    if (!obj) return '';
+                                                    let parts = [];
+                                                    if (obj.name) parts.push('Name: ' + obj.name);
+                                                    if (obj.description) parts.push('Description: ' + obj.description);
+                                                    if (obj.offers) {
+                                                        const offers = Array.isArray(obj.offers) ? obj.offers : [obj.offers];
+                                                        for (let o of offers) {
+                                                            if (o.price) parts.push('Price: ' + o.price + ' ' + (o.priceCurrency || ''));
+                                                            if (o.availability) parts.push('Availability: ' + o.availability.replace('http://schema.org/', ''));
+                                                        }
+                                                    }
+                                                    if (obj.brand && obj.brand.name) parts.push('Brand: ' + obj.brand.name);
+                                                    if (obj.sku) parts.push('SKU: ' + obj.sku);
+                                                    if (obj.category) parts.push('Category: ' + obj.category);
+                                                    if (obj['@graph']) return obj['@graph'].map(extract).join(' ');
+                                                    return parts.join('. ');
+                                                };
+                                                jsonLdText += ' ' + extract(data);
+                                            } catch(e) {}
+                                        }
+                                        let sidebarText = '';
+                                        for (let sel of [
+                                            '.theme-doc-sidebar-container', '.sidebar-container',
+                                            'nav[class*="sidebar"]', 'nav[class*="menu"]',
+                                            '.menu__list', '[class*="sidebarNav"]',
+                                            '.gitbook-sidebar', '.toc-sidebar', 'aside nav', 'aside'
+                                        ]) {
+                                            const el = document.querySelector(sel);
+                                            if (el) {
+                                                const t = el.textContent.replace(/\\s+/g, ' ').trim();
+                                                if (t.length > 100) { sidebarText = t; break; }
+                                            }
+                                        }
+                                        let bodyText = '';
+                                        const mainEl = document.querySelector('main') ||
+                                                        document.querySelector('article') ||
+                                                        document.querySelector('.content') ||
+                                                        document.querySelector('#content') ||
+                                                        document.querySelector('.post-content') ||
+                                                        document.querySelector('.entry-content') ||
+                                                        document.querySelector('.page-content');
+                                        if (mainEl && mainEl.innerText.trim().length > 100) {
+                                            bodyText = mainEl.innerText;
+                                        } else if (document.body) {
+                                            const clone = document.body.cloneNode(true);
+                                            [
+                                                'nav', 'header', 'footer', 'aside',
+                                                '[role="navigation"]', '[role="banner"]', '[role="contentinfo"]',
+                                                '.nav', '.navigation', '.sidebar', '.side_categories',
+                                                '.nav-list', '.breadcrumb', '.breadcrumbs',
+                                                '.pagination', '.social-links', '.cookie-notice',
+                                                'script', 'style', 'noscript', 'iframe', 'svg'
+                                            ].forEach(sel => {
+                                                clone.querySelectorAll(sel).forEach(el => el.remove());
+                                            });
+                                            bodyText = clone.innerText || '';
+                                        }
+                                        return JSON.stringify({
+                                            sidebar: sidebarText,
+                                            body: (jsonLdText + '\\n' + bodyText).trim()
+                                        });
+                                    }""")
+                                    sidebar_raw = ""
+                                    try:
+                                        import json as _json
+                                        _parsed = _json.loads(text or "{}")
+                                        sidebar_raw = _parsed.get("sidebar", "")
+                                        text = _parsed.get("body", "")
+                                    except Exception:
+                                        pass
+                                    text, page_meta = _prepare_crawl_page(text or "", cur_url, title_hint=title)
+                                    text = re.sub(r'\s+', ' ', _clean_text(text or "")).strip()
+                                    if len(text) < 200:
+                                        text = f"{title}. {meta_desc}. {text}".strip()
+                                    _ocr_start_msg = f"[{worker_label}] [ocr-start] {cur_url[:70]}"
+                                    logger.info(f"[CRAWL] {_ocr_start_msg}")
+                                    await log_queue.put(_ocr_start_msg)
+                                    ocr_text = await _ocr_page_images(pg, worker_label, cur_url)
+                                    if ocr_text:
+                                        text = f"{text} {ocr_text}".strip()
+                                        _ocr_done_msg = f"[{worker_label}] [ocr-done] appended OCR text for {cur_url[:70]}"
+                                    else:
+                                        _ocr_done_msg = f"[{worker_label}] [ocr-done] no OCR text added for {cur_url[:70]}"
+                                    logger.info(f"[CRAWL] {_ocr_done_msg}")
+                                    await log_queue.put(_ocr_done_msg)
+                                    text, page_meta = _prepare_crawl_page(text or "", cur_url, title_hint=title)
+                                    text = re.sub(r'\s+', ' ', _clean_text(text or "")).strip()
+                                    return text, title, page_meta, sidebar_raw
+                                except Exception as e:
+                                    if attempt < 4:
+                                        _pw_retry_msg = f"[{worker_label}] [playwright-retry] {attempt + 1}/5 failed for {cur_url[:70]}: {type(e).__name__}"
+                                        logger.warning(f"[CRAWL] {_pw_retry_msg}")
+                                        await log_queue.put(_pw_retry_msg)
+                                        await asyncio.sleep(1 * (attempt + 1))
+                                    else:
+                                        raise
+                        return await asyncio.wait_for(_run_attempts(), timeout=45)
+                    finally:
+                        try:
+                            await pg.close()
+                        except Exception:
+                            pass
 
                 async def _crawl_one(cur_url, idx):
                     nonlocal completed
@@ -8352,8 +8560,19 @@ async def crawl_site(data: dict, request: Request):
                         else:
                             await log_queue.put(f"[{completed}/{len(to_crawl)}] ⏭️  {cur_url[:70]} ({len(text)} chars - TOO SHORT)")
 
+                # Per-URL hard deadline: pg.evaluate() ignores set_default_timeout, so a page
+                # with hanging JS freezes a worker indefinitely. 90s covers goto+scroll+OCR+retries.
+                async def _crawl_one_with_timeout(u, i):
+                    try:
+                        await asyncio.wait_for(_crawl_one(u, i), timeout=90)
+                    except asyncio.TimeoutError:
+                        nonlocal completed
+                        completed += 1
+                        logger.warning(f"[CRAWL] [pw-page-timeout] {u[:70]} exceeded 90s — skipping")
+                        await log_queue.put(f"[{completed}/{len(to_crawl)}] ⏱️  {u[:70]} (90s timeout — skipped)")
+
                 # Launch all tasks, stream log messages as they arrive
-                tasks = [asyncio.create_task(_crawl_one(u, i)) for i, u in enumerate(to_crawl)]
+                tasks = [asyncio.create_task(_crawl_one_with_timeout(u, i)) for i, u in enumerate(to_crawl)]
 
                 done_count = 0
                 while done_count < len(tasks):
