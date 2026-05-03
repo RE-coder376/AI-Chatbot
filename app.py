@@ -5018,6 +5018,11 @@ async def _runtime_chunk_seed_items(tenant_db, db_name: str, desired_count: int,
         for idx, row in enumerate(doc_rows):
             preview = str((row or {}).get("preview") or "").strip()
             source = str((row or {}).get("source") or "").strip()
+            # Skip collection/category pages — list many products, never a single priced item
+            if "/collections/" in source.lower():
+                continue
+            if _re.search(r'Collection:.*Filter:', preview[:300], _re.I):
+                continue
             topic = _eval_v1._extract_chunk_topic(preview, source)
             if not topic:
                 continue
