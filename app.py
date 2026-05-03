@@ -5212,6 +5212,7 @@ async def admin_generate_evals(request: Request):
     }
     _save_eval_set(db_name, payload)
     history_count = _merge_into_eval_history(db_name, tests)
+    threading.Thread(target=_github_sync_upload, args=(db_name,), daemon=True).start()
     return {"success": True, "db": db_name, "count": len(tests), "history_count": history_count, "tenant_audit": tenant_audit}
 
 @app.get("/admin/evals/history")
