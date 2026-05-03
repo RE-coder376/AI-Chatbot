@@ -8726,6 +8726,10 @@ async def crawl_site(data: dict, request: Request):
             _write_crawl_status(db_name, "failed")
             yield _send(f"❌ Error: {e}\n{tb[:600]}")
             yield "data: {\"done\": true}\n\n"
+        finally:
+            if _manual_registered:
+                _manual_crawl_active = ""
+                _crawling_dbs.discard(db_name)
 
     # Run crawl as a background task — decoupled from the HTTP connection.
     # The browser tab can close/go to background and the crawl keeps going.
