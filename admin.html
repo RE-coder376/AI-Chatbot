@@ -681,7 +681,10 @@
         <button class="secondary" style="margin:0;" onclick="generateEvalSet('kb')">Generate from KB (Uses keys)</button>
       </div>
 
-      <button style="margin-top:12px;" onclick="runEvalSuite()">Run Eval Suite</button>
+      <div style="display:flex; gap:10px; margin-top:12px; align-items:center;">
+        <button style="margin:0;flex:1;" onclick="runEvalSuite()">Run Eval Suite</button>
+        <button class="secondary" style="margin:0;flex:1;" id="btn-run-history" onclick="runFromHistory()" title="Run all saved questions for this DB">Run from Saved (<span id="history-count">0</span>)</button>
+      </div>
       <div id="eval-status" class="status-msg"></div>
 
       <div id="eval-scores" style="display:none; margin-top:14px;">
@@ -2563,6 +2566,19 @@
     wrap.style.display = 'grid';
   }
 
+  async function loadHistoryCount(db) {
+    if (!db) return;
+    try {
+      const r = await authFetch(`${API}/admin/evals/history?db_name=${encodeURIComponent(db)}&password=${encodeURIComponent(sessionStorage.getItem('adminPass') || '')}`);
+      const d = await r.json().catch(() => ({}));
+      const n = d.count || 0;
+      document.getElementById('history-count').textContent = n;
+      document.getElementById('btn-run-history').disabled = n === 0;
+    } catch(_) {}
+  }
+
+  document.getElementById('eval-db')?.addEventListener('change', e => loadHistoryCount(e.target.value));
+
   async function generateEvalSet(strategy) {
     const db = document.getElementById('eval-db')?.value || localStorage.getItem('adminDb') || '';
     const count = Number(document.getElementById('eval-count')?.value || 12);
@@ -2576,9 +2592,56 @@
       });
       const d = await r.json().catch(() => ({}));
       if (!r.ok) return showStatus('eval', d.detail || 'Generate failed', 'error', true);
-      showStatus('eval', `✅ Generated ${d.count || count} questions for ${db}`, 'success', true);
+      showStatus('eval', `✅ Generated ${d.count || count} questions for ${db} (${d.history_count || '?'} saved total)`, 'success', true);
+      document.getElementById('history-count').textContent = d.history_count || '?';
     } catch (e) {
       showStatus('eval', 'Generate failed: ' + e.message, 'error', true);
+    }
+  }
+
+  async function runFromHistory() {
+    const db = document.getElementById('eval-db')?.value || localStorage.getItem('adminDb') || '';
+    const mode = document.getElementById('eval-mode')?.value || 'retrieve';
+    if (!db) return showStatus('eval', 'Select a DB first.', 'error');
+    const n = document.getElementById('history-count').textContent;
+    showStatus('eval', `Running eval from saved questions (${n} total, mode=${mode})...`, 'loading', true);
+    document.getElementById('eval-results').style.display = 'none';
+    document.getElementById('eval-scores').style.display = 'none';
+    document.getElementById('eval-summary').style.display = 'none';
+    try {
+      const r = await authFetch(`${API}/admin/evals/run`, {
+        method: 'POST',
+        headers: { ...authHeaders(), 'Content-Type': 'application/json' },
+        body: JSON.stringify({ password: sessionStorage.getItem('adminPass') || '', db_name: db, mode, source: 'history' }),
+      });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) return showStatus('eval', d.detail || 'Eval failed', 'error', true);
+      document.getElementById('score-overall').textContent = `${d.scores?.overall ?? '—'}/10`;
+      document.getElementById('score-retrieval').textContent = `${d.scores?.retrieval ?? '—'}/10`;
+      document.getElementById('score-answer').textContent = `${d.scores?.answer ?? '—'}/10`;
+      document.getElementById('score-idk').textContent = `${d.scores?.idk ?? '—'}/10`;
+      document.getElementById('eval-meaning').textContent = _renderEvalMeaning(d.scores, d.mode);
+      document.getElementById('eval-scores').style.display = 'block';
+      _renderEvalSummary(d.summary || {});
+      const body = document.getElementById('eval-body');
+      body.innerHTML = '';
+      window._lastEvalResults = (d.results || []);
+      window._lastEvalResults.forEach((row, idx) => {
+        const tr = document.createElement('tr');
+        tr.innerHTML = `
+          <td style="font-size:11px;font-weight:800;color:var(--text-muted);text-transform:uppercase;">${escapeHtml(row.difficulty || '—')}</td>
+          <td style="font-weight:700;">${escapeHtml(row.q || '')}</td>
+          <td>${_badge(row.checks?.retrieval)}</td>
+          <td>${_badge(row.checks?.answer)}</td>
+          <td>${_badge(row.checks?.idk)}</td>
+          <td style="font-size:11px;color:var(--text-muted);font-weight:700;">${escapeHtml(row.diagnosis || 'pass')}</td>
+          <td style="text-align:right;"><button class="secondary" style="width:auto;margin:0;padding:6px 10px;font-size:11px;" onclick="showEvalOverlay(window._lastEvalResults[${idx}])">View</button></td>`;
+        body.appendChild(tr);
+      });
+      document.getElementById('eval-results').style.display = 'block';
+      showStatus('eval', `✅ Eval complete — ${d.results?.length || 0} questions run from history`, 'success', true);
+    } catch (e) {
+      showStatus('eval', 'Eval failed: ' + e.message, 'error', true);
     }
   }
 

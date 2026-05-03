@@ -588,7 +588,8 @@ PRODUCT CATALOG RULES — MANDATORY for every product response:
 7. FEATURE RULE: Only claim a product has a feature (touchscreen, SSD, Windows, 4G, convertible) if that exact feature word appears in that product's own context block. IPS alone ≠ touchscreen. No assumptions.
 8. COMPARISON RULE: When user asks to compare variants of the same model, list EVERY variant found in context as a separate numbered entry with its full spec breakdown and price. Never merge them or say IDK if variants are present in context.
 9. NO MATCH RULE: If zero products meet ALL criteria after scanning the full context, explicitly say "No products in our catalog match all your criteria" and offer the closest alternatives if any exist.
-10. TRUST RETRIEVAL RULE: The context you receive is already filtered to match the user's query. If products are present, they ARE the matching category — do not reject them for lacking a category label. List or rank what you find."""
+10. TRUST RETRIEVAL RULE: The context you receive is already filtered to match the user's query. If products are present, they ARE the matching category — do not reject them for lacking a category label. List or rank what you find.
+11. PRICE ACCURACY RULE: Quote prices EXACTLY as they appear in the context — never round, approximate, or convert. If both a Sale price and Regular price are present, the Sale price IS the current price. State it as the price; mention Regular price only as the original/crossed-out price."""
 
     # For API-only DBs: inject AFTER the Tier framework so it wins over "NEVER use world knowledge"
     _api_expert_note = ""
@@ -724,6 +725,24 @@ _SOURCE_LEAK_PATTERNS = [
 ]
 
 _URL_PATTERN = _re.compile(r'https?://[^\s)\]"\'<>,]+|www\.[^\s)\]"\'<>,]+', _re.IGNORECASE)
+
+_PRICE_QUERY_RE = _re.compile(r'\b(price|cost|how much|rate|pkr|rs\.?)\b', _re.I)
+_PRICE_VAL_RE   = _re.compile(r'(?:Sale price|Regular price|Price:)\s*Rs\.?\s*([\d,]+(?:\.\d+)?)\s*PKR', _re.I)
+
+def _deterministic_price_answer(q: str, context: str) -> str | None:
+    """Return a direct price answer from context without LLM. Returns None if not applicable."""
+    if not _PRICE_QUERY_RE.search(q):
+        return None
+    prices = _PRICE_VAL_RE.findall(context)
+    if not prices:
+        return None
+    # Prefer sale price (appears after "Sale price"), otherwise first price found
+    sale_matches = _re.findall(r'Sale price\s*Rs\.?\s*([\d,]+(?:\.\d+)?)\s*PKR', context, _re.I)
+    price_str = f"Rs. {sale_matches[0]} PKR" if sale_matches else f"Rs. {prices[0]} PKR"
+    if len(sale_matches) >= 1 and len(prices) >= 1 and prices[0] != sale_matches[0]:
+        price_str = f"Rs. {sale_matches[0]} PKR (regular Rs. {prices[0]} PKR)"
+    return f"The price is {price_str}."
+
 
 def _strip_source_leaks(text: str, kb_context: str = "") -> str:
     for pat in _SOURCE_LEAK_PATTERNS:
@@ -1127,7 +1146,9 @@ def _prepare_crawl_page(text: str, url: str, title_hint: str = "") -> tuple[str,
         retrieve_eligible = False
         meta["quality_score"] = min(float(meta.get("quality_score") or 0.0), 0.35)
         quarantine_reason = "weak_product_fallback"
-    elif float(meta.get("quality_score") or 0.0) < 0.5:
+    elif meta["page_type"] in {"product", "unknown"} and float(meta.get("quality_score") or 0.0) < 0.5:
+        # Article/faq/policy pages have no structured fields so their score
+        # is capped at 0.4 by design — don't quarantine them on score alone.
         retrieve_eligible = False
         quarantine_reason = "low_quality"
     meta["retrieve_eligible"] = retrieve_eligible
@@ -1177,7 +1198,11 @@ def _retrieval_visible_doc(doc) -> bool:
     if meta.get("retrieve_eligible") is False:
         return False
     try:
-        if meta.get("quality_score") is not None and float(meta.get("quality_score") or 0.0) < 0.5:
+        if (
+            meta.get("quality_score") is not None
+            and meta.get("page_type", "unknown") in {"product", "unknown"}
+            and float(meta.get("quality_score") or 0.0) < 0.5
+        ):
             return False
     except Exception:
         pass
@@ -2376,7 +2401,7 @@ def get_fresh_llm():
                 temperature=0,
                 max_retries=0,
                 max_output_tokens=512,
-                timeout=8,
+                timeout=11,
             )
         elif provider == 'cerebras':
             return _CompatChatOpenAI(
@@ -3979,6 +4004,26 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
                 _trace_decision(workflow_debug, "validator_rewrite_triggered", True)
                 cleaned = ("I don't have specific details about that in my knowledge base right now. "
                            "Could you rephrase or ask about a specific product by name?")
+        # ── Price validator — all product DBs, zero LLM cost ────────────────────
+        if is_product_db and _PRICE_QUERY_RE.search(q) and context:
+            _ctx_nums  = set(_re.findall(r'[\d]+(?:[,\d]*(?:\.\d+)?)?',
+                             ' '.join(_re.findall(r'Rs\.?\s*[\d,]+(?:\.\d+)?\s*PKR', context, _re.I))))
+            _ans_nums  = set(_re.findall(r'[\d]+(?:[,\d]*(?:\.\d+)?)?',
+                             ' '.join(_re.findall(r'Rs\.?\s*[\d,]+(?:\.\d+)?\s*(?:PKR)?', cleaned, _re.I))))
+            # Condition 1: answer contains a price not in context at all (hallucination)
+            _halluc = bool(_ans_nums and not _ans_nums.issubset(_ctx_nums))
+            # Condition 2: context has a sale price but answer only mentions regular price (wrong pick)
+            _sale_nums = set(_re.findall(r'[\d]+(?:[,\d]*(?:\.\d+)?)?',
+                             ' '.join(_re.findall(r'Sale price\s*Rs\.?\s*[\d,]+(?:\.\d+)?\s*PKR', context, _re.I))))
+            _wrong_pick = bool(_sale_nums and _ans_nums and not _ans_nums.intersection(_sale_nums))
+            if _halluc or _wrong_pick:
+                _det = _deterministic_price_answer(q, context)
+                if _det:
+                    _reason = "price_hallucination" if _halluc else "regular_price_instead_of_sale"
+                    logger.warning(f"[PriceValidator] {_reason} — overriding with deterministic answer")
+                    _trace_event(workflow_trace, "validator_rewrite", reason=_reason)
+                    _trace_decision(workflow_debug, "price_validator_rewrite", _reason)
+                    cleaned = _det
         if visitor_id: _run_in_bg(save_visitor_turn, visitor_id, "assistant", cleaned, db_name)
         yield f"data: {json.dumps({'type': 'chunk', 'content': cleaned})}\n\n"
         # Suppress sources and log gap if LLM indicated it doesn't have the info.
@@ -4037,8 +4082,14 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
         _trace_event(workflow_trace, "guard_exit", guard="llm_all_attempts_failed")
         _trace_decision(workflow_debug, "exit_guard", "llm_all_attempts_failed")
         _trace_decision(workflow_debug, "llm_success", False)
-        yield f"data: {json.dumps({'type': 'chunk', 'content': 'I am unable to respond right now. Please try again in a moment.'})}\n\n"
-        yield f"data: {json.dumps(_metadata_payload(False, []))}\n\n"
+        _det_answer = _deterministic_price_answer(q, context) if context else None
+        if _det_answer:
+            _trace_decision(workflow_debug, "deterministic_fallback", True)
+            yield f"data: {json.dumps({'type': 'chunk', 'content': _det_answer})}\n\n"
+            yield f"data: {json.dumps(_metadata_payload(False, sources[:3]))}\n\n"
+        else:
+            yield f"data: {json.dumps({'type': 'chunk', 'content': 'I am unable to respond right now. Please try again in a moment.'})}\n\n"
+            yield f"data: {json.dumps(_metadata_payload(False, []))}\n\n"
     yield "data: {\"type\": \"done\"}\n\n"
 
 @app.post("/chat")
@@ -4354,8 +4405,9 @@ async def debug_retrieve(request: Request):
 
 # --- OWNER EVALS (RAG Quality Scoreboard) ---
 
-_EVAL_SET_FILENAME = "eval_set.json"
-_EVAL_RUNS_DIRNAME = "runs"
+_EVAL_SET_FILENAME     = "eval_set.json"
+_EVAL_HISTORY_FILENAME = "eval_history.json"
+_EVAL_RUNS_DIRNAME     = "runs"
 
 def _eval_dir(db_name: str) -> Path:
     db_name = _validate_db_name(db_name)
@@ -4380,6 +4432,34 @@ def _load_eval_set(db_name: str) -> dict:
 def _save_eval_set(db_name: str, data: dict) -> None:
     p = _eval_dir(db_name) / _EVAL_SET_FILENAME
     _atomic_write_json(p, data)
+
+def _load_eval_history(db_name: str) -> list:
+    p = _eval_dir(db_name) / _EVAL_HISTORY_FILENAME
+    if not p.exists():
+        return []
+    try:
+        return json.loads(p.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+
+def _save_eval_history(db_name: str, tests: list) -> None:
+    p = _eval_dir(db_name) / _EVAL_HISTORY_FILENAME
+    _atomic_write_json(p, tests)
+
+def _merge_into_eval_history(db_name: str, new_tests: list) -> int:
+    """Append new questions to history, dedup by question text. Returns total count."""
+    existing = _load_eval_history(db_name)
+    seen = {t.get("q", "").strip().lower() for t in existing if t.get("q")}
+    added = 0
+    for t in new_tests:
+        key = (t.get("q") or t.get("question") or "").strip().lower()
+        if key and key not in seen:
+            existing.append(t)
+            seen.add(key)
+            added += 1
+    if added:
+        _save_eval_history(db_name, existing)
+    return len(existing)
 
 
 def _runtime_eval_probes(db_name: str) -> list[str]:
@@ -5130,7 +5210,17 @@ async def admin_generate_evals(request: Request):
         "generated_at": datetime.utcnow().isoformat() + "Z",
     }
     _save_eval_set(db_name, payload)
-    return {"success": True, "db": db_name, "count": len(tests), "tenant_audit": tenant_audit}
+    history_count = _merge_into_eval_history(db_name, tests)
+    return {"success": True, "db": db_name, "count": len(tests), "history_count": history_count, "tenant_audit": tenant_audit}
+
+@app.get("/admin/evals/history")
+async def admin_eval_history(request: Request):
+    password = _extract_password(request, request.query_params.get("password", ""))
+    require_owner_auth(password)
+    db_name = _validate_db_name((request.query_params.get("db_name") or "").strip() or _get_active_db())
+    tests = _load_eval_history(db_name)
+    return {"db": db_name, "count": len(tests)}
+
 
 @app.post("/admin/evals/run")
 async def admin_run_evals(request: Request):
@@ -5144,14 +5234,18 @@ async def admin_run_evals(request: Request):
         mode = "retrieve"
     count = max(1, min(int(data.get("count", 12) or 12), 20))
 
+    source = (data.get("source") or "active").strip().lower()  # "active" | "history"
     # Allow explicit test injection (used by pytest). Not exposed in admin UI.
     tests = data.get("tests")
     eval_set = {}
     tenant_audit = None
     if not isinstance(tests, list) or not tests:
-        eval_set = _load_eval_set(db_name)
-        tests = eval_set.get("tests") if isinstance(eval_set, dict) else None
-        tenant_audit = eval_set.get("tenant_audit") if isinstance(eval_set, dict) else None
+        if source == "history":
+            tests = _load_eval_history(db_name) or []
+        else:
+            eval_set = _load_eval_set(db_name)
+            tests = eval_set.get("tests") if isinstance(eval_set, dict) else None
+            tenant_audit = eval_set.get("tenant_audit") if isinstance(eval_set, dict) else None
     if isinstance(tests, list) and tests:
         tests, dropped = _filter_eval_tests_for_tenant(tests, db_name, tenant_audit)
         if dropped:
