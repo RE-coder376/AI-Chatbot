@@ -107,6 +107,10 @@ def _github_sync_download(load_db_callback=None):
                         fout.write(chunk)
             db_extract_dir = DATABASES_DIR / db_name
             db_extract_dir.mkdir(exist_ok=True)
+            # Clean up any stale .tmp_sync files before extracting
+            for _stale in db_extract_dir.rglob("*.tmp_sync"):
+                try: _stale.unlink()
+                except Exception: pass
             with zipfile.ZipFile(tmp_zip, "r") as z:
                 for member in z.namelist():
                     rel = member[len(db_name)+1:] if member.startswith(f"{db_name}/") else member

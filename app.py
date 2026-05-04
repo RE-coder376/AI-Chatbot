@@ -4848,8 +4848,14 @@ def _owner_eval_blocker(db_name: str) -> str:
     if not db_dir.exists():
         return f"Tenant DB '{db_name}' is not available yet."
     try:
-        if any(db_dir.rglob("*.tmp_sync")):
+        import time as _t
+        tmp_files = list(db_dir.rglob("*.tmp_sync"))
+        active_tmp = [f for f in tmp_files if (_t.time() - f.stat().st_mtime) < 300]
+        if active_tmp:
             return f"Tenant DB '{db_name}' is still being restored."
+        for f in tmp_files:  # stale — clean up silently
+            try: f.unlink()
+            except Exception: pass
     except Exception:
         pass
     db_cfg_file = db_dir / "config.json"
