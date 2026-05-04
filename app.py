@@ -8467,6 +8467,19 @@ async def crawl_site(data: dict, request: Request):
                                     logger.info(f"[CRAWL] {_pw_attempt_msg}")
                                     await log_queue.put(_pw_attempt_msg)
                                     await pg.goto(cur_url, wait_until="domcontentloaded", timeout=15000)
+                                    # Fast-fail: detect auth redirect (JS redirect to login/sign-in page)
+                                    # Without this, login pages poison the content-hash dedup:
+                                    # page 1 stores hash of login page, pages 2-1000 all hit
+                                    # "duplicate content — skipped" instantly, polluting KB with 0 real content.
+                                    _land_url = pg.url
+                                    if _land_url and any(
+                                        p in _land_url.lower() for p in (
+                                            "/sign-in", "/signin", "/login", "/auth/",
+                                            "?redirect=", "?next=", "/access-denied", "/forbidden"
+                                        )
+                                    ) and _land_url.rstrip("/") != cur_url.rstrip("/"):
+                                        await log_queue.put(f"[{worker_label}] [auth-redirect] {cur_url[:70]} → login")
+                                        break
                                     # Quick JSON-LD check — if it gives content, skip expensive networkidle wait
                                     quick_text = await pg.evaluate("""() => {
                                         let out = '';
