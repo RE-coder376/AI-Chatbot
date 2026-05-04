@@ -8459,11 +8459,11 @@ async def crawl_site(data: dict, request: Request):
                             logger.info(f"[CRAWL] {_pw_fallback_msg}")
                             await log_queue.put(_pw_fallback_msg)
                             pg = await ctx.new_page()
-                            await pg.set_default_timeout(15000)  # Hard cap all Playwright ops — prevents hung evaluate/goto on WAF slow-drip
+                            await pg.set_default_timeout(12000)  # Hard cap all Playwright ops — prevents hung evaluate/goto on WAF slow-drip
                             await stealth(pg)
-                            for attempt in range(5):
+                            for attempt in range(2):
                                 try:
-                                    _pw_attempt_msg = f"[{worker_label}] [playwright-attempt] {attempt + 1}/5 {cur_url[:70]}"
+                                    _pw_attempt_msg = f"[{worker_label}] [playwright-attempt] {attempt + 1}/2 {cur_url[:70]}"
                                     logger.info(f"[CRAWL] {_pw_attempt_msg}")
                                     await log_queue.put(_pw_attempt_msg)
                                     await pg.goto(cur_url, wait_until="domcontentloaded", timeout=15000)
@@ -8654,14 +8654,14 @@ async def crawl_site(data: dict, request: Request):
                                                 pending_pages.append({"url": f"{cur_url}#site-navigation", "text": f"SITE NAVIGATION AND STRUCTURE:\n{_sb_text}", "page_meta": {"structural": True, "page_type": "site_navigation"}})
                                     break
                                 except Exception as e:
-                                    if attempt < 4:
-                                        _pw_retry_msg = f"[{worker_label}] [playwright-retry] {attempt + 1}/5 failed for {cur_url[:70]}: {type(e).__name__}"
+                                    if attempt < 1:
+                                        _pw_retry_msg = f"[{worker_label}] [playwright-retry] {attempt + 1}/2 failed for {cur_url[:70]}: {type(e).__name__}"
                                         logger.warning(f"[CRAWL] {_pw_retry_msg}")
                                         await log_queue.put(_pw_retry_msg)
-                                        await asyncio.sleep(1 * (attempt + 1))
+                                        await asyncio.sleep(2)
                                     else:
-                                        logger.warning(f"Crawl error [{attempt+1}/5] {cur_url}: {e}")
-                                        await log_queue.put(f"[{completed}/{len(to_crawl)}] ❌ Skipped (5 fails): {cur_url[:70]}")
+                                        logger.warning(f"Crawl error [{attempt+1}/2] {cur_url}: {e}")
+                                        await log_queue.put(f"[{completed}/{len(to_crawl)}] ❌ Skipped (2 fails): {cur_url[:70]}")
                             try:
                                 await pg.close()
                             except Exception:
@@ -8693,15 +8693,15 @@ async def crawl_site(data: dict, request: Request):
                             await log_queue.put(f"[{completed}/{len(to_crawl)}] ⏭️  {cur_url[:70]} ({len(text)} chars - TOO SHORT)")
 
                 # Per-URL hard deadline: pg.evaluate() ignores set_default_timeout, so a page
-                # with hanging JS freezes a worker indefinitely. 90s covers goto+scroll+OCR+retries.
+                # with hanging JS freezes a worker indefinitely. 35s covers goto+scroll+2 retries.
                 async def _crawl_one_with_timeout(u, i):
                     try:
-                        await asyncio.wait_for(_crawl_one(u, i), timeout=90)
+                        await asyncio.wait_for(_crawl_one(u, i), timeout=35)
                     except asyncio.TimeoutError:
                         nonlocal completed
                         completed += 1
-                        logger.warning(f"[CRAWL] [pw-page-timeout] {u[:70]} exceeded 90s — skipping")
-                        await log_queue.put(f"[{completed}/{len(to_crawl)}] ⏱️  {u[:70]} (90s timeout — skipped)")
+                        logger.warning(f"[CRAWL] [pw-page-timeout] {u[:70]} exceeded 35s — skipping")
+                        await log_queue.put(f"[{completed}/{len(to_crawl)}] ⏱️  {u[:70]} (35s timeout — skipped)")
 
                 # Launch all tasks, stream log messages as they arrive
                 tasks = [asyncio.create_task(_crawl_one_with_timeout(u, i)) for i, u in enumerate(to_crawl)]
