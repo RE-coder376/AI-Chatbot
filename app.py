@@ -8123,10 +8123,28 @@ async def crawl_site(data: dict, request: Request):
                     try:
                         r = await asyncio.to_thread(
                             _req.get, page_url, timeout=8,
-                            headers={"User-Agent": ua, "Accept-Language": "en-US,en;q=0.9"}
+                            headers={
+                                "User-Agent": ua,
+                                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                                "Accept-Language": "en-US,en;q=0.9",
+                                "Accept-Encoding": "gzip, deflate, br",
+                                "Connection": "keep-alive",
+                                "Upgrade-Insecure-Requests": "1",
+                                "Sec-Fetch-Dest": "document",
+                                "Sec-Fetch-Mode": "navigate",
+                                "Sec-Fetch-Site": "none",
+                            }
                         )
-                        if r.status_code != 200:
+                        if r.status_code not in (200, 301, 302):
                             return None
+                        # Follow redirect manually if needed
+                        if r.status_code in (301, 302) and r.headers.get("Location"):
+                            r = await asyncio.to_thread(
+                                _req.get, r.headers["Location"], timeout=8,
+                                headers={"User-Agent": ua, "Accept-Language": "en-US,en;q=0.9"}
+                            )
+                            if r.status_code != 200:
+                                return None
                         html = r.text
                         # Extract JSON-LD structured data (server-rendered by Shopify/WooCommerce)
                         ld_parts = []
@@ -8165,7 +8183,7 @@ async def crawl_site(data: dict, request: Request):
                         combined = f"{title_text}. {ld_text} {clean}".strip()
                         combined, page_meta = _prepare_crawl_page(combined, page_url, title_hint=title_text)
                         combined = re.sub(r'\s+', ' ', _clean_text(combined))
-                        if len(combined) > 300:
+                        if len(combined) > 100:
                             return {"text": combined, "title": title_text, "page_meta": page_meta}
                         return None
                     except Exception:
@@ -8444,7 +8462,7 @@ async def crawl_site(data: dict, request: Request):
                         await asyncio.sleep(random.uniform(0.3, 0.8))  # Polite delay — avoids CDN rate-limit
                         try:
                             _fast = await _requests_extract(cur_url)
-                            if _fast and len((_fast.get("text") or "")) >= 300:
+                            if _fast and len((_fast.get("text") or "")) >= 100:
                                 text = _fast.get("text") or ""
                                 title = _fast.get("title") or cur_url.rstrip("/").split("/")[-1].replace("-", " ").title()
                                 page_meta = _fast.get("page_meta") or {}
