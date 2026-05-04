@@ -134,8 +134,7 @@ def _github_sync_download(load_db_callback=None):
                                 # Operational fields: zip version wins (user saved them via admin panel).
                                 if existing.get("business_name") or existing.get("topics"):
                                     try:
-                                        import zipfile as _zf2
-                                        with zf.open(member) as _zf2src:
+                                        with z.open(member) as _zf2src:
                                             zip_cfg = _json.loads(_zf2src.read().decode("utf-8"))
                                         _OPERATIONAL_KEYS = {
                                             "auto_crawl_enabled", "crawl_interval_minutes",
@@ -158,7 +157,11 @@ def _github_sync_download(load_db_callback=None):
                                 pass  # fall through to normal extraction
                         tmp_dest = dest.with_name(dest.name + ".tmp_sync")
                         with z.open(member) as src, open(tmp_dest, "wb") as dst:
-                            dst.write(src.read())
+                            while True:
+                                buf = src.read(65536)
+                                if not buf:
+                                    break
+                                dst.write(buf)
                         os.replace(str(tmp_dest), str(dest))
                     # Fix permissions
                     try:
