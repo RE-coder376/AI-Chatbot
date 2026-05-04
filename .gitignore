@@ -9,6 +9,7 @@ active_db.txt
 # Local Databases & Cache
 databases/
 !databases/*/config.json
+!databases/*/evals/eval_history.json
 databases/*/secrets.json
 db/
 schemas/
