@@ -348,11 +348,26 @@ def _github_upload_active_db(db_name: str):
 def _github_sync_upload(db_name: str):
     """Zip DB and upload to GitHub Releases as an asset (supports files >100MB).
     Uses a temp file on disk — NOT BytesIO — to avoid OOM on Render 512MB."""
-    import zipfile, requests as _req
+    import zipfile, requests as _req, shutil as _shutil
     pat = os.environ.get("GITHUB_PAT", "").strip()
     if not pat: return
     db_path = DATABASES_DIR / db_name
     if not db_path.exists(): return
+    # On Linux/HF: live ChromaDB is in /dev/shm — sync it back to disk before zipping
+    # so the uploaded zip always has the current in-memory state (not a stale disk snapshot)
+    _shm_path = Path(f"/dev/shm/chroma_{db_name}")
+    if _shm_path.exists():
+        try:
+            for _itm in _shm_path.iterdir():
+                _d = db_path / _itm.name
+                if _itm.is_dir():
+                    if _d.exists(): _shutil.rmtree(str(_d))
+                    _shutil.copytree(str(_itm), str(_d))
+                else:
+                    _shutil.copy2(str(_itm), str(_d))
+            logger.info(f"[GH-SYNC] Synced /dev/shm → databases/{db_name} before zip")
+        except Exception as _se:
+            logger.warning(f"[GH-SYNC] /dev/shm sync failed (non-fatal): {_se}")
     tmp_zip = Path(f"/tmp/{db_name}_upload.zip")
     try:
         logger.info(f"[GH-SYNC] Zipping {db_name} to temp file...")
