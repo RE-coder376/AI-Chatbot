@@ -2047,7 +2047,10 @@ async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansio
                                 live_docs = [_Doc(page_content=_flatten_to_text(i).strip(),
                                              metadata={"source": search_url, "api_name": src["name"]})
                                              for i in items if len(_flatten_to_text(i).strip()) > 20]
-                                if live_docs and db:
+                                # Only cache API responses in DB for crawl-based DBs.
+                                # API-only DBs (no crawl_url) should not accumulate stale chunks.
+                                _db_has_crawl = bool(db_cfg.get("crawl_url", ""))
+                                if live_docs and db and _db_has_crawl:
                                     loop = asyncio.get_running_loop()
                                     loop.run_in_executor(None, lambda d=live_docs: db.add_documents(d))
                             except Exception as e:
@@ -8888,6 +8891,8 @@ async def crawl_site(data: dict, request: Request):
                 await asyncio.to_thread(_load_db_now)
                 _cnt_after = local_db._collection.count() if local_db else 0
                 logger.info(f"[POST-CRAWL] local_db reloaded from disk: {_cnt_after} chunks")
+                # Re-prime BM25 cache with updated chunks (evicted above at line 8865)
+                asyncio.create_task(_prewarm_bm25())
             yield _send(f"🔄 DB reloaded in memory — no restart needed.")
             yield _send(f"✅ Done! {total_chunks} chunks ingested into '{db_name}'.")
             _write_crawl_status(db_name, "success")
