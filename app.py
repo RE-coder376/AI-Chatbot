@@ -813,10 +813,10 @@ _PRODUCT_AVAIL_RE = re.compile(
     r'(?i)\b(in stock|out of stock|sold out|available|unavailable|pre[- ]?order)\b'
 )
 _STRUCTURAL_URL_RE = re.compile(
-    r'(?i)(?:/|#)(?:login|sign-?in|register|signup|account|profile|progress|dashboard|flashcards?|quiz(?:zes)?|exercise|exercises|leaderboard|help|support|guide|site-navigation|toc)(?:/|$|#)'
+    r'(?i)(?:/|#)(?:login|sign-?in|register|signup|account|profile|progress|dashboard|flashcards?|quiz(?:zes)?|exercise|exercises|leaderboard|help|support|site-navigation|toc)(?:/|$|#)'
 )
 _STRUCTURAL_TEXT_RE = re.compile(
-    r'(?i)\b(sign in|log in|register|my account|your profile|dashboard|leaderboard|flashcards?|quiz(?:zes)?|exercise|progress|continue learning|toggle theme|skip to main content)\b'
+    r'(?i)\b(sign in|log in|register|my account|your profile|dashboard|leaderboard|flashcards?|quiz(?:zes)?|exercise|progress|continue learning|toggle theme)\b'
 )
 _STORE_BOILERPLATE_PATTERNS = [
     re.compile(r'(?is)\byou may also like\b.*?(?=(?:\bproduct\b|\bdescription\b|\breviews?\b|\Z))'),
@@ -912,8 +912,10 @@ def _looks_structural_page(url: str, text: str) -> bool:
     if metrics["prose_chars"] < 120:
         return False
     if _STRUCTURAL_TEXT_RE.search(body):
-        topic_hits = len(re.findall(r'(?i)\b(chapter|lesson|module|flashcard|quiz|exercise)\b', body))
-        if metrics["sentence_count"] <= 2 or topic_hits >= 6:
+        # Count only pure UI-shell indicators — chapter/lesson/module are legitimate educational content words
+        # and appear in overview pages that ARE the content we want to retrieve.
+        topic_hits = len(re.findall(r'(?i)\b(flashcard|quiz(?:zes?)?|exercise)\b', body))
+        if metrics["sentence_count"] <= 2 or topic_hits >= 4:
             return True
     if metrics["nav_hits"] >= 8 and metrics["sentence_count"] <= 2:
         return True
@@ -3078,6 +3080,21 @@ async def _auto_scheduler():
             logger.error(f"[SCHEDULER] Loop error: {e}")
         await asyncio.sleep(60)
 
+async def _prewarm_bm25():
+    """Pre-build BM25 index at startup so first content query is fast."""
+    for _ in range(300):  # wait up to 5 min for DB to be ready
+        if _status == "ready" and local_db is not None:
+            break
+        await asyncio.sleep(1)
+    if _status != "ready" or local_db is None:
+        return
+    try:
+        db_name = _get_active_db()
+        await asyncio.to_thread(_get_bm25_index, local_db, db_name)
+        logger.info(f"✅ BM25 index pre-warmed for '{db_name}'")
+    except Exception as e:
+        logger.warning(f"BM25 pre-warm failed: {e}")
+
 async def _prewarm_intro_questions():
     """Pre-populate intro question cache once DB is ready — universal, no hardcoding."""
     for _ in range(180):  # wait up to 3 min for DB + keys
@@ -3142,6 +3159,7 @@ async def lifespan(app: FastAPI):
     asyncio.create_task(asyncio.to_thread(init_systems))
     asyncio.create_task(asyncio.to_thread(_cleanup_old_data))
     asyncio.create_task(_auto_scheduler())
+    asyncio.create_task(_prewarm_bm25())
     asyncio.create_task(_prewarm_intro_questions())
     yield
     # Graceful shutdown — persist state before exit
@@ -7935,8 +7953,8 @@ async def crawl_site(data: dict, request: Request):
                         from fastembed import TextEmbedding as _TE_crawl
                         _fe_crawl = _TE_crawl("BAAI/bge-small-en-v1.5")
                         class _FEWrap:
-                            def embed_documents(self, texts): return [list(v) for v in _fe_crawl.embed(texts)]
-                            def embed_query(self, text): return list(next(_fe_crawl.embed([text])))
+                            def embed_documents(self, texts): return [v.tolist() for v in _fe_crawl.embed(texts)]
+                            def embed_query(self, text): return next(_fe_crawl.embed([text])).tolist()
                         emb = _FEWrap()
                     except Exception as _emb_e:
                         yield _send(f"❌ Could not load embedding model: {_emb_e}")
@@ -8135,6 +8153,8 @@ async def crawl_site(data: dict, request: Request):
                                 "Sec-Fetch-Site": "none",
                             }
                         )
+                        if r.status_code in (404, 410, 403, 401):
+                            return {"status": r.status_code, "text": ""}  # skip marker — don't try Playwright
                         if r.status_code not in (200, 301, 302):
                             return None
                         # Follow redirect manually if needed
@@ -8432,294 +8452,299 @@ async def crawl_site(data: dict, request: Request):
 
                 async def _crawl_one(cur_url, idx):
                     nonlocal completed
-                    async with sem:
-                        worker_label = f"worker-{idx % PARALLEL + 1}"
-                        if _crawl_cancel_events.get(db_name, asyncio.Event()).is_set():
-                            completed += 1
-                            return
-                        # --- PDF path ---
-                        if cur_url.lower().endswith(".pdf"):
-                            text = await _pdf_extract(cur_url)
-                            completed += 1
-                            if text:
-                                await log_queue.put(f"[{completed}/{len(to_crawl)}] 📄 {cur_url[:70]} ({len(text)} chars PDF)")
-                                async with flush_lock:
-                                    pending_pages.append({"url": cur_url, "text": text})
-                                    if len(pending_pages) >= 5:
-                                        batch = pending_pages[:]
-                                        pending_pages.clear()
-                                        await _flush_pages(batch, worker_label=worker_label)
-                                        await log_queue.put(f"💾 Saved batch (5 pages, {total_chunks} total so far)")
-                            else:
-                                await log_queue.put(f"[{completed}/{len(to_crawl)}] ⚠️  {cur_url[:70]} (PDF failed)")
-                            return
+                    worker_label = f"worker-{idx % PARALLEL + 1}"
+                    if _crawl_cancel_events.get(db_name, asyncio.Event()).is_set():
+                        completed += 1
+                        return
+                    # --- PDF path ---
+                    if cur_url.lower().endswith(".pdf"):
+                        text = await _pdf_extract(cur_url)
+                        completed += 1
+                        if text:
+                            await log_queue.put(f"[{completed}/{len(to_crawl)}] 📄 {cur_url[:70]} ({len(text)} chars PDF)")
+                            async with flush_lock:
+                                pending_pages.append({"url": cur_url, "text": text})
+                                if len(pending_pages) >= 5:
+                                    batch = pending_pages[:]
+                                    pending_pages.clear()
+                                    await _flush_pages(batch, worker_label=worker_label)
+                                    await log_queue.put(f"💾 Saved batch (5 pages, {total_chunks} total so far)")
+                        else:
+                            await log_queue.put(f"[{completed}/{len(to_crawl)}] ⚠️  {cur_url[:70]} (PDF failed)")
+                        return
 
-                        text = ""
-                        title = ""
-                        page_meta = {}
-                        # Fast path: try httpx first (Shopify/WordPress server-render fine without browser).
-                        # Falls through to Playwright only if httpx returns < 300 chars.
-                        await asyncio.sleep(random.uniform(0.3, 0.8))  # Polite delay — avoids CDN rate-limit
-                        try:
-                            _fast = await _requests_extract(cur_url)
-                            if _fast and len((_fast.get("text") or "")) >= 100:
-                                text = _fast.get("text") or ""
-                                title = _fast.get("title") or cur_url.rstrip("/").split("/")[-1].replace("-", " ").title()
-                                page_meta = _fast.get("page_meta") or {}
-                                _http_ok_msg = f"[{worker_label}] [http-extract-ok] {cur_url[:70]}"
-                                logger.info(f"[CRAWL] {_http_ok_msg}")
-                                await log_queue.put(_http_ok_msg)
-                        except Exception:
-                            pass
-                        if len(text) < 300:
-                            # --- Playwright: full JS render + lazy scroll ---
-                            _pw_fallback_msg = f"[{worker_label}] [playwright-fallback] starting {cur_url[:70]}"
-                            logger.info(f"[CRAWL] {_pw_fallback_msg}")
-                            await log_queue.put(_pw_fallback_msg)
-                            pg = await ctx.new_page()
-                            await pg.set_default_timeout(12000)  # Hard cap all Playwright ops — prevents hung evaluate/goto on WAF slow-drip
-                            await stealth(pg)
-                            for attempt in range(2):
-                                try:
-                                    _pw_attempt_msg = f"[{worker_label}] [playwright-attempt] {attempt + 1}/2 {cur_url[:70]}"
-                                    logger.info(f"[CRAWL] {_pw_attempt_msg}")
-                                    await log_queue.put(_pw_attempt_msg)
-                                    await pg.goto(cur_url, wait_until="domcontentloaded", timeout=15000)
-                                    # Fast-fail: detect auth redirect (JS redirect to login/sign-in page)
-                                    # Without this, login pages poison the content-hash dedup:
-                                    # page 1 stores hash of login page, pages 2-1000 all hit
-                                    # "duplicate content — skipped" instantly, polluting KB with 0 real content.
-                                    _land_url = pg.url
-                                    if _land_url and any(
-                                        p in _land_url.lower() for p in (
-                                            "/sign-in", "/signin", "/login", "/auth/",
-                                            "?redirect=", "?next=", "/access-denied", "/forbidden"
+                    text = ""
+                    title = ""
+                    page_meta = {}
+                    # Fast path: try httpx first (Shopify/WordPress server-render fine without browser).
+                    # Falls through to Playwright only if httpx returns < 300 chars.
+                    await asyncio.sleep(random.uniform(0.3, 0.8))  # Polite delay — avoids CDN rate-limit
+                    try:
+                        _fast = await _requests_extract(cur_url)
+                        # Skip marker: HTTP returned 404/403/401/410 — don't waste Playwright on it
+                        if _fast and _fast.get("status") and not _fast.get("text"):
+                            completed += 1
+                            await log_queue.put(f"[{completed}/{len(to_crawl)}] ⏭️  {cur_url[:70]} (HTTP {_fast['status']} — skipped)")
+                            return
+                        if _fast and len((_fast.get("text") or "")) >= 100:
+                            text = _fast.get("text") or ""
+                            title = _fast.get("title") or cur_url.rstrip("/").split("/")[-1].replace("-", " ").title()
+                            page_meta = _fast.get("page_meta") or {}
+                            _http_ok_msg = f"[{worker_label}] [http-extract-ok] {cur_url[:70]}"
+                            logger.info(f"[CRAWL] {_http_ok_msg}")
+                            await log_queue.put(_http_ok_msg)
+                    except Exception:
+                        pass
+                    if len(text) < 300:
+                        # --- Playwright: full JS render + lazy scroll ---
+                        _pw_fallback_msg = f"[{worker_label}] [playwright-fallback] starting {cur_url[:70]}"
+                        logger.info(f"[CRAWL] {_pw_fallback_msg}")
+                        await log_queue.put(_pw_fallback_msg)
+                        pg = await ctx.new_page()
+                        await pg.set_default_timeout(12000)  # Hard cap all Playwright ops — prevents hung evaluate/goto on WAF slow-drip
+                        await stealth(pg)
+                        for attempt in range(2):
+                            try:
+                                _pw_attempt_msg = f"[{worker_label}] [playwright-attempt] {attempt + 1}/2 {cur_url[:70]}"
+                                logger.info(f"[CRAWL] {_pw_attempt_msg}")
+                                await log_queue.put(_pw_attempt_msg)
+                                await pg.goto(cur_url, wait_until="domcontentloaded", timeout=15000)
+                                # Fast-fail: detect auth redirect (JS redirect to login/sign-in page)
+                                # Without this, login pages poison the content-hash dedup:
+                                # page 1 stores hash of login page, pages 2-1000 all hit
+                                # "duplicate content — skipped" instantly, polluting KB with 0 real content.
+                                _land_url = pg.url
+                                if _land_url and any(
+                                    p in _land_url.lower() for p in (
+                                        "/sign-in", "/signin", "/login", "/auth/",
+                                        "?redirect=", "?next=", "/access-denied", "/forbidden"
+                                    )
+                                ) and _land_url.rstrip("/") != cur_url.rstrip("/"):
+                                    await log_queue.put(f"[{worker_label}] [auth-redirect] {cur_url[:70]} → login")
+                                    break
+                                # Quick JSON-LD check — if it gives content, skip expensive networkidle wait
+                                quick_text = await pg.evaluate("""() => {
+                                    let out = '';
+                                    for (let s of document.querySelectorAll('script[type="application/ld+json"]')) {
+                                        try { out += s.textContent; } catch(e) {}
+                                    }
+                                    return out;
+                                }""")
+                                if not quick_text or len(quick_text.strip()) < 100:
+                                    # No JSON-LD — wait for JS to render content
+                                    try:
+                                        await pg.wait_for_function(
+                                            "document.body && document.body.innerText.trim().length > 100",
+                                            timeout=2000
                                         )
-                                    ) and _land_url.rstrip("/") != cur_url.rstrip("/"):
-                                        await log_queue.put(f"[{worker_label}] [auth-redirect] {cur_url[:70]} → login")
-                                        break
-                                    # Quick JSON-LD check — if it gives content, skip expensive networkidle wait
-                                    quick_text = await pg.evaluate("""() => {
-                                        let out = '';
-                                        for (let s of document.querySelectorAll('script[type="application/ld+json"]')) {
-                                            try { out += s.textContent; } catch(e) {}
-                                        }
-                                        return out;
-                                    }""")
-                                    if not quick_text or len(quick_text.strip()) < 100:
-                                        # No JSON-LD — wait for JS to render content
-                                        try:
-                                            await pg.wait_for_function(
-                                                "document.body && document.body.innerText.trim().length > 100",
-                                                timeout=2000
-                                            )
-                                        except Exception:
-                                            pass  # take whatever is there
-                                    # Expand hidden content: accordions, tabs, show-more buttons
-                                    try:
-                                        await pg.evaluate("""() => {
-                                            // Force-open <details> (instant, no JS event handlers)
-                                            document.querySelectorAll('details').forEach(d => d.setAttribute('open', ''));
-                                            // Accordion / collapsible triggers (product FAQs, course curricula)
-                                            document.querySelectorAll(
-                                                '.accordion-button, .accordion-trigger, .accordion-header, ' +
-                                                '[data-toggle], .faq-question, .collapse-trigger, summary'
-                                            ).forEach(el => { try { el.click(); } catch(e) {} });
-                                            // Inactive tab panels
-                                            document.querySelectorAll(
-                                                '[role="tab"]:not([aria-selected="true"]), .tab:not(.active)'
-                                            ).forEach(el => { try { el.click(); } catch(e) {} });
-                                            // "Show more" / "Load more" buttons
-                                            document.querySelectorAll('button, [role="button"]').forEach(el => {
-                                                const t = (el.innerText || '').toLowerCase().trim();
-                                                if (['show more','read more','load more','see more','view more','expand all'].includes(t)) {
-                                                    try { el.click(); } catch(e) {}
-                                                }
-                                            });
-                                        }""")
-                                        await asyncio.sleep(0.5)
                                     except Exception:
-                                        pass
-                                    # Lazy-scroll: trigger scroll-loaded content
-                                    try:
-                                        for _ in range(6):
-                                            await pg.evaluate("window.scrollBy(0, window.innerHeight)")
-                                            await asyncio.sleep(0.25)
-                                        await pg.evaluate("window.scrollTo(0, 0)")
-                                    except Exception:
-                                        pass
-                                    title = await pg.title()
-                                    try:
-                                        meta_desc = await pg.eval_on_selector("meta[name='description']", "el => el.content")
-                                    except Exception:
-                                        meta_desc = ""
-                                    text = await pg.evaluate("""() => {
-                                        // ── JSON-LD structured data (Shopify, e-commerce, schema.org) ──
-                                        let jsonLdText = '';
-                                        for (let script of document.querySelectorAll('script[type="application/ld+json"]')) {
-                                            try {
-                                                const data = JSON.parse(script.textContent);
-                                                const extract = (obj) => {
-                                                    if (!obj) return '';
-                                                    let parts = [];
-                                                    if (obj.name) parts.push('Name: ' + obj.name);
-                                                    if (obj.description) parts.push('Description: ' + obj.description);
-                                                    if (obj.offers) {
-                                                        const offers = Array.isArray(obj.offers) ? obj.offers : [obj.offers];
-                                                        for (let o of offers) {
-                                                            if (o.price) parts.push('Price: ' + o.price + ' ' + (o.priceCurrency || ''));
-                                                            if (o.availability) parts.push('Availability: ' + o.availability.replace('http://schema.org/', ''));
-                                                        }
-                                                    }
-                                                    if (obj.brand && obj.brand.name) parts.push('Brand: ' + obj.brand.name);
-                                                    if (obj.sku) parts.push('SKU: ' + obj.sku);
-                                                    if (obj.category) parts.push('Category: ' + obj.category);
-                                                    if (obj['@graph']) return obj['@graph'].map(extract).join(' ');
-                                                    return parts.join('. ');
-                                                };
-                                                jsonLdText += ' ' + extract(data);
-                                            } catch(e) {}
-                                        }
-
-                                        // ── Sidebar: textContent captures collapsed/hidden nav items ──
-                                        let sidebarText = '';
-                                        for (let sel of [
-                                            '.theme-doc-sidebar-container', '.sidebar-container',
-                                            'nav[class*="sidebar"]', 'nav[class*="menu"]',
-                                            '.menu__list', '[class*="sidebarNav"]',
-                                            '.gitbook-sidebar', '.toc-sidebar', 'aside nav', 'aside'
-                                        ]) {
-                                            const el = document.querySelector(sel);
-                                            if (el) {
-                                                const t = el.textContent.replace(/\\s+/g, ' ').trim();
-                                                if (t.length > 100) { sidebarText = t; break; }
+                                        pass  # take whatever is there
+                                # Expand hidden content: accordions, tabs, show-more buttons
+                                try:
+                                    await pg.evaluate("""() => {
+                                        // Force-open <details> (instant, no JS event handlers)
+                                        document.querySelectorAll('details').forEach(d => d.setAttribute('open', ''));
+                                        // Accordion / collapsible triggers (product FAQs, course curricula)
+                                        document.querySelectorAll(
+                                            '.accordion-button, .accordion-trigger, .accordion-header, ' +
+                                            '[data-toggle], .faq-question, .collapse-trigger, summary'
+                                        ).forEach(el => { try { el.click(); } catch(e) {} });
+                                        // Inactive tab panels
+                                        document.querySelectorAll(
+                                            '[role="tab"]:not([aria-selected="true"]), .tab:not(.active)'
+                                        ).forEach(el => { try { el.click(); } catch(e) {} });
+                                        // "Show more" / "Load more" buttons
+                                        document.querySelectorAll('button, [role="button"]').forEach(el => {
+                                            const t = (el.innerText || '').toLowerCase().trim();
+                                            if (['show more','read more','load more','see more','view more','expand all'].includes(t)) {
+                                                try { el.click(); } catch(e) {}
                                             }
-                                        }
-
-                                        // ── Main body: prefer <main>/<article> so sidebar isn't duplicated ──
-                                        // Sidebar is stored separately; body should be page-unique content only.
-                                        let bodyText = '';
-                                        const mainEl = document.querySelector('main') ||
-                                                        document.querySelector('article') ||
-                                                        document.querySelector('.content') ||
-                                                        document.querySelector('#content') ||
-                                                        document.querySelector('.post-content') ||
-                                                        document.querySelector('.entry-content') ||
-                                                        document.querySelector('.page-content');
-                                        if (mainEl && mainEl.innerText.trim().length > 100) {
-                                            bodyText = mainEl.innerText;
-                                        } else {
-                                            // Fallback: clone body, strip nav/sidebar noise, then get innerText
-                                            if (document.body) {
-                                                const clone = document.body.cloneNode(true);
-                                                [
-                                                    'nav', 'header', 'footer', 'aside',
-                                                    '[role="navigation"]', '[role="banner"]', '[role="contentinfo"]',
-                                                    '.nav', '.navigation', '.sidebar', '.side_categories',
-                                                    '.nav-list', '.breadcrumb', '.breadcrumbs',
-                                                    '.pagination', '.social-links', '.cookie-notice',
-                                                    'script', 'style', 'noscript', 'iframe', 'svg'
-                                                ].forEach(sel => {
-                                                    clone.querySelectorAll(sel).forEach(el => el.remove());
-                                                });
-                                                bodyText = clone.innerText || '';
-                                            }
-                                        }
-
-                                        // Return as JSON so Python can handle sidebar separately
-                                        return JSON.stringify({
-                                            sidebar: sidebarText,
-                                            body: (jsonLdText + '\\n' + bodyText).trim()
                                         });
                                     }""")
-                                    # Parse JSON result {sidebar, body}
-                                    sidebar_raw = ""
-                                    try:
-                                        import json as _json
-                                        _parsed = _json.loads(text or "{}")
-                                        sidebar_raw = _parsed.get("sidebar", "")
-                                        text = _parsed.get("body", "")
-                                    except Exception:
-                                        pass  # text stays as raw string fallback
-                                    text, page_meta = _prepare_crawl_page(text or "", cur_url, title_hint=title)
-                                    text = re.sub(r'\s+', ' ', _clean_text(text or "")).strip()
-                                    if len(text) < 200:
-                                        text = f"{title}. {meta_desc}. {text}".strip()
-                                    # OCR: append text extracted from page images
-                                    _ocr_start_msg = f"[{worker_label}] [ocr-start] {cur_url[:70]}"
-                                    logger.info(f"[CRAWL] {_ocr_start_msg}")
-                                    await log_queue.put(_ocr_start_msg)
-                                    ocr_text = await _ocr_page_images(pg, worker_label, cur_url)
-                                    if ocr_text:
-                                        text = f"{text} {ocr_text}".strip()
-                                        _ocr_done_msg = f"[{worker_label}] [ocr-done] appended OCR text for {cur_url[:70]}"
-                                        logger.info(f"[CRAWL] {_ocr_done_msg}")
-                                        await log_queue.put(_ocr_done_msg)
-                                    else:
-                                        _ocr_none_msg = f"[{worker_label}] [ocr-done] no OCR text added for {cur_url[:70]}"
-                                        logger.info(f"[CRAWL] {_ocr_none_msg}")
-                                        await log_queue.put(_ocr_none_msg)
-                                    text, page_meta = _prepare_crawl_page(text or "", cur_url, title_hint=title)
-                                    text = re.sub(r'\s+', ' ', _clean_text(text or "")).strip()
-                                    # Store sidebar navigation ONCE as a standalone "Site Structure" doc
-                                    if sidebar_raw and len(sidebar_raw) > 200:
-                                        import hashlib as _hlib
-                                        _sb_key = _hlib.md5(re.sub(r'\s+', '', sidebar_raw[:300]).encode()).hexdigest()
-                                        if _sb_key not in seen_sidebar_hashes:
-                                            seen_sidebar_hashes.add(_sb_key)
-                                            _sb_text = re.sub(r'\s+', ' ', sidebar_raw).strip()
-                                            async with flush_lock:
-                                                pending_pages.append({"url": f"{cur_url}#site-navigation", "text": f"SITE NAVIGATION AND STRUCTURE:\n{_sb_text}", "page_meta": {"structural": True, "page_type": "site_navigation"}})
-                                    break
-                                except Exception as e:
-                                    if attempt < 1:
-                                        _pw_retry_msg = f"[{worker_label}] [playwright-retry] {attempt + 1}/2 failed for {cur_url[:70]}: {type(e).__name__}"
-                                        logger.warning(f"[CRAWL] {_pw_retry_msg}")
-                                        await log_queue.put(_pw_retry_msg)
-                                        await asyncio.sleep(2)
-                                    else:
-                                        logger.warning(f"Crawl error [{attempt+1}/2] {cur_url}: {e}")
-                                        await log_queue.put(f"[{completed}/{len(to_crawl)}] ❌ Skipped (2 fails): {cur_url[:70]}")
-                            try:
-                                await pg.close()
-                            except Exception:
-                                pass
-                        completed += 1
+                                    await asyncio.sleep(0.5)
+                                except Exception:
+                                    pass
+                                # Lazy-scroll: trigger scroll-loaded content
+                                try:
+                                    for _ in range(6):
+                                        await pg.evaluate("window.scrollBy(0, window.innerHeight)")
+                                        await asyncio.sleep(0.25)
+                                    await pg.evaluate("window.scrollTo(0, 0)")
+                                except Exception:
+                                    pass
+                                title = await pg.title()
+                                try:
+                                    meta_desc = await pg.eval_on_selector("meta[name='description']", "el => el.content")
+                                except Exception:
+                                    meta_desc = ""
+                                text = await pg.evaluate("""() => {
+                                    // ── JSON-LD structured data (Shopify, e-commerce, schema.org) ──
+                                    let jsonLdText = '';
+                                    for (let script of document.querySelectorAll('script[type="application/ld+json"]')) {
+                                        try {
+                                            const data = JSON.parse(script.textContent);
+                                            const extract = (obj) => {
+                                                if (!obj) return '';
+                                                let parts = [];
+                                                if (obj.name) parts.push('Name: ' + obj.name);
+                                                if (obj.description) parts.push('Description: ' + obj.description);
+                                                if (obj.offers) {
+                                                    const offers = Array.isArray(obj.offers) ? obj.offers : [obj.offers];
+                                                    for (let o of offers) {
+                                                        if (o.price) parts.push('Price: ' + o.price + ' ' + (o.priceCurrency || ''));
+                                                        if (o.availability) parts.push('Availability: ' + o.availability.replace('http://schema.org/', ''));
+                                                    }
+                                                }
+                                                if (obj.brand && obj.brand.name) parts.push('Brand: ' + obj.brand.name);
+                                                if (obj.sku) parts.push('SKU: ' + obj.sku);
+                                                if (obj.category) parts.push('Category: ' + obj.category);
+                                                if (obj['@graph']) return obj['@graph'].map(extract).join(' ');
+                                                return parts.join('. ');
+                                            };
+                                            jsonLdText += ' ' + extract(data);
+                                        } catch(e) {}
+                                    }
 
-                        import hashlib as _hashlib
-                        if len(text) > 150:
-                            # Content-level dedup: hash full text so pages sharing a sidebar TOC but having
-                            # different main content are NOT incorrectly flagged as duplicates.
-                            content_key = _hashlib.md5(re.sub(r'\s+', '', text).encode()).hexdigest()
-                            if content_key in seen_content_hashes:
-                                await log_queue.put(f"[{completed}/{len(to_crawl)}] ♻️  {cur_url[:70]} (duplicate content — skipped)")
-                            else:
-                                seen_content_hashes.add(content_key)
-                                batch_to_flush = None
-                                async with flush_lock:
-                                    pending_pages.append({"url": cur_url, "text": text, "page_meta": page_meta})
-                                    page_index.append((cur_url, title))
-                                    await log_queue.put(f"[{completed}/{len(to_crawl)}] ✅ {cur_url[:70]} ({len(text)} chars)")
-                                    if len(pending_pages) >= 5:
-                                        batch_to_flush = pending_pages[:]
-                                        pending_pages.clear()
-                                # Embed OUTSIDE the lock so other crawl tasks can proceed
-                                if batch_to_flush:
-                                    await _flush_pages(batch_to_flush, worker_label=worker_label)
-                                    await log_queue.put(f"💾 Saved batch ({len(batch_to_flush)} pages, {total_chunks} total so far)")
+                                    // ── Sidebar: textContent captures collapsed/hidden nav items ──
+                                    let sidebarText = '';
+                                    for (let sel of [
+                                        '.theme-doc-sidebar-container', '.sidebar-container',
+                                        'nav[class*="sidebar"]', 'nav[class*="menu"]',
+                                        '.menu__list', '[class*="sidebarNav"]',
+                                        '.gitbook-sidebar', '.toc-sidebar', 'aside nav', 'aside'
+                                    ]) {
+                                        const el = document.querySelector(sel);
+                                        if (el) {
+                                            const t = el.textContent.replace(/\\s+/g, ' ').trim();
+                                            if (t.length > 100) { sidebarText = t; break; }
+                                        }
+                                    }
+
+                                    // ── Main body: prefer <main>/<article> so sidebar isn't duplicated ──
+                                    // Sidebar is stored separately; body should be page-unique content only.
+                                    let bodyText = '';
+                                    const mainEl = document.querySelector('main') ||
+                                                    document.querySelector('article') ||
+                                                    document.querySelector('.content') ||
+                                                    document.querySelector('#content') ||
+                                                    document.querySelector('.post-content') ||
+                                                    document.querySelector('.entry-content') ||
+                                                    document.querySelector('.page-content');
+                                    if (mainEl && mainEl.innerText.trim().length > 100) {
+                                        bodyText = mainEl.innerText;
+                                    } else {
+                                        // Fallback: clone body, strip nav/sidebar noise, then get innerText
+                                        if (document.body) {
+                                            const clone = document.body.cloneNode(true);
+                                            [
+                                                'nav', 'header', 'footer', 'aside',
+                                                '[role="navigation"]', '[role="banner"]', '[role="contentinfo"]',
+                                                '.nav', '.navigation', '.sidebar', '.side_categories',
+                                                '.nav-list', '.breadcrumb', '.breadcrumbs',
+                                                '.pagination', '.social-links', '.cookie-notice',
+                                                'script', 'style', 'noscript', 'iframe', 'svg'
+                                            ].forEach(sel => {
+                                                clone.querySelectorAll(sel).forEach(el => el.remove());
+                                            });
+                                            bodyText = clone.innerText || '';
+                                        }
+                                    }
+
+                                    // Return as JSON so Python can handle sidebar separately
+                                    return JSON.stringify({
+                                        sidebar: sidebarText,
+                                        body: (jsonLdText + '\\n' + bodyText).trim()
+                                    });
+                                }""")
+                                # Parse JSON result {sidebar, body}
+                                sidebar_raw = ""
+                                try:
+                                    import json as _json
+                                    _parsed = _json.loads(text or "{}")
+                                    sidebar_raw = _parsed.get("sidebar", "")
+                                    text = _parsed.get("body", "")
+                                except Exception:
+                                    pass  # text stays as raw string fallback
+                                text, page_meta = _prepare_crawl_page(text or "", cur_url, title_hint=title)
+                                text = re.sub(r'\s+', ' ', _clean_text(text or "")).strip()
+                                if len(text) < 200:
+                                    text = f"{title}. {meta_desc}. {text}".strip()
+                                # OCR: append text extracted from page images
+                                _ocr_start_msg = f"[{worker_label}] [ocr-start] {cur_url[:70]}"
+                                logger.info(f"[CRAWL] {_ocr_start_msg}")
+                                await log_queue.put(_ocr_start_msg)
+                                ocr_text = await _ocr_page_images(pg, worker_label, cur_url)
+                                if ocr_text:
+                                    text = f"{text} {ocr_text}".strip()
+                                    _ocr_done_msg = f"[{worker_label}] [ocr-done] appended OCR text for {cur_url[:70]}"
+                                    logger.info(f"[CRAWL] {_ocr_done_msg}")
+                                    await log_queue.put(_ocr_done_msg)
+                                else:
+                                    _ocr_none_msg = f"[{worker_label}] [ocr-done] no OCR text added for {cur_url[:70]}"
+                                    logger.info(f"[CRAWL] {_ocr_none_msg}")
+                                    await log_queue.put(_ocr_none_msg)
+                                text, page_meta = _prepare_crawl_page(text or "", cur_url, title_hint=title)
+                                text = re.sub(r'\s+', ' ', _clean_text(text or "")).strip()
+                                # Store sidebar navigation ONCE as a standalone "Site Structure" doc
+                                if sidebar_raw and len(sidebar_raw) > 200:
+                                    import hashlib as _hlib
+                                    _sb_key = _hlib.md5(re.sub(r'\s+', '', sidebar_raw[:300]).encode()).hexdigest()
+                                    if _sb_key not in seen_sidebar_hashes:
+                                        seen_sidebar_hashes.add(_sb_key)
+                                        _sb_text = re.sub(r'\s+', ' ', sidebar_raw).strip()
+                                        async with flush_lock:
+                                            pending_pages.append({"url": f"{cur_url}#site-navigation", "text": f"SITE NAVIGATION AND STRUCTURE:\n{_sb_text}", "page_meta": {"structural": True, "page_type": "site_navigation"}})
+                                break
+                            except Exception as e:
+                                if attempt < 1:
+                                    _pw_retry_msg = f"[{worker_label}] [playwright-retry] {attempt + 1}/2 failed for {cur_url[:70]}: {type(e).__name__}"
+                                    logger.warning(f"[CRAWL] {_pw_retry_msg}")
+                                    await log_queue.put(_pw_retry_msg)
+                                    await asyncio.sleep(2)
+                                else:
+                                    logger.warning(f"Crawl error [{attempt+1}/2] {cur_url}: {e}")
+                                    await log_queue.put(f"[{completed}/{len(to_crawl)}] ❌ Skipped (2 fails): {cur_url[:70]}")
+                        try:
+                            await pg.close()
+                        except Exception:
+                            pass
+                    completed += 1
+
+                    import hashlib as _hashlib
+                    if len(text) > 150:
+                        # Content-level dedup: hash full text so pages sharing a sidebar TOC but having
+                        # different main content are NOT incorrectly flagged as duplicates.
+                        content_key = _hashlib.md5(re.sub(r'\s+', '', text).encode()).hexdigest()
+                        if content_key in seen_content_hashes:
+                            await log_queue.put(f"[{completed}/{len(to_crawl)}] ♻️  {cur_url[:70]} (duplicate content — skipped)")
                         else:
-                            await log_queue.put(f"[{completed}/{len(to_crawl)}] ⏭️  {cur_url[:70]} ({len(text)} chars - TOO SHORT)")
+                            seen_content_hashes.add(content_key)
+                            batch_to_flush = None
+                            async with flush_lock:
+                                pending_pages.append({"url": cur_url, "text": text, "page_meta": page_meta})
+                                page_index.append((cur_url, title))
+                                await log_queue.put(f"[{completed}/{len(to_crawl)}] ✅ {cur_url[:70]} ({len(text)} chars)")
+                                if len(pending_pages) >= 5:
+                                    batch_to_flush = pending_pages[:]
+                                    pending_pages.clear()
+                            # Embed OUTSIDE the lock so other crawl tasks can proceed
+                            if batch_to_flush:
+                                await _flush_pages(batch_to_flush, worker_label=worker_label)
+                                await log_queue.put(f"💾 Saved batch ({len(batch_to_flush)} pages, {total_chunks} total so far)")
+                    else:
+                        await log_queue.put(f"[{completed}/{len(to_crawl)}] ⏭️  {cur_url[:70]} ({len(text)} chars - TOO SHORT)")
 
                 # Per-URL hard deadline: pg.evaluate() ignores set_default_timeout, so a page
                 # with hanging JS freezes a worker indefinitely. 35s covers goto+scroll+2 retries.
                 async def _crawl_one_with_timeout(u, i):
-                    try:
-                        await asyncio.wait_for(_crawl_one(u, i), timeout=35)
-                    except asyncio.TimeoutError:
-                        nonlocal completed
-                        completed += 1
-                        logger.warning(f"[CRAWL] [pw-page-timeout] {u[:70]} exceeded 35s — skipping")
-                        await log_queue.put(f"[{completed}/{len(to_crawl)}] ⏱️  {u[:70]} (35s timeout — skipped)")
+                    async with sem:
+                        try:
+                            await asyncio.wait_for(_crawl_one(u, i), timeout=35)
+                        except asyncio.TimeoutError:
+                            nonlocal completed
+                            completed += 1
+                            logger.warning(f"[CRAWL] [pw-page-timeout] {u[:70]} exceeded 35s — skipping")
+                            await log_queue.put(f"[{completed}/{len(to_crawl)}] ⏱️  {u[:70]} (35s timeout — skipped)")
 
                 # Launch all tasks, stream log messages as they arrive
                 tasks = [asyncio.create_task(_crawl_one_with_timeout(u, i)) for i, u in enumerate(to_crawl)]
