@@ -1193,12 +1193,24 @@ def _merge_variant_docs(docs: list) -> list:
 
 def _retrieval_visible_doc(doc) -> bool:
     meta = (getattr(doc, "metadata", None) or {})
-    if meta.get("structural") or meta.get("contaminated"):
+    source = str(meta.get("source") or "")
+    # Structural exclusion: use URL pattern (reliable) rather than stale metadata flags
+    # (metadata was written by older crawler versions that had false-positive structural
+    # detection on Docusaurus/educational pages — "skip to main content" nav landmark).
+    if _STRUCTURAL_URL_RE.search(source) or "#site-navigation" in source:
+        return False
+    if meta.get("contaminated"):
         return False
     if meta.get("content_type") == "category":
         return False
     if meta.get("retrieve_eligible") is False:
-        return False
+        # "structural" quarantine reason = stale false-positive — don't exclude.
+        # All other reasons (low_quality, weak_product_fallback, contaminated) still apply.
+        qr = meta.get("quarantine_reason") or ""
+        if qr == "structural":
+            pass  # was a false positive — let it through
+        else:
+            return False
     try:
         if (
             meta.get("quality_score") is not None
@@ -1208,9 +1220,6 @@ def _retrieval_visible_doc(doc) -> bool:
             return False
     except Exception:
         pass
-    source = str(meta.get("source") or "")
-    if "#site-navigation" in source:
-        return False
     return True
 
 _ROLE_TERMS = {"ceo", "cto", "coo", "cfo", "cpo", "vp", "founder", "author", "director",
