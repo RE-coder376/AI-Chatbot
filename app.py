@@ -1471,6 +1471,13 @@ def _bm25_search(q: str, db, db_name: str, k: int = 5):
     Works for any website: structural queries, product names, exact terms, navigation content."""
     try:
         from langchain_core.documents import Document
+        # Fast-path: if cache is empty, skip rather than trigger a 20-40s blocking build.
+        # _prewarm_bm25() at startup populates the cache in the background.
+        # Queries before pre-warm completes fall back to vector-only (fast); afterwards hybrid.
+        entry = _bm25_cache.get(db_name)
+        if not entry:
+            return []
+        # Validate cache is still fresh (chunk count check only if already cached)
         entry = _get_bm25_index(db, db_name)
         if not entry:
             return []
