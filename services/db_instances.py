@@ -51,6 +51,7 @@ def _ensure_tmp_chroma(db_name: str, src_path: Path) -> Path:
 
 def _get_or_create_db(db_name: str):
     """Return Chroma instance for db_name, creating it fresh if no chroma.sqlite3 exists yet."""
+    import app as _app
     existing = _get_db_instance(db_name) if db_name else None
     if existing:
         return existing
@@ -65,10 +66,10 @@ def _get_or_create_db(db_name: str):
     instance._db_name = db_name
     _db_instance_cache[db_name] = instance
     return instance
-    import app as _app
 
 def _get_db_instance(db_name: str):
     """Return a Chroma instance for any DB (not just active). Cached per db_name."""
+    import app as _app
     if db_name in _db_instance_cache:
         return _db_instance_cache[db_name]
     db_path = DATABASES_DIR / db_name
@@ -89,10 +90,10 @@ def _get_db_instance(db_name: str):
         if _app.legacy_embeddings is None:
             try:
                 from langchain_huggingface import HuggingFaceEmbeddings
-                globals()["_app.legacy_embeddings"] = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
+                _app.legacy_embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
             except ImportError:
                 logger.warning("[DB] sentence-transformers not installed, falling back to fastembed")
-                globals()["_app.legacy_embeddings"] = _app.embeddings_model
+                _app.legacy_embeddings = _app.embeddings_model
         emb = _app.legacy_embeddings
     else:
         # All other DBs (bge, multilingual, unset) — crawler always writes bge-small-en-v1.5 (384-dim)
@@ -107,4 +108,3 @@ def _get_db_instance(db_name: str):
         _db_instance_cache.pop(oldest, None)
     _db_instance_cache[db_name] = instance
     return instance
-    import app as _app
