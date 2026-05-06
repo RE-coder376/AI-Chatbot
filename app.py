@@ -5469,6 +5469,11 @@ def get_db_stats(request: Request, password: str = ""):
             _sc_data = {}
         last_crawl = _sc_data.get("last_crawl_time") or db_cfg.get("last_crawl_time", "")
         last_crawl_status = _sc_data.get("last_crawl_status") or db_cfg.get("last_crawl_status", "")
+        last_crawl_error = _sc_data.get("last_crawl_error") or db_cfg.get("last_crawl_error", "")
+        last_crawl_fail_count = _sc_data.get("last_crawl_fail_count") or db_cfg.get("last_crawl_fail_count", 0)
+        last_crawl_failed_at = _sc_data.get("last_crawl_failed_at") or db_cfg.get("last_crawl_failed_at", "")
+        last_crawl_retry_after = _sc_data.get("last_crawl_retry_after") or db_cfg.get("last_crawl_retry_after", "")
+
         # Base next_crawl_ts on completion time (not start) so "due now" clears after crawl finishes
         _last_for_next = _sc_data.get("last_crawl_completed") or db_cfg.get("last_crawl_completed") or last_crawl
         next_crawl_ts = ""
@@ -5478,12 +5483,32 @@ def get_db_stats(request: Request, password: str = ""):
             except: pass
         elif auto_enabled:
             next_crawl_ts = datetime.now().isoformat()  # due now
+        
+        # If the last crawl failed and a retry cooldown is in effect, expose that as next_crawl_ts
+        if last_crawl_retry_after and auto_enabled:
+            try:
+                ra_dt = datetime.fromisoformat(last_crawl_retry_after)
+                if not next_crawl_ts:
+                    next_crawl_ts = ra_dt.isoformat()
+                else:
+                    try:
+                        nc_dt = datetime.fromisoformat(next_crawl_ts)
+                        if ra_dt > nc_dt:
+                            next_crawl_ts = ra_dt.isoformat()
+                    except Exception:
+                        next_crawl_ts = ra_dt.isoformat()
+            except Exception:
+                pass
         stats.append({
             "name": db_dir.name,
             "chunks": chunks,
             "last_crawl_time": last_crawl,
             "last_crawl_completed": _sc_data.get("last_crawl_completed") or db_cfg.get("last_crawl_completed", ""),
             "last_crawl_chunks": _sc_data.get("last_crawl_chunks") or db_cfg.get("last_crawl_chunks", 0),
+            "last_crawl_error": last_crawl_error,
+            "last_crawl_fail_count": last_crawl_fail_count,
+            "last_crawl_failed_at": last_crawl_failed_at,
+            "last_crawl_retry_after": last_crawl_retry_after,
             "next_crawl_ts": next_crawl_ts,
             "is_crawling": db_dir.name in _crawling_dbs,
             "auto_crawl_enabled": auto_enabled,
