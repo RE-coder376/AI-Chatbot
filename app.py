@@ -1158,6 +1158,34 @@ def _prepare_crawl_page(text: str, url: str, title_hint: str = "") -> tuple[str,
     return cleaned.strip(), meta
 
 
+def _chroma_safe_metadata(metadata: dict | None) -> dict:
+    """Chroma metadata values must be scalar; encode richer crawl fields compactly."""
+    safe = {}
+    for key, value in (metadata or {}).items():
+        if value is None:
+            continue
+        if isinstance(value, (str, int, float, bool)):
+            safe[key] = value
+        elif isinstance(value, (list, tuple, set)):
+            values = [str(v) for v in value if v is not None and str(v) != ""]
+            if values:
+                safe[key] = ", ".join(values)
+        elif isinstance(value, dict):
+            try:
+                safe[key] = json.dumps(value, ensure_ascii=True, sort_keys=True)
+            except Exception:
+                safe[key] = str(value)
+        else:
+            safe[key] = str(value)
+    return safe
+
+
+def _sanitize_docs_for_chroma(docs: list) -> list:
+    for doc in docs or []:
+        doc.metadata = _chroma_safe_metadata(getattr(doc, "metadata", None) or {})
+    return docs
+
+
 def _merge_variant_docs(docs: list) -> list:
     if not docs:
         return docs
@@ -2889,7 +2917,7 @@ async def _auto_crawl_db(db_name: str, url: str, max_pages: int = 0) -> int:
                     # Batch write every 100 docs — prevents unbounded RAM + avoids single huge write at end
                     if len(_pending_docs) >= 100:
                         try:
-                            await asyncio.wait_for(asyncio.to_thread(db.add_documents, _pending_docs), timeout=120)
+                            await asyncio.wait_for(asyncio.to_thread(db.add_documents, _sanitize_docs_for_chroma(_pending_docs)), timeout=120)
                             logger.info(f"[AUTO-CRAWL] '{db_name}' batch written: {len(_pending_docs)} docs")
                         except Exception as _bw_e:
                             logger.warning(f"[AUTO-CRAWL] '{db_name}' batch write failed: {_bw_e}")
@@ -2904,7 +2932,7 @@ async def _auto_crawl_db(db_name: str, url: str, max_pages: int = 0) -> int:
         # Final batch write for remaining docs
         if _pending_docs:
             try:
-                await asyncio.wait_for(asyncio.to_thread(db.add_documents, _pending_docs), timeout=120)
+                await asyncio.wait_for(asyncio.to_thread(db.add_documents, _sanitize_docs_for_chroma(_pending_docs)), timeout=120)
             except Exception as _fw_e:
                 logger.warning(f"[AUTO-CRAWL] '{db_name}' final batch write failed: {_fw_e}")
 
@@ -8135,6 +8163,7 @@ async def crawl_site(data: dict, request: Request):
                     async with chroma_write_lock:
                         await log_queue.put(f"[{worker_label}] [chroma-flush] lock acquired — embedding {len(chunks)} chunks")
                         try:
+                            chunks = _sanitize_docs_for_chroma(chunks)
                             await asyncio.wait_for(_chroma_run(chroma_db.add_documents, chunks), timeout=300)
                         except asyncio.TimeoutError:
                             logger.warning(f"[CRAWL] [{worker_label}] [chroma-flush-timeout] add_documents exceeded 300s — skipping batch")
