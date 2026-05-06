@@ -731,43 +731,6 @@ def detect_language(text: str) -> str:
 # moved to services/safety.py
 
 
-def _canonical_product_title(text: str) -> str:
-    text = re.sub(r'(?i)^product:\s*', '', text or "").strip()
-    text = re.sub(r'\s+', ' ', text)
-    text = re.sub(r'(?i)\b(?:size|color|colour|variant|pack of|pcs?|pieces?)\b.*$', '', text).strip(" -,:")
-    return text
-
-
-def _dedupe_repeated_lines(text: str) -> str:
-    lines = [ln.strip() for ln in re.split(r'[\r\n]+', text or "") if ln.strip()]
-    if not lines:
-        return text or ""
-    counts = Counter(lines)
-    kept = []
-    for ln in lines:
-        if counts[ln] >= 3:
-            if ln not in kept:
-                kept.append(ln)
-            continue
-        kept.append(ln)
-    return "\n".join(kept)
-
-
-def _strip_storefront_boilerplate(text: str) -> str:
-    cleaned = text or ""
-    cleaned = _dedupe_repeated_lines(cleaned)
-    for pat in _STORE_BOILERPLATE_PATTERNS:
-        cleaned = pat.sub(" ", cleaned)
-    cleaned = re.sub(
-        r'(?im)^(?:checkout|wishlist|compare|share|follow us|all rights reserved|privacy policy|terms of service)\s*$',
-        ' ',
-        cleaned,
-    )
-    cleaned = re.sub(r'(?i)\b(?:add to cart|buy now)\b(?:\s+\b(?:add to cart|buy now)\b)+', ' ', cleaned)
-    cleaned = re.sub(r'\s+', ' ', cleaned)
-    return _clean_text(cleaned).strip()
-
-
 # moved to services/safety.py
 
 
