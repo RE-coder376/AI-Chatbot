@@ -11,6 +11,7 @@ import logging
 import time
 import asyncio
 import re
+import re as _re
 import uuid
 import hmac
 import hashlib
@@ -75,6 +76,21 @@ from services.auth import (
     PASSWORD_HASH_PREFIX, PASSWORD_HASH_ITERATIONS,
     _validate_db_name, _is_password_hash, _hash_password,
     _password_matches, _extract_password,
+)
+from services.safety import (
+    _STRUCTURAL_URL_RE,
+    _STRUCTURAL_TEXT_RE,
+    _clean_text,
+    _canonical_product_title,
+    _dedupe_repeated_lines,
+    _strip_storefront_boilerplate,
+    _trusted_content_metrics,
+    _looks_structural_page,
+    _looks_like_product_page,
+    _deterministic_price_answer,
+    _strip_source_leaks,
+    expand_query,
+    _is_urdu_script,
 )
 
 # HF Spaces / containerised deploy: restore files from env vars if missing
@@ -706,146 +722,13 @@ def detect_language(text: str) -> str:
         return "Roman Urdu"
     return "English"
 
-_STOP_WORDS = {"what","how","why","when","where","who","which","is","are","was","were",
-               "do","does","did","can","could","would","should","will","the","a","an",
-               "in","on","at","to","for","of","and","or","tell","me","about","explain",
-               "describe","give","show","please","i","you","we","they","it","this","that"}
+# moved to services/safety.py
+# moved to services/safety.py
 
-import re as _re
-_SOURCE_LEAK_PATTERNS = [
-    r"(?i)based on (the |our |this )?(business context|knowledge base|kb|provided context|context provided)[,.]?\s*",
-    r"(?i)according to (the )?(knowledge base|business context|kb|agentfactory knowledge base|provided (information|context|data))[,.]?\s*",
-    r"(?i)the (knowledge base|business context|kb) (says?|states?|indicates?|shows?|mentions?|notes?)[,:]?\s*",
-    r"(?i)from (the )?(knowledge base|business context|kb|provided context)[,:]?\s*",
-    r"(?i)in (the )?(knowledge base|business context)[,:]?\s*",
-    r"(?i)as (per|stated in|mentioned in) (the )?(knowledge base|business context|kb|context)[,:]?\s*",
-    r"(?i)the (provided )?(context|kb|knowledge base) (provided )?(indicates?|shows?|states?|says?)[,:]?\s*",
-    r"(?i)BUSINESS CONTEXT:.*?(?=\n\n|\Z)",  # raw section dump
-    r"(?i)KNOWLEDGE BASE:.*?(?=\n\n|\Z)",    # raw section dump
-]
-
-_URL_PATTERN = _re.compile(r'https?://[^\s)\]"\'<>,]+|www\.[^\s)\]"\'<>,]+', _re.IGNORECASE)
-
-_PRICE_QUERY_RE = _re.compile(r'\b(price|cost|how much|rate|pkr|rs\.?)\b', _re.I)
-_PRICE_VAL_RE   = _re.compile(r'(?:Sale price|Regular price|Price:)\s*Rs\.?\s*([\d,]+(?:\.\d+)?)\s*PKR', _re.I)
-
-def _deterministic_price_answer(q: str, context: str) -> str | None:
-    """Return a direct price answer from context without LLM. Returns None if not applicable."""
-    if not _PRICE_QUERY_RE.search(q):
-        return None
-    prices = _PRICE_VAL_RE.findall(context)
-    if not prices:
-        return None
-    # Prefer sale price (appears after "Sale price"), otherwise first price found
-    sale_matches = _re.findall(r'Sale price\s*Rs\.?\s*([\d,]+(?:\.\d+)?)\s*PKR', context, _re.I)
-    price_str = f"Rs. {sale_matches[0]} PKR" if sale_matches else f"Rs. {prices[0]} PKR"
-    if len(sale_matches) >= 1 and len(prices) >= 1 and prices[0] != sale_matches[0]:
-        price_str = f"Rs. {sale_matches[0]} PKR (regular Rs. {prices[0]} PKR)"
-    return f"The price is {price_str}."
+# moved to services/safety.py
 
 
-def _strip_source_leaks(text: str, kb_context: str = "") -> str:
-    for pat in _SOURCE_LEAK_PATTERNS:
-        text = _re.sub(pat, "", text)
-    # Strip invented URLs — only allow URLs that appear verbatim in KB context
-    if kb_context:
-        kb_urls = set(_URL_PATTERN.findall(kb_context))
-        def _url_filter(m):
-            url = m.group(0).rstrip(".,;)")
-            return url if url in kb_urls else ""
-        text = _URL_PATTERN.sub(_url_filter, text)
-    # Capitalise first letter if it got stripped
-    text = text.strip()
-    if text and text[0].islower():
-        text = text[0].upper() + text[1:]
-    return text
-
-_CONCEPT_MAP = {
-    "curriculum": ["topics", "syllabus", "modules", "what will I learn", "chapters", "subjects", "course content", "roadmap", "outline"],
-    "price": ["cost", "fees", "charges", "subscription", "pricing", "payment", "how much", "rate card", "pay", "buy"],
-    "contact": ["email", "phone", "whatsapp", "address", "reach out", "support", "help", "connect"],
-    "owner": ["founder", "ceo", "team", "who made", "creator", "management", "leadership"],
-    "location": ["office", "where", "city", "country", "map", "headquarters"],
-    # Product/spec concepts for e-commerce DBs
-    "gpu": ["GeForce", "GTX", "graphics", "NVIDIA", "AMD", "Radeon", "1050", "1060", "1070", "1080"],
-    "gaming": ["ROG", "STRIX", "Nitro", "Legion", "GTX", "GeForce", "gaming laptop", "dedicated GPU"],
-    "ram": ["memory", "8GB", "16GB", "4GB", "DDR", "GB RAM"],
-    "storage": ["SSD", "HDD", "hard drive", "solid state", "128GB", "256GB", "512GB", "1TB"],
-    "laptop": ["notebook", "ThinkPad", "VivoBook", "Aspire", "MacBook", "Inspiron", "ZenBook"],
-    "tablet": ["android tablet", "iPad", "IdeaTab", "Iconia", "Galaxy Tab"],
-    "phone": ["smartphone", "Xperia", "iPhone", "Nokia", "Samsung Galaxy", "touch phone"],
-}
-
-def expand_query(q: str) -> list:
-    """Return [original_query, keyword_query, semantic_expansions] for conceptual understanding."""
-    q_lower = q.lower()
-    expanded = [q]
-    
-    # 1. Basic Keyword extraction
-    words = [w.strip("?.,!") for w in q_lower.split()]
-    keywords = [w for w in words if w not in _STOP_WORDS and len(w) > 2]
-    kw_query = " ".join(keywords)
-    if kw_query and kw_query != q_lower and len(keywords) >= 2:
-        expanded.append(kw_query)
-    
-    # 2. Universal Concept Expansion (Semantic understanding)
-    for concept, synonyms in _CONCEPT_MAP.items():
-        if concept in q_lower or any(s in q_lower for s in synonyms):
-            # If the user mentioned the concept or a synonym, add all other synonyms to the search
-            expanded.extend(synonyms[:5]) # Take top 5 to keep search efficient
-
-    return list(dict.fromkeys(expanded)) # Unique items only
-
-_INVISIBLE_CHARS = re.compile(r'[\u200b\u200c\u200d\ufeff\u00ad\u2060]')
-
-def _clean_text(text: str) -> str:
-    """Strip invisible Unicode characters that break retrieval."""
-    return _INVISIBLE_CHARS.sub('', text)
-
-
-_PRODUCT_PRICE_CAPTURE_RE = re.compile(
-    r'(?i)\b(?:rs\.?\s*|pkr\s*|\$\s*)([\d,]+(?:\.\d{1,2})?)\b'
-)
-_PRODUCT_PRICE_LINE_RE = re.compile(
-    r'(?i)\b(?:price|sale price|regular price)\s*:\s*(rs\.?\s*|pkr\s*|\$\s*)?([\d,]+(?:\.\d{1,2})?)'
-)
-_PRODUCT_AVAIL_RE = re.compile(
-    r'(?i)\b(in stock|out of stock|sold out|available|unavailable|pre[- ]?order)\b'
-)
-_STRUCTURAL_URL_RE = re.compile(
-    r'(?i)(?:/|#)(?:login|sign-?in|register|signup|account|profile|progress|dashboard|flashcards?|quiz(?:zes)?|exercise|exercises|leaderboard|help|support|site-navigation|toc)(?:/|$|#)'
-)
-_STRUCTURAL_TEXT_RE = re.compile(
-    r'(?i)\b(sign in|log in|register|my account|your profile|dashboard|leaderboard|flashcards?|quiz(?:zes)?|exercise|progress|continue learning|toggle theme)\b'
-)
-_STORE_BOILERPLATE_PATTERNS = [
-    re.compile(r'(?is)\byou may also like\b.*?(?=(?:\bproduct\b|\bdescription\b|\breviews?\b|\Z))'),
-    re.compile(r'(?is)\brecently viewed\b.*?(?=(?:\bproduct\b|\bdescription\b|\breviews?\b|\Z))'),
-    re.compile(r'(?is)\bcustomers also bought\b.*?(?=(?:\bproduct\b|\bdescription\b|\breviews?\b|\Z))'),
-    re.compile(r'(?is)\byour cart\b.*?(?=(?:\bcheckout\b|\bcontinue shopping\b|\Z))'),
-    re.compile(r'(?is)\bsubtotal\b.*?(?=(?:\bcheckout\b|\bcontinue shopping\b|\Z))'),
-    re.compile(r'(?is)\badd to wishlist\b'),
-    re.compile(r'(?is)\bfree shipping on orders over\b[^\n\.!]*'),
-    re.compile(r'(?is)\buse code\s+[A-Z0-9_-]+\s+for\s+\d+% off\b'),
-]
-_CONTAMINATION_HINTS_RE = re.compile(
-    r'(?i)\b(designer wear|premium fashion|men(?:\'s)? fashion|women(?:\'s)? fashion|apparel|clothing collection|footwear|shoes|handbags?)\b'
-)
-_GENERIC_SECTION_SPLIT_RE = re.compile(
-    r'(?m)^(?=(?:Q:|Question:|How |What |Why |When |Where |Who |Can |Do |Is |Are |Does |Should ))',
-    re.I,
-)
-_POLICY_URL_RE = re.compile(r'(?i)(?:/|#)(?:privacy|refund|return|shipping|delivery|warranty|policy|policies|terms)(?:/|$|#)')
-_CATEGORY_URL_RE = re.compile(r'(?i)(?:/|#)(?:collections?|categories?|category|shop)(?:/|$|#)')
-_ARTICLE_URL_RE = re.compile(r'(?i)(?:/|#)(?:blog|blogs|article|articles|lesson|lessons|chapter|chapters|docs|guide|guides|resources?)(?:/|$|#)')
-_POLICY_TEXT_RE = re.compile(r'(?i)\b(refund policy|return policy|shipping policy|privacy policy|terms of service|warranty policy|delivery policy)\b')
-_CATEGORY_TEXT_RE = re.compile(r'(?i)\b(sort by|filter|showing \d+|product type|collections?|categories?)\b')
-_BOILERPLATE_SIGNAL_RE = re.compile(
-    r'(?i)\b(you may also like|recently viewed|customers also bought|your cart|subtotal|checkout|wishlist|free shipping|use code|all rights reserved|privacy policy|terms of service)\b'
-)
-_NAV_CONTROL_RE = re.compile(
-    r'(?i)\b(home|menu|search|login|sign in|register|profile|dashboard|toggle theme|wishlist|cart|checkout|compare|share)\b'
-)
+# moved to services/safety.py
 
 
 def _canonical_product_title(text: str) -> str:
@@ -885,51 +768,7 @@ def _strip_storefront_boilerplate(text: str) -> str:
     return _clean_text(cleaned).strip()
 
 
-def _trusted_content_metrics(text: str) -> dict:
-    body = _clean_text(text or "")
-    sentence_count = len(re.findall(r'[.!?]', body))
-    prose_chars = len(body)
-    paragraphs = [p.strip() for p in re.split(r'[\r\n]+', body) if p.strip()]
-    nav_hits = len(_NAV_CONTROL_RE.findall(body))
-    policy_hits = len(_POLICY_TEXT_RE.findall(body))
-    category_hits = len(_CATEGORY_TEXT_RE.findall(body))
-    return {
-        "sentence_count": sentence_count,
-        "prose_chars": prose_chars,
-        "paragraph_count": len(paragraphs),
-        "nav_hits": nav_hits,
-        "policy_hits": policy_hits,
-        "category_hits": category_hits,
-    }
-
-
-def _looks_structural_page(url: str, text: str) -> bool:
-    source = (url or "").lower()
-    body = _clean_text(text or "")
-    if _STRUCTURAL_URL_RE.search(source):
-        return True
-    metrics = _trusted_content_metrics(body)
-    if metrics["prose_chars"] < 120:
-        return False
-    if _STRUCTURAL_TEXT_RE.search(body):
-        # Count only pure UI-shell indicators — chapter/lesson/module are legitimate educational content words
-        # and appear in overview pages that ARE the content we want to retrieve.
-        topic_hits = len(re.findall(r'(?i)\b(flashcard|quiz(?:zes?)?|exercise)\b', body))
-        if metrics["sentence_count"] <= 2 or topic_hits >= 4:
-            return True
-    if metrics["nav_hits"] >= 8 and metrics["sentence_count"] <= 2:
-        return True
-    return False
-
-
-def _looks_like_product_page(url: str, text: str) -> bool:
-    source = (url or "").lower()
-    body = text or ""
-    if "/products/" in source or re.search(r'(?i)\b@type\b.*\bproduct\b', body):
-        return True
-    if _PRODUCT_PRICE_CAPTURE_RE.search(body) and re.search(r'(?i)\b(add to cart|sku|availability|brand|product|variant)\b', body):
-        return True
-    return False
+# moved to services/safety.py
 
 
 def _extract_product_summary(text: str, url: str, title_hint: str = "") -> dict:
@@ -1521,9 +1360,7 @@ def _bm25_search(q: str, db, db_name: str, k: int = 5):
         logger.warning(f"[BM25] Search failed: {e}")
         return []
 
-def _is_urdu_script(text: str) -> bool:
-    """Check if string contains Urdu/Arabic characters."""
-    return any('\u0600' <= char <= '\u06FF' for char in text)
+# moved to services/safety.py
 
 async def _translate_query_for_search(q: str) -> str:
     """Fast translation of Urdu script to English keywords for retrieval."""
@@ -4287,6 +4124,20 @@ async def chat(request: Request):
         _PRODUCT_Q_RE_NS = re.compile(r'\b(do you (sell|carry|have|offer)|is .* available)\b', re.IGNORECASE)
         if _OOS_RE_NS.search(q) and not _PRODUCT_Q_RE_NS.search(q):
             return JSONResponse({"answer": f"I specialize in {_topics} for {_biz}. For other topics, I'd suggest a general search engine."})
+
+        # Greeting (match streaming fast path)
+        intent_ns = classify_intent(q)
+        if intent_ns == "greeting":
+            is_urdu = user_lang in ("Urdu Script", "Roman Urdu")
+            bot_name = cfg.get("bot_name", "Assistant")
+            _biz2 = cfg.get("business_name", "")
+            topics2 = cfg.get("topics", "") or (_biz2 if _biz2 else "our products and services")
+            quick_opts = await _get_intro_questions(tenant_db_name or _get_active_db(), tenant_db_instance, cfg)
+            if is_urdu:
+                reply = f"Salam! Main {bot_name} hoon. Main aapki {topics2} ke baare mein madad kar sakta hoon. Kya jaanna chahte hain?"
+            else:
+                reply = f"Hello! I'm {bot_name}. I can help you with {topics2}. What would you like to know?"
+            return JSONResponse({"answer": reply, "sources": [], "options": quick_opts})
 
         context, doc_count, sources = await retrieve_context(q, tenant_db_instance)
 
