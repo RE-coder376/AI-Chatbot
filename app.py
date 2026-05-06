@@ -53,8 +53,8 @@ logger = logging.getLogger(__name__)
 load_dotenv()
 
 # Configuration
-KEYS_FILE = Path("keys.json")
 from services.config import (
+    KEYS_FILE,
     DATABASES_DIR, CONFIG_FILE, ACTIVE_DB_FILE,
     DB_SECRETS_FILE, DB_SECRET_KEYS,
     _atomic_write_json, _safe_db_secret_name,

@@ -19,7 +19,6 @@ def _ensure_tmp_chroma(db_name: str, src_path: Path) -> Path:
     """Copy ChromaDB from overlayfs → /tmp (tmpfs) to avoid SQLite WAL mode failures on Docker.
     On Windows this is unnecessary (no overlayfs) — use src_path directly.
     Falls back to src_path if src has no DB yet (GH sync still running) or tmp copy is corrupt."""
-    import app as _app
     import sys as _sys, shutil as _shutil
     if _sys.platform == "win32":
         return src_path  # No WAL fix needed on Windows
