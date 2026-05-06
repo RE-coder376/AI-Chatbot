@@ -1304,6 +1304,9 @@
       const intervalM = st.crawl_interval_minutes || 60;
       const intervalLabel = intervalM < 60 ? `${intervalM}min` : `${intervalM/60}h`;
       const health = st.health || {level:'empty', label:'Unknown', reason:'No data'};
+      const lastErr = st.last_crawl_error || '';
+      const retryAfter = st.last_crawl_retry_after || '';
+
       const healthDot = {healthy:'🟢', warning:'🟡', critical:'🔴', empty:'⚪'}[health.level] || '⚪';
       const autoIcon = hasCrawl && hasApi ? '🟢🔌' : hasCrawl ? '🟢' : hasApi ? '🔌' : '⭕';
       const syncLabel = hasCrawl && hasApi
@@ -1344,6 +1347,8 @@
             <div>
               <div style="font-weight:700;font-size:13px;color:var(--text-main);">KB ${health.label}</div>
               <div style="font-size:11px;color:var(--text-muted);margin-top:2px;">${health.reason}</div>
+              ${lastErr ? `<div id="crawl-error-${db.name}" style="font-size:11px;color:#b91c1c;margin-top:6px;white-space:pre-wrap;">${escapeHtml(String(lastErr).slice(0,300))}</div>` : `<div id="crawl-error-${db.name}" style="display:none"></div>`}
+              ${retryAfter ? `<div id="crawl-retry-${db.name}" style="font-size:10px;color:var(--text-muted);margin-top:4px;">Retry after: ${escapeHtml(new Date(retryAfter).toLocaleString())}</div>` : `<div id="crawl-retry-${db.name}" style="display:none"></div>`}
             </div>
           </div>
           <div class="grid-2" style="margin-bottom:10px;">
@@ -1423,6 +1428,20 @@
             const lastCrawl = new Date(st.last_crawl_completed || st.last_crawl_time).toLocaleString();
             const newChunks = st.last_crawl_chunks || 0;
             lastEl.textContent = `🕐 Last: ${lastCrawl} (+${newChunks} new chunks)`;
+
+          // Crawl failure detail
+          const errEl = document.getElementById(`crawl-error-${st.name}`);
+          if (errEl) {
+            const e = st.last_crawl_error || '';
+            if (e) { errEl.style.display = 'block'; errEl.textContent = String(e).slice(0,300); }
+            else { errEl.style.display = 'none'; errEl.textContent = ''; }
+          }
+          const raEl = document.getElementById(`crawl-retry-${st.name}`);
+          if (raEl) {
+            const ra = st.last_crawl_retry_after || '';
+            if (ra) { raEl.style.display = 'block'; raEl.textContent = 'Retry after: ' + new Date(ra).toLocaleString(); }
+            else { raEl.style.display = 'none'; raEl.textContent = ''; }
+          }
           }
           // is_crawling: update badge + show/hide cancel button
           const nextEl = document.getElementById(`next-crawl-${st.name}`);
