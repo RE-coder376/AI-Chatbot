@@ -4181,8 +4181,10 @@ async def chat(request: Request):
                                                          tenant_db=tenant_db_instance, db_name=tenant_db_name):
                     yield chunk
             except Exception as _se:
+                import traceback as _tb
+                _err_detail = f"{type(_se).__name__}: {str(_se)[:120]}"
                 logger.error(f"chat_stream_generator crashed: {_se}", exc_info=True)
-                yield f"data: {json.dumps({'type':'chunk','content':'I ran into an issue. Please try again in a moment.'})}\n\n"
+                yield f"data: {json.dumps({'type':'chunk','content':f'Error: {_err_detail}'})}\n\n"
                 yield f"data: {json.dumps({'type':'metadata','capture_lead':False,'sources':[]})}\n\n"
                 yield "data: {\"type\": \"done\"}\n\n"
         return StreamingResponse(
