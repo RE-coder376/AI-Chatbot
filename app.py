@@ -52,6 +52,33 @@ logging.basicConfig(level=logging.INFO, format="[SERVER] %(message)s")
 logger = logging.getLogger(__name__)
 load_dotenv()
 
+# Throttled logging (to prevent spam from repeated external failures, e.g. DNS).
+_log_throttle: dict = {}  # key -> {"last": float, "suppressed": int}
+
+def _log_throttled(key: str, level: str, message: str, interval_s: int = 300) -> None:
+    """Log at most once per interval_s per key; count suppressed repeats."""
+    try:
+        now_t = time.time()
+        st = _log_throttle.get(key) or {"last": 0.0, "suppressed": 0}
+        if (now_t - float(st.get("last") or 0.0)) >= interval_s:
+            sup = int(st.get("suppressed") or 0)
+            msg = message + (f" (suppressed {sup} repeats)" if sup else "")
+            if level == "warning":
+                logger.warning(msg)
+            elif level == "error":
+                logger.error(msg)
+            else:
+                logger.info(msg)
+            _log_throttle[key] = {"last": now_t, "suppressed": 0}
+        else:
+            st["suppressed"] = int(st.get("suppressed") or 0) + 1
+            _log_throttle[key] = st
+    except Exception:
+        try:
+            logger.info(message)
+        except Exception:
+            pass
+
 # Configuration
 from services.config import (
     KEYS_FILE,
@@ -280,9 +307,11 @@ def _mark_crawl_failure(db_name: str, error_message: str):
             "last_crawl_retry_after": retry_dt.isoformat(),
         })
         sidecar.write_text(json.dumps(data, indent=2), encoding="utf-8")
-        logger.warning(
-            f"[CRAWL-STATUS] '{db_name}' marked failed (attempt {fail_count}); "
-            f"cooldown until {retry_dt.isoformat()}"
+        _log_throttled(
+            f"crawl_fail:{db_name}",
+            "warning",
+            f"[CRAWL-STATUS] '{db_name}' marked failed (attempt {fail_count}); cooldown until {retry_dt.isoformat()}",
+            interval_s=300,
         )
     except Exception as e:
         logger.warning(f"[CRAWL-STATUS] Could not mark crawl failure for {db_name}: {e}")
@@ -347,6 +376,7 @@ _crawling_dbs: set = set()   # DBs currently mid-crawl
 _crawl_cancel_events: dict = {}  # db_name -> asyncio.Event; set by /admin/crawl/cancel
 _crawl_start_times: dict = {}  # db_name -> time.time() when crawl started
 _auto_crawl_sem: asyncio.Semaphore | None = None  # initialized in lifespan; 1 auto-crawl at a time
+_scheduler_last_tick_ts: float = 0.0
 _queued_crawls: set = set()  # DBs that have been scheduled but not yet started (waiting for sem)
 _manual_crawl_active: str = ""  # db_name of the currently running manual crawl, if any
 
@@ -1157,6 +1187,8 @@ async def _auto_scheduler():
     await asyncio.sleep(60)  # Extended warm-up to ensure API is ready first
     while True:
         try:
+            global _scheduler_last_tick_ts
+            _scheduler_last_tick_ts = time.time()
             if _github_sync_result.get("status") == "running":
                 await asyncio.sleep(60)
                 continue
@@ -1197,7 +1229,7 @@ async def _auto_scheduler():
                         except Exception:
                             _sc = {}
                         if _manual_crawl_active:
-                            logger.info(f"[SCHEDULER] Postponing auto-crawl for '{db_name}' while manual crawl '{_manual_crawl_active}' is running")
+                            _log_throttled(f"scheduler_postpone:{db_name}", "info", f"[SCHEDULER] Postponing auto-crawl for '{db_name}' while manual crawl '{_manual_crawl_active}' is running", interval_s=300)
                             continue
                         if _is_auto_crawl_blocked(now, _sc):
                             continue
@@ -1370,6 +1402,28 @@ def _init_crawl_timestamps():
             except Exception as e:
                 logger.warning(f"[STARTUP] Could not reset timestamp for {db_dir.name}: {e}")
 
+async def _selfcheck_loop(interval_s: int = 300) -> None:
+    """Periodic runtime self-check (Option B). Logs warnings, does not crash the server."""
+    await asyncio.sleep(30)  # let startup settle
+    while True:
+        try:
+            if _scheduler_last_tick_ts:
+                age = int(time.time() - _scheduler_last_tick_ts)
+                if age > (interval_s * 3):
+                    _log_throttled("selfcheck:scheduler_stall", "warning", f"[SELFCHECK] Scheduler last tick {age}s ago", interval_s=600)
+            if _manual_crawl_active:
+                st = _crawl_start_times.get(_manual_crawl_active, 0)
+                if st:
+                    elapsed = int(time.time() - st)
+                    if elapsed > 1800:
+                        _log_throttled(f"selfcheck:manual_long:{_manual_crawl_active}", "warning", f"[SELFCHECK] Manual crawl '{_manual_crawl_active}' running {elapsed}s", interval_s=600)
+            if isinstance(_github_sync_result, dict) and _github_sync_result.get("status") == "failed":
+                detail = str(_github_sync_result.get("detail") or "")[:200]
+                _log_throttled("selfcheck:github_sync_failed", "warning", f"[SELFCHECK] github_sync failed: {detail}", interval_s=1800)
+        except Exception as e:
+            _log_throttled("selfcheck:loop_error", "warning", f"[SELFCHECK] loop error: {e}", interval_s=600)
+        await asyncio.sleep(interval_s)
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global _auto_crawl_sem
@@ -1384,6 +1438,7 @@ async def lifespan(app: FastAPI):
     asyncio.create_task(asyncio.to_thread(init_systems))
     asyncio.create_task(asyncio.to_thread(_cleanup_old_data))
     asyncio.create_task(_auto_scheduler())
+    asyncio.create_task(_selfcheck_loop())
     asyncio.create_task(_prewarm_bm25())
     asyncio.create_task(_prewarm_intro_questions())
     yield
