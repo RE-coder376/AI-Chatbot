@@ -80,6 +80,13 @@ from services.auth import (
 from services.safety import (
     _STRUCTURAL_URL_RE,
     _STRUCTURAL_TEXT_RE,
+    _CONTAMINATION_HINTS_RE,
+    _GENERIC_SECTION_SPLIT_RE,
+    _POLICY_URL_RE,
+    _POLICY_TEXT_RE,
+    _CATEGORY_URL_RE,
+    _ARTICLE_URL_RE,
+    _BOILERPLATE_SIGNAL_RE,
     _clean_text,
     _canonical_product_title,
     _dedupe_repeated_lines,
