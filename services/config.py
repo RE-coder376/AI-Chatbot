@@ -18,6 +18,7 @@ logger = logging.getLogger(__name__)
 DATABASES_DIR = Path("databases")
 CONFIG_FILE = Path("config.json")
 ACTIVE_DB_FILE = Path("active_db.txt")
+KEYS_FILE = Path("keys.json")
 DB_SECRETS_FILE = "secrets.json"
 DB_SECRET_KEYS = {"admin_password", "smtp_password", "sendgrid_keys", "widget_key", "api_sources"}
 
