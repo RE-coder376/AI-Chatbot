@@ -5533,12 +5533,43 @@ async def set_crawl_schedule(request: Request, data: dict = None):
     if db_cfg_file.exists():
         try: existing = json.loads(db_cfg_file.read_text(encoding="utf-8-sig"))
         except: pass
+    old_enabled = bool(existing.get("auto_crawl_enabled", False))
+    try:
+        old_interval_m = float(existing.get("crawl_interval_minutes", 60) or 60)
+    except Exception:
+        old_interval_m = 60.0
+    old_url = str(existing.get("crawl_url", "") or "")
     existing.update({
         "auto_crawl_enabled": bool(data.get("enabled", False)),
         "crawl_interval_minutes": float(data.get("interval_minutes", 60)),
         "crawl_url": data.get("crawl_url", existing.get("crawl_url", "")),
     })
+    new_enabled = bool(existing.get("auto_crawl_enabled", False))
+    try:
+        new_interval_m = float(existing.get("crawl_interval_minutes", 60) or 60)
+    except Exception:
+        new_interval_m = 60.0
+    new_url = str(existing.get("crawl_url", "") or "")
+    schedule_changed = (old_enabled != new_enabled) or (abs(old_interval_m - new_interval_m) > 1e-9) or (old_url != new_url)
     _atomic_write_json(db_cfg_file, existing)
+    # If the schedule was changed, reset the next-run baseline to now so the countdown
+    # reflects the chosen interval rather than firing immediately due to stale timestamps.
+    try:
+        if schedule_changed and new_enabled:
+            sidecar = DATABASES_DIR / db_name / "_crawl_times.json"
+            try:
+                sc = json.loads(sidecar.read_text(encoding="utf-8")) if sidecar.exists() else {}
+            except Exception:
+                sc = {}
+            now_iso = datetime.now(timezone.utc).astimezone(timezone(timedelta(hours=5))).isoformat()
+            sc["last_crawl_time"] = now_iso
+            sc["last_crawl_completed"] = now_iso
+            sidecar.write_text(json.dumps(sc, indent=2), encoding="utf-8")
+            logger.info(f"[SCHEDULE] Auto-crawl baseline reset for '{db_name}'")
+    except Exception as _e:
+        logger.warning(f"[SCHEDULE] Could not reset crawl baseline for {db_name}: {_e}")
+
+
     threading.Thread(target=_github_sync_upload, args=(db_name,), daemon=True).start()
     return {"success": True, "message": f"Schedule saved for '{db_name}'"}
 
