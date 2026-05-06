@@ -70,6 +70,7 @@ def _get_or_create_db(db_name: str):
 def _get_db_instance(db_name: str):
     """Return a Chroma instance for any DB (not just active). Cached per db_name."""
     import app as _app
+    from langchain_chroma import Chroma
     if db_name in _db_instance_cache:
         return _db_instance_cache[db_name]
     db_path = DATABASES_DIR / db_name
