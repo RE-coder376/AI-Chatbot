@@ -2466,6 +2466,19 @@ def _deterministic_learning_goals_answer(q: str, kb_context: str) -> str | None:
         snippet = re.sub(r"[\t\r]+", ' ', snippet)
         snippet = re.sub(r"\n{3,}", '\n\n', snippet)
 
+        def _reject_extractive_noise(ans: str, qq: str) -> bool:
+            # Guardrail: avoid returning site index / navigation link dumps as 'learning outcomes'.
+            if not ans:
+                return True
+            if (ans.count('http://') + ans.count('https://')) >= 3:
+                return True
+            # Require at least one non-trivial keyword from the question to appear in the extracted answer.
+            ql = (qq or '').lower()
+            kws = [w for w in re.findall(r'[a-zA-Z]{4,}', ql) if w not in {'what','will','learn','goals','goal','end','chapter','part','according','book','from','this','that','with','have','able','about'}]
+            if kws and not any(k in ans.lower() for k in kws[:8]):
+                return True
+            return False
+
         # Normalize to bullets
         if '\n' in snippet:
             out_lines = []
@@ -2478,14 +2491,23 @@ def _deterministic_learning_goals_answer(q: str, kb_context: str) -> str | None:
                     continue
                 out_lines.append('- ' + ln)
             if len(out_lines) >= 2:
-                return '\n'.join(out_lines[:18])
+                ans = '\n'.join(out_lines[:18])
+                if _reject_extractive_noise(ans, q):
+                    return None
+                return ans
 
         parts = re.split(r"(?=\b(?:Understand|Learn|Build|Ship|Use|Integrate|Deliver|Identify|Structure|Apply|Verify|Run|Retrofit|Install|Design|Validate)\b)", snippet)
         parts = [p.strip(' :;-\n') for p in parts if p.strip()]
         if len(parts) >= 2:
-            return '\n'.join(['- ' + p for p in parts[:18]])
+            ans = '\n'.join(['- ' + p for p in parts[:18]])
+            if _reject_extractive_noise(ans, q):
+                return None
+            return ans
 
-        return '- ' + snippet.strip()
+        ans = '- ' + snippet.strip()
+        if _reject_extractive_noise(ans, q):
+            return None
+        return ans
     except Exception:
         return None
 
