@@ -25,6 +25,85 @@ from services.crawler_utils import (
 
 logger = logging.getLogger(__name__)
 
+
+# Heuristic reranker (universal): improves reliability for chapter/part/title questions across DBs.
+# Used only when DB is not a product catalog (product DBs use different ranking rules).
+_NAV_HINTS = (
+    'on this page', 'copy as markdown', 'site index', '#site-index', '#site-navigation',
+    'ctrl+', 'toggle theme', 'skip to main content'
+)
+
+
+def _extract_title_phrase(q: str) -> str:
+    try:
+        m = re.search(r"\b(?:chapter|part|section|lesson|unit)\s*\d+\s*[:\-]\s*([^\n]{6,200})", q or '', re.I)
+        if m:
+            return m.group(1).strip().strip('"\'')
+    except Exception:
+        pass
+    return ''
+
+
+def _meaningful_keywords(q: str) -> list[str]:
+    ql = (q or '').lower()
+    # Keep longer tokens; drop generic question glue.
+    stop = {
+        'what','which','who','when','where','why','how','the','a','an','and','or','to','of','in','on','for','with','by','from',
+        'according','book','chapter','part','section','lesson','unit','end','able','learn','goals','objective','objectives','outcomes'
+    }
+    words = [w for w in re.findall(r"[a-zA-Z]{4,}", ql) if w not in stop]
+    # Prefer longer/more specific words.
+    words = sorted(set(words), key=len, reverse=True)
+    return words[:10]
+
+
+def _heuristic_rerank_score(doc, q: str, title_phrase: str) -> float:
+    try:
+        meta = (getattr(doc, 'metadata', None) or {})
+        src = str(meta.get('source') or '')
+        body = str(getattr(doc, 'page_content', '') or '')
+        sl = src.lower()
+        bl = body.lower()
+
+        score = 0.0
+
+        # Penalize navigation / index heavy chunks.
+        if any(h in sl for h in ('#site-index', '#site-navigation')):
+            score -= 8.0
+        if any(h in bl for h in _NAV_HINTS):
+            score -= 4.0
+        if (bl.count('http://') + bl.count('https://')) >= 3:
+            score -= 6.0
+
+        # Reward keyword overlap.
+        kws = _meaningful_keywords(q)
+        hit = sum(1 for k in kws if k in bl)
+        score += hit * 2.0
+        url_hit = sum(1 for k in kws[:6] if k in sl)
+        score += url_hit * 1.5
+
+        # If a title phrase exists, prioritize docs that contain it.
+        if title_phrase:
+            tpl = title_phrase.lower()
+            if tpl in bl:
+                score += 10.0
+            else:
+                # Partial token overlap with title phrase.
+                tks = [w for w in re.findall(r"[a-zA-Z]{4,}", tpl)][:8]
+                t_hit = sum(1 for t in tks if t in bl)
+                score += t_hit * 2.5
+                t_url_hit = sum(1 for t in tks[:6] if t in sl)
+                score += t_url_hit * 1.0
+
+        # Mild reward for outcome-like language when user asks goals/learn.
+        if re.search(r"\b(goals?|learn|objective[s]?|outcomes?|able to|by the end)\b", (q or ''), re.I):
+            if re.search(r"\b(you will|able to|by the end|objectives|learning outcomes)\b", body, re.I):
+                score += 3.0
+
+        return score
+    except Exception:
+        return 0.0
+
 _api_resp_cache: dict = {}      # url → (text, expiry) — Jikan response cache (10 min TTL)
 
 _entity_cache: dict = {}        # question_lower → extracted entity string (LRU, max 500)
@@ -620,6 +699,12 @@ async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansio
                     continue
             _comb_seen.add(_k)
             _combined_before_cap.append(_r)
+    
+
+    # Heuristic rerank for non-product DBs: improves chapter/part/title lookup accuracy.
+    if not _has_product_meta and _combined_before_cap:
+        _title_phrase = _extract_title_phrase(q)
+        _combined_before_cap.sort(key=lambda d: _heuristic_rerank_score(d, q, _title_phrase), reverse=True)
     if _has_product_meta and (_required_flags or _ram_min_req is not None or _max_price is not None):
         _post_filtered = []
         for r in _combined_before_cap:
