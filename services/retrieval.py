@@ -119,7 +119,7 @@ def _retrieval_visible_doc(doc) -> bool:
     try:
         if (
             meta.get("quality_score") is not None
-            and meta.get("page_type", "unknown") in {"product", "unknown"}
+            and meta.get("page_type", "unknown") in {"product"}
             and float(meta.get("quality_score") or 0.0) < 0.5
         ):
             return False
