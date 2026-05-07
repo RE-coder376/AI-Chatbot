@@ -480,7 +480,7 @@ async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansio
             k = max(k, 60)
             logger.info(f"[META-FILTER] {_combined_filter}")
 
-    policy_results: list = []; _bm25_raw: list = []; rescue_results: list = []; _vector_raw: list = []
+    policy_results: list = []
     if not _skip_chromadb and db is not None:
         loop = asyncio.get_running_loop()
         # Run vector searches + BM25 ALL IN PARALLEL
@@ -558,9 +558,19 @@ async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansio
         _bm25_result = _main_results[_bm25_idx] if len(_main_results) > _bm25_idx else []
         _bm25_raw = [] if isinstance(_bm25_result, Exception) else _bm25_result
         _vector_raw = []
+        _vector_exc_count = 0
+        _vector_exc_sample = None
         for _vi, _vr in enumerate(_main_results):
-            if _vi != _bm25_idx and not isinstance(_vr, Exception):
-                _vector_raw.extend(_vr)
+            if _vi == _bm25_idx:
+                continue
+            if isinstance(_vr, Exception):
+                _vector_exc_count += 1
+                if _vector_exc_sample is None:
+                    _vector_exc_sample = _vr
+                continue
+            _vector_raw.extend(_vr)
+        if _vector_exc_count:
+            logger.error(f"Vector retrieval error(s): {_vector_exc_count} task(s) failed; sample={type(_vector_exc_sample).__name__}: {_vector_exc_sample}")
         if isinstance(_bm25_result, Exception):
             logger.error(f"BM25 retrieval error: {_bm25_result}")
 
