@@ -1531,6 +1531,11 @@ def health():
         providers = list({k.get("provider") for k in keys_data if k.get("status") == "active"})
     except Exception as ke:
         active_keys = -1; providers = [str(ke)]
+
+    # HF Spaces exposes commit id in env vars; include it so we can verify deployments.
+    sha = (os.getenv('SPACE_REPO_SHA') or os.getenv('HF_SPACE_REPO_SHA') or os.getenv('GIT_SHA') or '')
+    space_id = (os.getenv('SPACE_ID') or os.getenv('HF_SPACE_ID') or '')
+
     return {
         "status": "ok" if _status in ("ready", "ready_no_db") else _status,
         "active_db": active,
@@ -1540,6 +1545,8 @@ def health():
         "providers": providers,
         "any_key_ready": any_key_ready(),
         "github_sync": _github_sync_result,
+        "git_sha": sha,
+        "space_id": space_id,
     }
 
 
