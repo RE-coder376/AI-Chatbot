@@ -25,6 +25,9 @@ from services.crawler_utils import (
 
 logger = logging.getLogger(__name__)
 
+# Outcomes/learning intent (universal)
+_OUTCOMES_INTENT_RE = re.compile(r"\b(what\s+will\s+i\s+learn|what\s+will\s+we\s+learn|learning\s+outcomes?|objectives?|goals?|by\s+the\s+end|you\s+will\s+be\s+able\s+to)\b", re.I)
+
 
 # Heuristic reranker (universal): improves reliability for chapter/part/title questions across DBs.
 # Used only when DB is not a product catalog (product DBs use different ranking rules).
@@ -95,10 +98,10 @@ def _heuristic_rerank_score(doc, q: str, title_phrase: str) -> float:
                 t_url_hit = sum(1 for t in tks[:6] if t in sl)
                 score += t_url_hit * 1.0
 
-        # Mild reward for outcome-like language when user asks goals/learn.
-        if re.search(r"\b(goals?|learn|objective[s]?|outcomes?|able to|by the end)\b", (q or ''), re.I):
-            if re.search(r"\b(you will|able to|by the end|objectives|learning outcomes)\b", body, re.I):
-                score += 3.0
+        # Reward outcome-marker docs when the question is asking for goals/learning/outcomes.
+        if _OUTCOMES_INTENT_RE.search(q or ''):
+            if re.search(r"\b(by the end|you will be able to|learning outcomes|objectives|goals)\b", body, re.I):
+                score += 6.0
 
         return score
     except Exception:
@@ -420,6 +423,26 @@ async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansio
     # 1. Start with hardcoded concept expansion (fast)
     search_queries = expand_query(q)
 
+    _title_phrase = _extract_title_phrase(q)
+    _is_outcomes_intent = bool(_OUTCOMES_INTENT_RE.search(q))
+    if _title_phrase and all(_title_phrase.lower() != str(sq).lower() for sq in search_queries):
+        search_queries.insert(0, _title_phrase)
+
+    # Outcomes-marker-first retrieval: add explicit markers as query variants so we pull the actual
+    # learning outcomes list instead of generic book/TOC pages.
+    if _is_outcomes_intent:
+        for _mq in (
+            (_title_phrase + ' by the end of this chapter you will be able to') if _title_phrase else 'by the end of this chapter you will be able to',
+            (_title_phrase + ' learning outcomes') if _title_phrase else 'learning outcomes',
+            (_title_phrase + ' objectives') if _title_phrase else 'objectives',
+            (_title_phrase + ' goals') if _title_phrase else 'goals',
+        ):
+            if _mq and all(_mq.lower() != str(sq).lower() for sq in search_queries):
+                search_queries.append(_mq)
+
+    # Cap variants to keep latency bounded
+    search_queries = search_queries[:6]
+
     # Extra query signal: if the user asks about 'Chapter N: Title' or 'Part N: Title',
     # add the title portion as an additional retrieval query. This dramatically improves
     # retrieval for book/curriculum KBs where 'chapter/part' is too generic.
@@ -705,6 +728,15 @@ async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansio
     if not _has_product_meta and _combined_before_cap:
         _title_phrase = _extract_title_phrase(q)
         _combined_before_cap.sort(key=lambda d: _heuristic_rerank_score(d, q, _title_phrase), reverse=True)
+        # outcomes-marker bubble: if user asks learning outcomes/goals, put the explicit outcomes chunks first.
+        if _is_outcomes_intent:
+            def _has_outcome_marker(d):
+                try:
+                    b = str(getattr(d,'page_content','') or '').lower()
+                    return ('you will be able to' in b) or ('by the end' in b) or ('learning outcomes' in b) or ('objectives' in b)
+                except Exception:
+                    return False
+            _combined_before_cap.sort(key=lambda d: (1 if _has_outcome_marker(d) else 0, _heuristic_rerank_score(d, q, _title_phrase)), reverse=True)
         # title_phrase filter: if query names a specific Chapter/Part title, prefer docs that actually mention it.
         if _title_phrase:
             _tpl = _title_phrase.lower()
