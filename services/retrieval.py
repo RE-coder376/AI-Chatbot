@@ -539,6 +539,36 @@ async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansio
             for r in _keyword_rescue(rescue_q, db, rescue_seen):
                 rescue_results.append(r)
 
+    # Outcomes rescue (universal): when user asks learning outcomes/goals, directly pull chunks likely to
+    # contain outcomes lists and then filter by the title phrase tokens in URL/body.
+    if _is_outcomes_intent and db is not None:
+        try:
+            from langchain_core.documents import Document
+            _tpl = (_title_phrase or '').lower()
+            _tks = [w for w in re.findall(r'[a-zA-Z]{4,}', _tpl)][:8]
+            # Broad net first ("you will" is common), then we filter hard by title tokens.
+            # This avoids DB-specific hardcoding while still reliably surfacing outcome bullets.
+            raw = db._collection.get(where_document={"$contains": "you will"}, limit=250)
+            for doc_text, meta in zip(raw.get('documents', []), raw.get('metadatas', [])):
+                if not doc_text:
+                    continue
+                src = str((meta or {}).get('source') or '').lower()
+                body = str(doc_text).lower()
+                # Only keep chunks that look like an outcomes list.
+                if not re.search(r"(?i)\b(by (the end of|completing|after completing|upon completing)\b|you will be able to\b|you will\s*:)", doc_text):
+                    continue
+                if _tks:
+                    # Require at least 2 title tokens in either URL or body
+                    hit = sum(1 for t in _tks if (t in src) or (t in body))
+                    if hit < 2:
+                        continue
+                key = doc_text[:100]
+                if key not in rescue_seen:
+                    rescue_seen.add(key)
+                    rescue_results.append(Document(page_content=doc_text, metadata=meta or {}))
+        except Exception:
+            pass
+
     # Fire entity extraction in parallel with ChromaDB search — zero net latency
     # Skip if fast-path (keyword-matched Jikan) — avoids wasted LLM TCP connection
     if _skip_chromadb:

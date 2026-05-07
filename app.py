@@ -2457,7 +2457,28 @@ def _deterministic_learning_goals_answer(q: str, kb_context: str) -> str | None:
             return False
 
         # Prefer explicit headings/markers if present.
-        m = _LEARNING_GOALS_MARKER_RE.search(ctx)
+        # Choose the best marker occurrence (not just the first): score by overlap with query keywords.
+        _mkws = [w for w in re.findall(r'[a-zA-Z]{4,}', (q or '').lower()) if w not in {'what','will','learn','goals','goal','end','chapter','part','according','book','from','this','that','with','have','able','about','the','you','your'}]
+        best_m = None
+        for _m in _LEARNING_GOALS_MARKER_RE.finditer(ctx):
+            try:
+                _win = ctx[_m.start(): min(len(ctx), _m.start()+500)]
+                _wl = _win.lower()
+                _hit = sum(1 for k in _mkws[:10] if k in _wl)
+                # Prefer 'By the end/able to' style outcomes lists over generic 'What you'll learn'.
+                _bonus = 0
+                _mt = ctx[_m.start():_m.end()].lower()
+                _local = ctx[_m.start(): min(len(ctx), _m.start()+300)].lower()
+                if 'you will be able to' in _local or 'by the end' in _local:
+                    _bonus += 4
+                if 'what you' in _mt:
+                    _bonus -= 1
+                _score = _hit + _bonus
+                if (best_m is None) or (_score > best_m[0]):
+                    best_m = (_score, _m)
+            except Exception:
+                continue
+        m = best_m[1] if best_m else None
         if m:
             tail = ctx[m.end():]
             stop = re.search(r"\n\s*(Chapter\b|Chapter\s+Progression\b|##\s+|#\s+|---|\Z)", tail)
@@ -2491,7 +2512,8 @@ def _deterministic_learning_goals_answer(q: str, kb_context: str) -> str | None:
         kws = [w for w in re.findall(r'[a-zA-Z]{4,}', ql2) if w not in {'what','will','learn','goals','goal','end','chapter','part','according','book','from','this','that','with','have','able','about','the'}]
         if kws:
             hit = sum(1 for k in kws[:8] if k in snippet.lower())
-            if hit < 2:
+            strong_outcomes = bool(re.search(r"\b(you will be able to|identify|apply|build|verify|retrofit|validate)\b", snippet, re.I))
+            if (not strong_outcomes) and hit < 2:
                 return None
         if not snippet:
             return None
