@@ -1116,8 +1116,9 @@ async def _auto_crawl_db(db_name: str, url: str, max_pages: int = 0) -> int:
                     except Exception as _del_e:
                         logger.debug(f"[AUTO-CRAWL] Could not delete old chunks for {page_url}: {_del_e}")
                     text, page_meta = _prepare_crawl_page(text, page_url)
-                    _pending_docs.extend(_smart_chunk_page(text, page_url, page_meta=page_meta))
-                    added += 1
+                    _new_docs = _smart_chunk_page(text, page_url, page_meta=page_meta)
+                    _pending_docs.extend(_new_docs)
+                    added += len(_new_docs)
                     # Batch write every 100 docs — prevents unbounded RAM + avoids single huge write at end
                     if len(_pending_docs) >= 100:
                         try:
@@ -1131,7 +1132,7 @@ async def _auto_crawl_db(db_name: str, url: str, max_pages: int = 0) -> int:
             except Exception as e: logger.warning(f"[AUTO-CRAWL] Page error {page_url}: {e}")
         await _hx_client.aclose()
         _total_elapsed = int(time.time() - _crawl_start)
-        logger.info(f"[AUTO-CRAWL] '{db_name}' finished: {_page_idx}/{_total_pages} pages, {added} indexed, {_skipped} skipped, {_total_elapsed}s total")
+        logger.info(f"[AUTO-CRAWL] '{db_name}' finished: {_page_idx}/{_total_pages} pages, {added} docs, {_skipped} skipped, {_total_elapsed}s total")
 
         # Final batch write for remaining docs
         if _pending_docs:
