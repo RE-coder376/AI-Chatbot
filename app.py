@@ -2410,9 +2410,19 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
 
 
 # Learning/goals extractor: when the KB contains an explicit outcomes list, prefer a deterministic answer.
-_LEARNING_GOALS_Q_RE = re.compile(r"\b(what\s+will\s+i\s+learn|what\s+will\s+we\s+learn|what\s+are\s+the\s+goals|goals\s+of|learning\s+outcomes|by\s+the\s+end\s+of\s+(?:this\s+)?chapter|what\s+will\s+i\s+be\s+able\s+to)\b", re.I)
+# Learning/goals extractor: when the KB contains an explicit outcomes list, prefer a deterministic answer.
+_LEARNING_GOALS_Q_RE = re.compile(r"\b(goals?|objective[s]?|learning\s+outcomes?|outcomes?|what\s+will\s+i\s+learn|what\s+will\s+we\s+learn|what\s+you\'?ll\s+learn|by\s+the\s+end|able\s+to|you\s+will\s+learn)\b", re.I)
 _LEARNING_GOALS_MARKER_RE = re.compile(
-    r"(By\s+completing[^\n]{0,160}?,\s+you\s+will\s*:|By\s+the\s+end\s+of\s+this\s+chapter,\s+you\s+will\s+be\s+able\s+to\s*:|By\s+the\s+end\s+of\s+this\s+chapter,\s+you\s+will\s*:)",
+    r"("
+    r"By\s+completing[^\n]{0,180}?:"
+    r"|By\s+the\s+end[^\n]{0,180}?:"
+    r"|What\s+you\'?ll\s+learn"
+    r"|What\s+you\s+will\s+learn"
+    r"|Learning\s+outcomes?"
+    r"|Objectives?"
+    r"|Goals?"
+    r")"
+    r"\s*(?::|\n)",
     re.I,
 )
 
@@ -2420,262 +2430,67 @@ def _deterministic_learning_goals_answer(q: str, kb_context: str) -> str | None:
     try:
         if not q or not kb_context:
             return None
-        if not _LEARNING_GOALS_Q_RE.search(q):
+        ql = q.lower()
+        # Only trigger for questions that are clearly asking for goals/learning/objectives.
+        if not _LEARNING_GOALS_Q_RE.search(ql):
             return None
-        m = _LEARNING_GOALS_MARKER_RE.search(kb_context)
-        if not m:
-            return None
-        tail = kb_context[m.end():]
-        # Stop at the next obvious heading/section boundary.
-        stop = re.search(r"\n\s*(Chapter\b|Chapter\s+Progression\b|##\s+|#\s+|---|\Z)", tail)
-        snippet = tail[: stop.start()] if stop else tail
-        snippet = snippet.strip()
+
+        ctx = kb_context
+
+        # 1) Prefer explicit section markers/headings.
+        m = _LEARNING_GOALS_MARKER_RE.search(ctx)
+        if m:
+            tail = ctx[m.end():]
+            stop = re.search(r"\n\s*(Chapter\b|Chapter\s+Progression\b|##\s+|#\s+|---|\Z)", tail)
+            snippet = tail[: stop.start()] if stop else tail
+        else:
+            # 2) Fallback: find the densest short window of imperative/list-like lines.
+            lines2 = [ln.strip() for ln in ctx.split("\n")]
+            best = None
+            for i2 in range(0, max(1, len(lines2) - 1), 5):
+                win = lines2[i2:i2+25]
+                wtxt = "\n".join([ln for ln in win if ln])
+                if len(wtxt) < 200:
+                    continue
+                bullet = len([ln for ln in win if re.match(r"^\s*([-?]|\d+\.|\*)\s+", ln)])
+                imp = len(re.findall(r"\b(Identify|Structure|Apply|Build|Verify|Run|Retrofit|Install|Design|Validate|Understand|Learn|Ship|Use|Integrate|Deliver)\b", wtxt, re.I))
+                score = bullet * 3 + imp
+                if score >= 6 and (best is None or score > best[0]):
+                    best = (score, wtxt)
+            if best:
+                snippet = best[1]
+            else:
+                return None
+
+        snippet = (snippet or "").strip()
         if not snippet:
             return None
-        # Cap to avoid dumping huge context.
-        snippet = snippet[:1600]
-        # Normalize whitespace.
+
+        snippet = snippet[:2000]
         snippet = re.sub(r"[\t\r]+", " ", snippet)
         snippet = re.sub(r"\n{3,}", "\n\n", snippet)
-        snippet = re.sub(r" +", " ", snippet).strip()
 
-        # If it's already bulleted/line-based, keep it mostly as-is.
         if "\n" in snippet:
-            # Light bullet normalization.
-            lines = [ln.strip(" \t-?") for ln in snippet.split("\n") if ln.strip()]
-            if len(lines) >= 2:
-                return "\n".join(["- " + ln for ln in lines])
+            out_lines = []
+            for ln in snippet.split("\n"):
+                ln = ln.strip()
+                if not ln:
+                    continue
+                ln = re.sub(r"^\s*([-?]|\d+\.|\*)\s+", "", ln).strip()
+                if len(ln) < 3:
+                    continue
+                out_lines.append("- " + ln)
+            if len(out_lines) >= 2:
+                return "\n".join(out_lines[:18])
 
-        # Otherwise, try to split into actionable bullet-like clauses.
         parts = re.split(r"(?=\b(?:Understand|Learn|Build|Ship|Use|Integrate|Deliver|Identify|Structure|Apply|Verify|Run|Retrofit|Install|Design|Validate)\b)", snippet)
         parts = [p.strip(" :;-\n") for p in parts if p.strip()]
         if len(parts) >= 2:
-            return "\n".join(["- " + p for p in parts])
+            return "\n".join(["- " + p for p in parts[:18]])
 
-        return "- " + snippet
+        return "- " + snippet.strip()
     except Exception:
         return None
-
-@app.post("/chat")
-async def chat(request: Request):
-    try:
-        data = await request.json()
-    except Exception:
-        return Response(content=json.dumps({"detail": "Invalid or missing JSON body"}), status_code=400, media_type="application/json")
-    if "question" not in data:
-        return Response(content=json.dumps({"detail": "Missing 'question' field"}), status_code=400, media_type="application/json")
-    q = data.get("question")
-    if not q or not str(q).strip():
-        return Response(content=json.dumps({"detail": "Question cannot be empty"}), status_code=400, media_type="application/json")
-    q = str(q).strip()
-    if len(q) > 2000:
-        return Response(content=json.dumps({"detail": "Message too long (max 2000 characters)"}), status_code=400, media_type="application/json")
-    visitor_id = str(data.get("visitor_id", "") or data.get("session_id", ""))[:64]
-    # Cap history message length to prevent LLM context bloat from malicious clients
-    hist = [
-        {**m, "content": str(m.get("content", ""))[:500]}
-        for m in (data.get("history", []) or [])[-10:]
-        if isinstance(m, dict) and m.get("role") in ("user", "assistant")
-    ]
-    stream = data.get("stream", True)
-    page_url   = str(data.get("page_url", ""))[:200]
-    page_title = str(data.get("page_title", ""))[:100]
-
-    # ── Multi-tenant routing — resolve DB from widget key ─────────────────────
-    widget_key = request.headers.get("X-Widget-Key", "").strip()
-    if widget_key in ("", "null", "undefined"):
-        widget_key = ""
-    if widget_key:
-        tenant_db_name = _get_db_for_widget_key(widget_key)
-        if not tenant_db_name:
-            return JSONResponse({"error": "Invalid widget key"}, status_code=401)
-        # If widget key resolves to the active DB, reuse pre-loaded global (avoid reloading BGE)
-        if tenant_db_name == _get_active_db() and local_db is not None:
-            tenant_db_instance = local_db
-        elif tenant_db_name in _db_instance_cache:
-            tenant_db_instance = _db_instance_cache[tenant_db_name]
-        else:
-            _db_instance_cache[tenant_db_name] = _get_db_instance(tenant_db_name)
-            tenant_db_instance = _db_instance_cache[tenant_db_name] or local_db
-    else:
-        # No widget key — use pre-loaded global to avoid blocking the event loop
-        tenant_db_name = _get_active_db()
-        tenant_db_instance = local_db
-    tenant_cfg = get_config(tenant_db_name)
-    asyncio.get_running_loop().run_in_executor(None, log_interaction, q, visitor_id, tenant_db_name)
-
-    if stream:
-        async def _safe_stream():
-            try:
-                async for chunk in chat_stream_generator(q, hist, visitor_id, page_url, page_title,
-                                                         request=request, cfg=tenant_cfg,
-                                                         tenant_db=tenant_db_instance, db_name=tenant_db_name):
-                    yield chunk
-            except Exception as _se:
-                logger.error(f"chat_stream_generator crashed: {_se}", exc_info=True)
-                yield f"data: {json.dumps({'type':'chunk','content':'I ran into an issue. Please try again in a moment.'})}\n\n"
-                yield f"data: {json.dumps({'type':'metadata','capture_lead':False,'sources':[]})}\n\n"
-                yield "data: {\"type\": \"done\"}\n\n"
-        return StreamingResponse(
-            _safe_stream(),
-            media_type="text/event-stream",
-            headers={"X-Accel-Buffering": "no", "Cache-Control": "no-cache"}
-        )
-    else:
-        # NON-STREAMING JSON MODE
-        cfg = tenant_cfg
-
-        # Warm-up check (mirror of streaming path line 2044)
-        if tenant_db_instance is None and _status not in ("ready_no_db",):
-            return JSONResponse({"answer": "I am still warming up — please try again in 1-2 minutes."})
-
-        # ── Pre-LLM guards (same as streaming path) ──────────────────────────
-        _bot  = cfg.get("bot_name", "Assistant")
-        _biz  = cfg.get("business_name", "the company")
-        _topics = cfg.get("topics", "our products and services")
-        user_lang = detect_language(q)
-
-        # Prompt injection
-        _PROMPT_RE_NS = re.compile(
-            r'(system prompt|your instructions|ignore previous|jailbreak|'
-            r'disregard|forget your|reveal your|print your|show your instructions)',
-            re.IGNORECASE
-        )
-        if _PROMPT_RE_NS.search(q):
-            return JSONResponse({"answer": f"I can't help with that. I'm {_bot}, here to assist with {_topics}."})
-
-        # Persona jailbreak
-        _PERSONA_RE_NS = re.compile(
-            r'(from now on|pretend (you are|to be)|act as|you are now|your name is|'
-            r'call yourself|rename yourself|change your name|forget you are|'
-            r'forget your name|ignore your|new name|i want you to be|roleplay as|'
-            r'play the role|be a different|be an? (ai|bot|assistant))',
-            re.IGNORECASE
-        )
-        if _PERSONA_RE_NS.search(q):
-            return JSONResponse({"answer": f"I'm {_bot}, the {_biz} assistant, and that's not something I can change!"})
-
-        # Translation
-        _TRANS_RE_NS = re.compile(
-            r'\btranslat\w*\b|\b(to|into)\b\s*(spanish|french|german|arabic|chinese|japanese|urdu|hindi|turkish|italian|portuguese)',
-            re.IGNORECASE
-        )
-        if _TRANS_RE_NS.search(q):
-            return JSONResponse({"answer": f"I specialize in {_topics} for {_biz} and can't help with translations."})
-
-        # Code generation
-        _CODE_RE_NS = re.compile(
-            r'\b(write|create|make|give me|show me|help me write|generate)\b.{0,30}'
-            r'\b(function|class|script|code|program|snippet|algorithm)\b|'
-            r'\b(python|javascript|java|c\+\+|typescript|html|css|sql)\b.{0,20}\b(code|script|program|example)\b',
-            re.IGNORECASE
-        )
-        if _CODE_RE_NS.search(q):
-            return JSONResponse({"answer": f"I specialize in {_topics} for {_biz} and can't help with coding tasks."})
-
-        # General OOS (math, trivia, weather, etc.)
-        _OOS_RE_NS = re.compile(
-            r'\b(solve|calculate|compute|evaluate|integrate|differentiate|simplify|factor|'
-            r'derivative of|integral of|what is \d|capital of|weather in|stock price|'
-            r'recipe for|how to cook|biryani|calories in|convert \d|square root|'
-            r'who won|world cup|football|cricket|current president|prime minister of|'
-            r'news about|latest news|definition of|wikipedia|synonym for|'
-            r'translate to|in spanish|in french|in german)\b',
-            re.IGNORECASE
-        )
-        _PRODUCT_Q_RE_NS = re.compile(r'\b(do you (sell|carry|have|offer)|is .* available)\b', re.IGNORECASE)
-        if _OOS_RE_NS.search(q) and not _PRODUCT_Q_RE_NS.search(q):
-            return JSONResponse({"answer": f"I specialize in {_topics} for {_biz}. For other topics, I'd suggest a general search engine."})
-
-        # Greeting (match streaming fast path)
-        intent_ns = classify_intent(q)
-        if intent_ns == "greeting":
-            is_urdu = user_lang in ("Urdu Script", "Roman Urdu")
-            bot_name = cfg.get("bot_name", "Assistant")
-            _biz2 = cfg.get("business_name", "")
-            topics2 = cfg.get("topics", "") or (_biz2 if _biz2 else "our products and services")
-            quick_opts = await _get_intro_questions(tenant_db_name or _get_active_db(), tenant_db_instance, cfg)
-            if is_urdu:
-                reply = f"Salam! Main {bot_name} hoon. Main aapki {topics2} ke baare mein madad kar sakta hoon. Kya jaanna chahte hain?"
-            else:
-                reply = f"Hello! I'm {bot_name}. I can help you with {topics2}. What would you like to know?"
-            return JSONResponse({"answer": reply, "sources": [], "options": quick_opts})
-
-        context, doc_count, sources = await retrieve_context(q, tenant_db_instance)
-
-        # Sparse KB guard — skip for api-only DBs so LLM can use training knowledge
-        _t_api_only = (not cfg.get("crawl_url", "")) and bool(cfg.get("api_sources"))
-        if not _t_api_only and not _context_addresses_query(context, q):
-            bot_name = cfg.get("bot_name", "AI Assistant")
-            topics   = cfg.get("topics", "our available content")
-            contact  = cfg.get("contact_email", "")
-            contact_str = f" or reach us at {contact}" if contact else ""
-            idk = (f"I don't have specific details about that in our current records. "
-                   f"Here's what I can help you with: {topics}.{contact_str}")
-            return JSONResponse({"answer": idk})
-
-        # ── Fast path: bypass LLM for structured Jikan responses ─────────────
-        _fast_resp = _fast_format_jikan(context, q)
-        if _fast_resp:
-            return JSONResponse({"answer": _fast_resp, "sources": sources[:3]})
-
-        # Cap context per provider to avoid payload limits
-        _prov2 = _peek_provider()
-        try:
-            _all_keys2 = json.loads(KEYS_FILE.read_text(encoding="utf-8")) if KEYS_FILE.exists() else []
-            _has_groq2 = any(k.get('provider') == 'groq' for k in _all_keys2 if k.get('status') == 'active')
-        except Exception:
-            _has_groq2 = False
-        if _prov2 == 'cerebras' and len(context) > _CEREBRAS_MAX_CONTEXT_CHARS:
-            context = context[:_CEREBRAS_MAX_CONTEXT_CHARS]
-        elif (_has_groq2 or _prov2 == 'groq') and len(context) > _GROQ_MAX_CONTEXT_CHARS:
-            context = context[:_GROQ_MAX_CONTEXT_CHARS]
-
-        sys_msg = get_system_prompt(cfg, context, doc_count, user_lang=user_lang,
-                                    is_product_db=_check_is_product_db(tenant_db_instance, tenant_db_name))
-        messages = [SystemMessage(content=sys_msg)]
-        for m in hist[-2:]:
-            if m.get('role') == 'user': messages.append(HumanMessage(content=m['content']))
-            elif m.get('role') == 'assistant': messages.append(AIMessage(content=m['content']))
-        messages.append(HumanMessage(content=q))
-
-        # Fast-fail if all keys are on cooldown
-        if not any_key_ready():
-            return JSONResponse({"answer": "I am unable to respond right now. Please try again in a moment."})
-
-        # Smart Key Recovery: Retry up to 10 times
-        max_retries = 10
-        for attempt in range(max_retries):
-            llm = get_fresh_llm()
-            if not llm: return JSONResponse({"answer": "No active API keys found."}, status_code=500)
-            try:
-                resp = await asyncio.wait_for(llm.ainvoke(messages), timeout=30)
-                return JSONResponse({"answer": _strip_source_leaks(resp.content, kb_context=context)})
-            except Exception as e:
-                err_str = str(e).lower()
-                logger.warning(f"LLM attempt {attempt+1} error type={type(e).__name__}: {str(e)[:200]}")
-                _should_rotate = True  # rotate on ALL provider errors by default
-                if any(p in err_str for p in ["invalid_api_key", "incorrect api key", "unauthorized", "401 "]):
-                    logger.error(f"Permanent key failure, marking and rotating: {str(e)[:100]}")
-                else:
-                    logger.warning(f"Provider error (rotating to next key): {str(e)[:100]}")
-                if _should_rotate:
-                    try:
-                        raw_key = getattr(llm, 'groq_api_key', None) or getattr(llm, 'openai_api_key', None) or getattr(llm, 'google_api_key', None)
-                        api_key = raw_key.get_secret_value() if hasattr(raw_key, 'get_secret_value') else str(raw_key)
-                        _mark_key_failed(api_key, str(e))
-                    except Exception as mark_err:
-                        logger.warning(f"_mark_key_failed error: {mark_err}")
-                    if not any_key_ready():
-                        return JSONResponse({"answer": "I am unable to respond right now. Please try again in a moment."})
-                    continue
-                logger.error(f"LLM Error (non-rotatable): {e}")
-                return JSONResponse({"answer": "I'm unable to respond right now. Please try again in a moment."}, status_code=200)
-        
-        return JSONResponse({"answer": "I'm unable to respond right now. Please try again in a moment."}, status_code=200)
-
-# --- FAQ HELPERS ---
-
 
 # Quote-first extractor (universal): try to return a short verbatim span when the KB already contains it.
 # Guardrails: requires multiple query keywords to co-occur inside a small window, and caps output length.
