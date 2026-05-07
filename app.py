@@ -2434,6 +2434,21 @@ def _deterministic_learning_goals_answer(q: str, kb_context: str) -> str | None:
 
         ctx = kb_context
 
+        def _is_toc_or_nav_text(s: str) -> bool:
+            sl = (s or '').lower()
+            # Strong nav/TOS/TOC indicators
+            bad = ["on this page", "copy as markdown", "ctrl+", "site index", "#site-index", "#site-navigation"]
+            if any(b in sl for b in bad):
+                return True
+            # Too many links is usually navigation, not learning outcomes
+            if (sl.count('http://') + sl.count('https://')) >= 3:
+                return True
+            # TOC-like: many 'Part X:' lines
+            part_lines = len(re.findall(r"(?im)^\s*part\s+\d+\b", s))
+            if part_lines >= 3:
+                return True
+            return False
+
         # Prefer explicit headings/markers if present.
         m = _LEARNING_GOALS_MARKER_RE.search(ctx)
         if m:
@@ -2451,7 +2466,8 @@ def _deterministic_learning_goals_answer(q: str, kb_context: str) -> str | None:
                     continue
                 bullet = len([ln for ln in win if re.match(r"^\s*([-?]|\d+\.|\*)\s+", ln)])
                 imp = len(re.findall(r"\b(Identify|Structure|Apply|Build|Verify|Run|Retrofit|Install|Design|Validate|Understand|Learn|Ship|Use|Integrate|Deliver)\b", wtxt, re.I))
-                score = bullet * 3 + imp
+                out = len(re.findall(r"\b(you\s+will|able\s+to|by\s+the\s+end)\b", wtxt, re.I))
+                score = bullet * 3 + imp + out * 4
                 if score >= 6 and (best is None or score > best[0]):
                     best = (score, wtxt)
             if not best:
@@ -2459,6 +2475,17 @@ def _deterministic_learning_goals_answer(q: str, kb_context: str) -> str | None:
             snippet = best[1]
 
         snippet = (snippet or '').strip()
+        # Reject obvious TOC/navigation extracts
+        if _is_toc_or_nav_text(snippet):
+            return None
+
+        # Require overlap with non-trivial query keywords (prevents generic list dumps)
+        ql2 = q.lower()
+        kws = [w for w in re.findall(r'[a-zA-Z]{4,}', ql2) if w not in {'what','will','learn','goals','goal','end','chapter','part','according','book','from','this','that','with','have','able','about','the'}]
+        if kws:
+            hit = sum(1 for k in kws[:8] if k in snippet.lower())
+            if hit < 2:
+                return None
         if not snippet:
             return None
 
@@ -2747,6 +2774,11 @@ def _deterministic_extractive_quote_answer(q: str, kb_context: str) -> str | Non
             return None
         ql = q.lower().strip()
         # Only run on ?factual lookup? style questions (avoid making conversation weird).
+
+        _qf_bad = ['on this page','copy as markdown','ctrl+','site index','#site-index','#site-navigation']
+        if any(b in kb_context.lower() for b in _qf_bad):
+            # Still allow quote-first, but later we reject extracted windows that look like nav.
+            pass
         if not re.search(r"\b(what|which|who|where|when|why|how|goals?|learn|able to|by the end|according)\b", ql):
             return None
 
@@ -2806,6 +2838,12 @@ def _deterministic_extractive_quote_answer(q: str, kb_context: str) -> str | Non
             return None
 
         # Return as a quote block style without markdown formatting (client renders plain text).
+        if (window.lower().count('http://') + window.lower().count('https://')) >= 3:
+            return None
+        if re.search(r'(?im)^\s*part\s+\d+\b', window) and len(re.findall(r'(?im)^\s*part\s+\d+\b', window))>=3:
+            return None
+        if any(b in window.lower() for b in ['on this page','copy as markdown','ctrl+']):
+            return None
         return window
     except Exception:
         return None
