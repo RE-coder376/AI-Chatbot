@@ -2329,6 +2329,17 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
                 _trace_decision(workflow_debug, 'learning_goals_validator_rewrite', True)
                 cleaned = _lg
 
+
+        # ? Quote-first fallback (guarded): if KB already contains a short verbatim answer span, prefer it.
+        # This is especially useful for chapter goals/learning outcomes, policies, definitions.
+        if context and not is_product_db:
+            _qf = _deterministic_extractive_quote_answer(q, context)
+            if _qf:
+                logger.info('[Validator] quote_first_extract ? overriding with verbatim KB span')
+                _trace_event(workflow_trace, 'validator_rewrite', reason='quote_first_extract')
+                _trace_decision(workflow_debug, 'quote_first_rewrite', True)
+                cleaned = _qf
+
         if visitor_id: _run_in_bg(save_visitor_turn, visitor_id, "assistant", cleaned, db_name)
         yield f"data: {json.dumps({'type': 'chunk', 'content': cleaned})}\n\n"
         # Suppress sources and log gap if LLM indicated it doesn't have the info.
@@ -2664,6 +2675,85 @@ async def chat(request: Request):
         return JSONResponse({"answer": "I'm unable to respond right now. Please try again in a moment."}, status_code=200)
 
 # --- FAQ HELPERS ---
+
+
+# Quote-first extractor (universal): try to return a short verbatim span when the KB already contains it.
+# Guardrails: requires multiple query keywords to co-occur inside a small window, and caps output length.
+_STOPWORDS = {
+    'the','a','an','and','or','to','of','in','on','for','with','is','are','was','were','be','been','being',
+    'what','which','who','whom','when','where','why','how','do','does','did','i','we','you','they','it',
+    'this','that','these','those','according','book','chapter','part'
+}
+
+
+def _deterministic_extractive_quote_answer(q: str, kb_context: str) -> str | None:
+    try:
+        if not q or not kb_context:
+            return None
+        ql = q.lower().strip()
+        # Only run on ?factual lookup? style questions (avoid making conversation weird).
+        if not re.search(r"\b(what|which|who|where|when|why|how|goals?|learn|able to|by the end|according)\b", ql):
+            return None
+
+        # Tokenize keywords.
+        words = [w for w in re.findall(r"[a-zA-Z]{3,}", ql) if w not in _STOPWORDS]
+        if len(words) < 2:
+            return None
+        # Keep the most specific words.
+        words = sorted(set(words), key=len, reverse=True)[:8]
+
+        ctx = kb_context
+        ctx_l = ctx.lower()
+
+        # Find a window around the best keyword hit.
+        best = None
+        for w in words[:5]:
+            i = ctx_l.find(w)
+            if i == -1:
+                continue
+            lo = max(0, i - 300)
+            hi = min(len(ctx), i + 900)
+            window = ctx[lo:hi]
+            wl = window.lower()
+            hit = sum(1 for x in words if x in wl)
+            # Require at least 2 keywords in same window.
+            if hit < 2:
+                continue
+            # Prefer windows that look like lists/definitions.
+            bonus = 0
+            if re.search(r"\n\s*[-?]\s+", window):
+                bonus += 2
+            if re.search(r":\s*$", window, re.M):
+                bonus += 1
+            score = hit + bonus
+            if best is None or score > best[0]:
+                best = (score, window)
+
+        if not best:
+            return None
+
+        window = best[1].strip()
+        # Tighten to start at a clean boundary.
+        window = re.sub(r"\r", "", window)
+        # If there is a strong marker, cut from there.
+        m = re.search(r"(By\s+completing[^\n]{0,160}you\s+will\s*:|By\s+the\s+end\s+of\s+this\s+chapter[^\n]{0,80}:)", window, re.I)
+        if m:
+            window = window[m.start():]
+
+        # Cap quote length.
+        window = window[:700].strip()
+        # Normalize whitespace lightly (keep newlines if present).
+        window = re.sub(r"[\t]+", " ", window)
+        window = re.sub(r" +", " ", window)
+        window = re.sub(r"\n{3,}", "\n\n", window)
+
+        if len(window) < 80:
+            return None
+
+        # Return as a quote block style without markdown formatting (client renders plain text).
+        return window
+    except Exception:
+        return None
 
 def _faq_file(db_name: str = "") -> Path:
     active = db_name or (ACTIVE_DB_FILE.read_text(encoding="utf-8").strip() if ACTIVE_DB_FILE.exists() else "")
