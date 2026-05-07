@@ -2319,6 +2319,16 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
                     _trace_event(workflow_trace, "validator_rewrite", reason="price_hallucination")
                     _trace_decision(workflow_debug, "price_validator_rewrite", "price_hallucination")
                     cleaned = _det
+
+        # ? Learning/goals extractor (universal): when KB contains an explicit outcomes list, use it verbatim.
+        if context:
+            _lg = _deterministic_learning_goals_answer(q, context)
+            if _lg:
+                logger.info('[Validator] learning_goals_extract ? overriding with deterministic outcomes list')
+                _trace_event(workflow_trace, 'validator_rewrite', reason='learning_goals_extract')
+                _trace_decision(workflow_debug, 'learning_goals_validator_rewrite', True)
+                cleaned = _lg
+
         if visitor_id: _run_in_bg(save_visitor_turn, visitor_id, "assistant", cleaned, db_name)
         yield f"data: {json.dumps({'type': 'chunk', 'content': cleaned})}\n\n"
         # Suppress sources and log gap if LLM indicated it doesn't have the info.
@@ -2386,6 +2396,54 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
             yield f"data: {json.dumps({'type': 'chunk', 'content': 'I am unable to respond right now. Please try again in a moment.'})}\n\n"
             yield f"data: {json.dumps(_metadata_payload(False, []))}\n\n"
     yield "data: {\"type\": \"done\"}\n\n"
+
+
+# Learning/goals extractor: when the KB contains an explicit outcomes list, prefer a deterministic answer.
+_LEARNING_GOALS_Q_RE = re.compile(r"\b(what\s+will\s+i\s+learn|what\s+will\s+we\s+learn|what\s+are\s+the\s+goals|goals\s+of|learning\s+outcomes|by\s+the\s+end\s+of\s+(?:this\s+)?chapter|what\s+will\s+i\s+be\s+able\s+to)\b", re.I)
+_LEARNING_GOALS_MARKER_RE = re.compile(
+    r"(By\s+completing[^\n]{0,160}?,\s+you\s+will\s*:|By\s+the\s+end\s+of\s+this\s+chapter,\s+you\s+will\s+be\s+able\s+to\s*:|By\s+the\s+end\s+of\s+this\s+chapter,\s+you\s+will\s*:)",
+    re.I,
+)
+
+def _deterministic_learning_goals_answer(q: str, kb_context: str) -> str | None:
+    try:
+        if not q or not kb_context:
+            return None
+        if not _LEARNING_GOALS_Q_RE.search(q):
+            return None
+        m = _LEARNING_GOALS_MARKER_RE.search(kb_context)
+        if not m:
+            return None
+        tail = kb_context[m.end():]
+        # Stop at the next obvious heading/section boundary.
+        stop = re.search(r"\n\s*(Chapter\b|Chapter\s+Progression\b|##\s+|#\s+|---|\Z)", tail)
+        snippet = tail[: stop.start()] if stop else tail
+        snippet = snippet.strip()
+        if not snippet:
+            return None
+        # Cap to avoid dumping huge context.
+        snippet = snippet[:1600]
+        # Normalize whitespace.
+        snippet = re.sub(r"[\t\r]+", " ", snippet)
+        snippet = re.sub(r"\n{3,}", "\n\n", snippet)
+        snippet = re.sub(r" +", " ", snippet).strip()
+
+        # If it's already bulleted/line-based, keep it mostly as-is.
+        if "\n" in snippet:
+            # Light bullet normalization.
+            lines = [ln.strip(" \t-?") for ln in snippet.split("\n") if ln.strip()]
+            if len(lines) >= 2:
+                return "\n".join(["- " + ln for ln in lines])
+
+        # Otherwise, try to split into actionable bullet-like clauses.
+        parts = re.split(r"(?=\b(?:Understand|Learn|Build|Ship|Use|Integrate|Deliver|Identify|Structure|Apply|Verify|Run|Retrofit|Install|Design|Validate)\b)", snippet)
+        parts = [p.strip(" :;-\n") for p in parts if p.strip()]
+        if len(parts) >= 2:
+            return "\n".join(["- " + p for p in parts])
+
+        return "- " + snippet
+    except Exception:
+        return None
 
 @app.post("/chat")
 async def chat(request: Request):
