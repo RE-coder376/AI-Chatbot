@@ -705,6 +705,25 @@ async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansio
     if not _has_product_meta and _combined_before_cap:
         _title_phrase = _extract_title_phrase(q)
         _combined_before_cap.sort(key=lambda d: _heuristic_rerank_score(d, q, _title_phrase), reverse=True)
+        # title_phrase filter: if query names a specific Chapter/Part title, prefer docs that actually mention it.
+        if _title_phrase:
+            _tpl = _title_phrase.lower()
+            _tks = [w for w in re.findall(r'[a-zA-Z]{4,}', _tpl)][:8]
+            def _title_match(d):
+                try:
+                    b = str(getattr(d,'page_content','') or '').lower()
+                    s = str((getattr(d,'metadata',None) or {}).get('source') or '').lower()
+                    if _tpl in b or _tpl in s:
+                        return True
+                    if not _tks:
+                        return False
+                    hit = sum(1 for t in _tks if t in b)
+                    return hit >= 2
+                except Exception:
+                    return False
+            _filtered = [d for d in _combined_before_cap if _title_match(d)]
+            if len(_filtered) >= 6:
+                _combined_before_cap = _filtered
     if _has_product_meta and (_required_flags or _ram_min_req is not None or _max_price is not None):
         _post_filtered = []
         for r in _combined_before_cap:
