@@ -178,9 +178,24 @@ async def _smart_search_expand(q: str, history: list = None) -> tuple:
 def _keyword_rescue(q: str, db, seen: set, k: int = 5) -> list:
     """Find chunks that exactly contain technical terms (acronyms, proper nouns) missing from vector results."""
     words = q.split()
+    _RESCUE_STOPWORDS = {
+        'what','which','who','when','where','why','how','chapter','part','section','lesson','unit',
+        'according','book','the','a','an','and','or','to','of','in','on','for','with','by','end',
+        'from','about','learn','goals','objective','objectives','outcomes','able'
+    }
     # Extract: (1) uppercase acronyms, (2) capitalized proper nouns, (3) role titles
-    technical = [w.strip("?.,!\"'") for w in words if (w.isupper() and len(w) >= 2) or
-                 (len(w) > 1 and w[0].isupper() and not w.isupper())]
+    # Extract: uppercase acronyms + capitalized proper nouns, but avoid generic question words.
+    technical = []
+    for w in words:
+        ww = w.strip("?.,!\"'")
+        if not ww or len(ww) < 4:
+            continue
+        lw = ww.lower()
+        if lw in _RESCUE_STOPWORDS:
+            continue
+        if (ww.isupper() and len(ww) >= 2) or (len(ww) > 1 and ww[0].isupper() and not ww.isupper()):
+            technical.append(ww)
+    technical = sorted(set(technical), key=len, reverse=True)
     # Also add uppercase form of role titles found in query
     q_lower = q.lower()
     for role in _ROLE_TERMS:
@@ -190,10 +205,10 @@ def _keyword_rescue(q: str, db, seen: set, k: int = 5) -> list:
     from langchain_core.documents import Document
     for term in technical[:3]:
         try:
-            raw = db._collection.get(where_document={"$contains": term}, limit=k * 2)
+            raw = db._collection.get(where_document={"$contains": term.lower()}, limit=k * 2)
             for doc_text, meta in zip(raw.get("documents", []), raw.get("metadatas", [])):
                 key = doc_text[:100]
-                if key not in seen and term in doc_text:
+                if key not in seen and term.lower() in (doc_text or "").lower():
                     seen.add(key)
                     rescue_docs.append(Document(page_content=doc_text, metadata=meta or {}))
         except Exception:
@@ -325,6 +340,19 @@ async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansio
 
     # 1. Start with hardcoded concept expansion (fast)
     search_queries = expand_query(q)
+
+    # Extra query signal: if the user asks about 'Chapter N: Title' or 'Part N: Title',
+    # add the title portion as an additional retrieval query. This dramatically improves
+    # retrieval for book/curriculum KBs where 'chapter/part' is too generic.
+    try:
+        _m_title = re.search(r"\b(?:chapter|part)\s*\d+\s*[:\-]\s*([^\n]{6,200})", q, re.I)
+        if _m_title:
+            _title_q = _m_title.group(1).strip().strip("\"'")
+            if _title_q and all(_title_q.lower() != str(sq).lower() for sq in search_queries):
+                search_queries.insert(0, _title_q)
+                search_queries = search_queries[:4]
+    except Exception:
+        pass
 
     # ── smart_search feature: load features for this DB ───────────────────────
     _ss_db_name = getattr(db, '_db_name', '') or ""
