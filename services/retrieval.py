@@ -688,6 +688,8 @@ async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansio
             re.I
         )
         _policy_task = None
+        _outcomes_title_task = None
+        _outcomes_title_task = None
         # Fire policy search when: (a) query explicitly mentions policy terms, OR
         # (b) DB is a product/retail catalog (_has_product_meta) — covers "Deli Punch shipping?"
         # type queries where the user asks about a product but the answer lives in a policy chunk.
@@ -698,8 +700,18 @@ async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansio
                 )
             )
             logger.debug(f"[POLICY-INJECT] Triggered (product_meta={_has_product_meta}) for: {q[:60]}")
+        if _is_outcomes_intent:
+            _oq = (_title_phrase or "").strip()
+            if _oq:
+                _outcomes_title_task = loop.run_in_executor(
+                    None, lambda: db.similarity_search(_oq, k=8)
+                )
         try:
-            _gather_tasks = [*_search_tasks, _bm25_task] + ([_policy_task] if _policy_task else [])
+            _gather_tasks = (
+                [*_search_tasks, _bm25_task]
+                + ([_policy_task] if _policy_task else [])
+                + ([_outcomes_title_task] if _outcomes_title_task else [])
+            )
             _all_results = await asyncio.wait_for(
                 asyncio.gather(*_gather_tasks, return_exceptions=True),
                 timeout=35
