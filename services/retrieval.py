@@ -552,6 +552,22 @@ async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansio
             _pc_anchor = (f"{_pc.group(1).lower()} {_pc.group(2)}" if _pc else "")
             # Broad net first ("you will" is common), then we filter hard by title tokens.
             # This avoids DB-specific hardcoding while still reliably surfacing outcome bullets.
+            # 1) Direct anchor phrase (highest precision when present).
+            # This is universal (not DB-specific): if the user asked "Part 10" and a chunk contains
+            # "By completing Part 10", grab it first.
+            if _pc_anchor:
+                _anchor_phrase = f"by completing {_pc_anchor}"
+                for _needle in (_anchor_phrase, _anchor_phrase.title()):
+                    try:
+                        raw2 = db._collection.get(where_document={"$contains": _needle}, limit=80)
+                        for doc_text, meta in zip(raw2.get('documents', []), raw2.get('metadatas', [])):
+                            if doc_text:
+                                rescue_seen.add(doc_text[:100])
+                                rescue_results.append(Document(page_content=doc_text, metadata=meta or {}))
+                    except Exception:
+                        pass
+
+            # 2) Broad net ("you will" is common), then filter hard by anchor tokens.
             raw = db._collection.get(where_document={"$contains": "you will"}, limit=250)
             for doc_text, meta in zip(raw.get('documents', []), raw.get('metadatas', [])):
                 if not doc_text:
