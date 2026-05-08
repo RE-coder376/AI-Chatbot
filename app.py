@@ -951,7 +951,7 @@ async def _auto_crawl_db(db_name: str, url: str, max_pages: int = 0) -> int:
         except Exception as e: logger.warning(f"[AUTO-CRAWL] Could not load seen URLs for {db_name}: {e}")
     base = url.rstrip("/")
     domain = urlparse(base).netloc
-    crawl_urls, added = [], 0
+    crawl_urls, added, deleted = [], 0, 0
     newly_seen: list = []
     def _domain_match(u_netloc: str, ref: str) -> bool:
         """True if netloc matches ref, ignoring www. prefix."""
@@ -1052,7 +1052,8 @@ async def _auto_crawl_db(db_name: str, url: str, max_pages: int = 0) -> int:
             _now_t = time.time()
             if _now_t - _last_progress_log >= 60:
                 _elapsed = int(_now_t - _crawl_start)
-                logger.info(f"[AUTO-CRAWL] '{db_name}' progress: {_page_idx}/{_total_pages} pages, +{added} chunks, {_skipped} skipped, {_elapsed}s elapsed")
+                net = added - deleted
+                logger.info(f"[AUTO-CRAWL] '{db_name}' progress: {_page_idx}/{_total_pages} pages, +{added} chunks, -{deleted} deleted, net {net}, {_skipped} skipped, {_elapsed}s elapsed")
                 _last_progress_log = _now_t
             try:
                 text = ""
@@ -1112,6 +1113,13 @@ async def _auto_crawl_db(db_name: str, url: str, max_pages: int = 0) -> int:
                     _skipped += 1
                 if len(text) > 100:
                     try:
+                        # Refresh crawls delete old chunks for a URL before re-adding updated ones.
+                        # Track deletes so admin UI can show net change rather than "+chunks written".
+                        try:
+                            _pre = await asyncio.to_thread(lambda u=page_url: db._collection.count(where={"source": u}))
+                            deleted += int(_pre or 0)
+                        except Exception:
+                            pass
                         await asyncio.to_thread(lambda u=page_url: db.delete(where={"source": u}))
                     except Exception as _del_e:
                         logger.debug(f"[AUTO-CRAWL] Could not delete old chunks for {page_url}: {_del_e}")
@@ -1132,7 +1140,8 @@ async def _auto_crawl_db(db_name: str, url: str, max_pages: int = 0) -> int:
             except Exception as e: logger.warning(f"[AUTO-CRAWL] Page error {page_url}: {e}")
         await _hx_client.aclose()
         _total_elapsed = int(time.time() - _crawl_start)
-        logger.info(f"[AUTO-CRAWL] '{db_name}' finished: {_page_idx}/{_total_pages} pages, {added} docs, {_skipped} skipped, {_total_elapsed}s total")
+        net = added - deleted
+        logger.info(f"[AUTO-CRAWL] '{db_name}' finished: {_page_idx}/{_total_pages} pages, +{added} chunks, -{deleted} deleted, net {net}, {_skipped} skipped, {_total_elapsed}s total")
 
         # Final batch write for remaining docs
         if _pending_docs:
@@ -1181,7 +1190,7 @@ async def _auto_crawl_db(db_name: str, url: str, max_pages: int = 0) -> int:
         # Always upload DB zip + crawl_times after a successful refresh (not just when new pages found)
         threading.Thread(target=_github_sync_upload, args=(db_name,), daemon=True).start()
         threading.Thread(target=_github_backup_crawl_times, args=(db_name,), daemon=True).start()
-    return added
+    return max(0, added - deleted)
 
 async def _auto_scheduler():
     """Background task: auto-crawl and API source polling every 60s."""
@@ -2439,6 +2448,14 @@ def _deterministic_learning_goals_answer(q: str, kb_context: str) -> str | None:
         if not _LEARNING_GOALS_Q_RE.search(q):
             return None
 
+        chapter_m = re.search(r"\bchapter\s+(\d{1,3})\b", q, re.I)
+        wants_chapter = bool(chapter_m)
+        chapter_title = ""
+        if wants_chapter:
+            _m2 = re.search(r"\bchapter\s+\d{1,3}\s*:\s*(.+)$", q, re.I)
+            if _m2:
+                chapter_title = _m2.group(1).strip()
+
         ctx = kb_context
 
         def _is_toc_or_nav_text(s: str) -> bool:
@@ -2503,6 +2520,21 @@ def _deterministic_learning_goals_answer(q: str, kb_context: str) -> str | None:
             snippet = best[1]
 
         snippet = (snippet or '').strip()
+
+        # Scope guardrail: if user explicitly asked for CHAPTER goals, reject PART-level goal lists.
+        if wants_chapter and re.search(r"(?im)^\s*By\s+completing\s+Part\b", snippet):
+            return None
+
+        # Chapter anchor guardrail: require some chapter-title token overlap to avoid returning a
+        # correct-looking outcomes list from the wrong section.
+        if wants_chapter and chapter_title:
+            _tt = chapter_title.lower()
+            _tks = [
+                w for w in re.findall(r"[a-zA-Z]{4,}", _tt)
+                if w not in {"chapter", "part", "this", "that", "with", "from", "according", "book", "goals", "goal", "learn", "will", "what"}
+            ]
+            if _tks and not any(t in snippet.lower() for t in _tks[:8]):
+                return None
         # Reject obvious TOC/navigation extracts
         if _is_toc_or_nav_text(snippet):
             return None
