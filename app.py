@@ -2459,6 +2459,41 @@ def _deterministic_learning_goals_answer(q: str, kb_context: str) -> str | None:
 
         ctx = kb_context
 
+        def _extract_bullets_near_anchor(anchor: str) -> str | None:
+            if not anchor:
+                return None
+            try:
+                idx = ctx.lower().find(anchor.lower())
+                if idx < 0:
+                    return None
+                win = ctx[idx: min(len(ctx), idx + 1800)]
+                lines = [ln.strip() for ln in win.split("\n") if ln.strip()]
+                out_lines = []
+                for ln in lines[:80]:
+                    # Stop if we run into a new major heading.
+                    if re.match(r"^(#{1,3}\s+|Chapter\s+\d+\b|Part\s+\d+\b)", ln, re.I):
+                        if out_lines:
+                            break
+                    if re.match(r"^([-*]|\d+\.)\s+", ln):
+                        item = re.sub(r"^([-*]|\d+\.)\s+", "", ln).strip()
+                        if len(item) >= 3:
+                            out_lines.append("- " + item)
+                if len(out_lines) >= 2:
+                    return "\n".join(out_lines[:18])
+            except Exception:
+                return None
+            return None
+
+        # Chapter-first extraction: for chapter queries, prefer lists near the chapter title.
+        if wants_chapter and chapter_title:
+            near = _extract_bullets_near_anchor(chapter_title)
+            if near:
+                # Reject if we accidentally grabbed a Part-level outcomes section.
+                if re.search(r"(?im)^\s*-\s*By\s+completing\s+Part\b", near):
+                    pass
+                else:
+                    return near
+
         def _is_toc_or_nav_text(s: str) -> bool:
             sl = (s or '').lower()
             # Strong nav/TOS/TOC indicators
