@@ -2546,7 +2546,6 @@ def _deterministic_learning_goals_answer(q: str, kb_context: str) -> str | None:
                 need = 2 if len(kws) >= 2 else 1
                 if hits < need:
                     return True
-            return True
             return False
 
         # Normalize to bullets
