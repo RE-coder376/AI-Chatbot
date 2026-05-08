@@ -545,7 +545,11 @@ async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansio
         try:
             from langchain_core.documents import Document
             _tpl = (_title_phrase or '').lower()
-            _tks = [w for w in re.findall(r'[a-zA-Z]{4,}', _tpl)][:8]
+            _tks = [w for w in re.findall(r'[a-zA-Z]{4,}', _tpl)][:10]
+            # "agent(s)" is too generic to be a reliable anchor token across most KBs.
+            _tks = [t for t in _tks if t not in {"agent", "agents"}]
+            _pc = re.search(r"\b(part|chapter)\s+(\d{1,3})\b", q, re.I)
+            _pc_anchor = (f"{_pc.group(1).lower()} {_pc.group(2)}" if _pc else "")
             # Broad net first ("you will" is common), then we filter hard by title tokens.
             # This avoids DB-specific hardcoding while still reliably surfacing outcome bullets.
             raw = db._collection.get(where_document={"$contains": "you will"}, limit=250)
@@ -556,6 +560,10 @@ async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansio
                 body = str(doc_text).lower()
                 # Only keep chunks that look like an outcomes list.
                 if not re.search(r"(?i)\b(by (the end of|completing|after completing|upon completing)\b|you will be able to\b|you will\s*:)", doc_text):
+                    continue
+                # If the query names a specific Part/Chapter, require that exact anchor to appear somewhere
+                # in the chunk or its source URL (prevents extracting the wrong outcomes list).
+                if _pc_anchor and (_pc_anchor not in body) and (_pc_anchor not in src):
                     continue
                 if _tks:
                     # Require at least 2 title tokens in either URL or body
@@ -763,7 +771,14 @@ async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansio
             def _has_outcome_marker(d):
                 try:
                     b = str(getattr(d,'page_content','') or '').lower()
-                    return ('you will be able to' in b) or ('by the end' in b) or ('learning outcomes' in b) or ('objectives' in b)
+                    return (
+                        ('you will be able to' in b)
+                        or ('by the end' in b)
+                        or ('by completing' in b)
+                        or ('learning outcomes' in b)
+                        or ('objectives' in b)
+                        or ('goals:' in b)
+                    )
                 except Exception:
                     return False
             _combined_before_cap.sort(key=lambda d: (1 if _has_outcome_marker(d) else 0, _heuristic_rerank_score(d, q, _title_phrase)), reverse=True)

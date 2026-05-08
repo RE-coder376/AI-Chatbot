@@ -2528,11 +2528,25 @@ def _deterministic_learning_goals_answer(q: str, kb_context: str) -> str | None:
                 return True
             if (ans.count('http://') + ans.count('https://')) >= 3:
                 return True
-            # Require at least one non-trivial keyword from the question to appear in the extracted answer.
+            # Relevance proof: require multiple non-trivial query anchors to appear in the extracted answer.
+            # A single token match is too weak (e.g. "agents" appears on many pages and can cause a
+            # correct-looking outcomes list from the wrong section to be returned).
             ql = (qq or '').lower()
-            kws = [w for w in re.findall(r'[a-zA-Z]{4,}', ql) if w not in {'what','will','learn','goals','goal','end','chapter','part','according','book','from','this','that','with','have','able','about'}]
-            if kws and not any(k in ans.lower() for k in kws[:8]):
-                return True
+            kws = [
+                w for w in re.findall(r'[a-zA-Z]{4,}', ql)
+                if w not in {
+                    'what','will','learn','goals','goal','end','chapter','part','according','book','from',
+                    'this','that','with','have','able','about','the','you','your','into','does','do',
+                }
+            ]
+            # "agent(s)" is often too generic to be a reliable anchor on its own.
+            kws = [w for w in kws if w not in {'agent', 'agents'}]
+            if kws:
+                hits = sum(1 for k in kws[:10] if k in ans.lower())
+                need = 2 if len(kws) >= 2 else 1
+                if hits < need:
+                    return True
+            return True
             return False
 
         # Normalize to bullets
