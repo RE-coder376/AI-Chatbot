@@ -2452,7 +2452,8 @@ def _deterministic_learning_goals_answer(q: str, kb_context: str) -> str | None:
         wants_chapter = bool(chapter_m)
         chapter_title = ""
         if wants_chapter:
-            _m2 = re.search(r"\bchapter\s+\d{1,3}\s*:\s*(.+)$", q, re.I)
+            # Accept "goals of Chapter 93: Title" as well as "Chapter 93: Title"
+            _m2 = re.search(r"\bchapter\s+\d{1,3}\s*:\s*([^\n]+)", q, re.I)
             if _m2:
                 chapter_title = _m2.group(1).strip()
 
@@ -2522,7 +2523,7 @@ def _deterministic_learning_goals_answer(q: str, kb_context: str) -> str | None:
         snippet = (snippet or '').strip()
 
         # Scope guardrail: if user explicitly asked for CHAPTER goals, reject PART-level goal lists.
-        if wants_chapter and re.search(r"(?im)^\s*By\s+completing\s+Part\b", snippet):
+        if wants_chapter and re.search(r"(?im)^\s*(?:[-*]|\d+\.)?\s*By\s+completing\s+Part\b", snippet):
             return None
 
         # Chapter anchor guardrail: require some chapter-title token overlap to avoid returning a
