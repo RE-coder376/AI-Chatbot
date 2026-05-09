@@ -2560,23 +2560,26 @@ def _deterministic_learning_goals_answer(q: str, kb_context: str) -> str | None:
         # Scope guardrail: if user explicitly asked for CHAPTER goals, reject PART-level goal lists
         # only when the extracted snippet doesn't also match the chapter title tokens.
         # (Some curricula place a Part-level outcomes block inside each chapter page.)
-        if wants_chapter and re.search(r"(?im)^\s*(?:[-*]|\d+\.)?\s*By\s+completing\s+Part\b", snippet):
+        _is_part_outcomes = bool(re.search(r"(?im)^\s*(?:[-*]|\d+\.)?\s*By\s+completing\s+Part\b", snippet))
+        if wants_chapter and _is_part_outcomes:
             if chapter_title:
                 _tt = chapter_title.lower()
                 _tks = [
                     w for w in re.findall(r"[a-zA-Z]{4,}", _tt)
                     if w not in {"chapter", "part", "this", "that", "with", "from", "according", "book", "goals", "goal", "learn", "will", "what"}
                 ]
-                if _tks and any(t in snippet.lower() for t in _tks[:8]):
-                    pass  # allow: part outcomes block is embedded on the chapter page
-                else:
-                    return None
+                # If the chapter title doesn't appear verbatim in the snippet, allow it only if
+                # the broader retrieved context contains strong chapter-title token overlap.
+                if _tks and not any(t in snippet.lower() for t in _tks[:8]):
+                    ctx_hits = sum(1 for t in _tks[:10] if t in ctx.lower())
+                    if ctx_hits < 2:
+                        return None
             else:
                 return None
 
         # Chapter anchor guardrail: require some chapter-title token overlap to avoid returning a
         # correct-looking outcomes list from the wrong section.
-        if wants_chapter and chapter_title:
+        if wants_chapter and chapter_title and (not _is_part_outcomes):
             _tt = chapter_title.lower()
             _tks = [
                 w for w in re.findall(r"[a-zA-Z]{4,}", _tt)
