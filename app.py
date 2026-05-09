@@ -2875,6 +2875,20 @@ async def chat(request: Request):
 
         context, doc_count, sources = await retrieve_context(q, tenant_db_instance)
 
+        # Deterministic outcomes extractor (same as streaming path).
+        _outcomes_ans = try_extract_outcomes_answer(q, context or "")
+        if _outcomes_ans is None and tenant_db_instance:
+            try:
+                _ctx2, _dc2, _src2 = await retrieve_context(q, tenant_db_instance, k=60, fast=False)
+                _out2 = try_extract_outcomes_answer(q, _ctx2 or "")
+                if _out2:
+                    context, doc_count, sources = _ctx2, _dc2, _src2
+                    _outcomes_ans = _out2
+            except Exception:
+                pass
+        if _outcomes_ans:
+            return JSONResponse({"answer": _outcomes_ans, "sources": (sources or [])[:5]})
+
         # Sparse KB guard — skip for api-only DBs so LLM can use training knowledge
         _t_api_only = (not cfg.get("crawl_url", "")) and bool(cfg.get("api_sources"))
         if not _t_api_only and not _context_addresses_query(context, q):
