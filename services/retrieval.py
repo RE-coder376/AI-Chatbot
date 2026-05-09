@@ -30,6 +30,9 @@ _OUTCOMES_INTENT_RE = re.compile(r"\b(what\s+will\s+i\s+learn|what\s+will\s+we\s
 
 _BULLET_LINE_RE = re.compile(r"^\s*(?:[-*•]|\d{1,2}[.)])\s+(.+?)\s*$")
 
+def is_outcomes_question(q: str) -> bool:
+    return bool(_OUTCOMES_INTENT_RE.search(q or ""))
+
 
 def try_extract_outcomes_answer(q: str, context: str) -> str | None:
     """Deterministically extract the best contiguous bullet list from retrieved context.
@@ -37,7 +40,7 @@ def try_extract_outcomes_answer(q: str, context: str) -> str | None:
     This is intentionally universal (works for any DB) and is only activated for
     outcomes-style questions (goals/objectives/learn/outcomes).
     """
-    if not context or not _OUTCOMES_INTENT_RE.search(q or ""):
+    if not context or not is_outcomes_question(q):
         return None
     try:
         title_phrase = _extract_title_phrase(q or "")
@@ -83,6 +86,14 @@ def try_extract_outcomes_answer(q: str, context: str) -> str | None:
                     jl = joined_raw.lower()
                     if not any(t in jl for t in title_tokens[:4]):
                         continue
+                # Reject question-list blocks ("What's X?", "What patterns...?") which are not outcomes.
+                if sum(1 for it in items if "?" in it) >= 1:
+                    continue
+                # Require at least two "imperative-ish" items (usually outcomes start with verbs).
+                bad_starts = ("what", "which", "why", "how", "when", "where", "who")
+                starters = [(it.split()[:1][0].lower() if it.split() else "") for it in items]
+                if sum(1 for s in starters if s and s not in bad_starts) < 2:
+                    continue
                 joined = " ".join(items).lower()
                 score = float(len(items))
                 # Reward "objective/outcome" verbs but do not require any fixed phrase.

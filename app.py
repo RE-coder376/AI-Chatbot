@@ -154,6 +154,7 @@ from services.retrieval import (
     retrieve_context,
     _fast_format_jikan,
     try_extract_outcomes_answer,
+    is_outcomes_question,
 )
 
 from services.db_instances import (
@@ -2140,8 +2141,17 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
             context, doc_count, sources = await _decompose_and_retrieve(q, _local_db)
             _trace_event(workflow_trace, "retrieval_path", path="multi_part")
         else:
-            context, doc_count, sources = await retrieve_context(q, _local_db, expansion_task=_early_expansion_task, history=history)
-            _trace_event(workflow_trace, "retrieval_path", path="standard")
+            # Outcomes/goals questions are brittle under HyDE expansion and should be fast.
+            if is_outcomes_question(q):
+                try:
+                    _early_expansion_task.cancel()
+                except Exception:
+                    pass
+                context, doc_count, sources = await retrieve_context(q, _local_db, k=60, fast=True, expansion_task=None, history=history)
+                _trace_event(workflow_trace, "retrieval_path", path="outcomes_fast")
+            else:
+                context, doc_count, sources = await retrieve_context(q, _local_db, expansion_task=_early_expansion_task, history=history)
+                _trace_event(workflow_trace, "retrieval_path", path="standard")
     else:
         # API-only DB (no ChromaDB) — still run retrieve_context for live API fetch
         context, doc_count, sources = await retrieve_context(q, None, expansion_task=_early_expansion_task, history=history)
