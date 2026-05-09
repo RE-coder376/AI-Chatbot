@@ -33,6 +33,13 @@ _BULLET_LINE_RE = re.compile(r"^\s*(?:[-*•]|\d{1,2}[.)])\s+(.+?)\s*$")
 def is_outcomes_question(q: str) -> bool:
     return bool(_OUTCOMES_INTENT_RE.search(q or ""))
 
+_INTERROGATIVE_START = {"what", "which", "why", "how", "when", "where", "who"}
+_OUTCOME_VERB_HINTS = {
+    "understand","build","ship","use","integrate","deliver","identify","structure","apply","prepare",
+    "run","evaluate","deploy","install","test","design","verify","retrofit","decide","learn","encode",
+    "create","implement","configure","monitor","optimize"
+}
+
 
 def try_extract_outcomes_answer(q: str, context: str) -> str | None:
     """Deterministically extract the best contiguous bullet list from retrieved context.
@@ -86,16 +93,35 @@ def try_extract_outcomes_answer(q: str, context: str) -> str | None:
                     jl = joined_raw.lower()
                     if not any(t in jl for t in title_tokens[:4]):
                         continue
-                # Reject question-list blocks ("What's X?", "What patterns...?") which are not outcomes.
-                if sum(1 for it in items if "?" in it) >= 1:
-                    continue
-                # Require at least two "imperative-ish" items (usually outcomes start with verbs).
-                bad_starts = ("what", "which", "why", "how", "when", "where", "who")
+
+                # Universal scoring: prefer outcome-like lists; avoid reflection-question lists,
+                # but do not hard-reject on '?' (some domains may phrase outcomes as questions).
                 starters = [(it.split()[:1][0].lower() if it.split() else "") for it in items]
-                if sum(1 for s in starters if s and s not in bad_starts) < 2:
+                q_marks = sum(1 for it in items if "?" in it)
+                interrogative = sum(1 for s in starters if s in _INTERROGATIVE_START)
+                verbish = sum(1 for s in starters if s in _OUTCOME_VERB_HINTS)
+                title_hit = 0
+                if title_tokens:
+                    jl = joined_raw.lower()
+                    title_hit = sum(1 for t in title_tokens[:6] if t in jl)
+                n = float(len(items))
+                question_ratio = q_marks / n
+                inter_ratio = interrogative / n
+                verb_ratio = verbish / n
+
+                score = n
+                score += (verbish * 2.5)
+                score += (title_hit * 2.0)
+                score -= (question_ratio * 8.0)
+                score -= (inter_ratio * 6.0)
+
+                # Minimum viability: needs either verb-ish starts or strong title overlap.
+                if (verbish < 2) and (title_hit < 2):
+                    continue
+                # If it's mostly questions, it's almost certainly not learning outcomes.
+                if question_ratio >= 0.5 or inter_ratio >= 0.5:
                     continue
                 joined = " ".join(items).lower()
-                score = float(len(items))
                 # Reward "objective/outcome" verbs but do not require any fixed phrase.
                 score += 4.0 if ("will" in joined or "able to" in joined) else 0.0
                 score += 2.0 if ("understand" in joined or "build" in joined or "ship" in joined or "integrate" in joined) else 0.0
