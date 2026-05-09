@@ -2163,7 +2163,8 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
     _outcomes_ans = try_extract_outcomes_answer(q, context or "")
     if _outcomes_ans is None and _local_db:
         try:
-            _ctx2, _dc2, _src2 = await retrieve_context(q, _local_db, k=60, fast=False, expansion_task=None, history=history)
+            # Retry with larger k, but stay in fast mode to avoid slow HyDE/LLM expansion.
+            _ctx2, _dc2, _src2 = await retrieve_context(q, _local_db, k=60, fast=True, expansion_task=None, history=history)
             _out2 = try_extract_outcomes_answer(q, _ctx2 or "")
             if _out2:
                 context, doc_count, sources = _ctx2, _dc2, _src2
@@ -2879,7 +2880,7 @@ async def chat(request: Request):
         _outcomes_ans = try_extract_outcomes_answer(q, context or "")
         if _outcomes_ans is None and tenant_db_instance:
             try:
-                _ctx2, _dc2, _src2 = await retrieve_context(q, tenant_db_instance, k=60, fast=False)
+                _ctx2, _dc2, _src2 = await retrieve_context(q, tenant_db_instance, k=60, fast=True)
                 _out2 = try_extract_outcomes_answer(q, _ctx2 or "")
                 if _out2:
                     context, doc_count, sources = _ctx2, _dc2, _src2

@@ -40,6 +40,8 @@ def try_extract_outcomes_answer(q: str, context: str) -> str | None:
     if not context or not _OUTCOMES_INTENT_RE.search(q or ""):
         return None
     try:
+        title_phrase = _extract_title_phrase(q or "")
+        title_tokens = [w.lower() for w in re.findall(r"[a-zA-Z]{4,}", title_phrase)][:10] if title_phrase else []
         lines = [ln.rstrip() for ln in str(context).splitlines()]
         best = None  # (score, start_idx, end_idx)
         i = 0
@@ -68,6 +70,19 @@ def try_extract_outcomes_answer(q: str, context: str) -> str | None:
             # Basic validity: list-like blocks only.
             items = [it for it in items if it and len(it) <= 260]
             if 3 <= len(items) <= 25:
+                # Reject link directories / nav lists (common in structural docs).
+                joined_raw = " ".join(items)
+                if re.search(r"https?://", joined_raw, re.I):
+                    continue
+                # Reject "Title : URL" shapes even if url missing protocol.
+                if sum(1 for it in items if re.search(r"\bwww\.\b|\.org\b|\.com\b|/docs/", it, re.I)) >= max(2, len(items) // 2):
+                    continue
+                # If the user mentioned a title phrase, require overlap so we don't
+                # extract unrelated lists from other pages.
+                if title_tokens:
+                    jl = joined_raw.lower()
+                    if not any(t in jl for t in title_tokens[:4]):
+                        continue
                 joined = " ".join(items).lower()
                 score = float(len(items))
                 # Reward "objective/outcome" verbs but do not require any fixed phrase.
@@ -82,7 +97,6 @@ def try_extract_outcomes_answer(q: str, context: str) -> str | None:
             # Inline list fallback: sometimes crawled pages lose bullet newlines and
             # the list becomes one long line after a ":" (still deterministic to parse).
             flat = " ".join(ln.strip() for ln in lines if ln and ln.strip())
-            title_phrase = _extract_title_phrase(q or "")
             title_ix = flat.lower().find(title_phrase.lower()) if title_phrase else -1
 
             def _split_inline_list(tail: str) -> list[str]:
@@ -127,6 +141,8 @@ def try_extract_outcomes_answer(q: str, context: str) -> str | None:
                         continue
                 items = _split_inline_list(tail)
                 if 3 <= len(items) <= 25:
+                    if re.search(r"https?://", " ".join(items), re.I):
+                        continue
                     joined = " ".join(items).lower()
                     score = float(len(items))
                     score += 2.0 if ("will" in joined or "able to" in joined) else 0.0
