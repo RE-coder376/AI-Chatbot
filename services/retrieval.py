@@ -895,7 +895,49 @@ async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansio
                     sources.append(src)
             except:
                 pass
-    context = "\n\n".join([_clean_text(r.page_content) for r in top])
+    # Context cap/compression: keep only the highest-signal slices so unrelated chunks
+    # can't dominate the prompt. This improves stability across all DBs.
+    MAX_CONTEXT_CHARS = 24000
+    MAX_DOC_CHARS = 1800
+
+    def _compress_doc(text: str, anchors: list[str]) -> str:
+        if not text:
+            return ""
+        t = _clean_text(text)
+        if len(t) <= MAX_DOC_CHARS:
+            return t
+        if not anchors:
+            return t[:MAX_DOC_CHARS]
+        # Line-based contextual compression: keep lines with anchor hits plus neighbors.
+        lines = [ln.strip() for ln in t.split("\n")]
+        keep = set()
+        al = [a.lower() for a in anchors if a]
+        for i, ln in enumerate(lines):
+            ll = ln.lower()
+            if any(a in ll for a in al):
+                for j in range(max(0, i - 1), min(len(lines), i + 2)):
+                    keep.add(j)
+        if keep:
+            out = "\n".join(lines[i] for i in sorted(keep) if lines[i])
+            return out[:MAX_DOC_CHARS] if out else t[:MAX_DOC_CHARS]
+        return t[:MAX_DOC_CHARS]
+
+    anchors = _meaningful_keywords(q)
+    context_parts = []
+    cur_chars = 0
+    for r in top[:k]:
+        chunk = _compress_doc(getattr(r, "page_content", "") or "", anchors)
+        if not chunk:
+            continue
+        if cur_chars + len(chunk) + 2 > MAX_CONTEXT_CHARS:
+            remain = max(0, MAX_CONTEXT_CHARS - cur_chars - 2)
+            if remain <= 200:
+                break
+            context_parts.append(chunk[:remain])
+            break
+        context_parts.append(chunk)
+        cur_chars += len(chunk) + 2
+    context = "\n\n".join(context_parts)
 
     # ── Live API fallback: trigger if no results OR db has api_sources ────
     _live_filler = re.compile(
