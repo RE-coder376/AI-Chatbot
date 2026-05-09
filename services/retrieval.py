@@ -28,6 +28,169 @@ logger = logging.getLogger(__name__)
 # Outcomes/learning intent (universal)
 _OUTCOMES_INTENT_RE = re.compile(r"\b(what\s+will\s+i\s+learn|what\s+will\s+we\s+learn|learning\s+outcomes?|objectives?|goals?|by\s+the\s+end|you\s+will\s+be\s+able\s+to)\b", re.I)
 
+_BULLET_LINE_RE = re.compile(r"^\s*(?:[-*•]|\d{1,2}[.)])\s+(.+?)\s*$")
+
+
+def try_extract_outcomes_answer(q: str, context: str) -> str | None:
+    """Deterministically extract the best contiguous bullet list from retrieved context.
+
+    This is intentionally universal (works for any DB) and is only activated for
+    outcomes-style questions (goals/objectives/learn/outcomes).
+    """
+    if not context or not _OUTCOMES_INTENT_RE.search(q or ""):
+        return None
+    try:
+        lines = [ln.rstrip() for ln in str(context).splitlines()]
+        best = None  # (score, start_idx, end_idx)
+        i = 0
+        while i < len(lines):
+            m = _BULLET_LINE_RE.match(lines[i] or "")
+            if not m:
+                i += 1
+                continue
+            # Collect a contiguous block of bullet-ish lines with optional continuations.
+            start = i
+            items = []
+            while i < len(lines):
+                ln = lines[i]
+                m2 = _BULLET_LINE_RE.match(ln or "")
+                if m2:
+                    items.append(m2.group(1).strip())
+                    i += 1
+                    continue
+                # Allow a single indented continuation line for the previous bullet.
+                if items and ln and (ln.startswith("  ") or ln.startswith("\t")) and len(ln.strip()) >= 6:
+                    items[-1] = (items[-1] + " " + ln.strip()).strip()
+                    i += 1
+                    continue
+                break
+            end = i
+            # Basic validity: list-like blocks only.
+            items = [it for it in items if it and len(it) <= 260]
+            if 3 <= len(items) <= 25:
+                joined = " ".join(items).lower()
+                score = float(len(items))
+                # Reward "objective/outcome" verbs but do not require any fixed phrase.
+                score += 4.0 if ("will" in joined or "able to" in joined) else 0.0
+                score += 2.0 if ("understand" in joined or "build" in joined or "ship" in joined or "integrate" in joined) else 0.0
+                # Prefer earlier blocks slightly (retrieval already sorts by relevance).
+                score += max(0.0, 6.0 - (start / 120.0))
+                if (best is None) or (score > best[0]):
+                    best = (score, start, end)
+            # Continue scanning from end of this block.
+        if not best:
+            # Inline list fallback: sometimes crawled pages lose bullet newlines and
+            # the list becomes one long line after a ":" (still deterministic to parse).
+            flat = " ".join(ln.strip() for ln in lines if ln and ln.strip())
+            title_phrase = _extract_title_phrase(q or "")
+            title_ix = flat.lower().find(title_phrase.lower()) if title_phrase else -1
+
+            def _split_inline_list(tail: str) -> list[str]:
+                # Start candidates are Titlecase words followed by a lowercase "glue" word
+                # (e.g., "Understand the", "Integrate real", "Ship with"). This avoids
+                # splitting on proper nouns like "LiveKit Agents".
+                starts = []
+                for m in re.finditer(r"\b([A-Z][a-z]{2,})\b\s+([a-z]{2,}|to|with|for|the|a|an|in|on|of|when|vs)\b", tail):
+                    starts.append(m.start(1))
+                # De-dupe and ensure minimum spacing to avoid noisy splits.
+                starts = sorted(set(starts))
+                pruned = []
+                for s in starts:
+                    if not pruned or (s - pruned[-1]) >= 18:
+                        pruned.append(s)
+                if len(pruned) < 3:
+                    return []
+                items = []
+                for a, b in zip(pruned, pruned[1:] + [len(tail)]):
+                    seg = tail[a:b].strip(" \t-•;|")
+                    if 10 <= len(seg) <= 260:
+                        items.append(seg)
+                return items
+
+            best_inline = None  # (score, items)
+            # Scan a few ":" occurrences and pick the one that yields the best list.
+            for _m in re.finditer(r":", flat):
+                cpos = _m.start()
+                if cpos < 10:
+                    continue
+                if title_ix != -1 and (cpos < (title_ix - 200) or cpos > (title_ix + 600)):
+                    continue
+                # Consider only reasonably-sized tails.
+                tail = flat[cpos + 1: cpos + 1400].strip()
+                if len(tail) < 60:
+                    continue
+                # If we have a title phrase (e.g. "Building Realtime Voice Agents"),
+                # bias toward lists that occur near it and share tokens with it.
+                if title_phrase:
+                    tks = [w.lower() for w in re.findall(r"[a-zA-Z]{4,}", title_phrase)][:8]
+                    if tks and not any(t in tail.lower() for t in tks[:4]):
+                        continue
+                items = _split_inline_list(tail)
+                if 3 <= len(items) <= 25:
+                    joined = " ".join(items).lower()
+                    score = float(len(items))
+                    score += 2.0 if ("will" in joined or "able to" in joined) else 0.0
+                    if title_ix != -1:
+                        dist = abs(cpos - title_ix)
+                        score += max(0.0, 6.0 - (dist / 180.0))
+                    if (best_inline is None) or (score > best_inline[0]):
+                        best_inline = (score, items)
+            if best_inline:
+                _, items = best_inline
+                # Merge obvious split fragments (e.g., "Ship with LiveKit" + "Agents ...").
+                try:
+                    glue_end = {"on","with","for","to","in","and","or","of","the","a","an","vs"}
+                    merged = []
+                    i = 0
+                    while i < len(items):
+                        cur = items[i].strip()
+                        if i + 1 < len(items):
+                            nxt = items[i + 1].strip()
+                            cur_last = (cur.split()[-1].lower() if cur.split() else "")
+                            if (cur_last in glue_end) or (len(cur.split()) <= 4 and not re.search(r"[.!?]$", cur)):
+                                # Only merge if next is not tiny.
+                                if len(nxt.split()) >= 3:
+                                    merged.append((cur + " " + nxt).strip())
+                                    i += 2
+                                    continue
+                        merged.append(cur)
+                        i += 1
+                    items = [m for m in merged if m]
+                except Exception:
+                    pass
+                # Trim if a heading-like token leaks into the last item (common when the
+                # list is followed by "Chapter X" or a new section title).
+                try:
+                    trimmed = []
+                    for it in items:
+                        mm = re.search(r"\b(?:Chapter|Lesson|Unit|Part)\b", it)
+                        if mm and mm.start() >= 8:
+                            head = it[:mm.start()].strip(" -:;,.")
+                            if head:
+                                trimmed.append(head)
+                            break
+                        trimmed.append(it)
+                    items = [t for t in trimmed if t]
+                except Exception:
+                    pass
+                return "Learning outcomes:\n\n" + "\n".join(f"- {it}" for it in items)
+            return None
+        _, s, e = best
+        out_items = []
+        for ln in lines[s:e]:
+            m3 = _BULLET_LINE_RE.match(ln or "")
+            if m3:
+                out_items.append(m3.group(1).strip())
+            elif out_items and ln and (ln.startswith("  ") or ln.startswith("\t")):
+                out_items[-1] = (out_items[-1] + " " + ln.strip()).strip()
+        out_items = [it for it in out_items if it]
+        if not (3 <= len(out_items) <= 25):
+            return None
+        # Normalize to a clean bullet list (keep it universal; don't require a specific marker string).
+        return "Learning outcomes:\n\n" + "\n".join(f"- {it}" for it in out_items)
+    except Exception:
+        return None
+
 
 # Heuristic reranker (universal): improves reliability for chapter/part/title questions across DBs.
 # Used only when DB is not a product catalog (product DBs use different ranking rules).
@@ -41,7 +204,11 @@ def _extract_title_phrase(q: str) -> str:
     try:
         m = re.search(r"\b(?:chapter|part|section|lesson|unit)\s*\d+\s*[:\-]\s*([^\n]{6,200})", q or '', re.I)
         if m:
-            return m.group(1).strip().strip('"\'')
+            phrase = m.group(1).strip().strip('"\'')
+            # Strip common trailing glue that isn't part of the title.
+            phrase = re.sub(r"\s+according\s+to\s+.*$", "", phrase, flags=re.I).strip()
+            phrase = re.sub(r"\s+from\s+the\s+book\s*$", "", phrase, flags=re.I).strip()
+            return phrase
     except Exception:
         pass
     return ''

@@ -511,6 +511,31 @@ def _smart_chunk_page(text: str, url: str, chunk_size: int = 400, chunk_step: in
         if docs:
             return docs
 
+    # ── Mode 2.5: bullet/list page ────────────────────────────────────────────
+    # Preserve newline structure for outcomes/checklists/release notes. Generic
+    # word-splitting destroys list boundaries and makes retrieval unreliable.
+    try:
+        _raw_lines = [ln.strip() for ln in clean.split("\n") if ln and ln.strip()]
+        _bullet_re = re.compile(r"^(?:[-*•]|\d{1,2}[.)])\s+")
+        _bullet_lines = [ln for ln in _raw_lines if _bullet_re.match(ln)]
+        if len(_bullet_lines) >= 3:
+            buf = []
+            buf_chars = 0
+            for ln in _raw_lines:
+                if len(ln) > 500:
+                    continue
+                if buf and (buf_chars + len(ln) + 1 > 2000):
+                    docs.append(Document(page_content="\n".join(buf).strip(), metadata=dict(_base_meta)))
+                    buf, buf_chars = [], 0
+                buf.append(ln)
+                buf_chars += len(ln) + 1
+            if buf:
+                docs.append(Document(page_content="\n".join(buf).strip(), metadata=dict(_base_meta)))
+            if docs:
+                return docs
+    except Exception:
+        pass
+
     # ── Mode 3: generic word-split (existing behaviour — unchanged) ───────────
     words = clean.split()
     for j in range(0, max(1, len(words)), chunk_step):

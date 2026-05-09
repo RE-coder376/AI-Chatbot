@@ -153,6 +153,7 @@ from services.retrieval import (
     async_intent_aware_expansion,
     retrieve_context,
     _fast_format_jikan,
+    try_extract_outcomes_answer,
 )
 
 from services.db_instances import (
@@ -936,6 +937,7 @@ async def _auto_crawl_db(db_name: str, url: str, max_pages: int = 0) -> int:
     # Admin UI wants "new chunks" as net growth, not "chunks processed".
     # Some Chroma versions don't support count(where=...), so track net via total count.
     _start_total = 0
+    _failures = []  # [(url, err)] capped
     try:
         _start_total = int(await asyncio.to_thread(lambda: db._collection.count()))
     except Exception:
@@ -1146,7 +1148,10 @@ async def _auto_crawl_db(db_name: str, url: str, max_pages: int = 0) -> int:
                         _pending_docs = []
                 if page_url not in already_seen:
                     newly_seen.append(page_url)
-            except Exception as e: logger.warning(f"[AUTO-CRAWL] Page error {page_url}: {e}")
+            except Exception as e:
+                logger.warning(f"[AUTO-CRAWL] Page error {page_url}: {e}")
+                if len(_failures) < 25:
+                    _failures.append({"url": page_url, "error": str(e)[:300]})
         await _hx_client.aclose()
         _total_elapsed = int(time.time() - _crawl_start)
         net = added - deleted
@@ -1204,6 +1209,23 @@ async def _auto_crawl_db(db_name: str, url: str, max_pages: int = 0) -> int:
         _end_total = int(await asyncio.to_thread(lambda: db._collection.count()))
     except Exception:
         _end_total = _start_total
+    # Lightweight crawl report for post-mortems (HF/Linux writable path).
+    try:
+        _rep = {
+            "db": db_name,
+            "url": url,
+            "pages_total": int(_total_pages or 0),
+            "pages_processed": int(_page_idx or 0),
+            "skipped": int(_skipped or 0),
+            "chunks_processed_added": int(added or 0),
+            "chunks_processed_deleted_est": int(deleted or 0),
+            "chunks_net_new": int(max(0, _end_total - _start_total)),
+            "failures": _failures,
+            "ts": datetime.now().isoformat(),
+        }
+        Path(f"/tmp/crawl_report_{db_name}.json").write_text(json.dumps(_rep, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception:
+        pass
     return max(0, _end_total - _start_total)
 
 async def _auto_scheduler():
@@ -2132,6 +2154,34 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
     _trace_artifact(workflow_debug, "retrieved_sources", list(sources or [])[:8])
     context_addresses_query = _context_addresses_query(context, q)
     _trace_decision(workflow_debug, "context_addresses_query", bool(context_addresses_query))
+
+    # ── Deterministic outcomes extractor (universal) ─────────────────────────────
+    # For "goals / objectives / what will I learn" questions, if the retrieved KB
+    # already contains a clean bullet list, return it directly (no LLM needed).
+    # If the first retrieval missed it, do one wider retrieval pass before falling
+    # through to the sparse-KB guard or the LLM.
+    _outcomes_ans = try_extract_outcomes_answer(q, context or "")
+    if _outcomes_ans is None and _local_db:
+        try:
+            _ctx2, _dc2, _src2 = await retrieve_context(q, _local_db, k=60, fast=False, expansion_task=None, history=history)
+            _out2 = try_extract_outcomes_answer(q, _ctx2 or "")
+            if _out2:
+                context, doc_count, sources = _ctx2, _dc2, _src2
+                _outcomes_ans = _out2
+                context_addresses_query = True  # extracted list is by definition relevant
+                _trace_event(workflow_trace, "retrieval_retry", reason="outcomes_extractor", k=60, doc_count=_dc2, source_count=len(_src2 or []))
+        except Exception as _re2:
+            logger.debug(f"[RETRIEVAL] outcomes retry failed: {_re2}")
+    if _outcomes_ans:
+        _trace_event(workflow_trace, "guard_exit", guard="deterministic_outcomes_extractor")
+        _trace_decision(workflow_debug, "exit_guard", "deterministic_outcomes_extractor")
+        if visitor_id: _run_in_bg(save_visitor_turn, visitor_id, "assistant", _outcomes_ans, db_name)
+        yield f"data: {json.dumps({'type': 'chunk', 'content': _outcomes_ans})}\n\n"
+        _lead_on = not cfg.get("disable_lead_box", False)
+        _trace_artifact(workflow_debug, "final_answer", _outcomes_ans[:4000])
+        yield f"data: {json.dumps(_metadata_payload(_lead_on, sources[:5]))}\n\n"
+        yield "data: {\"type\": \"done\"}\n\n"
+        return
 
     # ── Sparse KB guard — skip for api-only DBs (no KB, LLM uses training knowledge) ──
     if not _is_api_only and not context_addresses_query:
