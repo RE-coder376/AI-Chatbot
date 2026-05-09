@@ -930,7 +930,16 @@ async def _auto_crawl_db(db_name: str, url: str, max_pages: int = 0) -> int:
         except Exception as _e:
             logger.warning(f"[AUTO-CRAWL] Could not create write-db for {db_name}: {_e}")
             db = local_db
-    if not db or not url: return 0
+    if not db or not url:
+        return 0
+
+    # Admin UI wants "new chunks" as net growth, not "chunks processed".
+    # Some Chroma versions don't support count(where=...), so track net via total count.
+    _start_total = 0
+    try:
+        _start_total = int(await asyncio.to_thread(lambda: db._collection.count()))
+    except Exception:
+        _start_total = 0
     while _manual_crawl_active:
         logger.info(f"[AUTO-CRAWL] '{db_name}' postponed while manual crawl '{_manual_crawl_active}' is running")
         await asyncio.sleep(30)
@@ -1190,7 +1199,12 @@ async def _auto_crawl_db(db_name: str, url: str, max_pages: int = 0) -> int:
         # Always upload DB zip + crawl_times after a successful refresh (not just when new pages found)
         threading.Thread(target=_github_sync_upload, args=(db_name,), daemon=True).start()
         threading.Thread(target=_github_backup_crawl_times, args=(db_name,), daemon=True).start()
-    return max(0, added - deleted)
+    _end_total = _start_total
+    try:
+        _end_total = int(await asyncio.to_thread(lambda: db._collection.count()))
+    except Exception:
+        _end_total = _start_total
+    return max(0, _end_total - _start_total)
 
 async def _auto_scheduler():
     """Background task: auto-crawl and API source polling every 60s."""
