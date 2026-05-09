@@ -1638,7 +1638,7 @@ _GREETING_RE = re.compile(
 )
 _COMPLAINT_WORDS = {
     "frustrated", "angry", "furious", "terrible", "horrible", "worst", "hate",
-    "useless", "broken", "scam", "fraud", "cheated", "pathetic", "disgusting",
+    "useless", "scam", "fraud", "cheated", "pathetic", "disgusting",
     "awful", "rubbish", "nonsense", "ridiculous", "unacceptable", "disappointed",
     "dissatisfied", "complaint", "rip off", "waste", "lied", "deceived", "defective",
     # Profanity / venting — treat as frustrated user needing empathy

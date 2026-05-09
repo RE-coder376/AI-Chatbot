@@ -207,6 +207,16 @@ def _retrieval_visible_doc(doc) -> bool:
             return False
     except Exception:
         pass
+    # Drop corrupted/binary chunks — if <70% of first 200 chars are printable, skip.
+    try:
+        text = getattr(doc, "page_content", None) or ""
+        sample = text[:200]
+        if len(sample) > 20:
+            printable_ratio = sum(1 for c in sample if c.isprintable()) / len(sample)
+            if printable_ratio < 0.70:
+                return False
+    except Exception:
+        pass
     return True
 
 _ROLE_TERMS = {"ceo", "cto", "coo", "cfo", "cpo", "vp", "founder", "author", "director",
