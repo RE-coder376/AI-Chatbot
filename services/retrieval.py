@@ -51,6 +51,9 @@ def try_extract_outcomes_answer(q: str, context: str) -> str | None:
         return None
     try:
         title_phrase = _extract_title_phrase(q or "")
+        _q_lower = (q or "").lower()
+        _q_is_chapter = "chapter" in _q_lower
+        part_no = _extract_part_number(q or "")
         title_tokens = [w.lower() for w in re.findall(r"[a-zA-Z]{4,}", title_phrase)][:10] if title_phrase else []
         lines = [ln.rstrip() for ln in str(context).splitlines()]
         best = None  # (score, start_idx, end_idx)
@@ -158,38 +161,88 @@ def try_extract_outcomes_answer(q: str, context: str) -> str | None:
                         items.append(seg)
                 return items
 
-            best_inline = None  # (score, items)
-            # Scan a few ":" occurrences and pick the one that yields the best list.
+            def _trim_after_heading(items: list[str]) -> list[str]:
+                """Stop the list if a section heading leaks in (common when lists are inline)."""
+                out = []
+                for it in items:
+                    mm = re.search(r"\b(?:Lesson Progression|Chapter Progression|Capstone|Outcome\b|Method\b)\b", it, re.I)
+                    if mm and mm.start() >= 10:
+                        head = it[:mm.start()].strip(" -:;,.")
+                        if head:
+                            out.append(head)
+                        break
+                    out.append(it)
+                return [x for x in out if x]
+
+            best_inline = None  # (kind_prio, score, items)
+
+            def _consider_tail(tail: str, proximity_pos: int | None = None, kind: str = "colon"):
+                nonlocal best_inline
+                if not tail or len(tail) < 60:
+                    return
+                if part_no is not None and proximity_pos is not None:
+                    win = flat[max(0, proximity_pos - 420): proximity_pos + 850].lower()
+                    if f"part {part_no}" not in win:
+                        return
+                    # Prefer canonical outcomes phrasing for Part-level goals to avoid
+                    # picking random lesson checklists that merely mention "Part N".
+                    if ("completing part" in win) and (f"completing part {part_no}" not in win):
+                        return
+                if title_tokens and proximity_pos is not None:
+                    win2 = flat[max(0, proximity_pos - 420): proximity_pos + 850].lower()
+                    hit = sum(1 for t in title_tokens[:6] if t in win2)
+                    req = 3 if part_no is not None else 2
+                    if hit < req:
+                        return
+                # Title phrases are not always repeated inside the goals list itself
+                # (often the list is just verb-start items). So only require title-token
+                # overlap when we can anchor by proximity to the title occurrence.
+                if title_phrase and title_ix != -1 and proximity_pos is not None:
+                    tks = [w.lower() for w in re.findall(r"[a-zA-Z]{4,}", title_phrase)][:8]
+                    if tks and not any(t in tail.lower() for t in tks[:4]):
+                        return
+                items = _split_inline_list(tail)
+                if not (3 <= len(items) <= 25):
+                    return
+                if re.search(r"https?://", " ".join(items), re.I):
+                    return
+                items = _trim_after_heading(items)
+                if not (3 <= len(items) <= 25):
+                    return
+                joined = " ".join(items).lower()
+                score = float(len(items))
+                score += 2.0 if ("will" in joined or "able to" in joined) else 0.0
+                # Chapter queries: penalize lists that clearly describe Part-level goals.
+                if _q_is_chapter and "part " in joined:
+                    score -= 6.0
+                if kind == "goals":
+                    score += 4.0
+                if proximity_pos is not None and title_ix != -1:
+                    dist = abs(proximity_pos - title_ix)
+                    score += max(0.0, 6.0 - (dist / 180.0))
+                kind_prio = 1 if kind == "goals" else 0
+                if (best_inline is None) or ((kind_prio, score) > (best_inline[0], best_inline[1])):
+                    best_inline = (kind_prio, score, items)
+
+            # Pass A: Scan ":" occurrences ("By completing X, you will: ...")
             for _m in re.finditer(r":", flat):
                 cpos = _m.start()
                 if cpos < 10:
                     continue
                 if title_ix != -1 and (cpos < (title_ix - 200) or cpos > (title_ix + 600)):
                     continue
-                # Consider only reasonably-sized tails.
                 tail = flat[cpos + 1: cpos + 1400].strip()
-                if len(tail) < 60:
+                _consider_tail(tail, proximity_pos=cpos, kind="colon")
+
+            # Pass B: Handle "Goals ..." lead-in without a colon.
+            for _m in re.finditer(r"\bGoals\b", flat, re.I):
+                gpos = _m.end()
+                if title_ix != -1 and (gpos < (title_ix - 400) or gpos > (title_ix + 900)):
                     continue
-                # If we have a title phrase (e.g. "Building Realtime Voice Agents"),
-                # bias toward lists that occur near it and share tokens with it.
-                if title_phrase:
-                    tks = [w.lower() for w in re.findall(r"[a-zA-Z]{4,}", title_phrase)][:8]
-                    if tks and not any(t in tail.lower() for t in tks[:4]):
-                        continue
-                items = _split_inline_list(tail)
-                if 3 <= len(items) <= 25:
-                    if re.search(r"https?://", " ".join(items), re.I):
-                        continue
-                    joined = " ".join(items).lower()
-                    score = float(len(items))
-                    score += 2.0 if ("will" in joined or "able to" in joined) else 0.0
-                    if title_ix != -1:
-                        dist = abs(cpos - title_ix)
-                        score += max(0.0, 6.0 - (dist / 180.0))
-                    if (best_inline is None) or (score > best_inline[0]):
-                        best_inline = (score, items)
+                tail = flat[gpos: gpos + 1400].strip(" :;-—\t")
+                _consider_tail(tail, proximity_pos=gpos, kind="goals")
             if best_inline:
-                _, items = best_inline
+                _, __, items = best_inline
                 # Merge obvious split fragments (e.g., "Ship with LiveKit" + "Agents ...").
                 try:
                     glue_end = {"on","with","for","to","in","and","or","of","the","a","an","vs"}
@@ -200,32 +253,18 @@ def try_extract_outcomes_answer(q: str, context: str) -> str | None:
                         if i + 1 < len(items):
                             nxt = items[i + 1].strip()
                             cur_last = (cur.split()[-1].lower() if cur.split() else "")
-                            if (cur_last in glue_end) or (len(cur.split()) <= 4 and not re.search(r"[.!?]$", cur)):
+                            if (cur_last in glue_end) and (len(nxt.split()) >= 3):
                                 # Only merge if next is not tiny.
-                                if len(nxt.split()) >= 3:
-                                    merged.append((cur + " " + nxt).strip())
-                                    i += 2
-                                    continue
+                                merged.append((cur + " " + nxt).strip())
+                                i += 2
+                                continue
                         merged.append(cur)
                         i += 1
                     items = [m for m in merged if m]
                 except Exception:
                     pass
-                # Trim if a heading-like token leaks into the last item (common when the
-                # list is followed by "Chapter X" or a new section title).
-                try:
-                    trimmed = []
-                    for it in items:
-                        mm = re.search(r"\b(?:Chapter|Lesson|Unit|Part)\b", it)
-                        if mm and mm.start() >= 8:
-                            head = it[:mm.start()].strip(" -:;,.")
-                            if head:
-                                trimmed.append(head)
-                            break
-                        trimmed.append(it)
-                    items = [t for t in trimmed if t]
-                except Exception:
-                    pass
+                if len(items) < 3:
+                    return None
                 return "Learning outcomes:\n\n" + "\n".join(f"- {it}" for it in items)
             return None
         _, s, e = best
@@ -265,6 +304,26 @@ def _extract_title_phrase(q: str) -> str:
     except Exception:
         pass
     return ''
+
+
+def _extract_chapter_number(q: str) -> int | None:
+    try:
+        m = re.search(r"\bchapter\s*(\d{1,4})\b", q or "", re.I)
+        if m:
+            return int(m.group(1))
+    except Exception:
+        pass
+    return None
+
+
+def _extract_part_number(q: str) -> int | None:
+    try:
+        m = re.search(r"\bpart\s*(\d{1,4})\b", q or "", re.I)
+        if m:
+            return int(m.group(1))
+    except Exception:
+        pass
+    return None
 
 
 def _meaningful_keywords(q: str) -> list[str]:
@@ -925,7 +984,32 @@ async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansio
                 _bm25_db_name = Path(db._persist_directory).name.split("_", 1)[-1]
             except Exception:
                 pass
-        _bm25_task = loop.run_in_executor(None, lambda: _bm25_search(q, db, _bm25_db_name, k=k))
+        # For outcomes/goals questions, BM25 is often the only reliable way to land on
+        # the exact "Goals ..." chunk (vector search drifts to part overviews).
+        # Prewarm on-demand with a bounded budget.
+        if _is_outcomes_intent and _bm25_db_name and (_bm25_db_name not in _bm25_cache):
+            try:
+                await asyncio.wait_for(
+                    loop.run_in_executor(None, lambda: _get_bm25_index(db, _bm25_db_name)),
+                    timeout=10
+                )
+            except Exception:
+                pass
+        _bm25_q = q
+        if _is_outcomes_intent:
+            try:
+                _bm25_q = re.sub(
+                    r'(?i)^\s*(?:what\s+are\s+the\s+(?:goals?|objectives?|learning\s+outcomes?)\s+of\s+|what\s+will\s+i\s+learn\s+from\s+)',
+                    '',
+                    _bm25_q or ''
+                ).strip()
+            except Exception:
+                pass
+        _bm25_task = loop.run_in_executor(None, lambda: _bm25_search(_bm25_q, db, _bm25_db_name, k=k))
+        _bm25_title_task = None
+        if _is_outcomes_intent and _title_phrase:
+            _tp = _title_phrase
+            _bm25_title_task = loop.run_in_executor(None, lambda: _bm25_search(_tp, db, _bm25_db_name, k=min(k, 25)))
         # Policy injection: secondary search for shipping/discount/return docs when query is policy-related.
         # Runs in parallel — zero latency overhead. Prepended to context so never crowded out by product chunks.
         _POLICY_Q_RE = re.compile(
@@ -936,6 +1020,7 @@ async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansio
         _policy_task = None
         _outcomes_title_task = None
         _outcomes_title_task = None
+        _outcomes_title_results: list = []
         # Fire policy search when: (a) query explicitly mentions policy terms, OR
         # (b) DB is a product/retail catalog (_has_product_meta) — covers "Deli Punch shipping?"
         # type queries where the user asks about a product but the answer lives in a policy chunk.
@@ -955,6 +1040,7 @@ async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansio
         try:
             _gather_tasks = (
                 [*_search_tasks, _bm25_task]
+                + ([_bm25_title_task] if _bm25_title_task else [])
                 + ([_policy_task] if _policy_task else [])
                 + ([_outcomes_title_task] if _outcomes_title_task else [])
             )
@@ -964,9 +1050,24 @@ async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansio
             )
         except asyncio.TimeoutError:
             logger.warning("ChromaDB parallel search timed out")
+            # Best-effort fallback: do a small title-only search synchronously so
+            # outcomes questions still land on the right chapter/part page.
             _all_results = []
-        # Split results: last slot is policy_task (if fired), rest are main search results
-        _n_main = len(_search_tasks) + 1  # search tasks + bm25
+            try:
+                if _is_outcomes_intent and _title_phrase:
+                    _fallback_title = await asyncio.wait_for(
+                        loop.run_in_executor(None, lambda: db.similarity_search(_title_phrase, k=8)),
+                        timeout=8
+                    )
+                    for _r in (_fallback_title or []):
+                        _pk = _r.page_content[:100]
+                        if _pk not in seen:
+                            seen.add(_pk)
+                            _outcomes_title_results.append(_r)
+            except Exception:
+                pass
+        # Split results: main_results are vector tasks; optional policy/outcomes-title tasks appended.
+        _n_main = len(_search_tasks) + 1 + (1 if _bm25_title_task else 0)  # search tasks + bm25 + optional bm25(title)
         _main_results = _all_results[:_n_main]
         _policy_results_raw = _all_results[_n_main] if _policy_task and len(_all_results) > _n_main else []
         policy_results = []
@@ -976,18 +1077,34 @@ async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansio
                 if _pk not in seen:
                     seen.add(_pk)
                     policy_results.append(_pr)
+        if (not _outcomes_title_results) and _outcomes_title_task:
+            _idx = _n_main + (1 if _policy_task else 0)
+            _raw = _all_results[_idx] if len(_all_results) > _idx else []
+            if not isinstance(_raw, Exception):
+                for _r in _raw:
+                    _pk = _r.page_content[:100]
+                    if _pk not in seen:
+                        seen.add(_pk)
+                        _outcomes_title_results.append(_r)
         # Combine in priority order: BM25 exact matches first, then rescue, then vector.
         # Dedup in order so highest-priority group wins. This ensures the BM25 best
         # match (e.g. "Marabu Chalky Chic") appears at position 0 in the context,
         # not buried after 20+ generic same-brand docs from rescue.
-        _bm25_idx = len(_search_tasks)  # BM25 is last in _gather_tasks
+        _bm25_idx = len(_search_tasks)  # BM25 is immediately after vector tasks
         _bm25_result = _main_results[_bm25_idx] if len(_main_results) > _bm25_idx else []
         _bm25_raw = [] if isinstance(_bm25_result, Exception) else _bm25_result
+        _bm25_title_raw = []
+        if _bm25_title_task:
+            _bmt_idx = _bm25_idx + 1
+            _bmt_res = _main_results[_bmt_idx] if len(_main_results) > _bmt_idx else []
+            _bm25_title_raw = [] if isinstance(_bmt_res, Exception) else _bmt_res
         _vector_raw = []
         _vector_exc_count = 0
         _vector_exc_sample = None
         for _vi, _vr in enumerate(_main_results):
             if _vi == _bm25_idx:
+                continue
+            if _bm25_title_task and _vi == (_bm25_idx + 1):
                 continue
             if isinstance(_vr, Exception):
                 _vector_exc_count += 1
@@ -1004,7 +1121,9 @@ async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansio
     # policy → BM25 (lexical exact match) → rescue (term-contains) → vector
     _comb_seen: set = set()
     _combined_before_cap: list = []
-    for _grp in (policy_results, _bm25_raw, rescue_results, _vector_raw):
+    # Outcomes-title results are a high-signal extra retrieval pass (title phrase only).
+    # Include them early so the correct chapter/part page outranks broad overviews.
+    for _grp in (policy_results, _bm25_raw, _bm25_title_raw, _outcomes_title_results, rescue_results, _vector_raw):
         for _r in _grp:
             if not _retrieval_visible_doc(_r):
                 continue
