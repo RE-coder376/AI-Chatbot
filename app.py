@@ -4022,7 +4022,13 @@ async def admin_generate_evals(request: Request):
         return JSONResponse({"detail": blocker}, status_code=503)
 
     base_url = str(request.base_url).rstrip("/")
+    # Owner evals run even when the active DB is API-only (e.g. mal),
+    # so ensure embeddings exist before opening non-active tenant DBs.
+    if not _ensure_eval_embeddings_ready():
+        return JSONResponse({"detail": "Embeddings model is not available for evals right now."}, status_code=503)
     tenant_db = _get_or_create_db(db_name)
+    if tenant_db is None:
+        return JSONResponse({"detail": f"Tenant DB '{db_name}' could not be opened for evals."}, status_code=503)
     tenant_audit = await _safe_runtime_tenant_audit(tenant_db, db_name, cfg)
     tests = await _build_owner_eval_tests(base_url, password, db_name, count=count, strategy=strategy)
     tests, dropped = _filter_eval_tests_for_tenant(tests, db_name, tenant_audit)
@@ -4086,7 +4092,11 @@ async def admin_run_evals(request: Request):
     blocker = _owner_eval_blocker(db_name)
     if blocker:
         return JSONResponse({"detail": blocker}, status_code=503)
+    if not _ensure_eval_embeddings_ready():
+        return JSONResponse({"detail": "Embeddings model is not available for evals right now."}, status_code=503)
     tenant_db = _get_or_create_db(db_name)
+    if tenant_db is None:
+        return JSONResponse({"detail": f"Tenant DB '{db_name}' could not be opened for evals."}, status_code=503)
     if not tenant_audit:
         tenant_audit = await _safe_runtime_tenant_audit(tenant_db, db_name, cfg)
 
