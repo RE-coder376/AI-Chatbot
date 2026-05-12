@@ -3892,6 +3892,8 @@ async def _eval_retrieve_docs(q: str, tenant_db, k: int = 8) -> tuple[int, list[
     try:
         docs = await asyncio.to_thread(tenant_db.similarity_search, q, k)
         docs = [d for d in (docs or []) if _retrieval_visible_doc(d)]
+        if not docs:
+            raise RuntimeError("empty_similarity_search")
         sources: list[str] = []
         doc_rows: list[dict] = []
         for d in docs or []:
@@ -3922,7 +3924,7 @@ async def _eval_retrieve_docs(q: str, tenant_db, k: int = 8) -> tuple[int, list[
         # This keeps eval generation alive even if similarity_search fails due to
         # embedding init/model mismatch. Evals only need source/preview signals.
         try:
-            logger.warning(f"[EVAL] similarity_search failed for probe='{q[:60]}' type={type(e).__name__}: {e}")
+            logger.warning(f"[EVAL] similarity_search failed/empty for probe='{q[:60]}' type={type(e).__name__}: {e}")
             raw = None
             try:
                 raw = await asyncio.to_thread(lambda: tenant_db._collection.get(limit=max(40, k * 6), include=["documents", "metadatas"]))
