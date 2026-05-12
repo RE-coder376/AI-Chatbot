@@ -3917,8 +3917,50 @@ async def _eval_retrieve_docs(q: str, tenant_db, k: int = 8) -> tuple[int, list[
             seen.add(sl)
             deduped.append(s)
         return (len(docs or []), doc_rows[:k], deduped[:k])
-    except Exception:
-        return (0, [], [])
+    except Exception as e:
+        # Fallback: sample directly from the underlying Chroma collection.
+        # This keeps eval generation alive even if similarity_search fails due to
+        # embedding init/model mismatch. Evals only need source/preview signals.
+        try:
+            logger.warning(f"[EVAL] similarity_search failed for probe='{q[:60]}' type={type(e).__name__}: {e}")
+            raw = None
+            try:
+                raw = await asyncio.to_thread(lambda: tenant_db._collection.get(limit=max(40, k * 6), include=["documents", "metadatas"]))
+            except Exception:
+                raw = None
+            documents = (raw or {}).get("documents") or []
+            metadatas = (raw or {}).get("metadatas") or [{}] * len(documents)
+            if not documents:
+                return (0, [], [])
+            from types import SimpleNamespace as _SN
+            sources: list[str] = []
+            doc_rows: list[dict] = []
+            for doc_text, meta in zip(documents, metadatas):
+                try:
+                    src = (meta or {}).get("source") or ""
+                    tmp = _SN(page_content=(doc_text or ""), metadata=(meta or {}))
+                    if not _retrieval_visible_doc(tmp):
+                        continue
+                    if isinstance(src, str) and src.strip():
+                        sources.append(src.strip())
+                    prev = (doc_text or "")[:500]
+                    doc_rows.append({"source": (src.strip() if isinstance(src, str) else ""), "preview": prev})
+                    if len(doc_rows) >= max(12, k):
+                        break
+                except Exception:
+                    continue
+            # De-dup while preserving order
+            seen = set()
+            deduped = []
+            for s in sources:
+                sl = s.lower()
+                if sl in seen:
+                    continue
+                seen.add(sl)
+                deduped.append(s)
+            return (len(doc_rows), doc_rows[:k], deduped[:k])
+        except Exception:
+            return (0, [], [])
 
 async def _eval_answer_via_stream(q: str, cfg: dict, tenant_db, db_name: str) -> tuple[str, list[str], dict, dict]:
     """Consume the production streaming path to extract (answer, sources, workflow_trace, workflow_debug)."""
