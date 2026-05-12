@@ -166,6 +166,12 @@ def _classify_page_type(url: str, cleaned: str, product_like: bool, structural: 
         return "policy"
     if len(_GENERIC_SECTION_SPLIT_RE.split(cleaned)) >= 3:
         return "faq"
+    # Outcomes/learning-goals marker override (universal):
+    # Many docs index pages look "category/structural" but still contain the
+    # canonical "By completing..., you will:" goals list. Never classify those
+    # as category-only content.
+    if re.search(r"(?i)\b(by completing|by the end of this (?:chapter|lesson)|you will be able to|learning outcomes|objectives|goals)\b", cleaned or ""):
+        return "article"
     metrics = _trusted_content_metrics(cleaned)
     if _CATEGORY_URL_RE.search(source) or (metrics["category_hits"] >= 2 and metrics["sentence_count"] <= 2):
         return "category"
