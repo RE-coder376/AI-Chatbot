@@ -113,7 +113,8 @@ def try_extract_outcomes_answer(q: str, context: str) -> str | None:
                 _wh = ("what", "which", "why", "how", "when", "where", "who")
                 if sum(1 for it in items if it.strip().lower().startswith(_wh)) > max(0, len(items) - 2):
                     return None
-                if (not re.search(r"https?://", jr, re.I)) and (not any(h in jr for h in ("toggle theme", "toggle menu", "skip to main content", "ctrl+", "ctrl k", "leaderboard", "search..."))):
+                _ui_hints = ("toggle theme", "toggle menu", "skip to main content", "copy as markdown", "sign in to ask", "sign in to access", "ctrl+", "ctrl k", "leaderboard", "search...")
+                if (not re.search(r"https?://", jr, re.I)) and (not any(h in jr for h in _ui_hints)):
                     return "Learning outcomes:\n\n" + "\n".join(f"- {it}" for it in items)
         best = None  # (score, start_idx, end_idx)
         i = 0
@@ -148,7 +149,8 @@ def try_extract_outcomes_answer(q: str, context: str) -> str | None:
                     continue
                 # Reject UI/navigation control lists (universal).
                 _jr_low = joined_raw.lower()
-                if any(h in _jr_low for h in ("toggle theme", "toggle menu", "skip to main content", "ctrl+", "ctrl k", "search...", "leaderboard")):
+                _ui_hints = ("toggle theme", "toggle menu", "skip to main content", "copy as markdown", "sign in to ask", "sign in to access", "ctrl+", "ctrl k", "search...", "leaderboard")
+                if any(h in _jr_low for h in _ui_hints):
                     continue
                 # Reject question-list "outcomes" (universal).
                 if any("?" in it for it in items):
@@ -564,6 +566,10 @@ def _retrieval_visible_doc(doc) -> bool:
             ("skip to main content" in tl)
             or ("toggle theme" in tl)
             or ("toggle menu" in tl)
+            or ("copy as markdown" in tl)
+            or ("on this page" in tl and "ctrl" in tl and "copy" in tl)
+            or ("sign in to ask" in tl)
+            or ("sign in to access" in tl)
             or ("ctrl+" in tl)
             or ("leaderboard" in tl and "search" in tl and "toggle" in tl)
         ):
