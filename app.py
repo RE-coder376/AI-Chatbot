@@ -2985,7 +2985,22 @@ async def chat(request: Request):
             if not llm: return JSONResponse({"answer": "No active API keys found."}, status_code=500)
             try:
                 resp = await asyncio.wait_for(llm.ainvoke(messages), timeout=30)
-                return JSONResponse({"answer": _strip_source_leaks(resp.content, kb_context=context)})
+                _raw = resp.content
+                _ans = _strip_source_leaks(_raw, kb_context=context)
+                # Provider sanity check: if the model returns mojibake/control-char garbage,
+                # treat it like a provider failure and rotate keys/providers.
+                try:
+                    _sample = str(_ans or "")[:400]
+                    _ctrl = sum(1 for c in _sample if (ord(c) < 32 and c not in ("\n", "\r", "\t")))
+                    _rep = _sample.count("\ufffd") + _sample.count("ï¿½")
+                    if _ctrl >= 1 or (_rep / max(1, len(_sample)) > 0.02):
+                        raise RuntimeError("garbled_llm_output")
+                except RuntimeError:
+                    raise
+                except Exception:
+                    # If the heuristic itself fails, don't block the response.
+                    pass
+                return JSONResponse({"answer": _ans})
             except Exception as e:
                 err_str = str(e).lower()
                 logger.warning(f"LLM attempt {attempt+1} error type={type(e).__name__}: {str(e)[:200]}")
