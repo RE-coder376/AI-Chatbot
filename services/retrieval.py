@@ -602,6 +602,15 @@ def _retrieval_visible_doc(doc) -> bool:
             return False
         sample = text[:200]
         if len(sample) > 20:
+            # Drop control-char heavy chunks (these poison the LLM context and often
+            # appear after a bad decode).
+            ctrl = sum(1 for c in sample if (ord(c) < 32 and c not in ("\n", "\r", "\t")))
+            if ctrl >= 2:
+                return False
+            # Drop chunks with lots of replacement/mojibake markers.
+            rep = sample.count("\ufffd") + sample.count("ï¿½")
+            if rep / max(1, len(sample)) > 0.02:
+                return False
             printable_ratio = sum(1 for c in sample if c.isprintable()) / len(sample)
             if printable_ratio < 0.70:
                 return False
