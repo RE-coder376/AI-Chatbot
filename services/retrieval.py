@@ -1116,10 +1116,26 @@ async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansio
                 ).strip()
             except Exception:
                 pass
+            # If the user named an explicit Chapter/Part number, keep it in the BM25 query.
+            # This sharply reduces "nearby chapter" false positives (universal).
+            try:
+                if chapter_no is not None and (f"chapter {chapter_no}".lower() not in (_bm25_q or "").lower()):
+                    _bm25_q = f"Chapter {chapter_no} {_bm25_q}".strip()
+                if part_no is not None and (f"part {part_no}".lower() not in (_bm25_q or "").lower()):
+                    _bm25_q = f"Part {part_no} {_bm25_q}".strip()
+            except Exception:
+                pass
         _bm25_task = loop.run_in_executor(None, lambda: _bm25_search(_bm25_q, db, _bm25_db_name, k=k))
         _bm25_title_task = None
         if _is_outcomes_intent and _title_phrase:
             _tp = _title_phrase
+            try:
+                if chapter_no is not None and (f"chapter {chapter_no}".lower() not in _tp.lower()):
+                    _tp = f"Chapter {chapter_no} {_tp}"
+                if part_no is not None and (f"part {part_no}".lower() not in _tp.lower()):
+                    _tp = f"Part {part_no} {_tp}"
+            except Exception:
+                pass
             _bm25_title_task = loop.run_in_executor(None, lambda: _bm25_search(_tp, db, _bm25_db_name, k=min(k, 25)))
         # Policy injection: secondary search for shipping/discount/return docs when query is policy-related.
         # Runs in parallel — zero latency overhead. Prepended to context so never crowded out by product chunks.
