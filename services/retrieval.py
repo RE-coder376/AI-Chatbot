@@ -1106,12 +1106,12 @@ async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansio
                 )
             except Exception:
                 pass
+        # Explicit chapter/part numbers (if present) are useful anchors for both retrieval and extractors.
+        chapter_no = _extract_chapter_number(q or "")
+        part_no = _extract_part_number(q or "")
+
         _bm25_q = q
         if _is_outcomes_intent:
-            # Anchor outcomes queries on explicit Chapter/Part numbers when present.
-            # These helpers are cheap and prevent cross-chapter drift in BM25.
-            chapter_no = _extract_chapter_number(q or "")
-            part_no = _extract_part_number(q or "")
             try:
                 _bm25_q = re.sub(
                     r'(?i)^\s*(?:what\s+are\s+the\s+(?:goals?|objectives?|learning\s+outcomes?)\s+of\s+|what\s+will\s+i\s+learn\s+from\s+)',
