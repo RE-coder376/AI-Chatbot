@@ -1514,6 +1514,17 @@ async def chat_crash_guard_middleware(request: Request, call_next):
     except Exception as e:
         if request.url.path in ("/chat", "/widget-chat"):
             logger.error(f"Unhandled exception in {request.url.path}: {e}", exc_info=True)
+            try:
+                _last_chat_error.clear()
+                _last_chat_error.update({
+                    "ts": datetime.now(timezone.utc).isoformat(),
+                    "path": request.url.path,
+                    "stream": False,
+                    "type": type(e).__name__,
+                    "error": str(e)[:800],
+                })
+            except Exception:
+                pass
             return JSONResponse({"answer": "I ran into an issue. Please try again in a moment.", "sources": []}, status_code=200)
         raise
 
@@ -2810,7 +2821,18 @@ async def chat(request: Request):
                                                          tenant_db=tenant_db_instance, db_name=tenant_db_name):
                     yield chunk
             except Exception as _se:
-                logger.error(f"chat_stream_generator crashed: {_se}", exc_info=True)
+                logger.error(f"chat_stream_generator crashed: {type(_se).__name__}: {_se}", exc_info=True)
+                try:
+                    _last_chat_error.clear()
+                    _last_chat_error.update({
+                        "ts": datetime.now(timezone.utc).isoformat(),
+                        "db": tenant_db_name,
+                        "stream": True,
+                        "type": type(_se).__name__,
+                        "error": str(_se)[:800],
+                    })
+                except Exception:
+                    pass
                 yield f"data: {json.dumps({'type':'chunk','content':'I ran into an issue. Please try again in a moment.'})}\n\n"
                 yield f"data: {json.dumps({'type':'metadata','capture_lead':False,'sources':[]})}\n\n"
                 yield "data: {\"type\": \"done\"}\n\n"
@@ -6106,6 +6128,9 @@ async def delete_api_source(request: Request, data: dict):
 _crawl_state: dict = {}
 # Format: {db_name: {"logs": [], "done": False, "running": False, "error": False}}
 
+# Last /chat crash (admin-only visibility). Helps debug HF issues without exposing internals to end users.
+_last_chat_error: dict = {}
+
 @app.post("/admin/crawl/cancel")
 async def cancel_crawl_endpoint(data: dict, request: Request):
     db_name = _extract_admin_db(request, data.get("db_name", "").strip())
@@ -6141,6 +6166,15 @@ async def get_crawl_log(request: Request):
     if not log_path.exists():
         return PlainTextResponse("No crawl log found for this DB.", status_code=404)
     return PlainTextResponse(log_path.read_text(encoding="utf-8", errors="replace"))
+
+@app.get("/admin/chat-last-error")
+async def admin_chat_last_error(request: Request):
+    """Return the last unhandled /chat error (if any). Admin-only."""
+    db_name = request.query_params.get("db_name", "").strip()
+    password = request.query_params.get("password", "")
+    cfg = get_config(db_name) if db_name else get_config()
+    admin_auth(password, cfg)
+    return JSONResponse({"last_error": _last_chat_error or {}})
 
 @app.post("/admin/crawl")
 async def crawl_site(data: dict, request: Request):
