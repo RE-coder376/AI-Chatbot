@@ -56,6 +56,65 @@ def try_extract_outcomes_answer(q: str, context: str) -> str | None:
         part_no = _extract_part_number(q or "")
         title_tokens = [w.lower() for w in re.findall(r"[a-zA-Z]{4,}", title_phrase)][:10] if title_phrase else []
         lines = [ln.rstrip() for ln in str(context).splitlines()]
+        flat_all = " ".join(ln.strip() for ln in lines if ln and ln.strip())
+        # Goals-first: if we have an explicit "Goals ..." section, prefer extracting from it.
+        m_goals = re.search(r"\bGoals\b(.{60,1600})", flat_all, re.I)
+        if m_goals:
+            if title_tokens:
+                _win = flat_all[max(0, m_goals.start() - 500): m_goals.end() + 900].lower()
+                _hit = sum(1 for t in title_tokens[:6] if t in _win)
+                _ess = title_tokens[:2]
+                _ess_hit = sum(1 for t in _ess if t in _win)
+                if _q_is_chapter and "by completing part" in _win:
+                    m_goals = None
+                elif _hit < 2 or _ess_hit < 1:
+                    m_goals = None
+        if m_goals:
+            tail = m_goals.group(1)
+            tail = re.split(r"\b(?:Lesson Progression|Chapter Progression|Capstone|Outcome\b|Method\b)\b", tail, maxsplit=1, flags=re.I)[0]
+            starts = [mm.start(1) for mm in re.finditer(r"\b([A-Z][a-z]{2,})\b\s+(?:to|with|for|the|a|an|in|on|of|when|vs|[a-z]{2,})\b", tail)]
+            starts = sorted(set(starts))
+            pruned = []
+            for s in starts:
+                if not pruned or (s - pruned[-1]) >= 18:
+                    pruned.append(s)
+            items = []
+            for a, b in zip(pruned, pruned[1:] + [len(tail)]):
+                seg = tail[a:b].strip(" \t-•;|")
+                if 10 <= len(seg) <= 260:
+                    items.append(seg)
+            if 3 <= len(items) <= 25:
+                # Merge obvious split fragments ("Ship with LiveKit" + "Agents ...").
+                try:
+                    merged = []
+                    i2 = 0
+                    while i2 < len(items):
+                        cur = items[i2].strip()
+                        if i2 + 1 < len(items):
+                            nxt = items[i2 + 1].strip()
+                            last = (cur.split()[-1].lower() if cur.split() else "")
+                            if (
+                                (last in {"on","with","for","to","in","and","or","of","vs"})
+                                or (len(cur.split()) <= 4 and not re.search(r"[.!?:]$", cur))
+                            ) and len(nxt.split()) >= 3:
+                                merged.append((cur + " " + nxt).strip())
+                                i2 += 2
+                                continue
+                        merged.append(cur)
+                        i2 += 1
+                    items = [m for m in merged if m]
+                except Exception:
+                    pass
+                jr = " ".join(items).lower()
+                # Reject question-list "outcomes" (universal). These are almost always
+                # page TOCs / prompts (e.g., "What's the core architecture?").
+                if any("?" in it for it in items):
+                    return None
+                _wh = ("what", "which", "why", "how", "when", "where", "who")
+                if sum(1 for it in items if it.strip().lower().startswith(_wh)) > max(0, len(items) - 2):
+                    return None
+                if (not re.search(r"https?://", jr, re.I)) and (not any(h in jr for h in ("toggle theme", "toggle menu", "skip to main content", "ctrl+", "ctrl k", "leaderboard", "search..."))):
+                    return "Learning outcomes:\n\n" + "\n".join(f"- {it}" for it in items)
         best = None  # (score, start_idx, end_idx)
         i = 0
         while i < len(lines):
@@ -86,6 +145,16 @@ def try_extract_outcomes_answer(q: str, context: str) -> str | None:
                 # Reject link directories / nav lists (common in structural docs).
                 joined_raw = " ".join(items)
                 if re.search(r"https?://", joined_raw, re.I):
+                    continue
+                # Reject UI/navigation control lists (universal).
+                _jr_low = joined_raw.lower()
+                if any(h in _jr_low for h in ("toggle theme", "toggle menu", "skip to main content", "ctrl+", "ctrl k", "search...", "leaderboard")):
+                    continue
+                # Reject question-list "outcomes" (universal).
+                if any("?" in it for it in items):
+                    continue
+                _wh = ("what", "which", "why", "how", "when", "where", "who")
+                if sum(1 for it in items if it.strip().lower().startswith(_wh)) > max(0, len(items) - 2):
                     continue
                 # Reject "Title : URL" shapes even if url missing protocol.
                 if sum(1 for it in items if re.search(r"\bwww\.\b|\.org\b|\.com\b|/docs/", it, re.I)) >= max(2, len(items) // 2):
@@ -489,6 +558,16 @@ def _retrieval_visible_doc(doc) -> bool:
     # Drop corrupted/binary chunks — if <70% of first 200 chars are printable, skip.
     try:
         text = getattr(doc, "page_content", None) or ""
+        # Drop obvious site navigation / UI control dumps (universal).
+        tl = text.lower()
+        if (
+            ("skip to main content" in tl)
+            or ("toggle theme" in tl)
+            or ("toggle menu" in tl)
+            or ("ctrl+" in tl)
+            or ("leaderboard" in tl and "search" in tl and "toggle" in tl)
+        ):
+            return False
         sample = text[:200]
         if len(sample) > 20:
             printable_ratio = sum(1 for c in sample if c.isprintable()) / len(sample)

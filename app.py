@@ -1503,6 +1503,21 @@ app.add_middleware(CORSMiddleware,
 )
 
 @app.middleware("http")
+async def chat_crash_guard_middleware(request: Request, call_next):
+    """Never let /chat blow up into a 500.
+
+    We still log the exception, but return a safe JSON payload so widget clients
+    don't see a hard failure.
+    """
+    try:
+        return await call_next(request)
+    except Exception as e:
+        if request.url.path in ("/chat", "/widget-chat"):
+            logger.error(f"Unhandled exception in {request.url.path}: {e}", exc_info=True)
+            return JSONResponse({"answer": "I ran into an issue. Please try again in a moment.", "sources": []}, status_code=200)
+        raise
+
+@app.middleware("http")
 async def security_and_logging_middleware(request: Request, call_next):
     """Add security headers and log every request with IP, method, path, status, duration."""
     start = time.time()
