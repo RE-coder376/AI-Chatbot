@@ -56,6 +56,26 @@ def try_extract_outcomes_answer(q: str, context: str) -> str | None:
         part_no = _extract_part_number(q or "")
         title_tokens = [w.lower() for w in re.findall(r"[a-zA-Z]{4,}", title_phrase)][:10] if title_phrase else []
         lines = [ln.rstrip() for ln in str(context).splitlines()]
+        # Marker window: if the context explicitly contains an outcomes marker that matches
+        # the user query (Part/Chapter), strongly prefer lists that appear right after it.
+        _marker_ix: int | None = None
+        try:
+            ql = (q or "").lower()
+            _wants_part = ("part" in ql) and (part_no is not None)
+            _wants_ch = ("chapter" in ql) and (chapter_no is not None)
+            for _mi, _ln in enumerate(lines[:800]):
+                _ll = (_ln or "").lower()
+                if not re.search(r"\b(by completing|by the end|you will be able to|learning outcomes|objectives|goals)\b", _ll):
+                    continue
+                if _wants_part and (f"part {part_no}" not in _ll):
+                    continue
+                if _wants_ch and (f"chapter {chapter_no}" not in _ll):
+                    continue
+                _marker_ix = _mi
+                break
+        except Exception:
+            _marker_ix = None
+
         flat_all = " ".join(ln.strip() for ln in lines if ln and ln.strip())
         # Goals-first: if we have an explicit "Goals ..." section, prefer extracting from it.
         m_goals = re.search(r"\bGoals\b(.{60,1600})", flat_all, re.I)
@@ -201,6 +221,12 @@ def try_extract_outcomes_answer(q: str, context: str) -> str | None:
                 score += 2.0 if ("understand" in joined or "build" in joined or "ship" in joined or "integrate" in joined) else 0.0
                 # Prefer earlier blocks slightly (retrieval already sorts by relevance).
                 score += max(0.0, 6.0 - (start / 120.0))
+                # If there's an explicit matching marker, heavily reward the list nearest after it.
+                if _marker_ix is not None:
+                    if start >= _marker_ix and start <= (_marker_ix + 80):
+                        score += 30.0
+                    else:
+                        score -= 10.0
                 if (best is None) or (score > best[0]):
                     best = (score, start, end)
             # Continue scanning from end of this block.
