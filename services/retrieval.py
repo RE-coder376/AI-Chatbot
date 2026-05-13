@@ -217,7 +217,13 @@ def try_extract_outcomes_answer(q: str, context: str, debug: dict | None = None)
             for mi, ln in enumerate(lines[:900]):
                 ll = (ln or "").lower()
                 ll_norm = ll.replace("\u2019", "'").replace("’", "'")
-                if not any(m in ll_norm for m in topic_markers):
+                _is_topic_marker = any(m in ll_norm for m in topic_markers)
+                _has_well_learn = ("what we'll learn in this chapter" in ll_norm)
+                # Extra debug: if the full context contains the well-learn marker but we
+                # never see it as a single line, it may be joined without newlines.
+                if debug is not None and _has_well_learn and len(debug.get("outcomes_extractor_marker_hits") or []) < 6:
+                    debug["outcomes_extractor_marker_hits"].append(f"well_learn_line@{mi}:{(ln or '').strip()[:180]}")
+                if not _is_topic_marker:
                     continue
                 if debug is not None and len(debug.get("outcomes_extractor_marker_hits") or []) < 6:
                     debug["outcomes_extractor_marker_hits"].append(f"topic_marker@{mi}:{(ln or '').strip()[:180]}")
