@@ -136,6 +136,19 @@ def try_extract_outcomes_answer(q: str, context: str) -> str | None:
                     return None
                 _ui_hints = ("toggle theme", "toggle menu", "skip to main content", "copy as markdown", "sign in to ask", "sign in to access", "ctrl+", "ctrl k", "leaderboard", "search...")
                 if (not re.search(r"https?://", jr, re.I)) and (not any(h in jr for h in _ui_hints)):
+                    # Extra guards: avoid extracting prompt templates / noisy instructional lists.
+                    starters = [(it.split()[:1][0].lower() if it.split() else "") for it in items]
+                    verbish = sum(1 for s in starters if s in _OUTCOME_VERB_HINTS)
+                    verb_ratio = verbish / max(1.0, float(len(items)))
+                    _bad_starts = ("prompt", "step", "previous", "next", "prerequisites", "authors", "company", "about")
+                    _bs = sum(1 for it in items if it.strip().lower().startswith(_bad_starts))
+                    if _bs >= max(2, len(items) // 2):
+                        return None
+                    _long = sum(1 for it in items if len(it) > 140 or it.count(".") >= 2 or it.count(":") >= 2)
+                    if _long >= max(2, len(items) // 2):
+                        return None
+                    if verb_ratio < 0.45:
+                        return None
                     return "Learning outcomes:\n\n" + "\n".join(f"- {it}" for it in items)
         best = None  # (score, start_idx, end_idx)
         i = 0
