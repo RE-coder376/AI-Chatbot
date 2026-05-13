@@ -1073,7 +1073,13 @@ async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansio
             k = max(k, 60)
             logger.info(f"[META-FILTER] {_combined_filter}")
 
+    # Defaults so post-processing always has bound locals even when Chroma retrieval is skipped
+    # (e.g., api-only DB mode, null DB, or retrieval disabled).
     policy_results: list = []
+    _bm25_raw: list = []
+    _bm25_title_raw: list = []
+    _vector_raw: list = []
+    _outcomes_title_results: list = []
     if not _skip_chromadb and db is not None:
         loop = asyncio.get_running_loop()
         # Run vector searches + BM25 ALL IN PARALLEL
