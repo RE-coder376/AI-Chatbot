@@ -88,7 +88,7 @@ def try_extract_outcomes_answer(q: str, context: str, debug: dict | None = None)
             # Learning outcomes should be mostly verb-start imperatives.
             return verb_ratio >= 0.45
 
-        def _valid_chapter_topics_items(items: list[str]) -> bool:
+        def _valid_chapter_topics_items(items: list[str], strong_marker: bool = False) -> bool:
             # Used for sections like "compare it to what we'll learn in this chapter:" which often
             # lists topic nouns (not verb-imperatives). Still must be clean, non-operational content.
             if not (2 <= len(items) <= 25):
@@ -104,7 +104,7 @@ def try_extract_outcomes_answer(q: str, context: str, debug: dict | None = None)
             longish = sum(1 for it in items if len(it) > 140 or it.count(".") >= 2 or it.count(":") >= 2)
             if longish >= max(2, len(items) // 2):
                 return False
-            if title_tokens:
+            if (not strong_marker) and title_tokens:
                 hit = sum(1 for t in title_tokens[:6] if t and (t in joined))
                 req = 2 if len(title_tokens) >= 3 else 1
                 if hit < req:
@@ -227,7 +227,9 @@ def try_extract_outcomes_answer(q: str, context: str, debug: dict | None = None)
                     if re.search(r"(?i)\\b(previous|next|safety note|prompt\\s+\\d+|prerequisites|authors|company|privacy)\\b", t):
                         break
                 items = [it for it in items if it and len(it) <= 260]
-                if _valid_chapter_topics_items(items):
+                # This marker is inherently chapter-scoped, so don't require title-token overlap.
+                _strong = ("what we'll learn in this chapter" in ll) or ("what we will learn in this chapter" in ll)
+                if _valid_chapter_topics_items(items, strong_marker=_strong):
                     if debug is not None:
                         debug["outcomes_extractor_path"] = "chapter_topics_marker"
                         debug["outcomes_extractor_marker_line"] = str(ln or "").strip()[:220]
