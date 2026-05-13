@@ -2949,6 +2949,8 @@ async def chat(request: Request):
             workflow_debug["answer_artifacts"]["retrieve_doc_count"] = int(doc_count or 0)
             workflow_debug["answer_artifacts"]["retrieve_sources_count"] = int(len(sources or []))
             workflow_debug["answer_artifacts"]["retrieve_context_chars"] = int(len(context or ""))
+            if debug_effective and context:
+                workflow_debug["answer_artifacts"]["retrieve_context_preview"] = (context or "")[:2500]
             _trace_event(workflow_trace, "retrieve_done", doc_count=int(doc_count or 0), ctx_chars=int(len(context or "")))
         except Exception:
             pass
@@ -2967,6 +2969,8 @@ async def chat(request: Request):
         if _outcomes_ans:
             try:
                 workflow_debug["guard_decisions"]["outcomes_extractor_hit"] = True
+                if debug_effective:
+                    workflow_debug["answer_artifacts"]["outcomes_answer_preview"] = str(_outcomes_ans or "")[:1200]
                 _trace_event(workflow_trace, "outcomes_extractor_hit")
             except Exception:
                 pass
