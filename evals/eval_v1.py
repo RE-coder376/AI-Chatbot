@@ -10,9 +10,16 @@ from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
+import sys
+from urllib.error import HTTPError, URLError
+from urllib.parse import urlencode
+from urllib.request import Request, urlopen
 from urllib.parse import urlsplit
 
-import requests
+# When this file is executed directly (python evals/eval_v1.py), Python sets sys.path[0]
+# to the evals/ directory, not the repo root. Ensure repo root is importable.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
 from evals.llm_judge import JudgeVerdict, derive_fallback_verdict, judge_answer
 from services.config import get_config
 
@@ -129,6 +136,79 @@ class EvalItem:
 
 class EvalAuthError(RuntimeError):
     pass
+
+
+def _http_post_json(url: str, payload: dict, headers: dict | None = None, timeout: int = 60) -> tuple[int, dict | None, str]:
+    data = json.dumps(payload, ensure_ascii=True).encode("utf-8")
+    req = Request(
+        url=url,
+        data=data,
+        headers={"Content-Type": "application/json", **(headers or {})},
+        method="POST",
+    )
+    try:
+        with urlopen(req, timeout=timeout) as resp:
+            status = getattr(resp, "status", 200) or 200
+            raw = resp.read() or b""
+    except HTTPError as exc:
+        status = int(getattr(exc, "code", 0) or 0)
+        try:
+            raw = exc.read() or b""
+        except Exception:
+            raw = b""
+    except URLError as exc:
+        return 0, None, f"URLError: {exc}"
+    except Exception as exc:
+        return 0, None, f"{type(exc).__name__}: {exc}"
+    text = raw.decode("utf-8", errors="replace")
+    try:
+        body = json.loads(text or "{}")
+    except Exception:
+        body = None
+    return status, body, text
+
+
+def _http_post_form(url: str, form: dict, headers: dict | None = None, timeout: int = 30) -> tuple[int, str]:
+    data = urlencode(form or {}).encode("utf-8")
+    req = Request(
+        url=url,
+        data=data,
+        headers={"Content-Type": "application/x-www-form-urlencoded", **(headers or {})},
+        method="POST",
+    )
+    try:
+        with urlopen(req, timeout=timeout) as resp:
+            status = getattr(resp, "status", 200) or 200
+            raw = resp.read() or b""
+    except HTTPError as exc:
+        status = int(getattr(exc, "code", 0) or 0)
+        try:
+            raw = exc.read() or b""
+        except Exception:
+            raw = b""
+    except Exception:
+        return 0, ""
+    return status, raw.decode("utf-8", errors="replace")
+
+
+def _http_get_json(url: str, headers: dict | None = None, timeout: int = 10) -> tuple[int, dict | None]:
+    req = Request(url=url, headers=(headers or {}), method="GET")
+    try:
+        with urlopen(req, timeout=timeout) as resp:
+            status = getattr(resp, "status", 200) or 200
+            raw = resp.read() or b""
+    except HTTPError as exc:
+        status = int(getattr(exc, "code", 0) or 0)
+        try:
+            raw = exc.read() or b""
+        except Exception:
+            raw = b""
+    except Exception:
+        return 0, None
+    try:
+        return status, json.loads(raw.decode("utf-8", errors="replace") or "{}")
+    except Exception:
+        return status, None
 
 
 def _read_json(path: Path):
@@ -858,18 +938,18 @@ def _trim_seed_pool(items: list[EvalItem], desired_count: int) -> list[EvalItem]
 
 def _preflight_retrieve(base_url: str, password: str, item: EvalItem) -> EvalItem:
     try:
-        res = requests.post(
+        status, data, _ = _http_post_json(
             f"{base_url}/debug/retrieve",
-            json={"password": password, "question": item.q},
+            {"password": password, "question": item.q},
             timeout=60,
         )
-        if res.status_code in (401, 403):
+        if status in (401, 403):
             raise EvalAuthError(
                 "Owner auth failed during eval preflight. Pass the owner password used for /debug/retrieve."
             )
-        if res.status_code != 200:
+        if status != 200:
             return item
-        data = res.json() or {}
+        data = data or {}
         item.retrieve_doc_count = int(data.get("doc_count") or 0)
         item.retrieve_context_length = int(data.get("context_length") or 0)
         item.retrieve_context_preview = str(data.get("context_preview") or "")
@@ -1050,7 +1130,9 @@ def _wait_health(base_url: str, db_name: str, timeout_s: int = 120) -> None:
     start = time.time()
     while time.time() - start < timeout_s:
         try:
-            h = requests.get(f"{base_url}/health", timeout=10).json()
+            status, h = _http_get_json(f"{base_url}/health", timeout=10)
+            if status != 200 or not h:
+                raise RuntimeError("health_not_ok")
             if h.get("active_db") == db_name and h.get("status") == "ok":
                 return
         except Exception:
@@ -1569,13 +1651,13 @@ def main() -> int:
     judge_key = (args.judge_key or os.getenv("JUDGE_API_KEY") or "").strip()
     prompt_snapshot = _judge_prompt_snapshot(db) if args.judge else ""
 
-    r = requests.post(
+    st, body_text = _http_post_form(
         f"{args.base_url}/admin/databases/set-active",
-        data={"password": args.password, "name": db},
+        {"password": args.password, "name": db},
         timeout=30,
     )
-    if r.status_code != 200:
-        raise SystemExit(f"set-active failed: HTTP {r.status_code} {r.text[:200]}")
+    if st != 200:
+        raise SystemExit(f"set-active failed: HTTP {st} {body_text[:200]}")
     _wait_health(args.base_url, db)
 
     items = _collect_eval_items(args.base_url, args.password, db, max(3, min(args.count, 25)))
@@ -1623,22 +1705,33 @@ def main() -> int:
             row["retrieval_ranked_verdicts"] = retrieval_eval.get("ranked_verdicts", [])
 
         if args.mode in ("chat", "both"):
-            cr = requests.post(
+            cr_status, cr_payload, cr_text = _http_post_json(
                 f"{args.base_url}/chat",
-                json={"question": item.q, "history": [], "stream": False},
+                {
+                    "question": item.q,
+                    "history": [],
+                    "stream": False,
+                    "include_debug_artifacts": True,
+                },
+                headers={"X-Admin-Password": args.password},
                 timeout=120,
             )
-            row["chat_http"] = cr.status_code
-            if cr.status_code != 200:
+            row["chat_http"] = cr_status
+            if cr_status != 200:
                 row["answer_status"] = "FAIL"
                 row["overall_status"] = "FAIL"
-                row["chat_error"] = cr.text[:200]
+                row["chat_error"] = (cr_text or "")[:200]
                 failures += 1
                 results.append(row)
                 continue
 
-            ans = (cr.json() or {}).get("answer", "")
+            cr_payload = cr_payload or {}
+            ans = cr_payload.get("answer", "")
             ans_s = str(ans).strip()
+            debug_payload = cr_payload.get("debug") or {}
+            workflow_trace = debug_payload.get("workflow_trace") or {}
+            guard_decisions = debug_payload.get("guard_decisions") or {}
+            answer_artifacts = debug_payload.get("answer_artifacts") or {}
             answer_class = _answer_class(ans_s)
             judge_verdict = JudgeVerdict(error="judge_disabled")
             if args.judge:
@@ -1652,6 +1745,9 @@ def main() -> int:
                         prompt_context=prompt_snapshot,
                         retrieval_metrics=row.get("retrieval_metrics") or {},
                         retrieval_diagnosis=row.get("retrieval_diagnosis") or "",
+                        workflow_trace=json.dumps(workflow_trace, ensure_ascii=True),
+                        guard_decisions=guard_decisions,
+                        answer_artifacts=answer_artifacts,
                     )
                 else:
                     judge_verdict = JudgeVerdict(error="judge_skipped_non_answer")

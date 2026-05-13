@@ -2790,6 +2790,12 @@ async def chat(request: Request):
     stream = data.get("stream", True)
     page_url   = str(data.get("page_url", ""))[:200]
     page_title = str(data.get("page_title", ""))[:100]
+    # Optional: return debug artifacts (workflow trace, guard decisions, prompt snapshot) for evals/admin.
+    # This is "visual only" evidence for diagnosis; it must never be enabled for unauthenticated requests.
+    include_debug_artifacts_req = bool(data.get("include_debug_artifacts") or False)
+    admin_pw_hdr = (request.headers.get("X-Admin-Password", "") or "").strip()
+    admin_pw_body = str(data.get("admin_password", "") or "").strip()
+    debug_pw = admin_pw_hdr or admin_pw_body
 
     # ── Multi-tenant routing — resolve DB from widget key ─────────────────────
     widget_key = request.headers.get("X-Widget-Key", "").strip()
@@ -2814,12 +2820,24 @@ async def chat(request: Request):
     tenant_cfg = get_config(tenant_db_name)
     asyncio.get_running_loop().run_in_executor(None, log_interaction, q, visitor_id, tenant_db_name)
 
+    # Build debug containers early so every return path can attach evidence.
+    debug_effective = False
+    workflow_trace = {"events": []}
+    workflow_debug = {"guard_decisions": {}, "answer_artifacts": {}}
+    if include_debug_artifacts_req and debug_pw and admin_auth(debug_pw, tenant_cfg):
+        debug_effective = True
+        try:
+            _trace_event(workflow_trace, "chat_debug_enabled", db_name=tenant_db_name)
+        except Exception:
+            pass
+
     if stream:
         async def _safe_stream():
             try:
                 async for chunk in chat_stream_generator(q, hist, visitor_id, page_url, page_title,
                                                          request=request, cfg=tenant_cfg,
-                                                         tenant_db=tenant_db_instance, db_name=tenant_db_name):
+                                                         tenant_db=tenant_db_instance, db_name=tenant_db_name,
+                                                         include_debug_artifacts=debug_effective):
                     yield chunk
             except Exception as _se:
                 logger.error(f"chat_stream_generator crashed: {type(_se).__name__}: {_se}", exc_info=True)
@@ -2922,7 +2940,18 @@ async def chat(request: Request):
                 reply = f"Hello! I'm {bot_name}. I can help you with {topics2}. What would you like to know?"
             return JSONResponse({"answer": reply, "sources": [], "options": quick_opts})
 
-        context, doc_count, sources = await retrieve_context(q, tenant_db_instance)
+        try:
+            _trace_event(workflow_trace, "retrieve_start", db_name=tenant_db_name, k=25)
+        except Exception:
+            pass
+        context, doc_count, sources = await retrieve_context(q, tenant_db_instance, history=hist)
+        try:
+            workflow_debug["answer_artifacts"]["retrieve_doc_count"] = int(doc_count or 0)
+            workflow_debug["answer_artifacts"]["retrieve_sources_count"] = int(len(sources or []))
+            workflow_debug["answer_artifacts"]["retrieve_context_chars"] = int(len(context or ""))
+            _trace_event(workflow_trace, "retrieve_done", doc_count=int(doc_count or 0), ctx_chars=int(len(context or "")))
+        except Exception:
+            pass
 
         # Deterministic outcomes extractor (same as streaming path).
         _outcomes_ans = try_extract_outcomes_answer(q, context or "")
@@ -2936,7 +2965,19 @@ async def chat(request: Request):
             except Exception:
                 pass
         if _outcomes_ans:
-            return JSONResponse({"answer": _outcomes_ans, "sources": (sources or [])[:5]})
+            try:
+                workflow_debug["guard_decisions"]["outcomes_extractor_hit"] = True
+                _trace_event(workflow_trace, "outcomes_extractor_hit")
+            except Exception:
+                pass
+            payload = {"answer": _outcomes_ans, "sources": (sources or [])[:5]}
+            if debug_effective:
+                payload["debug"] = {
+                    "workflow_trace": workflow_trace,
+                    "guard_decisions": workflow_debug["guard_decisions"],
+                    "answer_artifacts": workflow_debug["answer_artifacts"],
+                }
+            return JSONResponse(payload)
 
         # Sparse KB guard — skip for api-only DBs so LLM can use training knowledge
         _t_api_only = (not cfg.get("crawl_url", "")) and bool(cfg.get("api_sources"))
@@ -2947,12 +2988,36 @@ async def chat(request: Request):
             contact_str = f" or reach us at {contact}" if contact else ""
             idk = (f"I don't have specific details about that in our current records. "
                    f"Here's what I can help you with: {topics}.{contact_str}")
-            return JSONResponse({"answer": idk})
+            try:
+                workflow_debug["guard_decisions"]["sparse_kb_guard_hit"] = True
+                _trace_event(workflow_trace, "sparse_kb_guard_hit", api_only=bool(_t_api_only))
+            except Exception:
+                pass
+            payload = {"answer": idk}
+            if debug_effective:
+                payload["debug"] = {
+                    "workflow_trace": workflow_trace,
+                    "guard_decisions": workflow_debug["guard_decisions"],
+                    "answer_artifacts": workflow_debug["answer_artifacts"],
+                }
+            return JSONResponse(payload)
 
         # ── Fast path: bypass LLM for structured Jikan responses ─────────────
         _fast_resp = _fast_format_jikan(context, q)
         if _fast_resp:
-            return JSONResponse({"answer": _fast_resp, "sources": sources[:3]})
+            try:
+                workflow_debug["guard_decisions"]["fast_format_jikan_hit"] = True
+                _trace_event(workflow_trace, "fast_format_jikan_hit")
+            except Exception:
+                pass
+            payload = {"answer": _fast_resp, "sources": sources[:3]}
+            if debug_effective:
+                payload["debug"] = {
+                    "workflow_trace": workflow_trace,
+                    "guard_decisions": workflow_debug["guard_decisions"],
+                    "answer_artifacts": workflow_debug["answer_artifacts"],
+                }
+            return JSONResponse(payload)
 
         # Cap context per provider to avoid payload limits
         _prov2 = _peek_provider()
@@ -2976,14 +3041,43 @@ async def chat(request: Request):
 
         # Fast-fail if all keys are on cooldown
         if not any_key_ready():
-            return JSONResponse({"answer": "I am unable to respond right now. Please try again in a moment."})
+            try:
+                workflow_debug["guard_decisions"]["llm_all_keys_cooldown"] = True
+                _trace_event(workflow_trace, "llm_all_keys_cooldown")
+            except Exception:
+                pass
+            payload = {"answer": "I am unable to respond right now. Please try again in a moment."}
+            if debug_effective:
+                payload["debug"] = {
+                    "workflow_trace": workflow_trace,
+                    "guard_decisions": workflow_debug["guard_decisions"],
+                    "answer_artifacts": workflow_debug["answer_artifacts"],
+                }
+            return JSONResponse(payload)
 
         # Smart Key Recovery: Retry up to 10 times
         max_retries = 10
         for attempt in range(max_retries):
             llm = get_fresh_llm()
-            if not llm: return JSONResponse({"answer": "No active API keys found."}, status_code=500)
+            if not llm:
+                try:
+                    workflow_debug["guard_decisions"]["llm_no_active_keys"] = True
+                    _trace_event(workflow_trace, "llm_no_active_keys")
+                except Exception:
+                    pass
+                payload = {"answer": "No active API keys found."}
+                if debug_effective:
+                    payload["debug"] = {
+                        "workflow_trace": workflow_trace,
+                        "guard_decisions": workflow_debug["guard_decisions"],
+                        "answer_artifacts": workflow_debug["answer_artifacts"],
+                    }
+                return JSONResponse(payload, status_code=500)
             try:
+                try:
+                    _trace_event(workflow_trace, "llm_attempt_start", attempt=int(attempt + 1))
+                except Exception:
+                    pass
                 resp = await asyncio.wait_for(llm.ainvoke(messages), timeout=30)
                 _raw = resp.content
                 _ans = _strip_source_leaks(_raw, kb_context=context)
@@ -3000,10 +3094,29 @@ async def chat(request: Request):
                 except Exception:
                     # If the heuristic itself fails, don't block the response.
                     pass
-                return JSONResponse({"answer": _ans})
+                try:
+                    workflow_debug["answer_artifacts"]["llm_attempts"] = int(attempt + 1)
+                    _trace_event(workflow_trace, "llm_attempt_success", attempt=int(attempt + 1))
+                except Exception:
+                    pass
+                payload = {"answer": _ans}
+                if debug_effective:
+                    payload["debug"] = {
+                        "workflow_trace": workflow_trace,
+                        "guard_decisions": workflow_debug["guard_decisions"],
+                        "answer_artifacts": workflow_debug["answer_artifacts"],
+                    }
+                return JSONResponse(payload)
             except Exception as e:
                 err_str = str(e).lower()
                 logger.warning(f"LLM attempt {attempt+1} error type={type(e).__name__}: {str(e)[:200]}")
+                try:
+                    workflow_debug["answer_artifacts"].setdefault("llm_attempt_errors", []).append(
+                        f"{type(e).__name__}: {str(e)[:220]}"
+                    )
+                    _trace_event(workflow_trace, "llm_attempt_error", attempt=int(attempt + 1), error=str(e)[:220])
+                except Exception:
+                    pass
                 _should_rotate = True  # rotate on ALL provider errors by default
                 if any(p in err_str for p in ["invalid_api_key", "incorrect api key", "unauthorized", "401 "]):
                     logger.error(f"Permanent key failure, marking and rotating: {str(e)[:100]}")
@@ -3017,12 +3130,38 @@ async def chat(request: Request):
                     except Exception as mark_err:
                         logger.warning(f"_mark_key_failed error: {mark_err}")
                     if not any_key_ready():
-                        return JSONResponse({"answer": "I am unable to respond right now. Please try again in a moment."})
+                        try:
+                            workflow_debug["guard_decisions"]["llm_all_keys_cooldown"] = True
+                            _trace_event(workflow_trace, "llm_all_keys_cooldown")
+                        except Exception:
+                            pass
+                        payload = {"answer": "I am unable to respond right now. Please try again in a moment."}
+                        if debug_effective:
+                            payload["debug"] = {
+                                "workflow_trace": workflow_trace,
+                                "guard_decisions": workflow_debug["guard_decisions"],
+                                "answer_artifacts": workflow_debug["answer_artifacts"],
+                            }
+                        return JSONResponse(payload)
                     continue
                 logger.error(f"LLM Error (non-rotatable): {e}")
-                return JSONResponse({"answer": "I'm unable to respond right now. Please try again in a moment."}, status_code=200)
+                payload = {"answer": "I'm unable to respond right now. Please try again in a moment."}
+                if debug_effective:
+                    payload["debug"] = {
+                        "workflow_trace": workflow_trace,
+                        "guard_decisions": workflow_debug["guard_decisions"],
+                        "answer_artifacts": workflow_debug["answer_artifacts"],
+                    }
+                return JSONResponse(payload, status_code=200)
         
-        return JSONResponse({"answer": "I'm unable to respond right now. Please try again in a moment."}, status_code=200)
+        payload = {"answer": "I'm unable to respond right now. Please try again in a moment."}
+        if debug_effective:
+            payload["debug"] = {
+                "workflow_trace": workflow_trace,
+                "guard_decisions": workflow_debug["guard_decisions"],
+                "answer_artifacts": workflow_debug["answer_artifacts"],
+            }
+        return JSONResponse(payload, status_code=200)
 
 # --- FAQ HELPERS ---
 

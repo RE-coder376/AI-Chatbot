@@ -5,8 +5,8 @@ import json
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
-
-import requests
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
 
 GROQ_BASE_URL = "https://api.groq.com/openai/v1"
 JUDGE_MODEL = "llama-3.3-70b-versatile"
@@ -23,6 +23,8 @@ ALLOWED_FAILURE_SOURCES = {
 EVALS_DIR = Path(__file__).resolve().parent
 JUDGE_CACHE_DIR = EVALS_DIR / "state" / "judge_cache"
 
+# NOTE: The judge is "visual only": it receives system-prompt snapshots and workflow traces
+# as plain text evidence, and never mutates app state.
 
 @dataclass
 class JudgeVerdict:
@@ -206,6 +208,21 @@ def _request_payload(
         f"Guard Decisions:\n{json.dumps(guard_decisions or {}, ensure_ascii=True)}\n\n"
         f"Answer Artifacts:\n{json.dumps(answer_artifacts or {}, ensure_ascii=True)}\n\n"
         f"Chatbot Answer:\n{answer}\n\n"
+        "You MUST ground your root-cause diagnosis in a concrete piece of evidence. "
+        "In root_cause_note, include one short exact quote copied from ONE of: workflow trace, guard decisions, answer artifacts, or system prompt snapshot. "
+        "Format inside root_cause_note: EVIDENCE_QUOTE=\"...\". Keep the quote under 180 characters.\n"
+        "For exact_failure_step, prefer a machine-friendly key derived from evidence, e.g.:\n"
+        "- guard:sparse_kb_guard_hit\n"
+        "- guard:outcomes_extractor_hit\n"
+        "- guard:fast_format_jikan_hit\n"
+        "- guard:llm_all_keys_cooldown\n"
+        "- guard:llm_no_active_keys\n"
+        "- generation:llm_attempt_error\n"
+        "- retrieval:context_is_toc_or_nav\n"
+        "- retrieval:empty_or_low_signal\n"
+        "- postprocess:strip_source_leaks\n"
+        "- answer_class_transition\n"
+        "If you cannot find any evidence quote, set error to 'insufficient_evidence' and keep scores as null.\n"
         "If the workflow trace, guard decisions, or answer artifacts clearly show a guard, fallback, source suppression, rewrite, post-processing branch, or answer-class toggle, use that evidence directly instead of hedging. "
         "Only blame retrieval when the trace and deterministic retrieval signals support that conclusion. "
         "If deterministic retrieval diagnosis is retrieval_ok but the final answer class is IDK or REFUSE, do NOT label this retrieval_incomplete unless the trace explicitly shows a retrieval guard or empty-context failure. "
@@ -271,6 +288,8 @@ def _recheck_payload(
         f"First-Pass Verdict:\n{json.dumps(first_pass.to_dict(), ensure_ascii=True)}\n\n"
         "If the first-pass verdict is solid, confirm it. "
         "If the evidence points somewhere else, correct it and explain what evidence forced the correction. "
+        "You MUST include one exact evidence quote in root_cause_note in the format: EVIDENCE_QUOTE=\"...\" (<=180 chars). "
+        "If you cannot find any evidence quote, set error to 'insufficient_evidence'. "
         "Exception: if the retrieved context preview consists mainly of navigation menus, table-of-contents entries, or repeated header text rather than substantive explanation, classify as retrieval_incomplete even if retrieval_diagnosis is retrieval_ok - false-positive grounding is a known eval system limitation. "
         "Return a JSON object with exactly these keys:\n"
         "- faithfulness_score\n"
@@ -305,27 +324,38 @@ def _should_rotate(status_code: int, payload: dict | None) -> bool:
 
 
 def _post_json(api_key: str, payload: dict) -> tuple[int, dict | None, str]:
+    url = f"{GROQ_BASE_URL}/chat/completions"
+    data = json.dumps(payload, ensure_ascii=True).encode("utf-8")
+    req = Request(
+        url=url,
+        data=data,
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
     try:
-        response = requests.post(
-            f"{GROQ_BASE_URL}/chat/completions",
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json",
-            },
-            json=payload,
-            timeout=90,
-        )
-    except requests.RequestException as exc:
+        with urlopen(req, timeout=90) as resp:
+            status = getattr(resp, "status", 200) or 200
+            raw = resp.read() or b""
+    except HTTPError as exc:
+        status = int(getattr(exc, "code", 0) or 0)
+        try:
+            raw = exc.read() or b""
+        except Exception:
+            raw = b""
+    except URLError:
+        return 0, None, "judge_request_failed: URLError"
+    except Exception as exc:
         return 0, None, f"judge_request_failed: {type(exc).__name__}"
 
     body = None
     try:
-        body = response.json()
+        body = json.loads(raw.decode("utf-8", errors="replace") or "{}")
     except Exception:
         body = None
-    if response.status_code != 200:
-        return response.status_code, body, ""
-    return response.status_code, body, ""
+    return status, body, ""
 
 
 def _strongest_failure_step(guard_decisions: dict | None, answer_artifacts: dict | None, retrieval_diagnosis: str = "") -> tuple[str, str]:
