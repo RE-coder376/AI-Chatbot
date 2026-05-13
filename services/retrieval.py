@@ -26,7 +26,7 @@ from services.crawler_utils import (
 logger = logging.getLogger(__name__)
 
 # Debug-only: helps confirm which extractor logic is running on HF.
-_OUTCOMES_EXTRACTOR_VERSION = "2026-05-13.v1"
+_OUTCOMES_EXTRACTOR_VERSION = "2026-05-13.v2"
 
 # Outcomes/learning intent (universal)
 _OUTCOMES_INTENT_RE = re.compile(r"\b(what\s+will\s+i\s+learn|what\s+will\s+we\s+learn|learning\s+outcomes?|objectives?|goals?|by\s+the\s+end|you\s+will\s+be\s+able\s+to)\b", re.I)
@@ -58,6 +58,7 @@ def try_extract_outcomes_answer(q: str, context: str, debug: dict | None = None)
             debug["outcomes_extractor_path"] = ""
             debug["outcomes_extractor_marker_line"] = ""
             debug["outcomes_extractor_block_preview"] = ""
+            debug["outcomes_extractor_marker_hits"] = []
         def _valid_outcomes_items(items: list[str]) -> bool:
             if not (3 <= len(items) <= 25):
                 return False
@@ -209,6 +210,8 @@ def try_extract_outcomes_answer(q: str, context: str, debug: dict | None = None)
                 ll = (ln or "").lower()
                 if not any(m in ll for m in topic_markers):
                     continue
+                if debug is not None and len(debug.get("outcomes_extractor_marker_hits") or []) < 6:
+                    debug["outcomes_extractor_marker_hits"].append(f"topic_marker@{mi}:{(ln or '').strip()[:180]}")
                 items = []
                 for ln2 in lines[mi + 1: mi + 60]:
                     t = (ln2 or "").strip()
@@ -225,6 +228,9 @@ def try_extract_outcomes_answer(q: str, context: str, debug: dict | None = None)
                         continue
                     # stop at headings
                     if re.search(r"(?i)\\b(previous|next|safety note|prompt\\s+\\d+|prerequisites|authors|company|privacy)\\b", t):
+                        break
+                    # Once we've started collecting bullets, stop when we hit normal prose.
+                    if items and len(t) >= 8:
                         break
                 items = [it for it in items if it and len(it) <= 260]
                 # This marker is inherently chapter-scoped, so don't require title-token overlap.
