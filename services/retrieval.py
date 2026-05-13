@@ -50,6 +50,26 @@ def try_extract_outcomes_answer(q: str, context: str) -> str | None:
     if not context or not is_outcomes_question(q):
         return None
     try:
+        def _valid_outcomes_items(items: list[str]) -> bool:
+            if not (3 <= len(items) <= 25):
+                return False
+            starters = [(it.split()[:1][0].lower() if it.split() else "") for it in items]
+            verbish = sum(1 for s in starters if s in _OUTCOME_VERB_HINTS)
+            verb_ratio = verbish / max(1.0, float(len(items)))
+            # Reject prompt templates / nav / diagnostic checklists.
+            bad_starts = ("prompt", "step", "previous", "next", "prerequisites", "authors", "company", "about")
+            if sum(1 for it in items if it.strip().lower().startswith(bad_starts)) >= max(2, len(items) // 2):
+                return False
+            joined = " ".join(items).lower()
+            if any(tok in joined for tok in ("kubectl", "readiness probe", "liveness probe", "exec probe", "agent-deployment-")):
+                # These are almost never "learning outcomes" phrasing; they're operational diagnostics.
+                return False
+            longish = sum(1 for it in items if len(it) > 140 or it.count(".") >= 2 or it.count(":") >= 2)
+            if longish >= max(2, len(items) // 2):
+                return False
+            # Learning outcomes should be mostly verb-start imperatives.
+            return verb_ratio >= 0.45
+
         title_phrase = _extract_title_phrase(q or "")
         _q_lower = (q or "").lower()
         _q_is_chapter = "chapter" in _q_lower
@@ -123,6 +143,8 @@ def try_extract_outcomes_answer(q: str, context: str) -> str | None:
                     if _long >= max(2, len(cand) // 2):
                         continue
                     if verb_ratio < 0.45:
+                        continue
+                    if not _valid_outcomes_items(cand):
                         continue
                     return "Learning outcomes:\n\n" + "\n".join(f"- {it}" for it in cand)
         except Exception:
@@ -378,6 +400,8 @@ def try_extract_outcomes_answer(q: str, context: str) -> str | None:
                     pass
                 if len(items) < 3:
                     return None
+                if not _valid_outcomes_items(items):
+                    return None
                 return "Learning outcomes:\n\n" + "\n".join(f"- {it}" for it in items)
             return None
         _, s, e = best
@@ -390,6 +414,8 @@ def try_extract_outcomes_answer(q: str, context: str) -> str | None:
                 out_items[-1] = (out_items[-1] + " " + ln.strip()).strip()
         out_items = [it for it in out_items if it]
         if not (3 <= len(out_items) <= 25):
+            return None
+        if not _valid_outcomes_items(out_items):
             return None
         # Normalize to a clean bullet list (keep it universal; don't require a specific marker string).
         return "Learning outcomes:\n\n" + "\n".join(f"- {it}" for it in out_items)
