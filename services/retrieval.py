@@ -61,12 +61,22 @@ def try_extract_outcomes_answer(q: str, context: str) -> str | None:
             if sum(1 for it in items if it.strip().lower().startswith(bad_starts)) >= max(2, len(items) // 2):
                 return False
             joined = " ".join(items).lower()
+            # Reject operational checklists / shell commands / file scaffolding.
             if any(tok in joined for tok in ("kubectl", "readiness probe", "liveness probe", "exec probe", "agent-deployment-")):
-                # These are almost never "learning outcomes" phrasing; they're operational diagnostics.
+                return False
+            if re.search(r"\b(mkdir|cd\s+~/?|kubectl|pip\s+install|npm\s+install|git\s+clone|python\s+-m)\b", joined):
+                return False
+            if re.search(r"\b(?:learning-spec|readme)\.md\b|\b[a-z0-9_\\-/]+\.py\b|\b[a-z0-9_\\-/]+\.md\b", joined):
                 return False
             longish = sum(1 for it in items if len(it) > 140 or it.count(".") >= 2 or it.count(":") >= 2)
             if longish >= max(2, len(items) // 2):
                 return False
+            # If the question names a specific chapter/part title, require overlap with that title.
+            if title_tokens:
+                hit = sum(1 for t in title_tokens[:6] if t and (t in joined))
+                req = 2 if len(title_tokens) >= 3 else 1
+                if hit < req:
+                    return False
             # Learning outcomes should be mostly verb-start imperatives.
             return verb_ratio >= 0.45
 
