@@ -182,6 +182,19 @@ def try_extract_outcomes_answer(q: str, context: str) -> str | None:
                 # Reject "Title : URL" shapes even if url missing protocol.
                 if sum(1 for it in items if re.search(r"\bwww\.\b|\.org\b|\.com\b|/docs/", it, re.I)) >= max(2, len(items) // 2):
                     continue
+
+                # Reject "prompt templates" masquerading as outcomes (common in curriculum pages).
+                # If most bullets start with "Prompt" / "Step" / "Previous" / "Next" it's not goals.
+                _bad_starts = ("prompt", "step", "previous", "next", "prerequisites", "authors", "company", "about us")
+                _bs = sum(1 for it in items if it.strip().lower().startswith(_bad_starts))
+                if _bs >= max(2, len(items) // 2):
+                    continue
+
+                # Outcomes are typically concise imperatives. If most bullets are long multi-sentence blobs,
+                # it's probably a chunk boundary artifact or an instruction block, not goals.
+                _long = sum(1 for it in items if len(it) > 140 or it.count(".") >= 2 or it.count(":") >= 2)
+                if _long >= max(2, len(items) // 2):
+                    continue
                 # If the user mentioned a title phrase, require non-trivial overlap so we don't
                 # extract unrelated lists from other pages.
                 if title_tokens:
@@ -214,6 +227,9 @@ def try_extract_outcomes_answer(q: str, context: str) -> str | None:
 
                 # Minimum viability: needs either verb-ish starts or strong title overlap.
                 if (verbish < 2) and (title_hit < 2):
+                    continue
+                # For goals/outcomes, we expect mostly verb-start bullets (Define/Structure/Prepare/Run...).
+                if verb_ratio < 0.45:
                     continue
                 # If it's mostly questions, it's almost certainly not learning outcomes.
                 if question_ratio >= 0.5 or inter_ratio >= 0.5:
