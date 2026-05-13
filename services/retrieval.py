@@ -119,6 +119,14 @@ def try_extract_outcomes_answer(q: str, context: str, debug: dict | None = None)
         part_no = _extract_part_number(q or "")
         title_tokens = [w.lower() for w in re.findall(r"[a-zA-Z]{4,}", title_phrase)][:10] if title_phrase else []
         lines = [ln.rstrip() for ln in str(context).splitlines()]
+        if debug is not None:
+            try:
+                debug["outcomes_extractor_line_count"] = int(len(lines))
+                _ctx_l = str(context).lower()
+                _ctx_ln = _ctx_l.replace("\u2019", "'").replace("’", "'")
+                debug["outcomes_extractor_has_well_learn_marker"] = bool("what we'll learn in this chapter" in _ctx_ln)
+            except Exception:
+                pass
         # Marker window: if the context explicitly contains an outcomes marker that matches
         # the user query (Part/Chapter), strongly prefer lists that appear right after it.
         _marker_ix: int | None = None
