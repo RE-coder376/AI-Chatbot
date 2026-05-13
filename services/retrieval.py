@@ -37,7 +37,7 @@ _INTERROGATIVE_START = {"what", "which", "why", "how", "when", "where", "who"}
 _OUTCOME_VERB_HINTS = {
     "understand","build","ship","use","integrate","deliver","identify","structure","apply","prepare",
     "run","evaluate","deploy","install","test","design","verify","retrofit","decide","learn","encode",
-    "create","implement","configure","monitor","optimize"
+    "create","implement","configure","monitor","optimize","define","package"
 }
 
 
@@ -314,6 +314,13 @@ def try_extract_outcomes_answer(q: str, context: str) -> str | None:
                     return
                 items = _trim_after_heading(items)
                 if not (3 <= len(items) <= 25):
+                    return
+                # Inline lists are especially error-prone (page text can include prompts/checklists).
+                # Require predominantly verb-start items to qualify as "learning outcomes".
+                starters = [(it.split()[:1][0].lower() if it.split() else "") for it in items]
+                verbish = sum(1 for s in starters if s in _OUTCOME_VERB_HINTS)
+                verb_ratio = verbish / max(1.0, float(len(items)))
+                if verb_ratio < 0.45:
                     return
                 joined = " ".join(items).lower()
                 score = float(len(items))
