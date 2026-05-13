@@ -53,6 +53,7 @@ def try_extract_outcomes_answer(q: str, context: str) -> str | None:
         title_phrase = _extract_title_phrase(q or "")
         _q_lower = (q or "").lower()
         _q_is_chapter = "chapter" in _q_lower
+        chapter_no = _extract_chapter_number(q or "")
         part_no = _extract_part_number(q or "")
         title_tokens = [w.lower() for w in re.findall(r"[a-zA-Z]{4,}", title_phrase)][:10] if title_phrase else []
         lines = [ln.rstrip() for ln in str(context).splitlines()]
@@ -181,11 +182,13 @@ def try_extract_outcomes_answer(q: str, context: str) -> str | None:
                 # Reject "Title : URL" shapes even if url missing protocol.
                 if sum(1 for it in items if re.search(r"\bwww\.\b|\.org\b|\.com\b|/docs/", it, re.I)) >= max(2, len(items) // 2):
                     continue
-                # If the user mentioned a title phrase, require overlap so we don't
+                # If the user mentioned a title phrase, require non-trivial overlap so we don't
                 # extract unrelated lists from other pages.
                 if title_tokens:
                     jl = joined_raw.lower()
-                    if not any(t in jl for t in title_tokens[:4]):
+                    title_hit_min = 2 if len(title_tokens) >= 3 else 1
+                    _th = sum(1 for t in title_tokens[:6] if t in jl)
+                    if _th < title_hit_min:
                         continue
 
                 # Universal scoring: prefer outcome-like lists; avoid reflection-question lists,
@@ -959,7 +962,7 @@ async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansio
             _tks = [t for t in _tks if t not in {"agent", "agents"}]
             _pc = re.search(r"\b(part|chapter)\s+(\d{1,3})\b", q, re.I)
             _pc_anchor = (f"{_pc.group(1).lower()} {_pc.group(2)}" if _pc else "")
-            # Broad net first ("you will" is common), then we filter hard by title tokens.
+            # Broad net first (common outcomes markers), then we filter hard by anchor tokens.
             # This avoids DB-specific hardcoding while still reliably surfacing outcome bullets.
             # 1) Direct anchor phrase (highest precision when present).
             # This is universal (not DB-specific): if the user asked "Part 10" and a chunk contains
@@ -976,29 +979,35 @@ async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansio
                     except Exception:
                         pass
 
-            # 2) Broad net ("you will" is common), then filter hard by anchor tokens.
-            raw = db._collection.get(where_document={"$contains": "you will"}, limit=250)
-            for doc_text, meta in zip(raw.get('documents', []), raw.get('metadatas', [])):
-                if not doc_text:
+            # 2) Broad net (marker phrases), then filter hard by anchor tokens.
+            # We intentionally include "goals" because some KB pages list outcomes as verb bullets
+            # without the literal "you will..." phrase.
+            for _marker in ("you will be able to", "by the end of this chapter", "learning outcomes", "by completing", "goals"):
+                try:
+                    raw = db._collection.get(where_document={"$contains": _marker}, limit=250)
+                except Exception:
                     continue
-                src = str((meta or {}).get('source') or '').lower()
-                body = str(doc_text).lower()
-                # Only keep chunks that look like an outcomes list.
-                if not re.search(r"(?i)\b(by (the end of|completing|after completing|upon completing)\b|you will be able to\b|you will\s*:)", doc_text):
-                    continue
-                # If the query names a specific Part/Chapter, require that exact anchor to appear somewhere
-                # in the chunk or its source URL (prevents extracting the wrong outcomes list).
-                if _pc_anchor and (_pc_anchor not in body) and (_pc_anchor not in src):
-                    continue
-                if _tks:
-                    # Require at least 2 title tokens in either URL or body
-                    hit = sum(1 for t in _tks if (t in src) or (t in body))
-                    if hit < 2:
+                for doc_text, meta in zip(raw.get('documents', []), raw.get('metadatas', [])):
+                    if not doc_text:
                         continue
-                key = doc_text[:100]
-                if key not in rescue_seen:
-                    rescue_seen.add(key)
-                    rescue_results.append(Document(page_content=doc_text, metadata=meta or {}))
+                    src = str((meta or {}).get('source') or '').lower()
+                    body = str(doc_text).lower()
+                    # Only keep chunks that look like an outcomes list.
+                    if not re.search(r"(?i)\b(by (the end of|completing|after completing|upon completing)\b|you will be able to\b|learning outcomes\b|objectives?\b|goals?\b)", doc_text):
+                        continue
+                    # If the query names a specific Part/Chapter, require that exact anchor to appear somewhere
+                    # in the chunk or its source URL (prevents extracting the wrong outcomes list).
+                    if _pc_anchor and (_pc_anchor not in body) and (_pc_anchor not in src):
+                        continue
+                    if _tks:
+                        # Require at least 2 title tokens in either URL or body
+                        hit = sum(1 for t in _tks if (t in src) or (t in body))
+                        if hit < 2:
+                            continue
+                    key = doc_text[:100]
+                    if key not in rescue_seen:
+                        rescue_seen.add(key)
+                        rescue_results.append(Document(page_content=doc_text, metadata=meta or {}))
         except Exception:
             pass
 
