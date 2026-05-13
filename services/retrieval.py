@@ -208,7 +208,8 @@ def try_extract_outcomes_answer(q: str, context: str, debug: dict | None = None)
             )
             for mi, ln in enumerate(lines[:900]):
                 ll = (ln or "").lower()
-                if not any(m in ll for m in topic_markers):
+                ll_norm = ll.replace("\u2019", "'").replace("’", "'")
+                if not any(m in ll_norm for m in topic_markers):
                     continue
                 if debug is not None and len(debug.get("outcomes_extractor_marker_hits") or []) < 6:
                     debug["outcomes_extractor_marker_hits"].append(f"topic_marker@{mi}:{(ln or '').strip()[:180]}")
@@ -234,7 +235,7 @@ def try_extract_outcomes_answer(q: str, context: str, debug: dict | None = None)
                         break
                 items = [it for it in items if it and len(it) <= 260]
                 # This marker is inherently chapter-scoped, so don't require title-token overlap.
-                _strong = ("what we'll learn in this chapter" in ll) or ("what we will learn in this chapter" in ll)
+                _strong = ("what we'll learn in this chapter" in ll_norm) or ("what we will learn in this chapter" in ll_norm)
                 if _valid_chapter_topics_items(items, strong_marker=_strong):
                     if debug is not None:
                         debug["outcomes_extractor_path"] = "chapter_topics_marker"
