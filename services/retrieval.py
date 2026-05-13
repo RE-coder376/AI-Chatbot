@@ -258,6 +258,29 @@ def try_extract_outcomes_answer(q: str, context: str, debug: dict | None = None)
                     return "Learning outcomes:\n\n" + "\n".join(f"- {it}" for it in items[:18])
         except Exception:
             pass
+
+        # If the marker exists in the full context but doesn't appear as a standalone line,
+        # it may have been flattened by chunking. Fall back to a windowed regex extraction.
+        try:
+            if debug is not None and debug.get("outcomes_extractor_has_well_learn_marker") and not debug.get("outcomes_extractor_path"):
+                _ctx_norm = str(context).replace("\u2019", "'").replace("’", "'")
+                _m = re.search(r"(?i)what\\s+we(?:'|’)ll\\s+learn\\s+in\\s+this\\s+chapter\\s*:\\s*(.{0,2000})", _ctx_norm)
+                if _m:
+                    tail = _m.group(1)
+                    # Extract bullet-ish lines (works even if the page was flattened; we search for "- " runs)
+                    cand = []
+                    for mm in re.finditer(r"(?m)^\\s*(?:[-*•]|\\d{1,2}[.)])\\s+(.{4,200})$", tail):
+                        cand.append(mm.group(1).strip())
+                        if len(cand) >= 18:
+                            break
+                    if _valid_chapter_topics_items(cand, strong_marker=True):
+                        if debug is not None:
+                            debug["outcomes_extractor_path"] = "chapter_topics_window_regex"
+                            debug["outcomes_extractor_marker_line"] = "what we'll learn in this chapter:"
+                            debug["outcomes_extractor_block_preview"] = "\n".join(cand[:10])[:900]
+                        return "Learning outcomes:\n\n" + "\n".join(f"- {it}" for it in cand[:18])
+        except Exception:
+            pass
         best = None  # (score, start_idx, end_idx)
         i = 0
         while i < len(lines):
