@@ -112,6 +112,18 @@ def try_extract_outcomes_answer(q: str, context: str) -> str | None:
                     if re.search(r"(?i)\\b(previous|next|prerequisites|authors|company|privacy|capstone|lesson progression)\\b", t):
                         break
                 if 3 <= len(cand) <= 18:
+                    starters = [(it.split()[:1][0].lower() if it.split() else "") for it in cand]
+                    verbish = sum(1 for s in starters if s in _OUTCOME_VERB_HINTS)
+                    verb_ratio = verbish / max(1.0, float(len(cand)))
+                    _bad_starts = ("prompt", "step", "previous", "next", "prerequisites", "authors", "company", "about")
+                    _bs = sum(1 for it in cand if it.strip().lower().startswith(_bad_starts))
+                    _long = sum(1 for it in cand if len(it) > 140 or it.count(".") >= 2 or it.count(":") >= 2)
+                    if _bs >= max(2, len(cand) // 2):
+                        continue
+                    if _long >= max(2, len(cand) // 2):
+                        continue
+                    if verb_ratio < 0.45:
+                        continue
                     return "Learning outcomes:\n\n" + "\n".join(f"- {it}" for it in cand)
         except Exception:
             pass
