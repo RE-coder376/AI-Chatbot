@@ -25,6 +25,9 @@ from services.crawler_utils import (
 
 logger = logging.getLogger(__name__)
 
+# Debug-only: helps confirm which extractor logic is running on HF.
+_OUTCOMES_EXTRACTOR_VERSION = "2026-05-13.v1"
+
 # Outcomes/learning intent (universal)
 _OUTCOMES_INTENT_RE = re.compile(r"\b(what\s+will\s+i\s+learn|what\s+will\s+we\s+learn|learning\s+outcomes?|objectives?|goals?|by\s+the\s+end|you\s+will\s+be\s+able\s+to)\b", re.I)
 
@@ -41,7 +44,7 @@ _OUTCOME_VERB_HINTS = {
 }
 
 
-def try_extract_outcomes_answer(q: str, context: str) -> str | None:
+def try_extract_outcomes_answer(q: str, context: str, debug: dict | None = None) -> str | None:
     """Deterministically extract the best contiguous bullet list from retrieved context.
 
     This is intentionally universal (works for any DB) and is only activated for
@@ -50,6 +53,11 @@ def try_extract_outcomes_answer(q: str, context: str) -> str | None:
     if not context or not is_outcomes_question(q):
         return None
     try:
+        if debug is not None:
+            debug["outcomes_extractor_version"] = _OUTCOMES_EXTRACTOR_VERSION
+            debug["outcomes_extractor_path"] = ""
+            debug["outcomes_extractor_marker_line"] = ""
+            debug["outcomes_extractor_block_preview"] = ""
         def _valid_outcomes_items(items: list[str]) -> bool:
             if not (3 <= len(items) <= 25):
                 return False
@@ -156,6 +164,10 @@ def try_extract_outcomes_answer(q: str, context: str) -> str | None:
                         continue
                     if not _valid_outcomes_items(cand):
                         continue
+                    if debug is not None:
+                        debug["outcomes_extractor_path"] = "marker_following_lines"
+                        debug["outcomes_extractor_marker_line"] = str(ln or "").strip()[:220]
+                        debug["outcomes_extractor_block_preview"] = "\n".join(cand[:8])[:900]
                     return "Learning outcomes:\n\n" + "\n".join(f"- {it}" for it in cand)
         except Exception:
             pass
@@ -412,6 +424,9 @@ def try_extract_outcomes_answer(q: str, context: str) -> str | None:
                     return None
                 if not _valid_outcomes_items(items):
                     return None
+                if debug is not None:
+                    debug["outcomes_extractor_path"] = "inline_list"
+                    debug["outcomes_extractor_block_preview"] = "\n".join(items[:8])[:900]
                 return "Learning outcomes:\n\n" + "\n".join(f"- {it}" for it in items)
             return None
         _, s, e = best
@@ -428,6 +443,9 @@ def try_extract_outcomes_answer(q: str, context: str) -> str | None:
         if not _valid_outcomes_items(out_items):
             return None
         # Normalize to a clean bullet list (keep it universal; don't require a specific marker string).
+        if debug is not None:
+            debug["outcomes_extractor_path"] = "bullet_block"
+            debug["outcomes_extractor_block_preview"] = "\n".join(out_items[:8])[:900]
         return "Learning outcomes:\n\n" + "\n".join(f"- {it}" for it in out_items)
     except Exception:
         return None
