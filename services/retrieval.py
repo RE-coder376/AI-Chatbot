@@ -77,79 +77,44 @@ def try_extract_outcomes_answer(q: str, context: str) -> str | None:
         except Exception:
             _marker_ix = None
 
-        flat_all = " ".join(ln.strip() for ln in lines if ln and ln.strip())
-        # Goals-first: if we have an explicit "Goals ..." section, prefer extracting from it.
-        m_goals = re.search(r"\bGoals\b(.{60,1600})", flat_all, re.I)
-        if m_goals:
-            if title_tokens:
-                _win = flat_all[max(0, m_goals.start() - 500): m_goals.end() + 900].lower()
-                _hit = sum(1 for t in title_tokens[:6] if t in _win)
-                _ess = title_tokens[:2]
-                _ess_hit = sum(1 for t in _ess if t in _win)
-                if _q_is_chapter and "by completing part" in _win:
-                    m_goals = None
-                elif _hit < 2 or _ess_hit < 1:
-                    m_goals = None
-        if m_goals:
-            tail = m_goals.group(1)
-            tail = re.split(r"\b(?:Lesson Progression|Chapter Progression|Capstone|Outcome\b|Method\b)\b", tail, maxsplit=1, flags=re.I)[0]
-            starts = [mm.start(1) for mm in re.finditer(r"\b([A-Z][a-z]{2,})\b\s+(?:to|with|for|the|a|an|in|on|of|when|vs|[a-z]{2,})\b", tail)]
-            starts = sorted(set(starts))
-            pruned = []
-            for s in starts:
-                if not pruned or (s - pruned[-1]) >= 18:
-                    pruned.append(s)
-            items = []
-            for a, b in zip(pruned, pruned[1:] + [len(tail)]):
-                seg = tail[a:b].strip(" \t-•;|")
-                if 10 <= len(seg) <= 260:
-                    items.append(seg)
-            if 3 <= len(items) <= 25:
-                # Merge obvious split fragments ("Ship with LiveKit" + "Agents ...").
-                try:
-                    merged = []
-                    i2 = 0
-                    while i2 < len(items):
-                        cur = items[i2].strip()
-                        if i2 + 1 < len(items):
-                            nxt = items[i2 + 1].strip()
-                            last = (cur.split()[-1].lower() if cur.split() else "")
-                            if (
-                                (last in {"on","with","for","to","in","and","or","of","vs"})
-                                or (len(cur.split()) <= 4 and not re.search(r"[.!?:]$", cur))
-                            ) and len(nxt.split()) >= 3:
-                                merged.append((cur + " " + nxt).strip())
-                                i2 += 2
-                                continue
-                        merged.append(cur)
-                        i2 += 1
-                    items = [m for m in merged if m]
-                except Exception:
-                    pass
-                jr = " ".join(items).lower()
-                # Reject question-list "outcomes" (universal). These are almost always
-                # page TOCs / prompts (e.g., "What's the core architecture?").
-                if any("?" in it for it in items):
-                    return None
-                _wh = ("what", "which", "why", "how", "when", "where", "who")
-                if sum(1 for it in items if it.strip().lower().startswith(_wh)) > max(0, len(items) - 2):
-                    return None
-                _ui_hints = ("toggle theme", "toggle menu", "skip to main content", "copy as markdown", "sign in to ask", "sign in to access", "ctrl+", "ctrl k", "leaderboard", "search...")
-                if (not re.search(r"https?://", jr, re.I)) and (not any(h in jr for h in _ui_hints)):
-                    # Extra guards: avoid extracting prompt templates / noisy instructional lists.
-                    starters = [(it.split()[:1][0].lower() if it.split() else "") for it in items]
-                    verbish = sum(1 for s in starters if s in _OUTCOME_VERB_HINTS)
-                    verb_ratio = verbish / max(1.0, float(len(items)))
-                    _bad_starts = ("prompt", "step", "previous", "next", "prerequisites", "authors", "company", "about")
-                    _bs = sum(1 for it in items if it.strip().lower().startswith(_bad_starts))
-                    if _bs >= max(2, len(items) // 2):
-                        return None
-                    _long = sum(1 for it in items if len(it) > 140 or it.count(".") >= 2 or it.count(":") >= 2)
-                    if _long >= max(2, len(items) // 2):
-                        return None
-                    if verb_ratio < 0.45:
-                        return None
-                    return "Learning outcomes:\n\n" + "\n".join(f"- {it}" for it in items)
+        # Marker-first extraction (safer than the old "Goals ..." heuristic):
+        # If we see an explicit outcomes marker line, extract short, verb-ish lines immediately after it.
+        try:
+            markers = ("by completing", "by the end", "you will be able to", "learning outcomes", "objectives")
+            for mi, ln in enumerate(lines[:900]):
+                ll = (ln or "").lower()
+                if not any(m in ll for m in markers):
+                    continue
+                # If the question names Chapter/Part number, require it to be present in the marker line
+                # (prevents grabbing the wrong chapter's outcomes list).
+                if chapter_no is not None and ("chapter" in _q_lower) and (f"chapter {chapter_no}" not in ll):
+                    continue
+                if part_no is not None and ("part" in _q_lower) and (f"part {part_no}" not in ll):
+                    continue
+                cand = []
+                for ln2 in lines[mi + 1: mi + 45]:
+                    t = (ln2 or "").strip()
+                    if not t:
+                        if cand:
+                            break
+                        continue
+                    if len(t) > 260:
+                        continue
+                    if _BULLET_LINE_RE.match(t):
+                        cand.append(_BULLET_LINE_RE.match(t).group(1).strip())
+                        continue
+                    # accept short verb-ish lines (no bullet marker)
+                    w0 = (t.split()[:1][0].lower() if t.split() else "")
+                    if w0 in _OUTCOME_VERB_HINTS and ("http" not in t.lower()) and ("?" not in t):
+                        cand.append(t.strip(" -•\t"))
+                        continue
+                    # stop when we hit obvious non-outcomes section headers
+                    if re.search(r"(?i)\\b(previous|next|prerequisites|authors|company|privacy|capstone|lesson progression)\\b", t):
+                        break
+                if 3 <= len(cand) <= 18:
+                    return "Learning outcomes:\n\n" + "\n".join(f"- {it}" for it in cand)
+        except Exception:
+            pass
         best = None  # (score, start_idx, end_idx)
         i = 0
         while i < len(lines):
