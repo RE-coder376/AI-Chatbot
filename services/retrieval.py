@@ -88,6 +88,29 @@ def try_extract_outcomes_answer(q: str, context: str, debug: dict | None = None)
             # Learning outcomes should be mostly verb-start imperatives.
             return verb_ratio >= 0.45
 
+        def _valid_chapter_topics_items(items: list[str]) -> bool:
+            # Used for sections like "compare it to what we'll learn in this chapter:" which often
+            # lists topic nouns (not verb-imperatives). Still must be clean, non-operational content.
+            if not (2 <= len(items) <= 25):
+                return False
+            joined = " ".join(items).lower()
+            if re.search(r"https?://", joined):
+                return False
+            if re.search(r"\b(mkdir|cd\s+~/?|kubectl|pip\s+install|npm\s+install|git\s+clone|python\s+-m)\b", joined):
+                return False
+            if re.search(r"\b(?:learning-spec|readme)\.md\b|\b[a-z0-9_\\-/]+\.py\b|\b[a-z0-9_\\-/]+\.md\b", joined):
+                return False
+            # Keep them reasonably short and list-like.
+            longish = sum(1 for it in items if len(it) > 140 or it.count(".") >= 2 or it.count(":") >= 2)
+            if longish >= max(2, len(items) // 2):
+                return False
+            if title_tokens:
+                hit = sum(1 for t in title_tokens[:6] if t and (t in joined))
+                req = 2 if len(title_tokens) >= 3 else 1
+                if hit < req:
+                    return False
+            return True
+
         title_phrase = _extract_title_phrase(q or "")
         _q_lower = (q or "").lower()
         _q_is_chapter = "chapter" in _q_lower
@@ -169,6 +192,47 @@ def try_extract_outcomes_answer(q: str, context: str, debug: dict | None = None)
                         debug["outcomes_extractor_marker_line"] = str(ln or "").strip()[:220]
                         debug["outcomes_extractor_block_preview"] = "\n".join(cand[:8])[:900]
                     return "Learning outcomes:\n\n" + "\n".join(f"- {it}" for it in cand)
+        except Exception:
+            pass
+
+        # Chapter-topics extraction: some curricula express goals as a topic list after
+        # "what we'll learn in this chapter". This is not verb-imperative, but is still a
+        # direct chapter learning-goals list.
+        try:
+            topic_markers = (
+                "what we'll learn in this chapter",
+                "what we will learn in this chapter",
+                "what you're learning",
+                "what you are learning",
+            )
+            for mi, ln in enumerate(lines[:900]):
+                ll = (ln or "").lower()
+                if not any(m in ll for m in topic_markers):
+                    continue
+                items = []
+                for ln2 in lines[mi + 1: mi + 60]:
+                    t = (ln2 or "").strip()
+                    if not t:
+                        if items:
+                            break
+                        continue
+                    m2 = _BULLET_LINE_RE.match(t)
+                    if m2:
+                        items.append(m2.group(1).strip())
+                        continue
+                    if t.startswith("- "):
+                        items.append(t[2:].strip())
+                        continue
+                    # stop at headings
+                    if re.search(r"(?i)\\b(previous|next|safety note|prompt\\s+\\d+|prerequisites|authors|company|privacy)\\b", t):
+                        break
+                items = [it for it in items if it and len(it) <= 260]
+                if _valid_chapter_topics_items(items):
+                    if debug is not None:
+                        debug["outcomes_extractor_path"] = "chapter_topics_marker"
+                        debug["outcomes_extractor_marker_line"] = str(ln or "").strip()[:220]
+                        debug["outcomes_extractor_block_preview"] = "\\n".join(items[:10])[:900]
+                    return "Learning outcomes:\n\n" + "\n".join(f"- {it}" for it in items[:18])
         except Exception:
             pass
         best = None  # (score, start_idx, end_idx)
