@@ -1511,7 +1511,15 @@ async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansio
                     # Require overlap across DISTINCT tokens in body and/or URL; URL often contains the slug.
                     hits = {t for t in _tks if (t in b or t in s)}
                     # Prevent generic matches (e.g. lots of pages contain "data"). Require 2+ distinct tokens.
-                    return len(hits) >= 2
+                    if len(hits) < 2:
+                        return False
+                    # Additionally require at least one "anchor" token when available (longer, rarer tokens
+                    # like "engineering", "tuning", "architecture", etc.). This prevents false positives
+                    # where only generic words match.
+                    anchors = [t for t in _tks if len(t) >= 7]
+                    if anchors:
+                        return any(a in hits for a in anchors)
+                    return True
                 except Exception:
                     return False
 
