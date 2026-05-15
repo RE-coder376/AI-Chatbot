@@ -5813,6 +5813,52 @@ async def reindex_from_artifacts(request: Request, data: dict):
     threading.Thread(target=_github_sync_upload, args=(target,), daemon=True).start()
     return {"success": True, "message": f"Reindexed '{target}' from artifacts", "pages": total_pages, "chunks": total_chunks}
 
+
+@app.get("/admin/artifacts-status")
+async def artifacts_status(request: Request):
+    """Owner-only: report crawl artifact file status (exists/size/line_count) for a DB.
+
+    This is intentionally metadata-only: it does not expose artifact contents.
+    """
+    password = _extract_password(request, request.query_params.get("password", ""))
+    try:
+        require_owner_auth(password)
+    except HTTPException:
+        return JSONResponse({"detail": "Unauthorized"}, status_code=401)
+
+    db_name = _extract_admin_db(request, request.query_params.get("db_name", "")).strip()
+    if not db_name:
+        return JSONResponse({"detail": "db_name required (or X-Admin-DB header)"}, status_code=400)
+    try:
+        db_name = _validate_db_name(db_name)
+    except Exception as _ve:
+        return JSONResponse({"detail": f"Invalid db_name: {_ve}"}, status_code=400)
+
+    artifacts_path = DATABASES_DIR / db_name / "crawl_artifacts" / "pages.jsonl"
+    exists = artifacts_path.exists()
+    size_bytes = artifacts_path.stat().st_size if exists else 0
+
+    async def _count_lines():
+        if not exists:
+            return 0
+        try:
+            cnt = 0
+            with open(artifacts_path, "r", encoding="utf-8", errors="replace") as _fh:
+                for _ in _fh:
+                    cnt += 1
+            return cnt
+        except Exception:
+            return -1
+
+    line_count = await asyncio.to_thread(_count_lines)
+    return {
+        "db": db_name,
+        "path": str(artifacts_path).replace("\\", "/"),
+        "exists": bool(exists),
+        "size_bytes": int(size_bytes),
+        "line_count": int(line_count),
+    }
+
 # --- SMART CRAWL CLASSIFICATION RULES (universal — apply to any site/DB) ---
 # High-value URL keywords — any pattern containing these gets score 4 (recommended)
 CRAWL_HIGH = {
