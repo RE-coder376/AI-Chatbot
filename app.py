@@ -5838,7 +5838,7 @@ async def artifacts_status(request: Request):
     exists = artifacts_path.exists()
     size_bytes = artifacts_path.stat().st_size if exists else 0
 
-    async def _count_lines():
+    def _count_lines():
         if not exists:
             return 0
         try:
