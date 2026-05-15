@@ -395,7 +395,13 @@ def _smart_chunk_page(text: str, url: str, chunk_size: int = 400, chunk_step: in
       3. Generic       — existing word-based sliding window (unchanged fallback)
     Returns list[Document]. Never raises.
     """
-    clean = _clean_text(text)
+    # Important: preserve newline structure for list-ish pages (outcomes, policies, release notes, etc.).
+    # _clean_text() is intentionally aggressive and tends to flatten whitespace, which destroys bullet boundaries.
+    raw_text = (text or "")
+    raw_text = raw_text.replace("\r\n", "\n").replace("\r", "\n")
+    raw_text = re.sub(r"[ \t]+", " ", raw_text)
+    raw_text = re.sub(r"\n{3,}", "\n\n", raw_text)
+    clean = _clean_text(raw_text)
     docs = []
     page_meta = page_meta or {}
     _base_meta = {"source": url}
@@ -521,7 +527,8 @@ def _smart_chunk_page(text: str, url: str, chunk_size: int = 400, chunk_step: in
     # Preserve newline structure for outcomes/checklists/release notes. Generic
     # word-splitting destroys list boundaries and makes retrieval unreliable.
     try:
-        _raw_lines = [ln.strip() for ln in clean.split("\n") if ln and ln.strip()]
+        # Use raw_text lines (not `clean`) so we don't lose bullets/numbering.
+        _raw_lines = [ln.strip() for ln in raw_text.split("\n") if ln and ln.strip()]
         _bullet_re = re.compile(r"^(?:[-*•]|\d{1,2}[.)])\s+")
         _bullet_lines = [ln for ln in _raw_lines if _bullet_re.match(ln)]
         if len(_bullet_lines) >= 3:
