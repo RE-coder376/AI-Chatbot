@@ -5685,6 +5685,134 @@ async def reindex(request: Request, data: dict):
     except Exception as e:
         return JSONResponse({"detail": f"Reindex error: {str(e)}"}, status_code=500)
 
+
+@app.post("/admin/reindex-from-artifacts")
+async def reindex_from_artifacts(request: Request, data: dict):
+    """Owner-only: rebuild a DB entirely from locally cached crawl artifacts (no network fetch).
+
+    This is the key to avoiding repeated full re-crawls of large DBs when tweaking extraction/chunking.
+    """
+    try:
+        require_owner_auth(_extract_password(request, data.get("password", "")))
+    except HTTPException:
+        return JSONResponse({"detail": "Unauthorized"}, status_code=401)
+
+    target = (data.get("target_db") or "").strip()
+    if not target:
+        return JSONResponse({"detail": "target_db required"}, status_code=400)
+    try:
+        target = _validate_db_name(target)
+    except Exception as _ve:
+        return JSONResponse({"detail": f"Invalid target_db: {_ve}"}, status_code=400)
+
+    artifacts_path = DATABASES_DIR / target / "crawl_artifacts" / "pages.jsonl"
+    if not artifacts_path.exists():
+        return JSONResponse({"detail": f"No artifacts found at {artifacts_path}"}, status_code=404)
+
+    # Ensure embedding function is available (use FastEmbed as the universal baseline).
+    global embeddings_model
+    if embeddings_model is None:
+        try:
+            from langchain_community.embeddings.fastembed import FastEmbedEmbeddings
+            embeddings_model = FastEmbedEmbeddings(model_name="BAAI/bge-small-en-v1.5")
+            logger.info("[REINDEX] Loaded FastEmbed for reindex-from-artifacts")
+        except Exception as _emb_e:
+            return JSONResponse({"detail": f"Embedding init failed: {type(_emb_e).__name__}: {_emb_e}"}, status_code=500)
+
+    from langchain_core.documents import Document
+    from langchain_chroma import Chroma
+
+    db_dir = DATABASES_DIR / target
+    db_dir.mkdir(parents=True, exist_ok=True)
+    chroma_dir = db_dir
+
+    # Wipe existing chroma store (preserve config + artifacts).
+    import shutil
+    import stat as _stat
+
+    def _force_rm(func, path, exc):
+        try:
+            os.chmod(path, _stat.S_IWRITE)
+            func(path)
+        except Exception:
+            pass
+
+    for item in chroma_dir.iterdir():
+        if item.name in ("config.json", "crawl_artifacts"):
+            continue
+        try:
+            if item.is_dir():
+                shutil.rmtree(item, onerror=_force_rm)
+            else:
+                item.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+    # Single-threaded: keep chromadb SQLite connections in one thread.
+    import concurrent.futures as _cf
+    _chroma_ex = _cf.ThreadPoolExecutor(max_workers=1)
+    _loop = asyncio.get_running_loop()
+
+    def _chroma_run(fn, *args, **kwargs):
+        return _loop.run_in_executor(_chroma_ex, lambda: fn(*args, **kwargs))
+
+    try:
+        chroma_db = await _chroma_run(Chroma, persist_directory=str(chroma_dir), embedding_function=embeddings_model)
+    except Exception as _init_e:
+        return JSONResponse({"detail": f"Chroma init failed: {type(_init_e).__name__}: {_init_e}"}, status_code=500)
+
+    # Rebuild from artifacts.
+    chunk_size = int(data.get("chunk_size") or 400)
+    chunk_overlap = int(data.get("chunk_overlap") or 80)
+    chunk_step = max(1, chunk_size - chunk_overlap)
+    max_pages = int(data.get("max_pages") or 0)  # 0 means no cap
+
+    total_pages = 0
+    total_chunks = 0
+    batch_docs: list = []
+
+    def _iter_artifacts():
+        import json as _json
+        with open(artifacts_path, "r", encoding="utf-8", errors="replace") as _fh:
+            for line in _fh:
+                line = (line or "").strip()
+                if not line:
+                    continue
+                try:
+                    yield _json.loads(line)
+                except Exception:
+                    continue
+
+    for rec in _iter_artifacts():
+        url = str(rec.get("url") or "").strip()
+        text = str(rec.get("text") or "")
+        page_meta = rec.get("page_meta") if isinstance(rec.get("page_meta"), dict) else {}
+        if not url or not text:
+            continue
+        total_pages += 1
+        docs = _smart_chunk_page(text, url, chunk_size, chunk_step, page_meta=page_meta)
+        docs = _sanitize_docs_for_chroma(docs)
+        batch_docs.extend(docs)
+        total_chunks += len(docs)
+        if len(batch_docs) >= 200:
+            await _chroma_run(chroma_db.add_documents, batch_docs)
+            batch_docs.clear()
+        if max_pages and total_pages >= max_pages:
+            break
+
+    if batch_docs:
+        await _chroma_run(chroma_db.add_documents, batch_docs)
+        batch_docs.clear()
+
+    # Invalidate BM25 cache for that DB (it is built off db docs).
+    try:
+        _bm25_cache.pop(target, None)
+    except Exception:
+        pass
+
+    threading.Thread(target=_github_sync_upload, args=(target,), daemon=True).start()
+    return {"success": True, "message": f"Reindexed '{target}' from artifacts", "pages": total_pages, "chunks": total_chunks}
+
 # --- SMART CRAWL CLASSIFICATION RULES (universal — apply to any site/DB) ---
 # High-value URL keywords — any pattern containing these gets score 4 (recommended)
 CRAWL_HIGH = {
@@ -6839,6 +6967,15 @@ async def crawl_site(data: dict, request: Request):
                 completed = 0
                 flush_lock = asyncio.Lock()
                 chroma_write_lock = asyncio.Lock()
+                # Persist extracted per-URL artifacts so we can reindex/chunk without re-crawling the network.
+                # This makes large DBs iteratable: tweak extraction/chunking and reindex from artifacts.
+                artifact_write_lock = asyncio.Lock()
+                artifacts_dir = (DATABASES_DIR / db_name / "crawl_artifacts")
+                try:
+                    artifacts_dir.mkdir(parents=True, exist_ok=True)
+                except Exception:
+                    artifacts_dir = None
+                artifacts_path = (artifacts_dir / "pages.jsonl") if artifacts_dir else None
                 pending_pages = []
                 seen_content_hashes: set = set()
                 seen_sidebar_hashes: set = set()  # store each unique sidebar nav ONCE as standalone doc
@@ -6847,6 +6984,36 @@ async def crawl_site(data: dict, request: Request):
                 async def _flush_pages(batch, worker_label="crawl"):
                     nonlocal chroma_db, total_chunks
                     chunks = []
+                    # Best-effort: persist extracted text + meta for replayable reindexing (no network).
+                    if artifacts_path:
+                        async with artifact_write_lock:
+                            try:
+                                def _append_jsonl(_items):
+                                    import json as _json
+                                    from datetime import datetime as _dt
+                                    lines = []
+                                    for _p in _items:
+                                        _meta = _p.get("page_meta") or {}
+                                        try:
+                                            _meta_safe = _chroma_safe_metadata(_meta)
+                                        except Exception:
+                                            _meta_safe = {}
+                                        _rec = {
+                                            "url": str(_p.get("url") or ""),
+                                            "text": str(_p.get("text") or "")[:120000],
+                                            "page_meta": _meta_safe,
+                                            "saved_at": _dt.utcnow().isoformat() + "Z",
+                                        }
+                                        lines.append(_json.dumps(_rec, ensure_ascii=True))
+                                    if lines:
+                                        with open(artifacts_path, "a", encoding="utf-8") as _fh:
+                                            _fh.write("\n".join(lines) + "\n")
+
+                                await asyncio.to_thread(_append_jsonl, batch)
+                            except Exception as _art_e:
+                                logger.warning(
+                                    f"[CRAWL] [{worker_label}] artifact write failed: {type(_art_e).__name__}: {_art_e}"
+                                )
                     for p in batch:
                         # Navigation/structure docs: store as ONE unit so retrieval gets full structure.
                         # Splitting a 3000-word nav doc into 400-word pieces means each piece only has
