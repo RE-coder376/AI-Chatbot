@@ -1520,7 +1520,7 @@ async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansio
             # If this is an outcomes intent (goals/learning outcomes) and the query names a specific title,
             # apply the filter even when it yields a small set. It's better to be precise than to mix in
             # unrelated chapters that happen to contain "By the end...".
-            if _is_outcomes_intent and len(_filtered) >= 2:
+            if _is_outcomes_intent and len(_filtered) >= 1:
                 _combined_before_cap = _filtered
             # For non-outcomes queries, keep the old safety valve to avoid empty/narrow context.
             elif len(_filtered) >= 6:
