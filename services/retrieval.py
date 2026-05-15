@@ -1474,42 +1474,68 @@ async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansio
     # Heuristic rerank for non-product DBs: improves chapter/part/title lookup accuracy.
     if not _has_product_meta and _combined_before_cap:
         _title_phrase = _extract_title_phrase(q)
-        _combined_before_cap.sort(key=lambda d: _heuristic_rerank_score(d, q, _title_phrase), reverse=True)
-        # outcomes-marker bubble: if user asks learning outcomes/goals, put the explicit outcomes chunks first.
-        if _is_outcomes_intent:
-            def _has_outcome_marker(d):
-                try:
-                    b = str(getattr(d,'page_content','') or '').lower()
-                    return (
-                        ('you will be able to' in b)
-                        or ('by the end' in b)
-                        or ('by completing' in b)
-                        or ('learning outcomes' in b)
-                        or ('objectives' in b)
-                        or ('goals:' in b)
-                    )
-                except Exception:
-                    return False
-            _combined_before_cap.sort(key=lambda d: (1 if _has_outcome_marker(d) else 0, _heuristic_rerank_score(d, q, _title_phrase)), reverse=True)
-        # title_phrase filter: if query names a specific Chapter/Part title, prefer docs that actually mention it.
+        chapter_no = _extract_chapter_number(q)
+        part_no = _extract_part_number(q)
+
+        def _has_outcome_marker(d):
+            try:
+                b = str(getattr(d, "page_content", "") or "").lower()
+                return (
+                    ("you will be able to" in b)
+                    or ("by the end" in b)
+                    or ("by completing" in b)
+                    or ("learning outcomes" in b)
+                    or ("objectives" in b)
+                    or ("goals:" in b)
+                    or ("what you will learn" in b)
+                    or ("what this part will teach you" in b)
+                )
+            except Exception:
+                return False
+
+        # title_phrase filter: if query names a specific Chapter/Part title, prefer docs that actually match it.
+        # Concrete issue observed in HF: generic outcomes phrases ("By the end of this chapter...") can retrieve
+        # the wrong chapter's learning outcomes. For chapter/part queries we must constrain aggressively.
         if _title_phrase:
             _tpl = _title_phrase.lower()
-            _tks = [w for w in re.findall(r'[a-zA-Z]{4,}', _tpl)][:8]
+            _tks = [w for w in re.findall(r"[a-zA-Z]{4,}", _tpl)][:10]
+
             def _title_match(d):
                 try:
-                    b = str(getattr(d,'page_content','') or '').lower()
-                    s = str((getattr(d,'metadata',None) or {}).get('source') or '').lower()
-                    if _tpl in b or _tpl in s:
+                    b = str(getattr(d, "page_content", "") or "").lower()
+                    s = str((getattr(d, "metadata", None) or {}).get("source") or "").lower()
+                    if _tpl and (_tpl in b or _tpl in s):
                         return True
                     if not _tks:
                         return False
-                    hit = sum(1 for t in _tks if t in b)
-                    return hit >= 2
+                    # Require overlap in body OR URL; URL often contains the slug.
+                    hit_body = sum(1 for t in _tks if t in b)
+                    hit_src = sum(1 for t in _tks if t in s)
+                    return (hit_body + hit_src) >= 2
                 except Exception:
                     return False
+
             _filtered = [d for d in _combined_before_cap if _title_match(d)]
-            if len(_filtered) >= 6:
+
+            # If this is an outcomes intent (goals/learning outcomes) and the query names a specific title,
+            # apply the filter even when it yields a small set. It's better to be precise than to mix in
+            # unrelated chapters that happen to contain "By the end...".
+            if _is_outcomes_intent and len(_filtered) >= 2:
                 _combined_before_cap = _filtered
+            # For non-outcomes queries, keep the old safety valve to avoid empty/narrow context.
+            elif len(_filtered) >= 6:
+                _combined_before_cap = _filtered
+
+        # Baseline rerank after optional filtering
+        _combined_before_cap.sort(key=lambda d: _heuristic_rerank_score(d, q, _title_phrase), reverse=True)
+
+        # outcomes-marker bubble: if user asks learning outcomes/goals, put explicit outcomes chunks first
+        # (but only within the already title-constrained set when title_phrase was present).
+        if _is_outcomes_intent:
+            _combined_before_cap.sort(
+                key=lambda d: (1 if _has_outcome_marker(d) else 0, _heuristic_rerank_score(d, q, _title_phrase)),
+                reverse=True,
+            )
     if _has_product_meta and (_required_flags or _ram_min_req is not None or _max_price is not None):
         _post_filtered = []
         for r in _combined_before_cap:

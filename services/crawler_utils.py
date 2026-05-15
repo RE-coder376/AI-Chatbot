@@ -411,6 +411,9 @@ def _smart_chunk_page(text: str, url: str, chunk_size: int = 400, chunk_step: in
         _base_meta["contaminated"] = True
     if page_meta.get("page_type"):
         _base_meta["content_type"] = page_meta["page_type"]
+    if page_meta.get("page_title"):
+        # Helps disambiguate chapter/part/policy pages with similar boilerplate phrases.
+        _base_meta["page_title"] = str(page_meta.get("page_title") or "")[:200]
     if "quality_score" in page_meta:
         _base_meta["quality_score"] = page_meta.get("quality_score")
     if "page_classifier_confidence" in page_meta:

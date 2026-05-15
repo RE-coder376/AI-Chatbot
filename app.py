@@ -7504,6 +7504,12 @@ async def crawl_site(data: dict, request: Request):
                             seen_content_hashes.add(content_key)
                             batch_to_flush = None
                             async with flush_lock:
+                                try:
+                                    if isinstance(page_meta, dict) and title:
+                                        page_meta = dict(page_meta)
+                                        page_meta["page_title"] = str(title)[:200]
+                                except Exception:
+                                    pass
                                 pending_pages.append({"url": cur_url, "text": text, "page_meta": page_meta})
                                 page_index.append((cur_url, title))
                                 await log_queue.put(f"[{completed}/{len(to_crawl)}] ✅ {cur_url[:70]} ({len(text)} chars)")
