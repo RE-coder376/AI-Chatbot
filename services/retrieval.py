@@ -1508,10 +1508,10 @@ async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansio
                         return True
                     if not _tks:
                         return False
-                    # Require overlap in body OR URL; URL often contains the slug.
-                    hit_body = sum(1 for t in _tks if t in b)
-                    hit_src = sum(1 for t in _tks if t in s)
-                    return (hit_body + hit_src) >= 2
+                    # Require overlap across DISTINCT tokens in body and/or URL; URL often contains the slug.
+                    hits = {t for t in _tks if (t in b or t in s)}
+                    # Prevent generic matches (e.g. lots of pages contain "data"). Require 2+ distinct tokens.
+                    return len(hits) >= 2
                 except Exception:
                     return False
 
