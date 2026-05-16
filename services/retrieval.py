@@ -213,6 +213,7 @@ def try_extract_outcomes_answer(q: str, context: str, debug: dict | None = None)
                 "what we will learn in this chapter",
                 "what you're learning",
                 "what you are learning",
+                "what this part will teach you",
             )
             for mi, ln in enumerate(lines[:900]):
                 ll = (ln or "").lower()
@@ -228,6 +229,53 @@ def try_extract_outcomes_answer(q: str, context: str, debug: dict | None = None)
                 if debug is not None and len(debug.get("outcomes_extractor_marker_hits") or []) < 6:
                     debug["outcomes_extractor_marker_hits"].append(f"topic_marker@{mi}:{(ln or '').strip()[:180]}")
                 items = []
+                # Special-case: some curricula use a small "Chapter / Focus / Framework" table
+                # under "What This Part Will Teach You". Convert it into bullets deterministically.
+                if "what this part will teach you" in ll_norm:
+                    try:
+                        cur_ch = None
+                        cur_focus = ""
+                        cur_fw = ""
+                        table_items = []
+                        for ln2 in lines[mi + 1: mi + 140]:
+                            t = (ln2 or "").strip()
+                            if not t:
+                                continue
+                            # stop once we hit the prompt-template section
+                            if re.search(r"(?i)\\b(try with ai|prompt\\s+\\d+|safety note|previous|next)\\b", t):
+                                break
+                            # Chapter numbers (e.g. 62)
+                            if re.fullmatch(r"\\d{1,3}", t):
+                                if cur_ch and cur_focus:
+                                    table_items.append(
+                                        f"Chapter {cur_ch}: {cur_focus}" + (f" ({cur_fw})" if cur_fw else "")
+                                    )
+                                cur_ch = t
+                                cur_focus = ""
+                                cur_fw = ""
+                                continue
+                            # Skip headers
+                            if t.lower() in ("chapter", "focus", "framework"):
+                                continue
+                            if cur_ch and not cur_focus:
+                                cur_focus = t
+                                continue
+                            if cur_ch and cur_focus and not cur_fw:
+                                cur_fw = t
+                                continue
+                        if cur_ch and cur_focus:
+                            table_items.append(
+                                f"Chapter {cur_ch}: {cur_focus}" + (f" ({cur_fw})" if cur_fw else "")
+                            )
+                        table_items = [it for it in table_items if it and len(it) <= 260]
+                        if len(table_items) >= 3:
+                            if debug is not None:
+                                debug["outcomes_extractor_path"] = "part_table_marker"
+                                debug["outcomes_extractor_marker_line"] = str(ln or "").strip()[:220]
+                                debug["outcomes_extractor_block_preview"] = "\n".join(table_items[:10])[:900]
+                            return "Learning outcomes:\n\n" + "\n".join(f"- {it}" for it in table_items[:18])
+                    except Exception:
+                        pass
                 for ln2 in lines[mi + 1: mi + 60]:
                     t = (ln2 or "").strip()
                     if not t:
