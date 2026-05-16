@@ -3364,6 +3364,62 @@ async def debug_retrieve(request: Request):
         "has_content": doc_count > 0,
     }
 
+
+@app.post("/debug/has-source")
+async def debug_has_source(request: Request):
+    """Owner-only: check whether the active DB contains any chunks for a specific metadata.source URL."""
+    try:
+        data = await request.json()
+    except Exception:
+        return JSONResponse({"detail": "Invalid JSON"}, status_code=400)
+    try:
+        require_owner_auth(_extract_password(request, data.get("password", "")))
+    except HTTPException:
+        return JSONResponse({"detail": "Unauthorized"}, status_code=401)
+    source = str(data.get("source", "") or "").strip()
+    if not source:
+        return JSONResponse({"detail": "source required"}, status_code=400)
+    if not local_db:
+        return JSONResponse({"detail": "No DB loaded"}, status_code=503)
+
+    def _count_one(u: str) -> int:
+        try:
+            return int(local_db._collection.count(where={"source": u}))
+        except Exception:
+            return 0
+
+    variants = []
+    variants.append(source)
+    if source.endswith("/"):
+        variants.append(source.rstrip("/"))
+    else:
+        variants.append(source + "/")
+
+    counts = {u: _count_one(u) for u in variants}
+    best_u = max(counts, key=lambda k: counts[k])
+    sample = None
+    if counts.get(best_u, 0) > 0:
+        try:
+            sample = await asyncio.to_thread(
+                lambda: local_db._collection.get(where={"source": best_u}, limit=1, include=["documents", "metadatas"])
+            )
+        except Exception:
+            sample = None
+
+    preview = ""
+    if sample and sample.get("documents"):
+        try:
+            preview = str(sample["documents"][0] or "")[:900]
+        except Exception:
+            preview = ""
+
+    return {
+        "source": source,
+        "counts": counts,
+        "best_match": best_u,
+        "preview": preview,
+    }
+
 # --- OWNER EVALS (RAG Quality Scoreboard) ---
 
 _EVAL_SET_FILENAME     = "eval_set.json"
