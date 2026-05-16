@@ -6994,6 +6994,12 @@ async def crawl_site(data: dict, request: Request):
                         yield "data: {\"done\": true}\n\n"
                         return
                 else:
+                    # If operator requested a full reset (clear_before_crawl),
+                    # avoid silently truncating the crawl to a low max_pages.
+                    # Expand to the full discovered URL set (within the hard cap).
+                    if clear_first and max_pages and max_pages < len(deduped):
+                        max_pages = min(5000, len(deduped))
+                        yield _send(f"🧹 Clear-before-crawl: expanding max_pages to {max_pages} (full reset)")
                     to_crawl = deduped[:max_pages]
                 yield _send(f"📋 {len(to_crawl)} unique pages to crawl...")
 
