@@ -568,6 +568,56 @@ _NAV_HINTS = (
     'ctrl+', 'toggle theme', 'skip to main content'
 )
 
+_PROMPT_TEMPLATE_HINTS = (
+    'try with ai',
+    'prompt 1:',
+    'prompt 2:',
+    'prompt 3:',
+    'safety note',
+    'reflect on your skill',
+)
+
+
+def _is_prompt_template_chunk(text: str) -> bool:
+    """Heuristic: detect "prompt template" content blocks that frequently pollute retrieval.
+
+    Universal: many doc sites include 'Try With AI' and numbered prompt scaffolds.
+    Great for learning, but usually the wrong evidence for goals/outcomes/policy questions.
+    """
+    try:
+        tl = (text or "").lower()
+        if not tl:
+            return False
+        # Strong signals
+        if ("try with ai" in tl) and (("prompt 1:" in tl) or ("prompt 2:" in tl)):
+            return True
+        # Multiple prompt markers is typically a template block
+        prompt_hits = tl.count("prompt 1:") + tl.count("prompt 2:") + tl.count("prompt 3:")
+        if prompt_hits >= 2:
+            return True
+        # Generic fallback
+        return any(h in tl for h in _PROMPT_TEMPLATE_HINTS) and ("prompt" in tl)
+    except Exception:
+        return False
+
+
+def _has_explicit_outcomes_marker(text: str) -> bool:
+    try:
+        tl = (text or "").lower()
+        if not tl:
+            return False
+        return (
+            ("learning outcomes" in tl)
+            or ("what you will learn" in tl)
+            or ("what you'll learn" in tl)
+            or ("what this part will teach you" in tl)
+            or ("by the end of this chapter" in tl)
+            or ("by completing" in tl)
+            or ("you will be able to" in tl)
+        )
+    except Exception:
+        return False
+
 
 def _extract_title_phrase(q: str) -> str:
     try:
@@ -633,6 +683,15 @@ def _heuristic_rerank_score(doc, q: str, title_phrase: str) -> float:
             score -= 4.0
         if (bl.count('http://') + bl.count('https://')) >= 3:
             score -= 6.0
+
+        # Penalize prompt-template blocks. These often mention many relevant keywords but
+        # are not the canonical "outcomes/policy/spec" sections users ask for.
+        if _is_prompt_template_chunk(body):
+            score -= 7.0
+
+        # Reward explicit outcomes markers (kept separate from prompt templates).
+        if _has_explicit_outcomes_marker(body) and not _is_prompt_template_chunk(body):
+            score += 3.0
 
         # Reward keyword overlap.
         kws = _meaningful_keywords(q)
@@ -1479,17 +1538,11 @@ async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansio
 
         def _has_outcome_marker(d):
             try:
-                b = str(getattr(d, "page_content", "") or "").lower()
-                return (
-                    ("you will be able to" in b)
-                    or ("by the end" in b)
-                    or ("by completing" in b)
-                    or ("learning outcomes" in b)
-                    or ("objectives" in b)
-                    or ("goals:" in b)
-                    or ("what you will learn" in b)
-                    or ("what this part will teach you" in b)
-                )
+                b = str(getattr(d, "page_content", "") or "")
+                # Do not treat prompt templates as outcome chunks even if they contain the words.
+                if _is_prompt_template_chunk(b):
+                    return False
+                return _has_explicit_outcomes_marker(b)
             except Exception:
                 return False
 
