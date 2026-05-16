@@ -226,6 +226,12 @@ def try_extract_outcomes_answer(q: str, context: str, debug: dict | None = None)
                     debug["outcomes_extractor_marker_hits"].append(f"well_learn_line@{mi}:{(ln or '').strip()[:180]}")
                 if not _is_topic_marker:
                     continue
+                # If the user explicitly asked about a specific Part, only accept the
+                # part-scoped marker. This prevents "Try with AI" prompt-question lists
+                # (which often sit near other topic markers) from being mis-extracted as
+                # Part learning outcomes.
+                if (part_no is not None) and ("part" in _q_lower) and ("what this part will teach you" not in ll_norm):
+                    continue
                 if debug is not None and len(debug.get("outcomes_extractor_marker_hits") or []) < 6:
                     debug["outcomes_extractor_marker_hits"].append(f"topic_marker@{mi}:{(ln or '').strip()[:180]}")
                 items = []
