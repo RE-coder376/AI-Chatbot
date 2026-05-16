@@ -1518,6 +1518,16 @@ async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansio
         for _r in _grp:
             if not _retrieval_visible_doc(_r):
                 continue
+            # Universal outcomes guard: for "goals/learning outcomes" queries, drop prompt-template chunks
+            # (Try With AI / Prompt 1/2/3) unless they also contain an explicit outcomes marker. This prevents
+            # generic prompt scaffolds from crowding out the actual outcomes/policy/spec sections.
+            if _is_outcomes_intent:
+                try:
+                    _txt = str(getattr(_r, "page_content", "") or "")
+                    if _is_prompt_template_chunk(_txt) and not _has_explicit_outcomes_marker(_txt):
+                        continue
+                except Exception:
+                    pass
             _k = _r.page_content[:100]
             if _k in _comb_seen:
                 continue
