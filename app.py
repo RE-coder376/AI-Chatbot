@@ -6806,6 +6806,51 @@ async def crawl_site(data: dict, request: Request):
                     pass
 
                 sitemap_urls = []
+                async def _extract_seed_links(_seed_url: str, _limit: int = 800) -> list:
+                    """Extract same-site links from a seed page even when sitemap is large.
+
+                    Some docs sites omit section/index pages (e.g. /docs/<Part-Name>) from sitemaps.
+                    Pulling nav links from the seed page makes crawls more complete and improves RAG.
+                    """
+                    try:
+                        _pg = await ctx.new_page()
+                        await stealth(_pg)
+                        try:
+                            await _pg.goto(_seed_url, wait_until="domcontentloaded", timeout=20000)
+                            try:
+                                await _pg.wait_for_function(
+                                    "document.body && document.body.innerText.trim().length > 100",
+                                    timeout=3000,
+                                )
+                            except Exception:
+                                pass
+                            try:
+                                await _pg.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                                await _pg.wait_for_timeout(600)
+                            except Exception:
+                                pass
+                            _hrefs = await _pg.evaluate(
+                                """() => Array.from(document.querySelectorAll('a[href]')).map(a => a.href)"""
+                            )
+                        finally:
+                            await _pg.close()
+                        out = []
+                        for _h in (_hrefs or []):
+                            try:
+                                _u = str(_h or "")
+                                if not _u.startswith("http"):
+                                    continue
+                                _u = _u.split("#")[0].split("?")[0].rstrip("/")
+                                if _u and _strip_www(_u).startswith(_crawl_prefix):
+                                    out.append(_u)
+                                    if len(out) >= _limit:
+                                        break
+                            except Exception:
+                                continue
+                        return out
+                    except Exception as _seed_e:
+                        logger.warning(f"[BFS] seed link extract failed {_seed_url}: {_seed_e}")
+                        return []
                 for sitemap_url_try in sitemap_candidates[:5]:
                     yield _send(f"🔍 Fetching sitemap: {sitemap_url_try.split('/')[-1]} ...")
                     sitemap_urls = await _fetch_sitemap(ctx, sitemap_url_try, _crawl_prefix)
@@ -6813,6 +6858,15 @@ async def crawl_site(data: dict, request: Request):
                     sitemap_urls = [u for u in sitemap_urls if not u.startswith("__SITEMAP_ERR__")]
                     if sitemap_urls:
                         break
+                # Always pull nav/sidebar links from the seed URL, even if sitemap is large.
+                # This catches section/index pages that many sitemaps omit.
+                try:
+                    _seed_links = await _extract_seed_links(url)
+                    if _seed_links:
+                        sitemap_urls.extend(_seed_links)
+                        yield _send(f"🧭 Seed nav links: +{len(_seed_links)}")
+                except Exception:
+                    pass
 
                 raw_sitemap_count = len(sitemap_urls)
                 # If sitemap has few/no URLs → BFS link-following spider
@@ -6883,6 +6937,15 @@ async def crawl_site(data: dict, request: Request):
                         yield _send(f"🕷️  Found {len(_spider_urls)} URLs (frontier: {len(_frontier)})...")
 
                     sitemap_urls = _spider_urls
+                # Always pull nav/sidebar links from the seed URL, even if sitemap is large.
+                # This catches section/index pages that many sitemaps omit.
+                try:
+                    _seed_links = await _extract_seed_links(url)
+                    if _seed_links:
+                        sitemap_urls.extend(_seed_links)
+                        yield _send(f"🧭 Seed nav links: +{len(_seed_links)}")
+                except Exception:
+                    pass
                     raw_sitemap_count = len(sitemap_urls)
                     yield _send(f"✅ BFS spider done: {len(sitemap_urls)} URLs discovered")
 
