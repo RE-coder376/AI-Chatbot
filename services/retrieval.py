@@ -258,6 +258,14 @@ def try_extract_outcomes_answer(q: str, context: str, debug: dict | None = None)
                     or _q_is_chapter
                     or ("part" in _q_lower)
                 )
+                # For explicit Chapter/Part questions, a topic-marker bullet list is already scoped.
+                # Accept it when we have at least 2 bullets, even if the items don't overlap the title words.
+                if _strong and len(items) >= 2:
+                    if debug is not None:
+                        debug["outcomes_extractor_path"] = "chapter_topics_marker"
+                        debug["outcomes_extractor_marker_line"] = str(ln or "").strip()[:220]
+                        debug["outcomes_extractor_block_preview"] = "\n".join(items[:10])[:900]
+                    return "Learning outcomes:\n\n" + "\n".join(f"- {it}" for it in items[:18])
                 if _valid_chapter_topics_items(items, strong_marker=_strong):
                     if debug is not None:
                         debug["outcomes_extractor_path"] = "chapter_topics_marker"
