@@ -610,6 +610,7 @@ def _has_explicit_outcomes_marker(text: str) -> bool:
             ("learning outcomes" in tl)
             or ("what you will learn" in tl)
             or ("what you'll learn" in tl)
+            or ("what we'll learn in this chapter" in tl)
             or ("what this part will teach you" in tl)
             or ("by the end of this chapter" in tl)
             or ("by completing" in tl)
@@ -1549,9 +1550,10 @@ async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansio
         def _has_outcome_marker(d):
             try:
                 b = str(getattr(d, "page_content", "") or "")
-                # Do not treat prompt templates as outcome chunks even if they contain the words.
+                # Prompt templates can still contain the real "what we'll learn" bullet list.
+                # Count as outcome marker only when an explicit outcomes marker exists.
                 if _is_prompt_template_chunk(b):
-                    return False
+                    return _has_explicit_outcomes_marker(b)
                 return _has_explicit_outcomes_marker(b)
             except Exception:
                 return False
