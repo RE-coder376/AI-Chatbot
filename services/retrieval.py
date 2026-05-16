@@ -249,7 +249,15 @@ def try_extract_outcomes_answer(q: str, context: str, debug: dict | None = None)
                         break
                 items = [it for it in items if it and len(it) <= 260]
                 # This marker is inherently chapter-scoped, so don't require title-token overlap.
-                _strong = ("what we'll learn in this chapter" in ll_norm) or ("what we will learn in this chapter" in ll_norm)
+                # If the user question explicitly references a chapter/part (number + title),
+                # and retrieval has already been title-constrained, topic-marker lists are
+                # sufficiently scoped even if the bullet items don't repeat the title words.
+                _strong = (
+                    ("what we'll learn in this chapter" in ll_norm)
+                    or ("what we will learn in this chapter" in ll_norm)
+                    or _q_is_chapter
+                    or ("part" in _q_lower)
+                )
                 if _valid_chapter_topics_items(items, strong_marker=_strong):
                     if debug is not None:
                         debug["outcomes_extractor_path"] = "chapter_topics_marker"
