@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import re
+import urllib.parse
 from typing import Any
 
 from services.safety import (
@@ -31,6 +32,25 @@ from services.safety import (
 
 
 _product_db_cache: dict[str, bool] = {}  # db_name → is_product_db (stable per collection)
+
+
+# Stable per-page URL identity used for dedupe/replace across crawls.
+def _canonical_source_url(url: str) -> str:
+    try:
+        u = (url or "").strip()
+        if not u:
+            return ""
+        p = urllib.parse.urlparse(u)
+        scheme = (p.scheme or "https").lower()
+        netloc = (p.netloc or "").lower()
+        if netloc.startswith("www."):
+            netloc = netloc[4:]
+        path = re.sub(r"/+", "/", p.path or "/")
+        if path != "/":
+            path = path.rstrip("/")
+        return f"{scheme}://{netloc}{path}"
+    except Exception:
+        return (url or "").strip()
 
 
 def _check_is_product_db(db, db_name: str = "") -> bool:
@@ -404,7 +424,8 @@ def _smart_chunk_page(text: str, url: str, chunk_size: int = 400, chunk_step: in
     clean = _clean_text(raw_text)
     docs = []
     page_meta = page_meta or {}
-    _base_meta = {"source": url}
+    _canon_source = _canonical_source_url(str((page_meta or {}).get("source_canonical") or url or ""))
+    _base_meta = {"source": (_canon_source or url), "source_canonical": (_canon_source or str(url or ""))}
     if page_meta.get("structural"):
         _base_meta["structural"] = True
     if page_meta.get("contaminated"):

@@ -134,6 +134,7 @@ from services.crawler_utils import (
     _smart_chunk_page,
     _extract_product_metadata,
     _enrich_docs_metadata,
+    _canonical_source_url,
 )
 
 from services.llm_keys import (
@@ -1125,18 +1126,27 @@ async def _auto_crawl_db(db_name: str, url: str, max_pages: int = 0) -> int:
                 if not text or len(text) <= 100:
                     _skipped += 1
                 if len(text) > 100:
+                    _canon_url = _canonical_source_url(page_url)
                     try:
                         # Refresh crawls delete old chunks for a URL before re-adding updated ones.
-                        # Track deletes so admin UI can show net change rather than "+chunks written".
+                        # Use canonical URL identity to avoid duplicate drift from URL variants.
                         try:
-                            _pre = await asyncio.to_thread(lambda u=page_url: db._collection.count(where={"source": u}))
-                            deleted += int(_pre or 0)
+                            _pre_raw = await asyncio.to_thread(lambda u=page_url: db._collection.count(where={"source": u}))
                         except Exception:
-                            pass
+                            _pre_raw = 0
+                        try:
+                            _pre_canon = await asyncio.to_thread(lambda u=_canon_url: db._collection.count(where={"source": u}))
+                        except Exception:
+                            _pre_canon = 0
+                        deleted += int(max(int(_pre_raw or 0), int(_pre_canon or 0)))
                         await asyncio.to_thread(lambda u=page_url: db.delete(where={"source": u}))
+                        if _canon_url and _canon_url != page_url:
+                            await asyncio.to_thread(lambda u=_canon_url: db.delete(where={"source": u}))
                     except Exception as _del_e:
                         logger.debug(f"[AUTO-CRAWL] Could not delete old chunks for {page_url}: {_del_e}")
                     text, page_meta = _prepare_crawl_page(text, page_url)
+                    page_meta = dict(page_meta or {})
+                    page_meta["source_canonical"] = _canon_url
                     _new_docs = _smart_chunk_page(text, page_url, page_meta=page_meta)
                     _pending_docs.extend(_new_docs)
                     added += len(_new_docs)
@@ -7301,6 +7311,8 @@ async def crawl_site(data: dict, request: Request):
                         clean = re.sub(r'\s+', ' ', clean).strip()
                         combined = f"{title_text}. {ld_text} {clean}".strip()
                         combined, page_meta = _prepare_crawl_page(combined, page_url, title_hint=title_text)
+                        page_meta = dict(page_meta or {})
+                        page_meta["source_canonical"] = _canonical_source_url(page_url)
                         combined = re.sub(r'\s+', ' ', _clean_text(combined))
                         if len(combined) > 100:
                             return {"text": combined, "title": title_text, "page_meta": page_meta}
@@ -7517,6 +7529,8 @@ async def crawl_site(data: dict, request: Request):
                                     except Exception:
                                         pass
                                     text, page_meta = _prepare_crawl_page(text or "", cur_url, title_hint=title)
+                                    page_meta = dict(page_meta or {})
+                                    page_meta["source_canonical"] = _canonical_source_url(cur_url)
                                     text = re.sub(r'\s+', ' ', _clean_text(text or "")).strip()
                                     if len(text) < 200:
                                         text = f"{title}. {meta_desc}. {text}".strip()
@@ -7532,6 +7546,8 @@ async def crawl_site(data: dict, request: Request):
                                     logger.info(f"[CRAWL] {_ocr_done_msg}")
                                     await log_queue.put(_ocr_done_msg)
                                     text, page_meta = _prepare_crawl_page(text or "", cur_url, title_hint=title)
+                                    page_meta = dict(page_meta or {})
+                                    page_meta["source_canonical"] = _canonical_source_url(cur_url)
                                     text = re.sub(r'\s+', ' ', _clean_text(text or "")).strip()
                                     return text, title, page_meta, sidebar_raw
                                 except Exception as e:
