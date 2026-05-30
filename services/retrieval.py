@@ -59,6 +59,21 @@ def try_extract_outcomes_answer(q: str, context: str, debug: dict | None = None)
             debug["outcomes_extractor_marker_line"] = ""
             debug["outcomes_extractor_block_preview"] = ""
             debug["outcomes_extractor_marker_hits"] = []
+        _GENERIC_GOALS_HEADINGS = (
+            "lessons", "about the code in this chapter", "about this chapter", "before you begin",
+            "exercises", "skill", "skills", "what you'll learn", "what you will learn",
+            "what you will be able to do", "what you'll be able to do"
+        )
+        def _generic_heading_count(items: list[str]) -> int:
+            c = 0
+            for it in items or []:
+                t = (it or "").strip().lower().strip(":")
+                if t in _GENERIC_GOALS_HEADINGS:
+                    c += 1
+                    continue
+                if any(t.startswith(h + ":") for h in _GENERIC_GOALS_HEADINGS):
+                    c += 1
+            return c
         def _valid_outcomes_items(items: list[str]) -> bool:
             if not (3 <= len(items) <= 25):
                 return False
@@ -79,6 +94,8 @@ def try_extract_outcomes_answer(q: str, context: str, debug: dict | None = None)
                 return False
             longish = sum(1 for it in items if len(it) > 140 or it.count(".") >= 2 or it.count(":") >= 2)
             if longish >= max(2, len(items) // 2):
+                return False
+            if _generic_heading_count(items) >= max(2, len(items) // 2):
                 return False
             # If the question names a specific chapter/part title, require overlap with that title.
             if title_tokens:
@@ -104,6 +121,8 @@ def try_extract_outcomes_answer(q: str, context: str, debug: dict | None = None)
             # Keep them reasonably short and list-like.
             longish = sum(1 for it in items if len(it) > 140 or it.count(".") >= 2 or it.count(":") >= 2)
             if longish >= max(2, len(items) // 2):
+                return False
+            if _generic_heading_count(items) >= max(2, len(items) // 2):
                 return False
             # For goals/outcomes queries, reject question-list blocks (common contamination source)
             # unless this is the only strong chapter marker pattern.
@@ -332,7 +351,8 @@ def try_extract_outcomes_answer(q: str, context: str, debug: dict | None = None)
                     1 for it in items
                     if ("?" in it) or ((it.split()[:1][0].lower() if it.split() else "") in _INTERROGATIVE_START)
                 )
-                if _strong and len(items) >= 2 and _qlike_items < max(2, len(items) // 2):
+                _generic_items = _generic_heading_count(items)
+                if _strong and len(items) >= 2 and _qlike_items < max(2, len(items) // 2) and _generic_items < max(2, len(items) // 2):
                     if debug is not None:
                         debug["outcomes_extractor_path"] = "chapter_topics_marker"
                         debug["outcomes_extractor_marker_line"] = str(ln or "").strip()[:220]
