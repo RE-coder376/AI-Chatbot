@@ -2428,7 +2428,7 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
                 _trace_event(workflow_trace, "retrieval_retry", reason="outcomes_extractor", k=60, doc_count=_dc2, source_count=len(_src2 or []))
         except Exception as _re2:
             logger.debug(f"[RETRIEVAL] outcomes retry failed: {_re2}")
-    if _outcomes_ans:
+    if _outcomes_ans and _is_quality_outcomes_answer_text(_outcomes_ans):
         _trace_event(workflow_trace, "guard_exit", guard="deterministic_outcomes_extractor")
         _trace_decision(workflow_debug, "exit_guard", "deterministic_outcomes_extractor")
         if visitor_id: _run_in_bg(save_visitor_turn, visitor_id, "assistant", _outcomes_ans, db_name)
@@ -2438,6 +2438,8 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
         yield f"data: {json.dumps(_metadata_payload(_lead_on, sources[:5]))}\n\n"
         yield "data: {\"type\": \"done\"}\n\n"
         return
+    elif _outcomes_ans:
+        _trace_decision(workflow_debug, "outcomes_extractor_rejected_low_quality", True)
 
     # ── Sparse KB guard — skip for api-only DBs (no KB, LLM uses training knowledge) ──
     if not _is_api_only and not context_addresses_query:
@@ -3230,7 +3232,7 @@ async def chat(request: Request):
                     _outcomes_ans = _out2
             except Exception:
                 pass
-        if _outcomes_ans:
+        if _outcomes_ans and _is_quality_outcomes_answer_text(_outcomes_ans):
             try:
                 workflow_debug["guard_decisions"]["outcomes_extractor_hit"] = True
                 if debug_effective:
@@ -3261,6 +3263,12 @@ async def chat(request: Request):
                     "answer_artifacts": workflow_debug["answer_artifacts"],
                 }
             return JSONResponse(payload)
+        elif _outcomes_ans:
+            try:
+                workflow_debug["guard_decisions"]["outcomes_extractor_rejected_low_quality"] = True
+                _trace_event(workflow_trace, "outcomes_extractor_rejected_low_quality")
+            except Exception:
+                pass
 
         # For learning-goals intents, prefer deterministic extraction only.
         if _LEARNING_GOALS_Q_RE.search(q):
@@ -3655,6 +3663,50 @@ def _deterministic_extractive_quote_answer(q: str, kb_context: str) -> str | Non
         return window
     except Exception:
         return None
+
+
+def _is_quality_outcomes_answer_text(text: str) -> bool:
+    t = (text or "").strip()
+    if not t:
+        return False
+    lines = [ln.strip() for ln in t.splitlines() if ln.strip()]
+    bullets = []
+    for ln in lines:
+        if ln.startswith("- "):
+            bullets.append(ln[2:].strip())
+        elif re.match(r"^\d+[.)]\s+", ln):
+            bullets.append(re.sub(r"^\d+[.)]\s+", "", ln).strip())
+    if len(bullets) < 2:
+        return False
+    generic = {
+        "lessons","about the code in this chapter","about this chapter","before you begin","exercises",
+        "skill","skills","what you'll learn","what you will learn","what you will be able to do","what you'll be able to do"
+    }
+    def is_generic(x: str) -> bool:
+        s = (x or "").lower().strip().strip(":")
+        return s in generic or any(s.startswith(g + ":") for g in generic)
+    bad = 0
+    good = 0
+    verbs = {
+        "understand","build","ship","use","integrate","deliver","identify","structure","apply","prepare",
+        "run","evaluate","deploy","install","test","design","verify","retrofit","decide","learn","encode",
+        "create","implement","configure","monitor","optimize","define","package","explain"
+    }
+    for b in bullets:
+        b0 = re.split(r"[\r\n]+", b)[0].strip()
+        if is_generic(b0):
+            bad += 1
+            continue
+        w = b0.split()
+        if len(w) < 3:
+            bad += 1
+            continue
+        w0 = re.sub(r"[^a-z]", "", w[0].lower())
+        if w0 in verbs or re.search(r"(?i)\b(you will be able to|by the end)\b", b0):
+            good += 1
+        else:
+            bad += 1
+    return good >= 2 and bad < max(2, len(bullets) // 2)
 
 def _faq_file(db_name: str = "") -> Path:
     active = db_name or (ACTIVE_DB_FILE.read_text(encoding="utf-8").strip() if ACTIVE_DB_FILE.exists() else "")
