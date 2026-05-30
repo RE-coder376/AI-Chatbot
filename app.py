@@ -239,13 +239,17 @@ def _widget_key_is_expired(expires_at: str) -> bool:
 
 
 def _widget_signing_secret() -> str:
-    # Prefer explicit secret; fallback to admin password material so tokens survive restarts.
+    # Prefer explicit secret; fallback must be stable across restarts/deploys.
     s = (os.getenv("WIDGET_SIGNING_SECRET", "") or "").strip()
     if s:
         return s
+    s = (os.getenv("ADMIN_PASSWORD", "") or "").strip()
+    if s:
+        return s
     try:
-        root_cfg = get_config("")
-        s = str(root_cfg.get("admin_password", "") or "").strip()
+        if CONFIG_FILE.exists():
+            raw = json.loads(CONFIG_FILE.read_text(encoding="utf-8-sig"))
+            s = str((raw or {}).get("admin_password", "") or "").strip()
         if s:
             return s
     except Exception:
