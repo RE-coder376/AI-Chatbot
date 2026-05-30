@@ -193,6 +193,30 @@ if _cfg_env and not CONFIG_FILE.exists():
     try: CONFIG_FILE.write_text(_cfg_env, encoding="utf-8")
     except Exception as _e: print(f"[STARTUP] Could not write config.json: {_e}")
 ANALYTICS_FILE = Path("analytics.json")  # legacy fallback only
+
+def _stable_chunk_id(doc) -> str:
+    """Deterministic chunk identity from canonical source + normalized content."""
+    try:
+        md = getattr(doc, "metadata", None) or {}
+        src = str(md.get("source_canonical") or md.get("source") or "").strip().lower()
+        txt = str(getattr(doc, "page_content", "") or "")
+        txt = _re.sub(r"\s+", " ", txt).strip()
+        h = hashlib.sha1(f"{src}\n{txt}".encode("utf-8", errors="ignore")).hexdigest()
+        return f"doc_{h}"
+    except Exception:
+        return f"doc_{uuid.uuid4().hex}"
+
+
+def _add_documents_deterministic(db, docs) -> None:
+    """Write docs with stable IDs to prevent duplicate drift across re-crawls."""
+    if not docs:
+        return
+    ids = [_stable_chunk_id(d) for d in docs]
+    try:
+        db.add_documents(docs, ids=ids)
+    except TypeError:
+        # Compatibility fallback for wrappers that don't expose ids kwarg.
+        db.add_documents(docs)
 def _get_active_db() -> str:
     if ACTIVE_DB_FILE.exists():
         v = ACTIVE_DB_FILE.read_text(encoding="utf-8").strip()
@@ -1153,7 +1177,7 @@ async def _auto_crawl_db(db_name: str, url: str, max_pages: int = 0) -> int:
                     # Batch write every 100 docs — prevents unbounded RAM + avoids single huge write at end
                     if len(_pending_docs) >= 100:
                         try:
-                            await asyncio.wait_for(asyncio.to_thread(db.add_documents, _sanitize_docs_for_chroma(_pending_docs)), timeout=120)
+                            await asyncio.wait_for(asyncio.to_thread(_add_documents_deterministic, db, _sanitize_docs_for_chroma(_pending_docs)), timeout=120)
                             logger.info(f"[AUTO-CRAWL] '{db_name}' batch written: {len(_pending_docs)} docs")
                         except Exception as _bw_e:
                             logger.warning(f"[AUTO-CRAWL] '{db_name}' batch write failed: {_bw_e}")
@@ -1172,7 +1196,7 @@ async def _auto_crawl_db(db_name: str, url: str, max_pages: int = 0) -> int:
         # Final batch write for remaining docs
         if _pending_docs:
             try:
-                await asyncio.wait_for(asyncio.to_thread(db.add_documents, _sanitize_docs_for_chroma(_pending_docs)), timeout=120)
+                await asyncio.wait_for(asyncio.to_thread(_add_documents_deterministic, db, _sanitize_docs_for_chroma(_pending_docs)), timeout=120)
             except Exception as _fw_e:
                 logger.warning(f"[AUTO-CRAWL] '{db_name}' final batch write failed: {_fw_e}")
 
@@ -5861,13 +5885,13 @@ async def reindex_from_artifacts(request: Request, data: dict):
         batch_docs.extend(docs)
         total_chunks += len(docs)
         if len(batch_docs) >= 200:
-            await _chroma_run(chroma_db.add_documents, batch_docs)
+            await _chroma_run(_add_documents_deterministic, chroma_db, batch_docs)
             batch_docs.clear()
         if max_pages and total_pages >= max_pages:
             break
 
     if batch_docs:
-        await _chroma_run(chroma_db.add_documents, batch_docs)
+        await _chroma_run(_add_documents_deterministic, chroma_db, batch_docs)
         batch_docs.clear()
 
     # Invalidate BM25 cache for that DB (it is built off db docs).
@@ -7712,7 +7736,7 @@ async def crawl_site(data: dict, request: Request):
                     site_index_text = f"SITE PAGE INDEX ({len(page_index)} pages crawled):\n" + "\n".join(lines)
                     index_doc = Document(page_content=site_index_text[:10000],
                                          metadata={"source": f"{base}#site-index"})
-                    await _chroma_run(chroma_db.add_documents, [index_doc])
+                    await _chroma_run(_add_documents_deterministic, chroma_db, [index_doc])
                     total_chunks += 1
                     yield _send(f"📋 Site index stored ({len(page_index)} pages)")
 
