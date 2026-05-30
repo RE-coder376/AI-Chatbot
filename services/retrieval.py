@@ -1036,19 +1036,28 @@ def _retrieval_visible_doc(doc) -> bool:
     # Drop corrupted/binary chunks — if <70% of first 200 chars are printable, skip.
     try:
         text = getattr(doc, "page_content", None) or ""
-        # Drop obvious site navigation / UI control dumps (universal).
+        # Drop obvious site-navigation/UI dumps, but avoid over-dropping real docs
+        # that contain a small nav fragment plus substantial content.
         tl = text.lower()
-        if (
-            ("skip to main content" in tl)
-            or ("toggle theme" in tl)
-            or ("toggle menu" in tl)
-            or ("copy as markdown" in tl)
-            or ("on this page" in tl and "ctrl" in tl and "copy" in tl)
-            or ("sign in to ask" in tl)
-            or ("sign in to access" in tl)
-            or ("ctrl+" in tl)
-            or ("leaderboard" in tl and "search" in tl and "toggle" in tl)
+        _nav_hits = 0
+        for _m in (
+            "skip to main content",
+            "toggle theme",
+            "toggle menu",
+            "copy as markdown",
+            "sign in to ask",
+            "sign in to access",
+            "ctrl+",
+            "on this page",
+            "leaderboard",
         ):
+            if _m in tl:
+                _nav_hits += 1
+        _alpha_chars = sum(1 for ch in text if ch.isalpha())
+        _looks_substantial = (len(text) >= 700 and _alpha_chars >= 250)
+        if _nav_hits >= 3 and (not _looks_substantial):
+            return False
+        if ("on this page" in tl and "copy as markdown" in tl and "ctrl+" in tl and not _looks_substantial):
             return False
         sample = text[:200]
         if len(sample) > 20:
