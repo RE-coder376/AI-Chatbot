@@ -1888,13 +1888,21 @@ def _context_addresses_query(context: str, q: str) -> bool:
         if user_mentioned_concept and context_has_synonym:
             return True
 
-    # 3. Trust results if we have substantial context (let LLM decide relevance)
-    if len(context.strip()) > 200:
-        return True
-    
-    # 4. Trust LLM for very short queries if we found at least some info
+    # 3. Scoped factual queries need explicit lexical anchors.
+    # Avoid "close-but-wrong" answers from neighboring sections.
+    if _is_strict_scope_query(q):
+        return bool(keywords) and sum(1 for kw in list(keywords)[:10] if kw in context_lower) >= 2
+
+    # 4. For very short generic queries, allow minimal context fallback.
     if not keywords and len(context.strip()) > 50:
         return True
+
+    # 5. For non-scoped queries, require at least one meaningful lexical hit.
+    # This is stricter than the previous "len(context)>200" rule and reduces hallucinations.
+    if keywords:
+        hit_count = sum(1 for kw in list(keywords)[:12] if kw in context_lower)
+        if hit_count >= 1:
+            return True
     
     return False
 
@@ -1914,6 +1922,13 @@ def _context_has_scope_anchor(context: str, q: str) -> bool:
     m_pt = re.search(r"\bpart\s+(\d{1,4})\b", ql)
     if m_pt and f"part {m_pt.group(1)}" not in cl:
         return False
+    # If query includes "Chapter N: Title" or "Part N: Title", require at least one
+    # meaningful title token in context to avoid cross-section leakage.
+    m_title = re.search(r"\b(?:chapter|part)\s+\d{1,4}\s*[:\-]\s*([^\n]{4,200})", q, re.I)
+    if m_title:
+        tks = [w.lower() for w in re.findall(r"[a-zA-Z]{4,}", m_title.group(1)) if w.lower() not in _QUERY_STOP][:8]
+        if tks and not any(t in cl for t in tks[:4]):
+            return False
     return True
 
 # ── Intent classifier ────────────────────────────────────────────────────────

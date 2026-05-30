@@ -828,6 +828,17 @@ def _evidence_rerank_score(doc, q: str, title_phrase: str) -> float:
                 score += 16.0
             if tpl in head:
                 score += 12.0
+            # Near-exact phrase boost (normalized punctuation/whitespace).
+            try:
+                _tpl_n = re.sub(r"[^a-z0-9]+", " ", tpl).strip()
+                _bl_n = re.sub(r"[^a-z0-9]+", " ", bl)
+                _sl_n = re.sub(r"[^a-z0-9]+", " ", sl)
+                if _tpl_n and _tpl_n in _bl_n:
+                    score += 14.0
+                if _tpl_n and _tpl_n in _sl_n:
+                    score += 10.0
+            except Exception:
+                pass
 
         for a in anchors[:10]:
             if len(a) < 4:
@@ -847,6 +858,20 @@ def _evidence_rerank_score(doc, q: str, title_phrase: str) -> float:
         return score
     except Exception:
         return 0.0
+
+
+def _source_section_key(doc) -> str:
+    """Stable section key for grouping nearby chunks from the same canonical page."""
+    try:
+        meta = (getattr(doc, "metadata", None) or {})
+        src = str(meta.get("source") or "").strip().lower()
+        if not src:
+            return ""
+        src = src.split("#", 1)[0].split("?", 1)[0]
+        src = re.sub(r"/(index\.html?)?$", "", src)
+        return src.rstrip("/")
+    except Exception:
+        return ""
 
 
 def _heuristic_rerank_score(doc, q: str, title_phrase: str) -> float:
@@ -1793,6 +1818,16 @@ async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansio
 
         # Baseline rerank after optional filtering
         _combined_before_cap.sort(key=lambda d: _heuristic_rerank_score(d, q, _title_phrase), reverse=True)
+
+        # Section lock for strict scoped lookups (Chapter/Part): keep context mostly from
+        # the strongest page/section to avoid mixed nearby-chapter contamination.
+        if _strict_scope_q and _combined_before_cap:
+            _top_key = _source_section_key(_combined_before_cap[0])
+            if _top_key:
+                _same = [d for d in _combined_before_cap if _source_section_key(d) == _top_key]
+                _other = [d for d in _combined_before_cap if _source_section_key(d) != _top_key]
+                if len(_same) >= 2:
+                    _combined_before_cap = _same[:28] + _other[:6]
 
         # outcomes-marker bubble: if user asks learning outcomes/goals, put explicit outcomes chunks first
         # (but only within the already title-constrained set when title_phrase was present).
