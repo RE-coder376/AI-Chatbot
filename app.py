@@ -1760,6 +1760,24 @@ def _context_addresses_query(context: str, q: str) -> bool:
     
     return False
 
+
+def _is_strict_scope_query(q: str) -> bool:
+    return bool(re.search(r"\b(?:chapter|part)\s+\d{1,4}\b", q or "", re.I))
+
+
+def _context_has_scope_anchor(context: str, q: str) -> bool:
+    if not context or not q:
+        return False
+    ql = q.lower()
+    cl = context.lower()
+    m_ch = re.search(r"\bchapter\s+(\d{1,4})\b", ql)
+    if m_ch and f"chapter {m_ch.group(1)}" not in cl:
+        return False
+    m_pt = re.search(r"\bpart\s+(\d{1,4})\b", ql)
+    if m_pt and f"part {m_pt.group(1)}" not in cl:
+        return False
+    return True
+
 # ── Intent classifier ────────────────────────────────────────────────────────
 _GREETING_RE = re.compile(
     r'^\s*(hi+|hello+|hey+|salam|assalam[\w\s]*|good\s+(morning|afternoon|evening|day)'
@@ -3051,6 +3069,50 @@ async def chat(request: Request):
                 }
             return JSONResponse(payload)
 
+        # Hard evidence lock for explicit Chapter/Part questions.
+        if _is_strict_scope_query(q) and not _context_has_scope_anchor(context or "", q):
+            payload = {
+                "answer": "I couldn't find explicit evidence for that exact chapter/part in the retrieved context.",
+                "sources": (sources or [])[:5],
+                "evidence_spans": [],
+            }
+            if debug_effective:
+                payload["debug"] = {
+                    "workflow_trace": workflow_trace,
+                    "guard_decisions": workflow_debug["guard_decisions"],
+                    "answer_artifacts": workflow_debug["answer_artifacts"],
+                }
+            return JSONResponse(payload)
+
+        # For learning-goals intents, prefer deterministic extraction only.
+        if _LEARNING_GOALS_Q_RE.search(q):
+            _lg = _deterministic_learning_goals_answer(q, context or "")
+            if _lg and (not re.match(r"(?i)^\s*chapter\s+\d+\b[:\-]?\s*$", _lg.strip())):
+                payload = {
+                    "answer": _lg,
+                    "sources": (sources or [])[:5],
+                    "evidence_spans": _evidence_spans_for_answer(q, context or ""),
+                }
+                if debug_effective:
+                    payload["debug"] = {
+                        "workflow_trace": workflow_trace,
+                        "guard_decisions": workflow_debug["guard_decisions"],
+                        "answer_artifacts": workflow_debug["answer_artifacts"],
+                    }
+                return JSONResponse(payload)
+            payload = {
+                "answer": "I couldn't find an explicit learning-goals list for that exact chapter/part in the retrieved context.",
+                "sources": (sources or [])[:5],
+                "evidence_spans": [],
+            }
+            if debug_effective:
+                payload["debug"] = {
+                    "workflow_trace": workflow_trace,
+                    "guard_decisions": workflow_debug["guard_decisions"],
+                    "answer_artifacts": workflow_debug["answer_artifacts"],
+                }
+            return JSONResponse(payload)
+
         # Sparse KB guard — skip for api-only DBs so LLM can use training knowledge
         _t_api_only = (not cfg.get("crawl_url", "")) and bool(cfg.get("api_sources"))
         if not _t_api_only and not _context_addresses_query(context, q):
@@ -3176,7 +3238,11 @@ async def chat(request: Request):
                     _trace_event(workflow_trace, "llm_attempt_success", attempt=int(attempt + 1))
                 except Exception:
                     pass
-                payload = {"answer": _ans}
+                payload = {
+                    "answer": _ans,
+                    "sources": (sources or [])[:5],
+                    "evidence_spans": _evidence_spans_for_answer(q, context or ""),
+                }
                 if debug_effective:
                     payload["debug"] = {
                         "workflow_trace": workflow_trace,
@@ -3298,6 +3364,29 @@ def _best_explicit_evidence_sentence(q: str, kb_context: str) -> str | None:
         return out[:280]
     except Exception:
         return None
+
+
+def _evidence_spans_for_answer(q: str, kb_context: str, max_spans: int = 3) -> list[str]:
+    try:
+        q_words = [w for w in re.findall(r"[a-zA-Z]{4,}", (q or "").lower()) if w not in _STOPWORDS][:10]
+        if not q_words or not kb_context:
+            return []
+        spans = []
+        for ln in (kb_context or "").splitlines():
+            t = (ln or "").strip()
+            if len(t) < 25 or len(t) > 320:
+                continue
+            tl = t.lower()
+            if any(b in tl for b in ("on this page", "copy as markdown", "ctrl+", "site index")):
+                continue
+            hit = sum(1 for w in q_words if w in tl)
+            if hit >= 2:
+                spans.append(re.sub(r"\s+", " ", t))
+            if len(spans) >= max_spans:
+                break
+        return spans
+    except Exception:
+        return []
 
 
 def _deterministic_extractive_quote_answer(q: str, kb_context: str) -> str | None:

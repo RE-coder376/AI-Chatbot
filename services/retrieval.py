@@ -1234,6 +1234,13 @@ async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansio
         except Exception:
             pass
 
+    # Tight latency path for strict chapter/part questions:
+    # keep retrieval focused and avoid broad expansion drift.
+    _strict_scope_q = bool(re.search(r"\b(?:chapter|part)\s+\d{1,4}\b", q or "", re.I))
+    if _strict_scope_q:
+        fast = True
+        k = min(k, 18)
+
     # 1. Start with hardcoded concept expansion (fast)
     search_queries = expand_query(q)
 
@@ -1255,7 +1262,7 @@ async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansio
                 search_queries.append(_mq)
 
     # Cap variants to keep latency bounded
-    search_queries = search_queries[:6]
+    search_queries = search_queries[: (3 if _strict_scope_q else 6)]
 
     # Extra query signal: if the user asks about 'Chapter N: Title' or 'Part N: Title',
     # add the title portion as an additional retrieval query. This dramatically improves
