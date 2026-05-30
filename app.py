@@ -2447,7 +2447,11 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
                 _trace_event(workflow_trace, "retrieval_retry", reason="outcomes_extractor", k=60, doc_count=_dc2, source_count=len(_src2 or []))
         except Exception as _re2:
             logger.debug(f"[RETRIEVAL] outcomes retry failed: {_re2}")
-    if _outcomes_ans and _is_quality_outcomes_answer_text(_outcomes_ans):
+    if (
+        _outcomes_ans
+        and _is_quality_outcomes_answer_text(_outcomes_ans)
+        and _outcomes_answer_matches_scope(q, _outcomes_ans)
+    ):
         _trace_event(workflow_trace, "guard_exit", guard="deterministic_outcomes_extractor")
         _trace_decision(workflow_debug, "exit_guard", "deterministic_outcomes_extractor")
         if visitor_id: _run_in_bg(save_visitor_turn, visitor_id, "assistant", _outcomes_ans, db_name)
@@ -3258,7 +3262,11 @@ async def chat(request: Request):
                     _outcomes_ans = _out2
             except Exception:
                 pass
-        if _outcomes_ans and _is_quality_outcomes_answer_text(_outcomes_ans):
+        if (
+            _outcomes_ans
+            and _is_quality_outcomes_answer_text(_outcomes_ans)
+            and _outcomes_answer_matches_scope(q, _outcomes_ans)
+        ):
             try:
                 workflow_debug["guard_decisions"]["outcomes_extractor_hit"] = True
                 if debug_effective:
@@ -3302,6 +3310,7 @@ async def chat(request: Request):
             if (
                 _lg
                 and _is_quality_outcomes_answer_text(_lg)
+                and _outcomes_answer_matches_scope(q, _lg)
                 and (not re.match(r"(?i)^\s*chapter\s+\d+\b[:\-]?\s*$", _lg.strip()))
             ):
                 payload = {
@@ -3423,7 +3432,7 @@ async def chat(request: Request):
                         "guard_decisions": workflow_debug["guard_decisions"],
                         "answer_artifacts": workflow_debug["answer_artifacts"],
                     }
-                return JSONResponse(payload, status_code=500)
+                return JSONResponse(payload, status_code=200)
             try:
                 try:
                     _trace_event(workflow_trace, "llm_attempt_start", attempt=int(attempt + 1))
@@ -3737,6 +3746,34 @@ def _is_quality_outcomes_answer_text(text: str) -> bool:
         else:
             bad += 1
     return good >= 2 and bad < max(2, len(bullets) // 2)
+
+
+def _outcomes_answer_matches_scope(q: str, text: str) -> bool:
+    """For chapter/part-scoped questions, ensure extracted outcomes stay in-scope."""
+    try:
+        q = str(q or "")
+        text_l = str(text or "").lower()
+        if not q or not text_l:
+            return False
+        ql = q.lower()
+        mch = re.search(r"\bchapter\s+(\d{1,4})\b", ql)
+        mpt = re.search(r"\bpart\s+(\d{1,4})\b", ql)
+        if mch and f"chapter {mch.group(1)}" not in text_l:
+            return False
+        if mpt and f"part {mpt.group(1)}" not in text_l:
+            return False
+        mt = re.search(r"\b(?:chapter|part)\s+\d{1,4}\s*[:\-]\s*([^\n]{4,200})", q, re.I)
+        if mt:
+            stop = {"what","will","learn","goals","goal","objectives","objective","chapter","part","according","book","from","the","this","that","with","about"}
+            tks = [w.lower() for w in re.findall(r"[a-zA-Z]{4,}", mt.group(1)) if w.lower() not in stop][:8]
+            if tks:
+                hit = sum(1 for t in tks if t in text_l)
+                req = 2 if len(tks) >= 3 else 1
+                if hit < req:
+                    return False
+        return True
+    except Exception:
+        return False
 
 def _faq_file(db_name: str = "") -> Path:
     active = db_name or (ACTIVE_DB_FILE.read_text(encoding="utf-8").strip() if ACTIVE_DB_FILE.exists() else "")
