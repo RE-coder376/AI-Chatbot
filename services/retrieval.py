@@ -1076,6 +1076,24 @@ def _retrieval_visible_doc(doc) -> bool:
         pass
     return True
 
+
+def _minimally_usable_doc(doc) -> bool:
+    """Lenient fallback visibility check used only when strict filters produce zero docs."""
+    try:
+        txt = str(getattr(doc, "page_content", "") or "")
+        if len(txt.strip()) < 80:
+            return False
+        sample = txt[:400]
+        ctrl = sum(1 for c in sample if (ord(c) < 32 and c not in ("\n", "\r", "\t")))
+        if ctrl >= 3:
+            return False
+        rep = sample.count("\ufffd") + sample.count("Ã¯Â¿Â½")
+        if rep >= 4:
+            return False
+        return True
+    except Exception:
+        return False
+
 _ROLE_TERMS = {"ceo", "cto", "coo", "cfo", "cpo", "vp", "founder", "author", "director",
                "president", "chairman", "head", "lead", "chief"}
 
@@ -1764,6 +1782,22 @@ async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansio
                     continue
             _comb_seen.add(_k)
             _combined_before_cap.append(_r)
+
+    # Universal fallback: if strict visibility rules eliminate everything but retrieval returned docs,
+    # keep minimally-usable chunks so answer generation can still ground on evidence.
+    if not _combined_before_cap:
+        _fallback_seen: set = set()
+        for _grp in (policy_results, _bm25_raw, _bm25_title_raw, _outcomes_title_results, rescue_results, _vector_raw):
+            for _r in _grp:
+                if not _minimally_usable_doc(_r):
+                    continue
+                _k = str(getattr(_r, "page_content", "") or "")[:120]
+                if _k in _fallback_seen:
+                    continue
+                _fallback_seen.add(_k)
+                _combined_before_cap.append(_r)
+        if _combined_before_cap:
+            logger.warning(f"[RETRIEVE] strict filters yielded 0; fallback kept {len(_combined_before_cap)} docs")
     
 
     # Heuristic rerank for non-product DBs: improves chapter/part/title lookup accuracy.
