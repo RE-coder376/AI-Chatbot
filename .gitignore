@@ -42,6 +42,7 @@ csat_log.json
 knowledge_gaps.json
 visitor_history/
 key_health.json
+widget_keys.json
 watchdog_baseline.json
 watchdog_dialogue.json
 watchdog.lock

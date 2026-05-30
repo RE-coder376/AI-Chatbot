@@ -257,6 +257,21 @@ def _resolve_widget_key(key: str) -> tuple[str, str]:
         cached_valid_db = cached
     if not DATABASES_DIR.exists():
         return "", "invalid"
+    # Local untracked fallback store (survives process restarts when secrets sync lags).
+    try:
+        wk_store = _load_widget_key_store()
+        for _dbn, _meta in (wk_store or {}).items():
+            if not isinstance(_meta, dict):
+                continue
+            if str(_meta.get("widget_key") or "") != key:
+                continue
+            exp = str(_meta.get("widget_key_expires_at") or "")
+            if exp and _widget_key_is_expired(exp):
+                return "", "expired"
+            _widget_key_cache[key] = {"db": str(_dbn), "expires_at": exp}
+            return str(_dbn), "valid"
+    except Exception:
+        pass
     for db_dir in DATABASES_DIR.iterdir():
         if not db_dir.is_dir():
             continue
@@ -283,6 +298,43 @@ def _get_db_for_widget_key(key: str) -> str:
     """Return the db_name that owns this widget_key, or '' if not found/expired."""
     db_name, status = _resolve_widget_key(key)
     return db_name if status == "valid" else ""
+
+
+WIDGET_KEYS_FILE = Path("widget_keys.json")  # local, untracked key metadata fallback
+
+
+def _load_widget_key_store() -> dict:
+    try:
+        if WIDGET_KEYS_FILE.exists():
+            data = json.loads(WIDGET_KEYS_FILE.read_text(encoding="utf-8-sig"))
+            if isinstance(data, dict):
+                return data
+    except Exception:
+        pass
+    return {}
+
+
+def _save_widget_key_store(data: dict) -> None:
+    try:
+        _atomic_write_json(WIDGET_KEYS_FILE, data or {})
+    except Exception as e:
+        logger.warning(f"Could not save widget key store: {e}")
+
+
+def _persist_widget_key_local(db_name: str, widget_key: str, created_at: str, expires_at: str) -> None:
+    """Persist widget key metadata in a local untracked store as restart-safe fallback."""
+    try:
+        if not db_name or not widget_key:
+            return
+        data = _load_widget_key_store()
+        data[db_name] = {
+            "widget_key": widget_key,
+            "widget_key_created_at": created_at or "",
+            "widget_key_expires_at": expires_at or "",
+        }
+        _save_widget_key_store(data)
+    except Exception as e:
+        logger.warning(f"Could not persist widget key in local store for {db_name}: {e}")
 def _analytics_file(db_name: str = "") -> Path:
     if db_name:
         return DATABASES_DIR / db_name / "analytics.json"
@@ -5972,6 +6024,7 @@ def get_embed_code(request: Request, password: str = ""):
                 "widget_key_created_at": created_at,
                 "widget_key_expires_at": exp,
             })
+            _persist_widget_key_local(db_name, widget_key, created_at, exp)
             _widget_key_cache[widget_key] = {"db": db_name, "expires_at": exp}
             expires_at = exp
         except Exception as _wk_e:
@@ -5998,6 +6051,22 @@ def get_embed_code(request: Request, password: str = ""):
         "widget_key_expires_at": expires_at,
         "widget_key_ttl": ttl_label,
     }
+
+
+@app.get("/admin/widget-key-status")
+def widget_key_status(request: Request, password: str = ""):
+    password = _extract_password(request, password)
+    db_name = _extract_admin_db(request, "")
+    cfg = get_config(db_name) if db_name else get_config()
+    admin_auth(password, cfg)
+    if not db_name:
+        return JSONResponse({"detail": "db_name required"}, status_code=400)
+    key = str(cfg.get("widget_key", "") or "")
+    exp = str(cfg.get("widget_key_expires_at", "") or "")
+    if not key:
+        return {"db": db_name, "status": "missing", "widget_key_expires_at": exp}
+    _, status = _resolve_widget_key(key)
+    return {"db": db_name, "status": status, "widget_key_expires_at": exp}
 
 @app.post("/admin/reindex")
 async def reindex(request: Request, data: dict):
