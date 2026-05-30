@@ -743,6 +743,7 @@
       </div>
       <div style="margin-top:16px; display:flex; gap:10px; flex-wrap:wrap;">
         <select id="widget-ttl" style="width:auto; min-width:160px; margin:0;">
+          <option value="">Select key lifetime</option>
           <option value="30d">30 days</option>
           <option value="7d">7 days</option>
           <option value="1d">1 day</option>
@@ -1916,32 +1917,30 @@
   async function loadEmbedCode() {
     const pass = document.getElementById('master-pass').value;
     if (!pass) return;
-    try {
-      const res  = await fetch(`${API}/admin/embed-code`, { headers: authHeaders() });
-      const data = await res.json();
-      if (data.snippet) {
-        document.getElementById('embed-snippet').value = data.snippet;
-        const meta = document.getElementById('widget-key-meta');
-        const exp = data.widget_key_expires_at || '';
-        const ttl = data.widget_key_ttl || 'existing';
-        meta.textContent = exp ? `Key TTL: ${ttl} | Expires: ${exp}` : `Key TTL: ${ttl} | Expires: lifetime`;
-        showStatus('embed', 'Snippet ready.', 'success');
-      }
-    } catch (e) {
-      showStatus('embed', 'Failed to load snippet.', 'error');
+    // Security UX: do not reveal an existing key automatically.
+    const el = document.getElementById('embed-snippet');
+    const meta = document.getElementById('widget-key-meta');
+    if (!window._widgetKeyReady) {
+      if (el) el.value = '';
+      if (meta) meta.textContent = '';
+      showStatus('embed', 'Select lifetime and click Create Widget Key.', 'loading');
+      return;
     }
+    showStatus('embed', 'Snippet ready.', 'success');
   }
 
   async function createWidgetKey() {
     const pass = document.getElementById('master-pass').value;
     if (!pass) return showStatus('embed', 'Enter admin password first.', 'error');
-    const ttl = (document.getElementById('widget-ttl')?.value || '30d').trim();
+    const ttl = (document.getElementById('widget-ttl')?.value || '').trim();
+    if (!ttl) return showStatus('embed', 'Select key lifetime first.', 'error');
     try {
       const res = await fetch(`${API}/admin/embed-code?rotate=1&ttl=${encodeURIComponent(ttl)}`, { headers: authHeaders() });
       const data = await res.json();
       if (!res.ok) return showStatus('embed', data.detail || 'Failed to create widget key', 'error');
       if (data.snippet) {
         document.getElementById('embed-snippet').value = data.snippet;
+        window._widgetKeyReady = true;
       }
       const meta = document.getElementById('widget-key-meta');
       const exp = data.widget_key_expires_at || '';
@@ -1955,7 +1954,10 @@
 
   async function previewBot() {
     let snippet = document.getElementById('embed-snippet').value;
-    if (!snippet.includes('widget-chat')) await loadEmbedCode();
+    if (!snippet.includes('widget-chat')) {
+      showStatus('embed', 'Create widget key first.', 'error');
+      return;
+    }
     snippet = document.getElementById('embed-snippet').value;
     const m = snippet.match(/key=([a-f0-9\-]{36})/);
     if (m) window.open(`${API}/widget-chat?key=${m[1]}`, '_blank');

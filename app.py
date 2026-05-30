@@ -431,6 +431,7 @@ _analytics_lock = threading.Lock()  # prevents concurrent analytics.json corrupt
 _chat_rate:  dict = {}   # ip -> deque of timestamps
 _admin_rate: dict = {}
 _public_write_rate: dict = {}
+_db_chat_rate: dict = {}  # db_name -> deque of timestamps
 _rate_lock = threading.Lock()
 _crawling_dbs: set = set()   # DBs currently mid-crawl
 _crawl_cancel_events: dict = {}  # db_name -> asyncio.Event; set by /admin/crawl/cancel
@@ -1637,6 +1638,20 @@ async def rate_and_error_middleware(request: Request, call_next):
         if path == "/chat":
             if not check_rate_limit(ip, _chat_rate, limit=20):
                 return JSONResponse({"detail": "Too many requests. Slow down."}, status_code=429)
+            try:
+                wk = (request.headers.get("X-Widget-Key", "") or "").strip()
+                if wk and wk not in ("null", "undefined"):
+                    _db_name, _wk_status = _resolve_widget_key(wk)
+                    db_bucket = _db_name if _db_name else "invalid_widget_key"
+                else:
+                    db_bucket = _get_active_db() or "default"
+            except Exception:
+                db_bucket = "default"
+            if not check_rate_limit(f"db:{db_bucket}", _db_chat_rate, limit=10):
+                return JSONResponse(
+                    {"answer": "Too many questions right now for this assistant. Please try again in one minute."},
+                    status_code=429,
+                )
         elif path.startswith("/admin") or path.startswith("/debug"):
             if not check_rate_limit(ip, _admin_rate, limit=30):  # 30 req/min per IP
                 return JSONResponse({"detail": "Too many requests."}, status_code=429)
