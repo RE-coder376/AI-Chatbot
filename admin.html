@@ -1959,7 +1959,7 @@
       return;
     }
     snippet = document.getElementById('embed-snippet').value;
-    const m = snippet.match(/key=([a-f0-9\-]{36})/);
+    const m = snippet.match(/key=([^'\"&\s>]+)/);
     if (m) window.open(`${API}/widget-chat?key=${m[1]}`, '_blank');
     else showStatus('embed', 'Could not find widget key. Try Refresh Snippet first.', 'error');
   }

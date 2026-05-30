@@ -13,6 +13,7 @@ import asyncio
 import re
 import re as _re
 import uuid
+import base64
 import hmac
 import hashlib
 import secrets
@@ -237,10 +238,76 @@ def _widget_key_is_expired(expires_at: str) -> bool:
     return _now_pk() >= dt
 
 
+def _widget_signing_secret() -> str:
+    # Prefer explicit secret; fallback to admin password material so tokens survive restarts.
+    s = (os.getenv("WIDGET_SIGNING_SECRET", "") or "").strip()
+    if s:
+        return s
+    try:
+        root_cfg = get_config("")
+        s = str(root_cfg.get("admin_password", "") or "").strip()
+        if s:
+            return s
+    except Exception:
+        pass
+    return ""
+
+
+def _b64u(data: bytes) -> str:
+    return base64.urlsafe_b64encode(data).decode("ascii").rstrip("=")
+
+
+def _b64u_dec(s: str) -> bytes:
+    pad = "=" * ((4 - (len(s) % 4)) % 4)
+    return base64.urlsafe_b64decode((s + pad).encode("ascii"))
+
+
+def _make_widget_token(db_name: str, expires_at: str) -> str:
+    secret = _widget_signing_secret()
+    if not secret:
+        return ""
+    payload = {"db": db_name, "exp": expires_at or "", "v": 1}
+    payload_b64 = _b64u(json.dumps(payload, separators=(",", ":"), ensure_ascii=True).encode("utf-8"))
+    sig = hmac.new(secret.encode("utf-8"), payload_b64.encode("ascii"), hashlib.sha256).digest()
+    sig_b64 = _b64u(sig)
+    return f"wk1.{payload_b64}.{sig_b64}"
+
+
+def _parse_widget_token(key: str) -> tuple[str, str]:
+    # Returns (db_name, status) where status is valid|expired|invalid
+    if not key or not key.startswith("wk1."):
+        return "", "invalid"
+    try:
+        parts = key.split(".")
+        if len(parts) != 3:
+            return "", "invalid"
+        _, payload_b64, sig_b64 = parts
+        secret = _widget_signing_secret()
+        if not secret:
+            return "", "invalid"
+        expected_sig = _b64u(hmac.new(secret.encode("utf-8"), payload_b64.encode("ascii"), hashlib.sha256).digest())
+        if not hmac.compare_digest(expected_sig, sig_b64):
+            return "", "invalid"
+        payload = json.loads(_b64u_dec(payload_b64).decode("utf-8"))
+        db_name = str(payload.get("db", "") or "").strip()
+        expires_at = str(payload.get("exp", "") or "")
+        if not db_name:
+            return "", "invalid"
+        if expires_at and _widget_key_is_expired(expires_at):
+            return "", "expired"
+        return db_name, "valid"
+    except Exception:
+        return "", "invalid"
+
+
 def _resolve_widget_key(key: str) -> tuple[str, str]:
     """Return (db_name, status) where status is valid|expired|invalid."""
     if not key:
         return "", "invalid"
+    # Stateless signed token path (preferred): survives restarts/deploys without storage sync.
+    _tok_db, _tok_status = _parse_widget_token(key)
+    if _tok_status in ("valid", "expired"):
+        return _tok_db, _tok_status
     cached_valid_db = ""
     cached = _widget_key_cache.get(key)
     if isinstance(cached, dict):
@@ -6025,7 +6092,6 @@ def get_embed_code(request: Request, password: str = ""):
         widget_key = ""
 
     if (not widget_key) or rotate:
-        widget_key = str(uuid.uuid4())
         created_at = _now_pk().isoformat()
         if ttl_minutes > 0:
             exp = (_now_pk() + timedelta(minutes=ttl_minutes)).isoformat()
@@ -6039,6 +6105,8 @@ def get_embed_code(request: Request, password: str = ""):
         else:
             exp = (_now_pk() + timedelta(days=ttl_days)).isoformat()
             ttl_label = f"{ttl_days} day{'s' if ttl_days != 1 else ''}"
+        _token = _make_widget_token(db_name, exp)
+        widget_key = _token if _token else str(uuid.uuid4())
         try:
             _save_db_secrets(db_name, {
                 "widget_key": widget_key,
