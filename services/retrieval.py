@@ -891,6 +891,10 @@ def _heuristic_rerank_score(doc, q: str, title_phrase: str) -> float:
         if (bl.count('http://') + bl.count('https://')) >= 3:
             score -= 6.0
 
+        # For goals/outcomes queries, quiz/exercise pages are usually not the canonical evidence.
+        if _OUTCOMES_INTENT_RE.search(q or '') and any(p in sl for p in ("/chapter-quiz", "/quiz", "/exercises", "/exercise")):
+            score -= 10.0
+
         # Penalize prompt-template blocks. These often mention many relevant keywords but
         # are not the canonical "outcomes/policy/spec" sections users ask for.
         if _is_prompt_template_chunk(body):
