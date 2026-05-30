@@ -105,6 +105,11 @@ def try_extract_outcomes_answer(q: str, context: str, debug: dict | None = None)
             longish = sum(1 for it in items if len(it) > 140 or it.count(".") >= 2 or it.count(":") >= 2)
             if longish >= max(2, len(items) // 2):
                 return False
+            # For goals/outcomes queries, reject question-list blocks (common contamination source)
+            # unless this is the only strong chapter marker pattern.
+            qlike = sum(1 for it in items if "?" in it or ((it.split()[:1][0].lower() if it.split() else "") in _INTERROGATIVE_START))
+            if qlike >= max(2, len(items) // 2) and not strong_marker:
+                return False
             if (not strong_marker) and title_tokens:
                 hit = sum(1 for t in title_tokens[:6] if t and (t in joined))
                 req = 2 if len(title_tokens) >= 3 else 1
@@ -314,7 +319,12 @@ def try_extract_outcomes_answer(q: str, context: str, debug: dict | None = None)
                 )
                 # For explicit Chapter/Part questions, a topic-marker bullet list is already scoped.
                 # Accept it when we have at least 2 bullets, even if the items don't overlap the title words.
-                if _strong and len(items) >= 2:
+                # Reject interrogative/checklist bullets for goals/outcomes prompts.
+                _qlike_items = sum(
+                    1 for it in items
+                    if ("?" in it) or ((it.split()[:1][0].lower() if it.split() else "") in _INTERROGATIVE_START)
+                )
+                if _strong and len(items) >= 2 and _qlike_items < max(2, len(items) // 2):
                     if debug is not None:
                         debug["outcomes_extractor_path"] = "chapter_topics_marker"
                         debug["outcomes_extractor_marker_line"] = str(ln or "").strip()[:220]

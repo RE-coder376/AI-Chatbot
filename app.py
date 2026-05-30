@@ -3243,6 +3243,9 @@ def _best_explicit_evidence_sentence(q: str, kb_context: str) -> str | None:
             hit = sum(1 for w in q_words if w in ll)
             if hit < 2:
                 continue
+            # Avoid returning bare headings/titles as "evidence".
+            if re.match(r"(?i)^\s*(chapter|part|section|lesson|unit)\s+\d+\s*[:\-]?\s*$", ln):
+                continue
             bonus = 0
             if re.match(r"^\s*(?:[-*]|\d{1,2}[.)])\s+", ln):
                 bonus += 1
@@ -3290,6 +3293,10 @@ def _deterministic_extractive_quote_answer(q: str, kb_context: str) -> str | Non
         # Evidence-first: if we can find one explicit supporting sentence/line, return it first.
         explicit = _best_explicit_evidence_sentence(q, kb_context)
         if explicit:
+            # For learning-goals style questions, single-line quote is usually insufficient;
+            # let the dedicated outcomes extractor/LLM answer instead.
+            if _LEARNING_GOALS_Q_RE.search(ql):
+                return None
             return explicit
 
         # Find a window around the best keyword hit.
