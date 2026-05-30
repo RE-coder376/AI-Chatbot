@@ -230,12 +230,33 @@ def _get_active_db() -> str:
 # _safe_db_secret_name, _load_db_secrets, _save_db_secrets
 # imported from services.config above
 
-def _get_db_for_widget_key(key: str) -> str:
-    """Return the db_name that owns this widget_key, or '' if not found. Cached."""
-    if key in _widget_key_cache:
-        return _widget_key_cache[key]
+def _widget_key_is_expired(expires_at: str) -> bool:
+    dt = _parse_crawl_dt(expires_at or "")
+    if dt is None:
+        return False
+    return _now_pk() >= dt
+
+
+def _resolve_widget_key(key: str) -> tuple[str, str]:
+    """Return (db_name, status) where status is valid|expired|invalid."""
+    if not key:
+        return "", "invalid"
+    cached_valid_db = ""
+    cached = _widget_key_cache.get(key)
+    if isinstance(cached, dict):
+        _db = str(cached.get("db") or "")
+        _exp = str(cached.get("expires_at") or "")
+        if _db:
+            if _exp and _widget_key_is_expired(_exp):
+                _widget_key_cache.pop(key, None)
+                return "", "expired"
+            # Continue to disk scan below to avoid stale cache when secrets rotate/expire.
+            cached_valid_db = _db
+    elif isinstance(cached, str) and cached:
+        # backward compatibility for old cache shape
+        cached_valid_db = cached
     if not DATABASES_DIR.exists():
-        return ""
+        return "", "invalid"
     for db_dir in DATABASES_DIR.iterdir():
         if not db_dir.is_dir():
             continue
@@ -246,11 +267,22 @@ def _get_db_for_widget_key(key: str) -> str:
             cfg = json.loads(cfg_file.read_text(encoding="utf-8"))
             cfg.update(_load_db_secrets(db_dir.name))
             if cfg.get("widget_key") == key:
-                _widget_key_cache[key] = db_dir.name
-                return db_dir.name
+                exp = str(cfg.get("widget_key_expires_at") or "")
+                if exp and _widget_key_is_expired(exp):
+                    return "", "expired"
+                _widget_key_cache[key] = {"db": db_dir.name, "expires_at": exp}
+                return db_dir.name, "valid"
         except Exception:
             pass
-    return ""
+    if cached_valid_db:
+        return cached_valid_db, "valid"
+    return "", "invalid"
+
+
+def _get_db_for_widget_key(key: str) -> str:
+    """Return the db_name that owns this widget_key, or '' if not found/expired."""
+    db_name, status = _resolve_widget_key(key)
+    return db_name if status == "valid" else ""
 def _analytics_file(db_name: str = "") -> Path:
     if db_name:
         return DATABASES_DIR / db_name / "analytics.json"
@@ -391,7 +423,7 @@ def _is_auto_crawl_blocked(now: datetime, sidecar_data: dict | None = None) -> b
 # ──────────────────────────────────────────────────────────────────────────────
 
 _intro_q_cache: dict = {}       # keyed by db_name → list[str]
-_widget_key_cache: dict = {}    # widget_key → db_name
+_widget_key_cache: dict = {}    # widget_key → {"db": db_name, "expires_at": iso_str}
 _csrf_tokens: dict = {}         # token → expiry timestamp (TTL 2h)
 _analytics_lock = threading.Lock()  # prevents concurrent analytics.json corruption
 
@@ -2836,8 +2868,10 @@ async def chat(request: Request):
     if widget_key in ("", "null", "undefined"):
         widget_key = ""
     if widget_key:
-        tenant_db_name = _get_db_for_widget_key(widget_key)
+        tenant_db_name, wk_status = _resolve_widget_key(widget_key)
         if not tenant_db_name:
+            if wk_status == "expired":
+                return JSONResponse({"error": "Widget key expired"}, status_code=401)
             return JSONResponse({"error": "Invalid widget key"}, status_code=401)
         # If widget key resolves to the active DB, reuse pre-loaded global (avoid reloading BGE)
         if tenant_db_name == _get_active_db() and local_db is not None:
@@ -5186,7 +5220,10 @@ async def delete_db(request: Request, password: str = Form(...), name: str = For
             try:
                 await asyncio.to_thread(shutil.rmtree, db_path)
                 # Evict stale caches for deleted DB
-                _widget_key_cache_copy = {k: v for k, v in _widget_key_cache.items() if v != db_name}
+                _widget_key_cache_copy = {
+                    k: v for k, v in _widget_key_cache.items()
+                    if ((v.get("db") if isinstance(v, dict) else v) != db_name)
+                }
                 _widget_key_cache.clear()
                 _widget_key_cache.update(_widget_key_cache_copy)
                 _intro_q_cache.pop(db_name, None)
@@ -5228,7 +5265,10 @@ async def rename_db(request: Request, password: str = Form(...), old_name: str =
         threading.Thread(target=_github_upload_active_db, args=(new,), daemon=True).start()
         local_db = None
     # Evict caches for old name
-    _widget_key_cache_copy = {k: v for k, v in _widget_key_cache.items() if v != old}
+    _widget_key_cache_copy = {
+        k: v for k, v in _widget_key_cache.items()
+        if ((v.get("db") if isinstance(v, dict) else v) != old)
+    }
     _widget_key_cache.clear(); _widget_key_cache.update(_widget_key_cache_copy)
     _intro_q_cache.pop(old, None); _bm25_cache.pop(old, None); _db_instance_cache.pop(old, None)
     _product_db_cache.pop(old, None)
@@ -5785,16 +5825,56 @@ def get_embed_code(request: Request, password: str = ""):
     db_name = _extract_admin_db(request, "")
     cfg = get_config(db_name) if db_name else get_config()
     admin_auth(password, cfg)
+    if not db_name:
+        return JSONResponse({"detail": "db_name required"}, status_code=400)
     host = str(request.base_url).rstrip("/").replace("http://", "https://")
-    widget_key = cfg.get("widget_key", "")
-    # Auto-generate widget_key if missing
-    if not widget_key and db_name:
+    ttl_opt = (request.query_params.get("ttl", "") or "").strip().lower()
+    rotate = (request.query_params.get("rotate", "") or "").strip().lower() in {"1", "true", "yes"}
+    ttl_map_days = {"1d": 1, "7d": 7, "30d": 30, "lifetime": 0}
+    ttl_minutes = 0
+    ttl_days = None
+    if ttl_opt:
+        if ttl_opt == "1m":
+            ttl_minutes = 1
+            ttl_days = 0
+        elif ttl_opt in ttl_map_days:
+            ttl_days = ttl_map_days[ttl_opt]
+        else:
+            return JSONResponse({"detail": "Invalid ttl; use 1d, 7d, 30d, lifetime"}, status_code=400)
+
+    widget_key = str(cfg.get("widget_key", "") or "")
+    expires_at = str(cfg.get("widget_key_expires_at", "") or "")
+    if expires_at and _widget_key_is_expired(expires_at):
+        widget_key = ""
+
+    if (not widget_key) or rotate:
         widget_key = str(uuid.uuid4())
+        created_at = _now_pk().isoformat()
+        if ttl_minutes > 0:
+            exp = (_now_pk() + timedelta(minutes=ttl_minutes)).isoformat()
+            ttl_label = "1 minute (test)"
+        elif ttl_days is None:
+            exp = (_now_pk() + timedelta(days=30)).isoformat()
+            ttl_label = "30 days"
+        elif ttl_days <= 0:
+            exp = ""
+            ttl_label = "lifetime"
+        else:
+            exp = (_now_pk() + timedelta(days=ttl_days)).isoformat()
+            ttl_label = f"{ttl_days} day{'s' if ttl_days != 1 else ''}"
         try:
-            _save_db_secrets(db_name, {"widget_key": widget_key})
-            _widget_key_cache[widget_key] = db_name
+            _save_db_secrets(db_name, {
+                "widget_key": widget_key,
+                "widget_key_created_at": created_at,
+                "widget_key_expires_at": exp,
+            })
+            _widget_key_cache[widget_key] = {"db": db_name, "expires_at": exp}
+            expires_at = exp
         except Exception as _wk_e:
             logger.warning(f"Could not persist widget_key for {db_name}: {_wk_e}")
+            ttl_label = "unknown"
+    else:
+        ttl_label = "existing"
     primary = cfg.get("branding", {}).get("primary_color", "#6366f1") if isinstance(cfg.get("branding"), dict) else "#6366f1"
     snippet = (
         f'<!-- {cfg.get("bot_name","AI")} Chat Widget -->\n'
@@ -5806,7 +5886,14 @@ def get_embed_code(request: Request, password: str = ""):
         f'background:{primary};border:none;cursor:pointer;z-index:9999;box-shadow:0 4px 20px rgba(0,0,0,0.25);'
         f'font-size:26px;display:flex;align-items:center;justify-content:center;color:white;">💬</button>'
     )
-    return {"snippet": snippet, "embed_code": snippet, "db": db_name, "widget_key": widget_key}
+    return {
+        "snippet": snippet,
+        "embed_code": snippet,
+        "db": db_name,
+        "widget_key": widget_key,
+        "widget_key_expires_at": expires_at,
+        "widget_key_ttl": ttl_label,
+    }
 
 @app.post("/admin/reindex")
 async def reindex(request: Request, data: dict):

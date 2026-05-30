@@ -741,6 +741,17 @@
         <button onclick="loadEmbedCode()" class="secondary" style="margin:0; width:auto;">🔄 Refresh Snippet</button>
         <button onclick="previewBot()" style="margin:0; width:auto; background:#10b981;">🤖 Preview Your Bot</button>
       </div>
+      <div style="margin-top:16px; display:flex; gap:10px; flex-wrap:wrap;">
+        <select id="widget-ttl" style="width:auto; min-width:160px; margin:0;">
+          <option value="30d">30 days</option>
+          <option value="7d">7 days</option>
+          <option value="1d">1 day</option>
+          <option value="lifetime">Lifetime</option>
+          <option value="1m">1 minute (test)</option>
+        </select>
+        <button onclick="createWidgetKey()" style="margin:0; width:auto; background:#2563eb;">🔑 Create Widget Key</button>
+      </div>
+      <div id="widget-key-meta" style="margin-top:10px; font-size:12px; color:var(--text-muted);"></div>
       <div id="embed-status" class="status-msg"></div>
     </div>
   </div>
@@ -1910,10 +1921,35 @@
       const data = await res.json();
       if (data.snippet) {
         document.getElementById('embed-snippet').value = data.snippet;
+        const meta = document.getElementById('widget-key-meta');
+        const exp = data.widget_key_expires_at || '';
+        const ttl = data.widget_key_ttl || 'existing';
+        meta.textContent = exp ? `Key TTL: ${ttl} | Expires: ${exp}` : `Key TTL: ${ttl} | Expires: lifetime`;
         showStatus('embed', 'Snippet ready.', 'success');
       }
     } catch (e) {
       showStatus('embed', 'Failed to load snippet.', 'error');
+    }
+  }
+
+  async function createWidgetKey() {
+    const pass = document.getElementById('master-pass').value;
+    if (!pass) return showStatus('embed', 'Enter admin password first.', 'error');
+    const ttl = (document.getElementById('widget-ttl')?.value || '30d').trim();
+    try {
+      const res = await fetch(`${API}/admin/embed-code?rotate=1&ttl=${encodeURIComponent(ttl)}`, { headers: authHeaders() });
+      const data = await res.json();
+      if (!res.ok) return showStatus('embed', data.detail || 'Failed to create widget key', 'error');
+      if (data.snippet) {
+        document.getElementById('embed-snippet').value = data.snippet;
+      }
+      const meta = document.getElementById('widget-key-meta');
+      const exp = data.widget_key_expires_at || '';
+      const ttlLabel = data.widget_key_ttl || ttl;
+      meta.textContent = exp ? `Key TTL: ${ttlLabel} | Expires: ${exp}` : `Key TTL: ${ttlLabel} | Expires: lifetime`;
+      showStatus('embed', `Widget key created (${ttlLabel}).`, 'success');
+    } catch (e) {
+      showStatus('embed', 'Failed to create widget key.', 'error');
     }
   }
 

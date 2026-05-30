@@ -20,7 +20,15 @@ CONFIG_FILE = Path("config.json")
 ACTIVE_DB_FILE = Path("active_db.txt")
 KEYS_FILE = Path("keys.json")
 DB_SECRETS_FILE = "secrets.json"
-DB_SECRET_KEYS = {"admin_password", "smtp_password", "sendgrid_keys", "widget_key", "api_sources"}
+DB_SECRET_KEYS = {
+    "admin_password",
+    "smtp_password",
+    "sendgrid_keys",
+    "widget_key",
+    "widget_key_created_at",
+    "widget_key_expires_at",
+    "api_sources",
+}
 
 
 def _atomic_write_json(path: Path, data) -> None:
