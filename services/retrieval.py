@@ -737,6 +737,80 @@ def _meaningful_keywords(q: str) -> list[str]:
     return words[:10]
 
 
+def _question_heading_anchors(q: str, title_phrase: str = "") -> list[str]:
+    anchors: list[str] = []
+    try:
+        ql = (q or "").lower()
+        ch = _extract_chapter_number(q or "")
+        pt = _extract_part_number(q or "")
+        if ch is not None:
+            anchors.extend([f"chapter {ch}", f"chapter-{ch}"])
+        if pt is not None:
+            anchors.extend([f"part {pt}", f"part-{pt}"])
+        if title_phrase:
+            anchors.append(title_phrase.lower())
+            for t in re.findall(r"[a-zA-Z]{4,}", title_phrase.lower())[:6]:
+                anchors.append(t)
+        for k in _meaningful_keywords(ql)[:6]:
+            anchors.append(k)
+    except Exception:
+        pass
+    # keep order, dedup
+    out = []
+    seen = set()
+    for a in anchors:
+        if a and a not in seen:
+            seen.add(a)
+            out.append(a)
+    return out
+
+
+def _evidence_rerank_score(doc, q: str, title_phrase: str) -> float:
+    """Evidence-first score: exact title/heading/anchor hits before broad semantic hits."""
+    try:
+        meta = (getattr(doc, "metadata", None) or {})
+        src = str(meta.get("source") or "")
+        body = str(getattr(doc, "page_content", "") or "")
+        sl = src.lower()
+        bl = body.lower()
+        score = 0.0
+        anchors = _question_heading_anchors(q, title_phrase)
+        if not anchors:
+            return 0.0
+
+        # Head section of each chunk often carries title/heading context.
+        head = bl[:500]
+        first_lines = "\n".join((body or "").splitlines()[:10]).lower()
+
+        if title_phrase:
+            tpl = title_phrase.lower()
+            if tpl in bl:
+                score += 20.0
+            if tpl in sl:
+                score += 16.0
+            if tpl in head:
+                score += 12.0
+
+        for a in anchors[:10]:
+            if len(a) < 4:
+                continue
+            if a in sl:
+                score += 5.5
+            if a in head:
+                score += 4.5
+            elif a in first_lines:
+                score += 3.5
+            elif a in bl:
+                score += 1.5
+
+        # Reward chunks that look like explicit answer sections (heading/list/definition).
+        if re.search(r"(?im)^\s*(?:#{1,4}\s+|[-*]\s+|\d{1,2}[.)]\s+)", body):
+            score += 2.0
+        return score
+    except Exception:
+        return 0.0
+
+
 def _heuristic_rerank_score(doc, q: str, title_phrase: str) -> float:
     try:
         meta = (getattr(doc, 'metadata', None) or {})
@@ -789,9 +863,12 @@ def _heuristic_rerank_score(doc, q: str, title_phrase: str) -> float:
             if re.search(r"\b(by the end|you will be able to|learning outcomes|objectives|goals)\b", body, re.I):
                 score += 6.0
 
-        return score
+        return score + _evidence_rerank_score(doc, q, title_phrase)
     except Exception:
-        return 0.0
+        try:
+            return _evidence_rerank_score(doc, q, title_phrase)
+        except Exception:
+            return 0.0
 
 _api_resp_cache: dict = {}      # url → (text, expiry) — Jikan response cache (10 min TTL)
 

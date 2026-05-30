@@ -3069,8 +3069,9 @@ async def chat(request: Request):
         elif (_has_groq2 or _prov2 == 'groq') and len(context) > _GROQ_MAX_CONTEXT_CHARS:
             context = context[:_GROQ_MAX_CONTEXT_CHARS]
 
+        _is_product_db_local = _check_is_product_db(tenant_db_instance, tenant_db_name)
         sys_msg = get_system_prompt(cfg, context, doc_count, user_lang=user_lang,
-                                    is_product_db=_check_is_product_db(tenant_db_instance, tenant_db_name))
+                                    is_product_db=_is_product_db_local)
         messages = [SystemMessage(content=sys_msg)]
         for m in hist[-2:]:
             if m.get('role') == 'user': messages.append(HumanMessage(content=m['content']))
@@ -3119,6 +3120,10 @@ async def chat(request: Request):
                 resp = await asyncio.wait_for(llm.ainvoke(messages), timeout=30)
                 _raw = resp.content
                 _ans = _strip_source_leaks(_raw, kb_context=context)
+                if context and not _is_product_db_local:
+                    _qf = _deterministic_extractive_quote_answer(q, context)
+                    if _qf:
+                        _ans = _qf
                 # Provider sanity check: if the model returns mojibake/control-char garbage,
                 # treat it like a provider failure and rotate keys/providers.
                 try:
@@ -3213,6 +3218,51 @@ _STOPWORDS = {
 }
 
 
+def _best_explicit_evidence_sentence(q: str, kb_context: str) -> str | None:
+    try:
+        q_words = [w for w in re.findall(r"[a-zA-Z]{4,}", (q or "").lower()) if w not in _STOPWORDS]
+        if not q_words:
+            return None
+        q_words = sorted(set(q_words), key=len, reverse=True)[:10]
+
+        # Prefer list/heading lines first (often where goals/objectives are explicitly written).
+        lines = []
+        for ln in (kb_context or "").splitlines():
+            t = ln.strip()
+            if not t:
+                continue
+            if len(t) > 280:
+                continue
+            lines.append(t)
+
+        best = None
+        for ln in lines[:1200]:
+            ll = ln.lower()
+            if any(b in ll for b in ("on this page", "copy as markdown", "ctrl+", "site index")):
+                continue
+            hit = sum(1 for w in q_words if w in ll)
+            if hit < 2:
+                continue
+            bonus = 0
+            if re.match(r"^\s*(?:[-*]|\d{1,2}[.)])\s+", ln):
+                bonus += 1
+            if ":" in ln:
+                bonus += 0.5
+            score = hit + bonus
+            if (best is None) or (score > best[0]):
+                best = (score, ln)
+
+        if not best:
+            return None
+        out = best[1].strip()
+        out = re.sub(r"\s+", " ", out)
+        if len(out) < 40:
+            return None
+        return out[:280]
+    except Exception:
+        return None
+
+
 def _deterministic_extractive_quote_answer(q: str, kb_context: str) -> str | None:
     try:
         if not q or not kb_context:
@@ -3236,6 +3286,11 @@ def _deterministic_extractive_quote_answer(q: str, kb_context: str) -> str | Non
 
         ctx = kb_context
         ctx_l = ctx.lower()
+
+        # Evidence-first: if we can find one explicit supporting sentence/line, return it first.
+        explicit = _best_explicit_evidence_sentence(q, kb_context)
+        if explicit:
+            return explicit
 
         # Find a window around the best keyword hit.
         best = None
