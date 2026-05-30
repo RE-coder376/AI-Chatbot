@@ -2465,6 +2465,24 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
     elif _outcomes_ans:
         _trace_decision(workflow_debug, "outcomes_extractor_rejected_low_quality", True)
 
+    # Universal source-page fallback for outcomes/goals queries in streaming mode.
+    if _LEARNING_GOALS_Q_RE.search(q):
+        try:
+            _live_outcomes = await _extract_outcomes_from_source_urls(q, sources or [], limit=3)
+            if _live_outcomes:
+                _trace_event(workflow_trace, "guard_exit", guard="source_page_outcomes_extractor")
+                _trace_decision(workflow_debug, "exit_guard", "source_page_outcomes_extractor")
+                if visitor_id:
+                    _run_in_bg(save_visitor_turn, visitor_id, "assistant", _live_outcomes, db_name)
+                yield f"data: {json.dumps({'type': 'chunk', 'content': _live_outcomes})}\n\n"
+                _lead_on = not cfg.get("disable_lead_box", False)
+                _trace_artifact(workflow_debug, "final_answer", _live_outcomes[:4000])
+                yield f"data: {json.dumps(_metadata_payload(_lead_on, sources[:5]))}\n\n"
+                yield "data: {\"type\": \"done\"}\n\n"
+                return
+        except Exception:
+            pass
+
     # ── Sparse KB guard — skip for api-only DBs (no KB, LLM uses training knowledge) ──
     if not _is_api_only and not context_addresses_query:
         _trace_event(workflow_trace, "guard_exit", guard="sparse_kb_context_miss", doc_count=doc_count)
@@ -3341,6 +3359,22 @@ async def chat(request: Request):
                         "answer_artifacts": workflow_debug["answer_artifacts"],
                     }
                 return JSONResponse(payload)
+            # Universal fallback: if retrieved snippets missed the explicit list, try extracting
+            # directly from retrieved source pages before returning not-found.
+            _lg_live = await _extract_outcomes_from_source_urls(q, sources or [], limit=3)
+            if _lg_live:
+                payload = {
+                    "answer": _lg_live,
+                    "sources": (sources or [])[:5],
+                    "evidence_spans": _evidence_spans_for_answer(q, context or ""),
+                }
+                if debug_effective:
+                    payload["debug"] = {
+                        "workflow_trace": workflow_trace,
+                        "guard_decisions": workflow_debug["guard_decisions"],
+                        "answer_artifacts": workflow_debug["answer_artifacts"],
+                    }
+                return JSONResponse(payload)
             payload = {
                 "answer": "I couldn't find an explicit learning-goals list for that exact chapter/part in the retrieved context.",
                 "sources": (sources or [])[:5],
@@ -3790,6 +3824,40 @@ def _outcomes_answer_matches_scope(q: str, text: str) -> bool:
         return True
     except Exception:
         return False
+
+
+async def _extract_outcomes_from_source_urls(q: str, sources: list[str], limit: int = 3) -> str | None:
+    """Universal fallback: fetch retrieved source pages and run deterministic outcomes extractor."""
+    try:
+        if not sources:
+            return None
+        import httpx
+        def _html_to_text(html: str) -> str:
+            h = re.sub(r"(?is)<script[^>]*>.*?</script>", " ", html or "")
+            h = re.sub(r"(?is)<style[^>]*>.*?</style>", " ", h)
+            h = re.sub(r"(?is)<noscript[^>]*>.*?</noscript>", " ", h)
+            h = re.sub(r"(?is)<[^>]+>", " ", h)
+            h = re.sub(r"\s+", " ", h)
+            return h.strip()
+        async with httpx.AsyncClient(timeout=12, follow_redirects=True, headers={"User-Agent": "Mozilla/5.0"}) as client:
+            for u in (sources or [])[:max(1, int(limit))]:
+                try:
+                    if not str(u).startswith(("http://", "https://")):
+                        continue
+                    r = await client.get(str(u))
+                    if r.status_code != 200:
+                        continue
+                    txt = _html_to_text(r.text or "")
+                    if len(txt) < 120:
+                        continue
+                    ans = try_extract_outcomes_answer(q, txt, debug=None)
+                    if ans and _is_quality_outcomes_answer_text(ans) and _outcomes_answer_matches_scope(q, ans):
+                        return ans
+                except Exception:
+                    continue
+    except Exception:
+        return None
+    return None
 
 def _faq_file(db_name: str = "") -> Path:
     active = db_name or (ACTIVE_DB_FILE.read_text(encoding="utf-8").strip() if ACTIVE_DB_FILE.exists() else "")
