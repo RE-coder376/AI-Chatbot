@@ -122,6 +122,8 @@ def try_extract_outcomes_answer(q: str, context: str, debug: dict | None = None)
         _q_is_chapter = "chapter" in _q_lower
         chapter_no = _extract_chapter_number(q or "")
         part_no = _extract_part_number(q or "")
+        chapter_anchor = f"chapter {chapter_no}" if chapter_no is not None else ""
+        part_anchor = f"part {part_no}" if part_no is not None else ""
         title_tokens = [w.lower() for w in re.findall(r"[a-zA-Z]{4,}", title_phrase)][:10] if title_phrase else []
         lines = [ln.rstrip() for ln in str(context).splitlines()]
         if debug is not None:
@@ -307,6 +309,12 @@ def try_extract_outcomes_answer(q: str, context: str, debug: dict | None = None)
                     if items and len(t) >= 8:
                         break
                 items = [it for it in items if it and len(it) <= 260]
+                # For explicit chapter/part questions, require anchor in marker line or nearby list text.
+                _scope_blob = (str(ln or "") + " " + " ".join(items)).lower()
+                if chapter_anchor and ("chapter" in _q_lower) and (chapter_anchor not in _scope_blob):
+                    continue
+                if part_anchor and ("part" in _q_lower) and (part_anchor not in _scope_blob):
+                    continue
                 # This marker is inherently chapter-scoped, so don't require title-token overlap.
                 # If the user question explicitly references a chapter/part (number + title),
                 # and retrieval has already been title-constrained, topic-marker lists are
