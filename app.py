@@ -3097,7 +3097,14 @@ async def chat(request: Request):
             tenant_db_instance = _db_instance_cache[tenant_db_name]
         else:
             _db_instance_cache[tenant_db_name] = _get_db_instance(tenant_db_name)
-            tenant_db_instance = _db_instance_cache[tenant_db_name] or local_db
+            tenant_db_instance = _db_instance_cache[tenant_db_name]
+        # Never silently fall back to active DB for widget-tenant chats.
+        # That hides tenant-DB load failures and causes wrong/empty retrieval.
+        if tenant_db_instance is None:
+            return JSONResponse(
+                {"error": f"Tenant DB '{tenant_db_name}' is unavailable. Please re-crawl or verify DB files."},
+                status_code=503
+            )
     else:
         # No widget key — use pre-loaded global to avoid blocking the event loop
         tenant_db_name = _get_active_db()
