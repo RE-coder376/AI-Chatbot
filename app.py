@@ -2796,6 +2796,29 @@ def _deterministic_learning_goals_answer(q: str, kb_context: str) -> str | None:
             t = (text or "").strip().lower().strip(":")
             return t in _GENERIC_GOALS_HEADINGS or any(t.startswith(x + ":") for x in _GENERIC_GOALS_HEADINGS)
 
+        _OUTCOME_VERB_HINTS = {
+            "understand","build","ship","use","integrate","deliver","identify","structure","apply","prepare",
+            "run","evaluate","deploy","install","test","design","verify","retrofit","decide","learn","encode",
+            "create","implement","configure","monitor","optimize","define","package","explain"
+        }
+
+        def _is_quality_outcome_line(text: str) -> bool:
+            t = (text or "").strip()
+            if len(t) < 12:
+                return False
+            if _is_generic_goal_heading(t):
+                return False
+            # Split accidental multi-line lumps and evaluate the first meaningful segment.
+            t0 = re.split(r"[\n\r]+", t)[0].strip()
+            words = t0.split()
+            if len(words) < 3:
+                return False
+            w0 = re.sub(r"[^a-z]", "", words[0].lower())
+            if w0 in _OUTCOME_VERB_HINTS:
+                return True
+            # Also accept explicit outcomes marker phrases.
+            return bool(re.search(r"(?i)\b(you will be able to|by the end)\b", t0))
+
         def _extract_bullets_near_anchor(anchor: str) -> str | None:
             if not anchor:
                 return None
@@ -2814,7 +2837,7 @@ def _deterministic_learning_goals_answer(q: str, kb_context: str) -> str | None:
                     if re.match(r"^([-*]|\d+\.)\s+", ln):
                         item = re.sub(r"^([-*]|\d+\.)\s+", "", ln).strip()
                         if len(item) >= 3:
-                            if _is_generic_goal_heading(item):
+                            if not _is_quality_outcome_line(item):
                                 continue
                             out_lines.append("- " + item)
                 if len(out_lines) >= 2:
@@ -2981,7 +3004,7 @@ def _deterministic_learning_goals_answer(q: str, kb_context: str) -> str | None:
                 ln = re.sub(r"^\s*([-?]|\d+\.|\*)\s+", '', ln).strip()
                 if len(ln) < 3:
                     continue
-                if _is_generic_goal_heading(ln):
+                if not _is_quality_outcome_line(ln):
                     continue
                 out_lines.append('- ' + ln)
             if len(out_lines) >= 2:
