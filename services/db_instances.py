@@ -76,8 +76,11 @@ def _get_db_instance(db_name: str):
     db_path = DATABASES_DIR / db_name
     if not db_path.exists():
         return None
-    # Don't create a new Chroma instance if no DB file exists (API-only DBs like mal)
-    if not (db_path / "chroma.sqlite3").exists():
+    # Don't create a new Chroma instance if no DB file exists (API-only DBs like mal).
+    # However, on some Linux deployments we may still have a valid tmpfs copy in /dev/shm.
+    src_sqlite = (db_path / "chroma.sqlite3")
+    tmp_sqlite = Path(f"/dev/shm/chroma_{db_name}/chroma.sqlite3")
+    if not src_sqlite.exists() and not tmp_sqlite.exists():
         return None
     db_cfg_file = db_path / "config.json"
     db_cfg = {}
@@ -100,7 +103,12 @@ def _get_db_instance(db_name: str):
         # All other DBs (bge, multilingual, unset) — crawler always writes bge-small-en-v1.5 (384-dim)
         # so we must query with the same model. bge-base-en-v1.5 is 768-dim and would mismatch.
         emb = _app.embeddings_model  # FastEmbed BAAI/bge-small-en-v1.5, 384-dim
-    tmp_dir = _ensure_tmp_chroma(db_name, db_path)
+    if src_sqlite.exists():
+        tmp_dir = _ensure_tmp_chroma(db_name, db_path)
+    else:
+        # Source sqlite missing but tmpfs copy exists; use it directly.
+        tmp_dir = Path(f"/dev/shm/chroma_{db_name}")
+        logger.info(f"[DB] Using tmpfs-only Chroma for '{db_name}' from {tmp_dir}")
     instance = Chroma(persist_directory=str(tmp_dir), embedding_function=emb)
     instance._db_name = db_name  # stored for BM25 lookup
     # LRU eviction — remove oldest entry when over limit
