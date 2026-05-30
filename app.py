@@ -3299,7 +3299,11 @@ async def chat(request: Request):
         # For learning-goals intents, prefer deterministic extraction only.
         if _LEARNING_GOALS_Q_RE.search(q):
             _lg = _deterministic_learning_goals_answer(q, context or "")
-            if _lg and (not re.match(r"(?i)^\s*chapter\s+\d+\b[:\-]?\s*$", _lg.strip())):
+            if (
+                _lg
+                and _is_quality_outcomes_answer_text(_lg)
+                and (not re.match(r"(?i)^\s*chapter\s+\d+\b[:\-]?\s*$", _lg.strip()))
+            ):
                 payload = {
                     "answer": _lg,
                     "sources": (sources or [])[:5],

@@ -124,10 +124,9 @@ def try_extract_outcomes_answer(q: str, context: str, debug: dict | None = None)
                 return False
             if _generic_heading_count(items) >= max(2, len(items) // 2):
                 return False
-            # For goals/outcomes queries, reject question-list blocks (common contamination source)
-            # unless this is the only strong chapter marker pattern.
+            # For goals/outcomes queries, reject question-list blocks (common contamination source).
             qlike = sum(1 for it in items if "?" in it or ((it.split()[:1][0].lower() if it.split() else "") in _INTERROGATIVE_START))
-            if qlike >= max(2, len(items) // 2) and not strong_marker:
+            if qlike >= 1:
                 return False
             if (not strong_marker) and title_tokens:
                 hit = sum(1 for t in title_tokens[:6] if t and (t in joined))
