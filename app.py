@@ -3134,7 +3134,9 @@ async def chat(request: Request):
                     if os.environ.get("GITHUB_PAT", "").strip() and _github_sync_result.get("status") != "running":
                         logger.warning(f"[TENANT-SELFHEAL] Triggering GitHub restore for missing tenant DB '{tenant_db_name}'")
                         threading.Thread(target=_startup_sync, daemon=True).start()
-                    elif db_cfg.get("crawl_url") and tenant_db_name not in _crawling_dbs:
+                    # Also trigger crawl recovery when crawl_url exists (independent of sync),
+                    # so DBs that are missing from release assets can self-rebuild.
+                    if db_cfg.get("crawl_url") and tenant_db_name not in _crawling_dbs:
                         logger.warning(f"[TENANT-SELFHEAL] Triggering background crawl for missing tenant DB '{tenant_db_name}'")
                         asyncio.create_task(_auto_crawl_db(tenant_db_name, db_cfg.get("crawl_url", ""), max_pages=0))
             except Exception as _selfheal_e:
