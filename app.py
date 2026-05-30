@@ -3855,6 +3855,38 @@ async def _extract_outcomes_from_source_urls(q: str, sources: list[str], limit: 
                         return ans
                 except Exception:
                     continue
+        # JS-rendered fallback (universal): SPA docs often serve a thin HTML shell to httpx.
+        try:
+            from playwright.async_api import async_playwright
+            async with async_playwright() as _pw:
+                _browser = await _pw.chromium.launch(headless=True, args=["--no-sandbox", "--disable-dev-shm-usage"])
+                try:
+                    for u in (sources or [])[:max(1, int(limit))]:
+                        try:
+                            if not str(u).startswith(("http://", "https://")):
+                                continue
+                            _page = await _browser.new_page(viewport={"width": 1365, "height": 900})
+                            try:
+                                await _page.goto(str(u), wait_until="domcontentloaded", timeout=20000)
+                                try:
+                                    await _page.wait_for_load_state("networkidle", timeout=8000)
+                                except Exception:
+                                    pass
+                                _txt = await _page.evaluate("() => (document.body && document.body.innerText) ? document.body.innerText : ''")
+                                _txt = re.sub(r"\s+", " ", str(_txt or "")).strip()
+                                if len(_txt) < 120:
+                                    continue
+                                ans = try_extract_outcomes_answer(q, _txt, debug=None)
+                                if ans and _is_quality_outcomes_answer_text(ans) and _outcomes_answer_matches_scope(q, ans):
+                                    return ans
+                            finally:
+                                await _page.close()
+                        except Exception:
+                            continue
+                finally:
+                    await _browser.close()
+        except Exception:
+            pass
     except Exception:
         return None
     return None
