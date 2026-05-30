@@ -2711,6 +2711,23 @@ def _deterministic_learning_goals_answer(q: str, kb_context: str) -> str | None:
                 chapter_title = _m2.group(1).strip()
 
         ctx = kb_context
+        _GENERIC_GOALS_HEADINGS = {
+            "lessons",
+            "about the code in this chapter",
+            "about this chapter",
+            "before you begin",
+            "exercises",
+            "skill",
+            "skills",
+            "what you'll learn",
+            "what you will learn",
+            "what you will be able to do",
+            "what you'll be able to do",
+        }
+
+        def _is_generic_goal_heading(text: str) -> bool:
+            t = (text or "").strip().lower().strip(":")
+            return t in _GENERIC_GOALS_HEADINGS or any(t.startswith(x + ":") for x in _GENERIC_GOALS_HEADINGS)
 
         def _extract_bullets_near_anchor(anchor: str) -> str | None:
             if not anchor:
@@ -2730,6 +2747,8 @@ def _deterministic_learning_goals_answer(q: str, kb_context: str) -> str | None:
                     if re.match(r"^([-*]|\d+\.)\s+", ln):
                         item = re.sub(r"^([-*]|\d+\.)\s+", "", ln).strip()
                         if len(item) >= 3:
+                            if _is_generic_goal_heading(item):
+                                continue
                             out_lines.append("- " + item)
                 if len(out_lines) >= 2:
                     return "\n".join(out_lines[:18])
@@ -2894,6 +2913,8 @@ def _deterministic_learning_goals_answer(q: str, kb_context: str) -> str | None:
                     continue
                 ln = re.sub(r"^\s*([-?]|\d+\.|\*)\s+", '', ln).strip()
                 if len(ln) < 3:
+                    continue
+                if _is_generic_goal_heading(ln):
                     continue
                 out_lines.append('- ' + ln)
             if len(out_lines) >= 2:
