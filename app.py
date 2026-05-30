@@ -563,6 +563,7 @@ _auto_crawl_sem: asyncio.Semaphore | None = None  # initialized in lifespan; 1 a
 _scheduler_last_tick_ts: float = 0.0
 _queued_crawls: set = set()  # DBs that have been scheduled but not yet started (waiting for sem)
 _manual_crawl_active: str = ""  # db_name of the currently running manual crawl, if any
+_tenant_restore_inflight: set = set()  # db_names where self-heal restore has been triggered
 
 def check_rate_limit(ip: str, store: dict, limit: int, window: int = 60) -> bool:
     now = time.time()
@@ -3102,11 +3103,26 @@ async def chat(request: Request):
         else:
             _db_instance_cache[tenant_db_name] = _get_db_instance(tenant_db_name)
             tenant_db_instance = _db_instance_cache[tenant_db_name]
+        if tenant_db_instance is not None:
+            _tenant_restore_inflight.discard(tenant_db_name)
         # Never silently fall back to active DB for widget-tenant chats.
         # That hides tenant-DB load failures and causes wrong/empty retrieval.
         if tenant_db_instance is None:
+            # Universal self-heal: trigger restore/crawl once, then tell client to retry shortly.
+            try:
+                if tenant_db_name not in _tenant_restore_inflight:
+                    _tenant_restore_inflight.add(tenant_db_name)
+                    db_cfg = get_config(tenant_db_name)
+                    if os.environ.get("GITHUB_PAT", "").strip() and _github_sync_result.get("status") != "running":
+                        logger.warning(f"[TENANT-SELFHEAL] Triggering GitHub restore for missing tenant DB '{tenant_db_name}'")
+                        threading.Thread(target=_startup_sync, daemon=True).start()
+                    elif db_cfg.get("crawl_url") and tenant_db_name not in _crawling_dbs:
+                        logger.warning(f"[TENANT-SELFHEAL] Triggering background crawl for missing tenant DB '{tenant_db_name}'")
+                        asyncio.create_task(_auto_crawl_db(tenant_db_name, db_cfg.get("crawl_url", ""), max_pages=0))
+            except Exception as _selfheal_e:
+                logger.warning(f"[TENANT-SELFHEAL] trigger failed for '{tenant_db_name}': {_selfheal_e}")
             return JSONResponse(
-                {"error": f"Tenant DB '{tenant_db_name}' is unavailable. Please re-crawl or verify DB files."},
+                {"error": f"Tenant DB '{tenant_db_name}' is unavailable and restore has been triggered. Please retry shortly."},
                 status_code=503
             )
     else:
