@@ -3840,6 +3840,12 @@ def _is_quality_outcomes_answer_text(text: str) -> bool:
             good += 1
         else:
             bad += 1
+    # Reject contaminated long-form checklist/template dumps.
+    joined = " ".join(bullets).lower()
+    if any(tok in joined for tok in ("what i already know", "analyze the official docs", "lesson progression", "prerequisites", "next", "previous")):
+        return False
+    if sum(1 for b in bullets if len(b) > 220) >= 1:
+        return False
     return good >= 2 and bad < max(2, len(bullets) // 2)
 
 
@@ -3866,6 +3872,9 @@ def _outcomes_answer_matches_scope(q: str, text: str) -> bool:
                 req = 2 if len(tks) >= 3 else 1
                 if hit < req:
                     return False
+        # Reject obvious prompt-template/checklist contamination for scoped outcomes.
+        if any(tok in text_l for tok in ("what i already know", "analyze the official docs", "help me understand", "lesson progression", "prerequisites")):
+            return False
         return True
     except Exception:
         return False
