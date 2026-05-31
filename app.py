@@ -3452,7 +3452,8 @@ async def chat(request: Request):
             return JSONResponse(payload)
 
         # Hard evidence lock for explicit Chapter/Part questions.
-        if _is_strict_scope_query(q) and not _context_has_scope_anchor(context or "", q):
+        # For learning-goals intents, let the dedicated goals branch run first.
+        if _is_strict_scope_query(q) and (not _LEARNING_GOALS_Q_RE.search(q)) and not _context_has_scope_anchor(context or "", q):
             payload = {
                 "answer": "I couldn't find explicit evidence for that exact chapter/part in the retrieved context.",
                 "sources": (sources or [])[:5],
