@@ -2961,6 +2961,49 @@ def _deterministic_learning_goals_answer(q: str, kb_context: str) -> str | None:
                 return None
             snippet = best[1]
 
+        # Universal segment scorer fallback: choose best list-like segment near heading anchors.
+        # This reduces dependence on one page format and improves cross-DB robustness.
+        try:
+            def _segment_score(seg: str) -> tuple[float, list[str]]:
+                lines = [ln.strip() for ln in (seg or "").splitlines() if ln.strip()]
+                if not lines:
+                    return (0.0, [])
+                items = []
+                for ln in lines[:120]:
+                    if re.match(r"^\s*(?:[-*]|\d+[.)])\s+", ln):
+                        items.append(re.sub(r"^\s*(?:[-*]|\d+[.)])\s+", "", ln).strip())
+                # Accept short imperative lines if no bullet markers
+                if len(items) < 2:
+                    for ln in lines[:60]:
+                        if len(ln) < 180 and _is_quality_outcome_line(ln):
+                            items.append(ln)
+                if len(items) < 2:
+                    return (0.0, [])
+                txt = " ".join(items).lower()
+                verbs = sum(1 for it in items if _is_quality_outcome_line(it))
+                qk = [w for w in re.findall(r"[a-zA-Z]{4,}", (q or "").lower()) if w not in {"what","will","learn","goals","goal","chapter","part","book","from","with","that","this","about"}]
+                qhit = sum(1 for w in qk[:10] if w in txt)
+                nav_pen = 3 if _is_toc_or_nav_text("\n".join(items)) else 0
+                generic_pen = sum(1 for it in items if _is_generic_goal_heading(it))
+                score = (verbs * 2.0) + (qhit * 1.5) - (nav_pen * 2.0) - (generic_pen * 1.5)
+                return (score, items[:18])
+
+            candidates = []
+            # Split by likely section boundaries.
+            parts = re.split(r"(?im)\n\s*(?:#{1,4}\s+|chapter\s+\d+\b|part\s+\d+\b|what\s+you(?:'|’)ll\s+learn|learning\s+outcomes?|objectives?|goals?)", ctx)
+            for seg in parts:
+                if len(seg.strip()) < 80:
+                    continue
+                sc, items = _segment_score(seg)
+                if sc > 0 and items:
+                    candidates.append((sc, items))
+            if candidates:
+                candidates.sort(key=lambda x: x[0], reverse=True)
+                best_items = candidates[0][1]
+                snippet = "\n".join(f"- {it}" for it in best_items if it)[:2200]
+        except Exception:
+            pass
+
         snippet = (snippet or '').strip()
 
         # Scope guardrail: if user explicitly asked for CHAPTER goals, reject PART-level goal lists
