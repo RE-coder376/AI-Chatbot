@@ -1783,6 +1783,8 @@ async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansio
                     _strict_scope = bool(re.search(r"\b(?:chapter|part)\s+\d{1,4}\b", _q_l))
                     if _strict_scope and "/docs/" not in _src_l:
                         continue
+                    if _strict_scope and any(p in _src_l for p in ("/chapter-quiz", "/quiz", "/exercises", "/exercise", "/certifications", "/about")):
+                        continue
                     if _is_prompt_template_chunk(_txt) and not _has_explicit_outcomes_marker(_txt):
                         continue
                     # Scoped chapter/part queries: require the same anchor in URL or text.
