@@ -4124,19 +4124,26 @@ def _outcomes_answer_matches_scope(q: str, text: str) -> bool:
         ql = q.lower()
         mch = re.search(r"\bchapter\s+(\d{1,4})\b", ql)
         mpt = re.search(r"\bpart\s+(\d{1,4})\b", ql)
-        if mch and f"chapter {mch.group(1)}" not in text_l:
-            return False
-        if mpt and f"part {mpt.group(1)}" not in text_l:
-            return False
+        chapter_anchor_present = (not mch) or (f"chapter {mch.group(1)}" in text_l)
+        part_anchor_present = (not mpt) or (f"part {mpt.group(1)}" in text_l)
         mt = re.search(r"\b(?:chapter|part)\s+\d{1,4}\s*[:\-]\s*([^\n]{4,200})", q, re.I)
+        title_hit = 0
+        title_req = 0
         if mt:
             stop = {"what","will","learn","goals","goal","objectives","objective","chapter","part","according","book","from","the","this","that","with","about"}
             tks = [w.lower() for w in re.findall(r"[a-zA-Z]{4,}", mt.group(1)) if w.lower() not in stop][:8]
             if tks:
-                hit = sum(1 for t in tks if t in text_l)
-                req = 2 if len(tks) >= 3 else 1
-                if hit < req:
+                title_hit = sum(1 for t in tks if t in text_l)
+                title_req = 2 if len(tks) >= 3 else 1
+        # Scoped rule:
+        # - Prefer explicit chapter/part anchors
+        # - But allow strong title-token evidence when headings are omitted in bullet lists
+        if (mch or mpt):
+            if not (chapter_anchor_present and part_anchor_present):
+                if not (title_req > 0 and title_hit >= title_req):
                     return False
+        elif title_req > 0 and title_hit < title_req:
+            return False
         # Reject obvious prompt-template/checklist contamination for scoped outcomes.
         if any(tok in text_l for tok in ("what i already know", "analyze the official docs", "help me understand", "lesson progression", "prerequisites")):
             return False
