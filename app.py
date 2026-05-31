@@ -3438,6 +3438,20 @@ async def chat(request: Request):
                         "answer_artifacts": workflow_debug["answer_artifacts"],
                     }
                 return JSONResponse(payload)
+            _lg_probe = await _live_site_outcomes_probe(q, cfg, max_urls=4)
+            if _lg_probe:
+                payload = {
+                    "answer": _lg_probe,
+                    "sources": (sources or [])[:5],
+                    "evidence_spans": _evidence_spans_for_answer(q, context or ""),
+                }
+                if debug_effective:
+                    payload["debug"] = {
+                        "workflow_trace": workflow_trace,
+                        "guard_decisions": workflow_debug["guard_decisions"],
+                        "answer_artifacts": workflow_debug["answer_artifacts"],
+                    }
+                return JSONResponse(payload)
             payload = {
                 "answer": "I couldn't find an explicit learning-goals list for that exact chapter/part in the retrieved context.",
                 "sources": (sources or [])[:5],
@@ -3928,6 +3942,72 @@ async def _extract_outcomes_from_source_urls(q: str, sources: list[str], limit: 
                 except Exception:
                     continue
         # Keep fallback lightweight: avoid heavy browser rendering in live chat path.
+    except Exception:
+        return None
+    return None
+
+
+async def _live_site_outcomes_probe(q: str, cfg: dict, max_urls: int = 4) -> str | None:
+    """Universal fallback: probe sitemap pages on-demand for explicit outcomes lists."""
+    try:
+        base = str((cfg or {}).get("crawl_url") or "").strip().rstrip("/")
+        if not base:
+            return None
+        import httpx
+        import urllib.parse as _up
+        def _to_text(html: str) -> str:
+            h = re.sub(r"(?is)<script[^>]*>.*?</script>", " ", html or "")
+            h = re.sub(r"(?is)<style[^>]*>.*?</style>", " ", h)
+            h = re.sub(r"(?is)<[^>]+>", " ", h)
+            h = re.sub(r"\s+", " ", h)
+            return h.strip()
+        ql = (q or "").lower()
+        ch = _extract_chapter_number(q or "")
+        pt = _extract_part_number(q or "")
+        tphrase = _extract_title_phrase(q or "")
+        tks = [w.lower() for w in re.findall(r"[a-zA-Z]{4,}", tphrase)][:8] if tphrase else []
+        async with httpx.AsyncClient(timeout=10, follow_redirects=True, headers={"User-Agent": "Mozilla/5.0"}) as client:
+            sm_url = f"{base}/sitemap.xml"
+            sm = await client.get(sm_url)
+            if sm.status_code != 200:
+                return None
+            locs = re.findall(r"(?is)<loc>\s*([^<\s]+)\s*</loc>", sm.text or "")
+            if not locs:
+                return None
+            scored = []
+            for u in locs[:3000]:
+                ul = str(u).lower()
+                sc = 0.0
+                if "/docs/" in ul:
+                    sc += 3.0
+                if ch is not None and f"chapter-{ch}" in ul:
+                    sc += 4.0
+                if ch is not None and f"chapter {ch}" in ul:
+                    sc += 3.0
+                if pt is not None and f"part-{pt}" in ul:
+                    sc += 4.0
+                if pt is not None and f"part {pt}" in ul:
+                    sc += 3.0
+                if tks:
+                    sc += sum(1.0 for t in tks if t in ul)
+                if any(b in ul for b in ("/quiz", "/chapter-quiz", "/certifications", "/about")):
+                    sc -= 3.0
+                if sc > 0:
+                    scored.append((sc, u))
+            scored.sort(key=lambda x: x[0], reverse=True)
+            for _, u in scored[:max(1, int(max_urls))]:
+                try:
+                    r = await client.get(str(u))
+                    if r.status_code != 200:
+                        continue
+                    txt = _to_text(r.text or "")
+                    if len(txt) < 120:
+                        continue
+                    ans = try_extract_outcomes_answer(q, txt, debug=None)
+                    if ans and _is_quality_outcomes_answer_text(ans) and _outcomes_answer_matches_scope(q, ans):
+                        return ans
+                except Exception:
+                    continue
     except Exception:
         return None
     return None
