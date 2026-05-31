@@ -1867,6 +1867,33 @@ async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansio
                 _combined_before_cap.append(_r)
         if _combined_before_cap:
             logger.warning(f"[RETRIEVE] strict filters yielded 0; fallback kept {len(_combined_before_cap)} docs")
+        elif _strict_scope_q and db:
+            # One lexical retry for strict chapter/part queries when all retrieval paths miss.
+            try:
+                _tp2 = _extract_title_phrase(q or "")
+                _ch2 = _extract_chapter_number(q or "")
+                _pt2 = _extract_part_number(q or "")
+                _rq = (q or "").strip()
+                if _tp2:
+                    _rq = f"{_rq} {_tp2}".strip()
+                if _ch2 is not None:
+                    _rq += f" chapter {_ch2}"
+                if _pt2 is not None:
+                    _rq += f" part {_pt2}"
+                _lex = db.similarity_search(_rq[:320], k=max(24, int(k)))
+                _seen2 = set()
+                for _r in (_lex or []):
+                    if not _retrieval_visible_doc(_r):
+                        continue
+                    _k2 = str(getattr(_r, "page_content", "") or "")[:120]
+                    if _k2 in _seen2:
+                        continue
+                    _seen2.add(_k2)
+                    _combined_before_cap.append(_r)
+                if _combined_before_cap:
+                    logger.warning(f"[RETRIEVE] strict lexical retry recovered {len(_combined_before_cap)} docs")
+            except Exception:
+                pass
     
 
     # Heuristic rerank for non-product DBs: improves chapter/part/title lookup accuracy.
