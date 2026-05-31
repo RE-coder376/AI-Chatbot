@@ -601,13 +601,28 @@ async def _filter_live_sources(urls: list[str], max_check: int = 6, ttl_s: int =
                     try:
                         r = await client.get(u)
                         txt = (r.text or "")[:1500].lower()
-                        alive = (r.status_code == 200) and ("page not found" not in txt) and ("404" not in txt[:200])
+                        # Universal, less brittle liveness check:
+                        # - Accept auth/rate-limited pages as live (403/401/405/429),
+                        #   since content may still be valid for end users/browser paths.
+                        # - Only treat as dead when explicit "not found" shell is detected.
+                        if r.status_code in (200, 401, 403, 405, 429):
+                            alive = True
+                            if r.status_code == 200:
+                                if ("page not found" in txt and "we could not find what you were looking for" in txt):
+                                    alive = False
+                                elif "<title>404" in txt[:220]:
+                                    alive = False
+                        else:
+                            alive = False
                     except Exception:
-                        alive = False
+                        # Fail-open to avoid false "dead-source" negatives caused by transient
+                        # network restrictions between hosting regions.
+                        alive = True
                     _source_alive_cache[u] = (alive, now)
                     if alive:
                         out.append(u)
-        return out[:8]
+        # If checks were inconclusive and dropped everything, keep original sources.
+        return (out[:8] if out else list(urls or [])[:8])
     except Exception:
         return list(urls or [])[:8]
 
