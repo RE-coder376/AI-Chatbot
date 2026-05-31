@@ -4202,7 +4202,18 @@ def _outcomes_answer_matches_scope(q: str, text: str) -> bool:
         if (mch or mpt):
             if not (chapter_anchor_present and part_anchor_present):
                 if not (title_req > 0 and title_hit >= title_req):
-                    return False
+                    # Some sites store clean outcomes bullets without repeating chapter/part header
+                    # inside each chunk. Accept only strong verb-ish outcome lists with no conflicting scope.
+                    bullets = [ln.strip()[2:].strip() for ln in str(text or "").splitlines() if ln.strip().startswith("- ")]
+                    verb_hints = {"identify","structure","apply","build","verify","run","retrofit","install","design","validate","define","prepare","generate","version","package","deploy","evaluate","integrate","use","understand","explain"}
+                    verbish = sum(1 for b in bullets if (re.findall(r"[a-zA-Z]+", b.lower())[:1] or [""])[0] in verb_hints)
+                    has_conflict = False
+                    if mch:
+                        has_conflict = bool(re.search(r"\bchapter\s+(?!%s\b)\d{1,4}\b" % re.escape(mch.group(1)), text_l))
+                    if (not has_conflict) and mpt:
+                        has_conflict = bool(re.search(r"\bpart\s+(?!%s\b)\d{1,4}\b" % re.escape(mpt.group(1)), text_l))
+                    if not (len(bullets) >= 3 and verbish >= 2 and (not has_conflict)):
+                        return False
         elif title_req > 0 and title_hit < title_req:
             return False
         # Reject obvious prompt-template/checklist contamination for scoped outcomes.

@@ -97,8 +97,9 @@ def try_extract_outcomes_answer(q: str, context: str, debug: dict | None = None)
                 return False
             if _generic_heading_count(items) >= max(2, len(items) // 2):
                 return False
-            # If the question names a specific chapter/part title, require overlap with that title.
-            if title_tokens:
+            # If the question names a specific chapter/part title, require overlap with that title
+            # only when the retrieved context itself has no explicit chapter/part anchor.
+            if title_tokens and (not _scope_anchor_present):
                 hit = sum(1 for t in title_tokens[:6] if t and (t in joined))
                 req = 2 if len(title_tokens) >= 3 else 1
                 if hit < req:
@@ -128,7 +129,7 @@ def try_extract_outcomes_answer(q: str, context: str, debug: dict | None = None)
             qlike = sum(1 for it in items if "?" in it or ((it.split()[:1][0].lower() if it.split() else "") in _INTERROGATIVE_START))
             if qlike >= 1:
                 return False
-            if (not strong_marker) and title_tokens:
+            if (not strong_marker) and title_tokens and (not _scope_anchor_present):
                 hit = sum(1 for t in title_tokens[:6] if t and (t in joined))
                 req = 2 if len(title_tokens) >= 3 else 1
                 if hit < req:
@@ -144,6 +145,11 @@ def try_extract_outcomes_answer(q: str, context: str, debug: dict | None = None)
         part_anchor = f"part {part_no}" if part_no is not None else ""
         title_tokens = [w.lower() for w in re.findall(r"[a-zA-Z]{4,}", title_phrase)][:10] if title_phrase else []
         lines = [ln.rstrip() for ln in str(context).splitlines()]
+        _ctx_lower = str(context).lower()
+        _scope_anchor_present = bool(
+            (chapter_anchor and chapter_anchor in _ctx_lower) or
+            (part_anchor and part_anchor in _ctx_lower)
+        )
         if debug is not None:
             try:
                 debug["outcomes_extractor_line_count"] = int(len(lines))
@@ -167,6 +173,8 @@ def try_extract_outcomes_answer(q: str, context: str, debug: dict | None = None)
                     continue
                 if _wants_ch and (f"chapter {chapter_no}" not in _ll):
                     continue
+                if _wants_ch and ("by completing part" in _ll):
+                    continue
                 _marker_ix = _mi
                 break
         except Exception:
@@ -185,6 +193,8 @@ def try_extract_outcomes_answer(q: str, context: str, debug: dict | None = None)
                 if chapter_no is not None and ("chapter" in _q_lower) and (f"chapter {chapter_no}" not in ll):
                     continue
                 if part_no is not None and ("part" in _q_lower) and (f"part {part_no}" not in ll):
+                    continue
+                if _q_is_chapter and ("by completing part" in ll):
                     continue
                 cand = []
                 for ln2 in lines[mi + 1: mi + 45]:
@@ -584,6 +594,8 @@ def try_extract_outcomes_answer(q: str, context: str, debug: dict | None = None)
                 if verb_ratio < 0.45:
                     return
                 joined = " ".join(items).lower()
+                if _q_is_chapter and re.search(r"\bby\s+completing\s+part\s+\d+\b", joined):
+                    return
                 score = float(len(items))
                 score += 2.0 if ("will" in joined or "able to" in joined) else 0.0
                 # Chapter queries: penalize lists that clearly describe Part-level goals.
