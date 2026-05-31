@@ -667,15 +667,44 @@ def try_extract_outcomes_answer(q: str, context: str, debug: dict | None = None)
             elif out_items and ln and (ln.startswith("  ") or ln.startswith("\t")):
                 out_items[-1] = (out_items[-1] + " " + ln.strip()).strip()
         out_items = [it for it in out_items if it]
-        if not (3 <= len(out_items) <= 25):
-            return None
-        if not _valid_outcomes_items(out_items):
-            return None
-        # Normalize to a clean bullet list (keep it universal; don't require a specific marker string).
-        if debug is not None:
-            debug["outcomes_extractor_path"] = "bullet_block"
-            debug["outcomes_extractor_block_preview"] = "\n".join(out_items[:8])[:900]
-        return "Learning outcomes:\n\n" + "\n".join(f"- {it}" for it in out_items)
+        if 3 <= len(out_items) <= 25 and _valid_outcomes_items(out_items):
+            # Normalize to a clean bullet list (keep it universal; don't require a specific marker string).
+            if debug is not None:
+                debug["outcomes_extractor_path"] = "bullet_block"
+                debug["outcomes_extractor_block_preview"] = "\n".join(out_items[:8])[:900]
+            return "Learning outcomes:\n\n" + "\n".join(f"- {it}" for it in out_items)
+
+        # Last-resort universal extractor:
+        # harvest contiguous short verb-start lines even when explicit markers are missing
+        # (some docs render goals as plain lines instead of list bullets).
+        cand: list[str] = []
+        for ln in lines[:1200]:
+            t = (ln or "").strip()
+            if not t:
+                if len(cand) >= 4:
+                    break
+                continue
+            if len(t) > 220:
+                if len(cand) >= 4:
+                    break
+                continue
+            if re.search(r"https?://", t, re.I):
+                continue
+            if re.search(r"(?i)\b(previous|next|chapter\s+quiz|try with ai|prompt\s+\d+|authors|company|privacy)\b", t):
+                if len(cand) >= 4:
+                    break
+                continue
+            w0 = (re.findall(r"[a-zA-Z]+", t.lower())[:1] or [""])[0]
+            if w0 in _OUTCOME_VERB_HINTS:
+                cand.append(t.strip(" -*\t"))
+            elif len(cand) >= 4:
+                break
+        if 4 <= len(cand) <= 18 and _valid_outcomes_items(cand):
+            if debug is not None:
+                debug["outcomes_extractor_path"] = "verb_lines_fallback"
+                debug["outcomes_extractor_block_preview"] = "\n".join(cand[:8])[:900]
+            return "Learning outcomes:\n\n" + "\n".join(f"- {it}" for it in cand[:18])
+        return None
     except Exception:
         return None
 
