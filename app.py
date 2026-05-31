@@ -142,6 +142,7 @@ from services.llm_keys import (
     _load_key_health,
     _save_key_health,
     _mark_key_failed,
+    _cooldown_provider,
     any_key_ready,
     _peek_provider,
     get_fresh_llm,
@@ -2820,6 +2821,11 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
             err_str = str(e).lower()
             logger.warning(f"LLM attempt {attempt+1} error type={type(e).__name__}: {str(e)[:200]}")
             _trace_event(workflow_trace, "llm_attempt_result", attempt=attempt + 1, success=False, error=type(e).__name__)
+            if ("ratelimit" in err_str or "rate limit" in err_str or "429" in err_str):
+                try:
+                    _cooldown_provider(_prov_name or getattr(llm, "_provider_name", ""), 120)
+                except Exception:
+                    pass
             # Rotate on ALL provider errors — only permanent auth failures get marked differently
             _should_rotate = True
             if any(p in err_str for p in ["invalid_api_key", "incorrect api key", "unauthorized", "401 "]):
@@ -3850,6 +3856,11 @@ async def chat(request: Request):
             except Exception as e:
                 err_str = str(e).lower()
                 logger.warning(f"LLM attempt {attempt+1} error type={type(e).__name__}: {str(e)[:200]}")
+                if ("ratelimit" in err_str or "rate limit" in err_str or "429" in err_str):
+                    try:
+                        _cooldown_provider(_prov_name2 or getattr(llm, "_provider_name", ""), 120)
+                    except Exception:
+                        pass
                 try:
                     workflow_debug["answer_artifacts"].setdefault("llm_attempt_errors", []).append(
                         f"{type(e).__name__}: {str(e)[:220]}"

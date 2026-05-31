@@ -48,6 +48,7 @@ KEY_HEALTH_FILE = Path("key_health.json")
 _key_status: Dict[str, dict] = {}
 _key_org_map: Dict[str, str] = {}   # api_key -> org_id (populated from 429 errors)
 _org_cooldown: Dict[str, float] = {} # org_id -> cooldown_until timestamp
+_provider_cooldown: Dict[str, float] = {}  # provider -> cooldown_until timestamp
 _key_rpm_window: Dict[str, deque] = {}  # api_key -> deque of request timestamps (last 60s)
 # Soft RPM limits — rotate before hitting the real limit (leaves ~5 req buffer)
 _KEY_RPM_SOFT_LIMIT: Dict[str, int] = {
@@ -58,6 +59,15 @@ _KEY_RPM_SOFT_LIMIT: Dict[str, int] = {
     "mistral": 25,
     "openai": 25,
 }
+
+def _cooldown_provider(provider: str, seconds: int = 90):
+    try:
+        p = str(provider or "").strip().lower()
+        if not p:
+            return
+        _provider_cooldown[p] = time.time() + max(30, int(seconds))
+    except Exception:
+        pass
 
 
 def _load_key_health():
@@ -176,6 +186,9 @@ def any_key_ready() -> bool:
             if v and not any(k.get('key') == v for k in actives):
                 actives.append({"key": v, "provider": prov, "label": f"Env {prov}"})
         for k in actives:
+            prov = str(k.get('provider', '') or '').lower()
+            if prov and now < _provider_cooldown.get(prov, 0):
+                continue
             s = _key_status.get(k['key'], {})
             if now >= s.get("cooldown_until", 0):
                 org_id = _key_org_map.get(k['key'])
@@ -208,6 +221,9 @@ def _peek_provider() -> str:
             return 'groq'
         now = time.time()
         def _score(k):
+            prov = str(k.get('provider', '') or '').lower()
+            if prov and now < _provider_cooldown.get(prov, 0):
+                return (-1, 0, 0)
             s = _key_status.get(k['key'], {})
             if now < s.get("cooldown_until", 0): return (-1, 0, 0)
             org_id = _key_org_map.get(k['key'])
@@ -245,6 +261,9 @@ def get_fresh_llm():
 
         def key_health_score(k):
             s = _key_status.get(k['key'], {})
+            prov = str(k.get('provider', '') or '').lower()
+            if prov and now < _provider_cooldown.get(prov, 0):
+                return (-1, 0, 0, random.random())
             if now < s.get("cooldown_until", 0):
                 return (-1, 0, 0, random.random())
             org_id = _key_org_map.get(k['key'])
