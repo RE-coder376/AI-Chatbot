@@ -3568,6 +3568,10 @@ async def chat(request: Request):
                 resp = await asyncio.wait_for(llm.ainvoke(messages), timeout=30)
                 _raw = resp.content
                 _ans = _strip_source_leaks(_raw, kb_context=context)
+                # If user explicitly requests sources but retrieval returned none,
+                # do not allow fabricated citation blocks in model text.
+                if re.search(r"(?i)\b(source|sources|cite|citation|reference|references)\b", q or "") and not (sources or []):
+                    _ans = re.sub(r"(?is)\n?\s*(sources?|references?)\s*:\s*.*$", "", str(_ans or "")).strip()
                 if context and not _is_product_db_local:
                     _qf = _deterministic_extractive_quote_answer(q, context)
                     if _qf:
