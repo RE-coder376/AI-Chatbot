@@ -894,6 +894,12 @@ def _heuristic_rerank_score(doc, q: str, title_phrase: str) -> float:
         # For goals/outcomes queries, quiz/exercise pages are usually not the canonical evidence.
         if _OUTCOMES_INTENT_RE.search(q or '') and any(p in sl for p in ("/chapter-quiz", "/quiz", "/exercises", "/exercise")):
             score -= 10.0
+        # For scoped chapter/part outcomes queries, deprioritize non-canonical site shells/translations.
+        if _OUTCOMES_INTENT_RE.search(q or '') and re.search(r"\b(?:chapter|part)\s+\d{1,4}\b", q or "", re.I):
+            if any(p in sl for p in ("/roman/", "/arabic/", "/urdu/", "/certifications", "/about")):
+                score -= 12.0
+            if "/docs/" not in sl:
+                score -= 6.0
 
         # Penalize prompt-template blocks. These often mention many relevant keywords but
         # are not the canonical "outcomes/policy/spec" sections users ask for.
@@ -1774,6 +1780,19 @@ async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansio
                     _txt = str(getattr(_r, "page_content", "") or "")
                     if _is_prompt_template_chunk(_txt) and not _has_explicit_outcomes_marker(_txt):
                         continue
+                    # Scoped chapter/part queries: require the same anchor in URL or text.
+                    _ch = _extract_chapter_number(q or "")
+                    _pt = _extract_part_number(q or "")
+                    _src_l = str((getattr(_r, "metadata", None) or {}).get("source") or "").lower()
+                    _txt_l = _txt.lower()
+                    if _ch is not None and ("chapter" in (q or "").lower()):
+                        _a = f"chapter {_ch}"
+                        if (_a not in _src_l) and (_a not in _txt_l):
+                            continue
+                    if _pt is not None and ("part" in (q or "").lower()):
+                        _a = f"part {_pt}"
+                        if (_a not in _src_l) and (_a not in _txt_l):
+                            continue
                 except Exception:
                     pass
             _k = _r.page_content[:100]
