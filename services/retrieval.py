@@ -1778,12 +1778,16 @@ async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansio
             if _is_outcomes_intent:
                 try:
                     _txt = str(getattr(_r, "page_content", "") or "")
+                    _src_l = str((getattr(_r, "metadata", None) or {}).get("source") or "").lower()
+                    _q_l = (q or "").lower()
+                    _strict_scope = bool(re.search(r"\b(?:chapter|part)\s+\d{1,4}\b", _q_l))
+                    if _strict_scope and "/docs/" not in _src_l:
+                        continue
                     if _is_prompt_template_chunk(_txt) and not _has_explicit_outcomes_marker(_txt):
                         continue
                     # Scoped chapter/part queries: require the same anchor in URL or text.
                     _ch = _extract_chapter_number(q or "")
                     _pt = _extract_part_number(q or "")
-                    _src_l = str((getattr(_r, "metadata", None) or {}).get("source") or "").lower()
                     _txt_l = _txt.lower()
                     if _ch is not None and ("chapter" in (q or "").lower()):
                         _a = f"chapter {_ch}"
