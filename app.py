@@ -2563,7 +2563,9 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
         _trace_event(workflow_trace, "retrieval_path", path="api_only")
     _trace_event(workflow_trace, "retrieval_result", doc_count=doc_count, source_count=len(sources or []), context_chars=len(context or ""))
     if _is_strict_scope_query(q):
+        _trace_event(workflow_trace, "strict_sources_pre_filter", source_count=len(sources or []), sample=list((sources or [])[:5]))
         sources = await _filter_live_sources(sources or [], max_check=6)
+        _trace_event(workflow_trace, "strict_sources_post_filter", source_count=len(sources or []), sample=list((sources or [])[:5]))
     _trace_decision(workflow_debug, "retrieval_doc_count", int(doc_count or 0))
     _trace_decision(workflow_debug, "retrieval_source_count", len(sources or []))
     _trace_decision(workflow_debug, "is_api_only", bool(_is_api_only))
