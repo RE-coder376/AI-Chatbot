@@ -760,6 +760,46 @@ def _extract_part_number(q: str) -> int | None:
         pass
     return None
 
+def _doc_matches_strict_scope(doc, q: str, title_phrase: str) -> bool:
+    """Universal gate for scoped chapter/part queries.
+    Keeps only chunks with strong number/title anchors in URL or text.
+    """
+    try:
+        src = str(((getattr(doc, "metadata", None) or {}).get("source")) or "").lower()
+        body = str(getattr(doc, "page_content", "") or "").lower()
+        ch = _extract_chapter_number(q or "")
+        pt = _extract_part_number(q or "")
+        tks = [w.lower() for w in re.findall(r"[a-zA-Z0-9]{4,}", title_phrase or "")][:10]
+        tks = [t for t in tks if t not in {"chapter", "part", "learning", "goals", "outcomes", "according", "book"}]
+
+        num_hit = False
+        if ch is not None:
+            if (f"chapter-{ch}" in src) or (f"chapter {ch}" in src) or (f"chapter {ch}" in body) or re.search(rf"\bch(?:apter)?\.?\s*{ch}\b", body):
+                num_hit = True
+        if pt is not None:
+            if (f"part-{pt}" in src) or (f"part {pt}" in src) or (f"part {pt}" in body):
+                num_hit = True
+
+        phrase_hit = False
+        if title_phrase:
+            tpl = title_phrase.lower().strip()
+            if tpl and (tpl in src or tpl in body):
+                phrase_hit = True
+            elif tks:
+                hits = {t for t in tks if (t in src or t in body)}
+                if len(hits) >= 2:
+                    phrase_hit = True
+
+        if num_hit and (phrase_hit or not tks):
+            return True
+        if phrase_hit and (ch is None and pt is None):
+            return True
+        if num_hit and _has_explicit_outcomes_marker(body):
+            return True
+    except Exception:
+        pass
+    return False
+
 
 def _meaningful_keywords(q: str) -> list[str]:
     ql = (q or '').lower()
@@ -1886,6 +1926,13 @@ async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansio
             # For non-outcomes queries, keep the old safety valve to avoid empty/narrow context.
             elif len(_filtered) >= 6:
                 _combined_before_cap = _filtered
+
+        # Universal strict-scope gate: for chapter/part queries, discard chunks
+        # that do not carry matching scope anchors.
+        if _strict_scope_q:
+            _scoped = [d for d in _combined_before_cap if _doc_matches_strict_scope(d, q, _title_phrase)]
+            if _scoped:
+                _combined_before_cap = _scoped
 
         # Baseline rerank after optional filtering
         _combined_before_cap.sort(key=lambda d: _heuristic_rerank_score(d, q, _title_phrase), reverse=True)
