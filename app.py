@@ -564,6 +564,7 @@ _scheduler_last_tick_ts: float = 0.0
 _queued_crawls: set = set()  # DBs that have been scheduled but not yet started (waiting for sem)
 _manual_crawl_active: str = ""  # db_name of the currently running manual crawl, if any
 _tenant_restore_inflight: set = set()  # db_names where self-heal restore has been triggered
+_source_alive_cache: dict = {}  # url -> (alive:bool, ts:float)
 
 def check_rate_limit(ip: str, store: dict, limit: int, window: int = 60) -> bool:
     now = time.time()
@@ -575,6 +576,40 @@ def check_rate_limit(ip: str, store: dict, limit: int, window: int = 60) -> bool
             return False
         dq.append(now)
         return True
+
+
+async def _filter_live_sources(urls: list[str], max_check: int = 6, ttl_s: int = 900) -> list[str]:
+    """Keep only sources that are currently reachable (fast check with small cache)."""
+    try:
+        import httpx
+        now = time.time()
+        out = []
+        to_check = []
+        for u in (urls or []):
+            if not str(u).startswith(("http://", "https://")):
+                continue
+            c = _source_alive_cache.get(u)
+            if c and (now - float(c[1] or 0.0) < ttl_s):
+                if bool(c[0]):
+                    out.append(u)
+                continue
+            to_check.append(u)
+        if to_check:
+            async with httpx.AsyncClient(timeout=6, follow_redirects=True, headers={"User-Agent": "Mozilla/5.0"}) as client:
+                for u in to_check[:max(1, int(max_check))]:
+                    alive = False
+                    try:
+                        r = await client.get(u)
+                        txt = (r.text or "")[:1500].lower()
+                        alive = (r.status_code == 200) and ("page not found" not in txt) and ("404" not in txt[:200])
+                    except Exception:
+                        alive = False
+                    _source_alive_cache[u] = (alive, now)
+                    if alive:
+                        out.append(u)
+        return out[:8]
+    except Exception:
+        return list(urls or [])[:8]
 
 FEEDBACK_FILE = FEEDBACK_FILE_GLOBAL  # alias — use _feedback_file() for per-DB access
 
@@ -2431,6 +2466,7 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
         context, doc_count, sources = await retrieve_context(q, None, expansion_task=_early_expansion_task, history=history)
         _trace_event(workflow_trace, "retrieval_path", path="api_only")
     _trace_event(workflow_trace, "retrieval_result", doc_count=doc_count, source_count=len(sources or []), context_chars=len(context or ""))
+    sources = await _filter_live_sources(sources or [], max_check=6)
     _trace_decision(workflow_debug, "retrieval_doc_count", int(doc_count or 0))
     _trace_decision(workflow_debug, "retrieval_source_count", len(sources or []))
     _trace_decision(workflow_debug, "is_api_only", bool(_is_api_only))
@@ -3338,6 +3374,7 @@ async def chat(request: Request):
         except Exception:
             pass
         context, doc_count, sources = await retrieve_context(q, tenant_db_instance, history=hist)
+        sources = await _filter_live_sources(sources or [], max_check=6)
         try:
             workflow_debug["answer_artifacts"]["retrieve_doc_count"] = int(doc_count or 0)
             workflow_debug["answer_artifacts"]["retrieve_sources_count"] = int(len(sources or []))
