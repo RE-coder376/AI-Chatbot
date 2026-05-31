@@ -23,6 +23,14 @@ from services.config import KEYS_FILE, _atomic_write_json
 
 logger = logging.getLogger(__name__)
 
+def _tag_llm(llm, provider: str, model: str):
+    try:
+        setattr(llm, "_provider_name", provider)
+        setattr(llm, "_model_name", model)
+    except Exception:
+        pass
+    return llm
+
 
 class _CompatChatOpenAI(_BaseChatOpenAI):
     """ChatOpenAI subclass that reverts max_completion_tokens → max_tokens
@@ -270,29 +278,29 @@ def get_fresh_llm():
 
         if provider == 'openai':
             from langchain_openai import ChatOpenAI
-            return ChatOpenAI(
+            return _tag_llm(ChatOpenAI(
                 api_key=key_val,
                 model="gpt-4o-mini",
                 temperature=0,
                 max_retries=0,
                 max_tokens=512,
                 request_timeout=8,
-            )
+            ), "openai", "gpt-4o-mini")
         elif provider == 'gemini':
             from langchain_google_genai import ChatGoogleGenerativeAI
             # max_retries=0 + transport="rest" disables google-genai SDK's internal
             # exponential-backoff retry loop (which was wasting 30-40s per exhausted key
             # before our own rotation code could run)
-            return ChatGoogleGenerativeAI(
+            return _tag_llm(ChatGoogleGenerativeAI(
                 google_api_key=key_val,
                 model="gemini-2.0-flash-lite",
                 temperature=0,
                 max_retries=0,
                 max_output_tokens=512,
                 timeout=11,
-            )
+            ), "gemini", "gemini-2.0-flash-lite")
         elif provider == 'cerebras':
-            return _CompatChatOpenAI(
+            return _tag_llm(_CompatChatOpenAI(
                 api_key=key_val,
                 model="llama3.1-8b",
                 base_url="https://api.cerebras.ai/v1",
@@ -300,9 +308,9 @@ def get_fresh_llm():
                 max_retries=0,
                 max_tokens=512,
                 request_timeout=8,
-            )
+            ), "cerebras", "llama3.1-8b")
         elif provider == 'sambanova':
-            return _CompatChatOpenAI(
+            return _tag_llm(_CompatChatOpenAI(
                 api_key=key_val,
                 model="Meta-Llama-3.3-70B-Instruct",
                 base_url="https://api.sambanova.ai/v1",
@@ -310,9 +318,9 @@ def get_fresh_llm():
                 max_retries=0,
                 max_tokens=512,
                 request_timeout=8,
-            )
+            ), "sambanova", "Meta-Llama-3.3-70B-Instruct")
         elif provider == 'mistral':
-            return _CompatChatOpenAI(
+            return _tag_llm(_CompatChatOpenAI(
                 api_key=key_val,
                 model="mistral-small-latest",
                 base_url="https://api.mistral.ai/v1",
@@ -320,16 +328,16 @@ def get_fresh_llm():
                 max_retries=0,
                 max_tokens=512,
                 request_timeout=8,
-            )
+            ), "mistral", "mistral-small-latest")
         else:
-            return ChatGroq(
+            return _tag_llm(ChatGroq(
                 api_key=key_val,
                 model="llama-3.3-70b-versatile",
                 temperature=0,
                 max_retries=0,
                 max_tokens=512,
                 request_timeout=7,
-            )
+            ), "groq", "llama-3.3-70b-versatile")
     except Exception as e:
         logger.error(f"LLM Key Selection Error: {e}")
         return None

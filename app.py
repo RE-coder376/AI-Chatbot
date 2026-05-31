@@ -2710,6 +2710,8 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
         _has_groq = any(k.get('provider') == 'groq' for k in _all_keys if k.get('status') == 'active')
     except Exception:
         _has_groq = False
+    if _is_strict_scope_query(q) and len(context) > 12000:
+        context = context[:12000]
     if _prov == 'cerebras' and len(context) > _CEREBRAS_MAX_CONTEXT_CHARS:
         context = context[:_CEREBRAS_MAX_CONTEXT_CHARS]
     elif (_has_groq or _prov == 'groq') and len(context) > _GROQ_MAX_CONTEXT_CHARS:
@@ -2776,7 +2778,9 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
         return
 
     # Smart Key Recovery: Buffer response, retry silently on rate-limit — never expose errors to user
-    max_retries = 10
+    _strict_q = _is_strict_scope_query(q)
+    max_retries = 4 if _strict_q else 10
+    _attempt_timeout_s = 9 if _strict_q else 12
     response_buffer = []
     success = False
     for attempt in range(max_retries):
@@ -2793,8 +2797,10 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
         _should_rotate = False
         _exc_for_mark = None
         try:
-            _trace_event(workflow_trace, "llm_attempt", attempt=attempt + 1)
-            async with asyncio.timeout(12):  # Hard kill — prevents hung connections; 12s allows slower providers (Sambanova/Mistral)
+            _prov_name = str(getattr(llm, "_provider_name", "") or getattr(llm, "provider", "") or "")
+            _model_name = str(getattr(llm, "_model_name", "") or getattr(llm, "model_name", "") or "")
+            _trace_event(workflow_trace, "llm_attempt", attempt=attempt + 1, provider=_prov_name, model=_model_name, timeout_s=_attempt_timeout_s)
+            async with asyncio.timeout(_attempt_timeout_s):  # Hard kill — faster failover on strict scoped queries
                 async for chunk in llm.astream(messages):
                     if request and await request.is_disconnected():
                         logger.info("Client disconnected mid-stream — aborting LLM call")
@@ -3738,6 +3744,8 @@ async def chat(request: Request):
             _has_groq2 = any(k.get('provider') == 'groq' for k in _all_keys2 if k.get('status') == 'active')
         except Exception:
             _has_groq2 = False
+        if _is_strict_scope_query(q) and len(context) > 12000:
+            context = context[:12000]
         if _prov2 == 'cerebras' and len(context) > _CEREBRAS_MAX_CONTEXT_CHARS:
             context = context[:_CEREBRAS_MAX_CONTEXT_CHARS]
         elif (_has_groq2 or _prov2 == 'groq') and len(context) > _GROQ_MAX_CONTEXT_CHARS:
@@ -3769,7 +3777,9 @@ async def chat(request: Request):
             return JSONResponse(payload)
 
         # Smart Key Recovery: Retry up to 10 times
-        max_retries = 10
+        _strict_q2 = _is_strict_scope_query(q)
+        max_retries = 4 if _strict_q2 else 10
+        _attempt_timeout_s2 = 9 if _strict_q2 else 30
         for attempt in range(max_retries):
             llm = get_fresh_llm()
             if not llm:
@@ -3788,10 +3798,12 @@ async def chat(request: Request):
                 return JSONResponse(payload, status_code=200)
             try:
                 try:
-                    _trace_event(workflow_trace, "llm_attempt_start", attempt=int(attempt + 1))
+                    _prov_name2 = str(getattr(llm, "_provider_name", "") or getattr(llm, "provider", "") or "")
+                    _model_name2 = str(getattr(llm, "_model_name", "") or getattr(llm, "model_name", "") or "")
+                    _trace_event(workflow_trace, "llm_attempt_start", attempt=int(attempt + 1), provider=_prov_name2, model=_model_name2, timeout_s=_attempt_timeout_s2)
                 except Exception:
                     pass
-                resp = await asyncio.wait_for(llm.ainvoke(messages), timeout=30)
+                resp = await asyncio.wait_for(llm.ainvoke(messages), timeout=_attempt_timeout_s2)
                 _raw = resp.content
                 _ans = _strip_source_leaks(_raw, kb_context=context)
                 # If user explicitly requests sources but retrieval returned none,
