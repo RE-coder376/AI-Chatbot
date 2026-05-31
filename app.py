@@ -2661,6 +2661,25 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
             yield f"data: {json.dumps(_metadata_payload(_lead_on, []))}\n\n"
             yield "data: {\"type\": \"done\"}\n\n"
             return
+        # Strict scoped goals queries should not fall through to free-form LLM guessing.
+        if _is_strict_scope_query(q):
+            _probe3 = await _live_site_content_outcomes_probe(q, cfg, max_urls=24)
+            if _probe3:
+                if visitor_id:
+                    _run_in_bg(save_visitor_turn, visitor_id, "assistant", _probe3, db_name)
+                yield f"data: {json.dumps({'type': 'chunk', 'content': _probe3})}\n\n"
+                _lead_on = not cfg.get("disable_lead_box", False)
+                yield f"data: {json.dumps(_metadata_payload(_lead_on, sources[:5]))}\n\n"
+                yield "data: {\"type\": \"done\"}\n\n"
+                return
+            _msg2 = "I couldn't find an explicit learning-goals list for that exact chapter/part in the retrieved context."
+            if visitor_id:
+                _run_in_bg(save_visitor_turn, visitor_id, "assistant", _msg2, db_name)
+            yield f"data: {json.dumps({'type': 'chunk', 'content': _msg2})}\n\n"
+            _lead_on = not cfg.get("disable_lead_box", False)
+            yield f"data: {json.dumps(_metadata_payload(_lead_on, sources[:5]))}\n\n"
+            yield "data: {\"type\": \"done\"}\n\n"
+            return
 
     # ── Sparse KB guard — skip for api-only DBs (no KB, LLM uses training knowledge) ──
     if not _is_api_only and not context_addresses_query:
