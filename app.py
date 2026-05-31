@@ -2815,6 +2815,10 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
         except (TimeoutError, asyncio.TimeoutError):
             logger.warning(f"LLM attempt {attempt+1} timed out (Google SDK internal retry killed) — rotating key")
             _trace_event(workflow_trace, "llm_attempt_result", attempt=attempt + 1, success=False, error="timeout")
+            try:
+                _cooldown_provider(_prov_name or getattr(llm, "_provider_name", ""), 90)
+            except Exception:
+                pass
             _should_rotate = True
         except Exception as e:
             _exc_for_mark = e
@@ -2968,6 +2972,16 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
         _trace_event(workflow_trace, "guard_exit", guard="llm_all_attempts_failed")
         _trace_decision(workflow_debug, "exit_guard", "llm_all_attempts_failed")
         _trace_decision(workflow_debug, "llm_success", False)
+        if _is_strict_scope_query(q) and context:
+            try:
+                _det_scoped = try_extract_outcomes_answer(q, context, debug=workflow_debug.get("answer_artifacts"))
+                if _det_scoped:
+                    yield f"data: {json.dumps({'type': 'chunk', 'content': _det_scoped})}\n\n"
+                    yield f"data: {json.dumps(_metadata_payload(False, sources[:5]))}\n\n"
+                    yield "data: {\"type\": \"done\"}\n\n"
+                    return
+            except Exception:
+                pass
         _det_answer = _deterministic_price_answer(q, context) if context else None
         if _det_answer:
             _trace_decision(workflow_debug, "deterministic_fallback", True)
@@ -3802,10 +3816,10 @@ async def chat(request: Request):
                         "answer_artifacts": workflow_debug["answer_artifacts"],
                     }
                 return JSONResponse(payload, status_code=200)
+            _prov_name2 = str(getattr(llm, "_provider_name", "") or getattr(llm, "provider", "") or "")
+            _model_name2 = str(getattr(llm, "_model_name", "") or getattr(llm, "model_name", "") or "")
             try:
                 try:
-                    _prov_name2 = str(getattr(llm, "_provider_name", "") or getattr(llm, "provider", "") or "")
-                    _model_name2 = str(getattr(llm, "_model_name", "") or getattr(llm, "model_name", "") or "")
                     _trace_event(workflow_trace, "llm_attempt_start", attempt=int(attempt + 1), provider=_prov_name2, model=_model_name2, timeout_s=_attempt_timeout_s2)
                 except Exception:
                     pass
@@ -3856,6 +3870,11 @@ async def chat(request: Request):
             except Exception as e:
                 err_str = str(e).lower()
                 logger.warning(f"LLM attempt {attempt+1} error type={type(e).__name__}: {str(e)[:200]}")
+                if ("timeout" in err_str):
+                    try:
+                        _cooldown_provider(_prov_name2 or getattr(llm, "_provider_name", ""), 90)
+                    except Exception:
+                        pass
                 if ("ratelimit" in err_str or "rate limit" in err_str or "429" in err_str):
                     try:
                         _cooldown_provider(_prov_name2 or getattr(llm, "_provider_name", ""), 120)
