@@ -3164,6 +3164,15 @@ async def chat(request: Request):
         else:
             _db_instance_cache[tenant_db_name] = _get_db_instance(tenant_db_name)
             tenant_db_instance = _db_instance_cache[tenant_db_name]
+        # Transient-recovery retry: DB may appear moments after sync/crawl writes.
+        if tenant_db_instance is None:
+            try:
+                _db_instance_cache.pop(tenant_db_name, None)
+                await asyncio.sleep(0.2)
+                _db_instance_cache[tenant_db_name] = _get_db_instance(tenant_db_name)
+                tenant_db_instance = _db_instance_cache[tenant_db_name]
+            except Exception:
+                pass
         if tenant_db_instance is not None:
             _tenant_restore_inflight.discard(tenant_db_name)
         # Never silently fall back to active DB for widget-tenant chats.
