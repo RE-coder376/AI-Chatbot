@@ -1104,6 +1104,15 @@ async def _auto_crawl_db(db_name: str, url: str, max_pages: int = 0) -> int:
             logger.warning(f"[AUTO-CRAWL] Could not load embeddings model: {_emb_e}")
             return 0
     db = await asyncio.to_thread(_get_db_instance, db_name)
+    if db is None and db_name:
+        # Universal self-heal: if DB files are missing, bootstrap an empty Chroma instance
+        # so auto-crawl can repopulate from crawl_url instead of aborting.
+        try:
+            db = await asyncio.to_thread(_get_or_create_db, db_name)
+            if db is not None:
+                logger.info(f"[AUTO-CRAWL] Bootstrapped empty DB instance for '{db_name}'")
+        except Exception as _boot_e:
+            logger.warning(f"[AUTO-CRAWL] Could not bootstrap DB '{db_name}': {_boot_e}")
     if db is None and db_name == _get_active_db() and local_db is not None:
         # active DB lives in /dev/shm — create a SEPARATE Chroma instance for writes
         # so the shared local_db read lock is never blocked by crawl writes
