@@ -2906,7 +2906,7 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
 
         # ? Quote-first fallback (guarded): if KB already contains a short verbatim answer span, prefer it.
         # This is especially useful for chapter goals/learning outcomes, policies, definitions.
-        if context and not is_product_db:
+        if context and not is_product_db and (not _is_strict_scope_query(q)) and (not _LEARNING_GOALS_Q_RE.search(q or "")):
             _qf = _deterministic_extractive_quote_answer(q, context)
             if _qf:
                 logger.info('[Validator] quote_first_extract ? overriding with verbatim KB span')
@@ -3833,7 +3833,7 @@ async def chat(request: Request):
                     _ans = re.sub(r"(?is)\n\s*(?:sources?|references?)\s*:\s*(?:.|\n)*?(?=\n\n[A-Z][^\n]{0,80}:|\Z)", "\n", _ans)
                     _ans = re.sub(r"(?im)^\s*[-*]\s*https?://\S+\s*$", "", _ans)
                     _ans = re.sub(r"\n{3,}", "\n\n", _ans).strip()
-                if context and not _is_product_db_local:
+                if context and (not _is_product_db_local) and (not _is_strict_scope_query(q)) and (not _LEARNING_GOALS_Q_RE.search(q or "")):
                     _qf = _deterministic_extractive_quote_answer(q, context)
                     if _qf:
                         _ans = _qf
