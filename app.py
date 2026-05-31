@@ -2626,6 +2626,15 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
         except Exception:
             pass
         if _is_strict_scope_with_dead_sources(q, sources or [], cfg):
+            _probe2 = await _live_site_content_outcomes_probe(q, cfg, max_urls=24)
+            if _probe2:
+                if visitor_id:
+                    _run_in_bg(save_visitor_turn, visitor_id, "assistant", _probe2, db_name)
+                yield f"data: {json.dumps({'type': 'chunk', 'content': _probe2})}\n\n"
+                _lead_on = not cfg.get("disable_lead_box", False)
+                yield f"data: {json.dumps(_metadata_payload(_lead_on, sources[:5]))}\n\n"
+                yield "data: {\"type\": \"done\"}\n\n"
+                return
             _msg = "The requested chapter/part source pages are currently unavailable on the site, so I can’t extract verified goals right now."
             if visitor_id:
                 _run_in_bg(save_visitor_turn, visitor_id, "assistant", _msg, db_name)
@@ -3612,6 +3621,20 @@ async def chat(request: Request):
                     }
                 return JSONResponse(payload)
             if _is_strict_scope_with_dead_sources(q, sources or [], cfg):
+                _lg_probe2 = await _live_site_content_outcomes_probe(q, cfg, max_urls=24)
+                if _lg_probe2:
+                    payload = {
+                        "answer": _lg_probe2,
+                        "sources": (sources or [])[:5],
+                        "evidence_spans": _evidence_spans_for_answer(q, context or ""),
+                    }
+                    if debug_effective:
+                        payload["debug"] = {
+                            "workflow_trace": workflow_trace,
+                            "guard_decisions": workflow_debug["guard_decisions"],
+                            "answer_artifacts": workflow_debug["answer_artifacts"],
+                        }
+                    return JSONResponse(payload)
                 payload = {
                     "answer": "The requested chapter/part source pages are currently unavailable on the site, so I can’t extract verified goals right now.",
                     "sources": [],
@@ -4195,6 +4218,68 @@ async def _live_site_outcomes_probe(q: str, cfg: dict, max_urls: int = 4) -> str
                         continue
                     txt = _to_text(r.text or "")
                     if len(txt) < 120:
+                        continue
+                    ans = try_extract_outcomes_answer(q, txt, debug=None)
+                    if ans and _is_quality_outcomes_answer_text(ans) and _outcomes_answer_matches_scope(q, ans):
+                        return ans
+                except Exception:
+                    continue
+    except Exception:
+        return None
+    return None
+
+async def _live_site_content_outcomes_probe(q: str, cfg: dict, max_urls: int = 24) -> str | None:
+    """Universal fallback for strict goals queries: match by page content, not only URL slug."""
+    try:
+        base = str((cfg or {}).get("crawl_url") or "").strip().rstrip("/")
+        if not base:
+            return None
+        import httpx
+        ql = (q or "").lower()
+        tphrase = _extract_title_phrase(q or "")
+        tks = [w.lower() for w in re.findall(r"[a-zA-Z0-9]{4,}", tphrase)][:12] if tphrase else []
+        if not tks:
+            tks = [w.lower() for w in re.findall(r"[a-zA-Z0-9]{4,}", ql) if w.lower() not in {"what","which","when","where","why","how","chapter","part","goals","according","book"}][:10]
+        if not tks:
+            return None
+        def _to_text(html: str) -> str:
+            h = re.sub(r"(?is)<script[^>]*>.*?</script>", " ", html or "")
+            h = re.sub(r"(?is)<style[^>]*>.*?</style>", " ", h)
+            h = re.sub(r"(?is)<noscript[^>]*>.*?</noscript>", " ", h)
+            h = re.sub(r"(?is)<[^>]+>", " ", h)
+            h = re.sub(r"\s+", " ", h)
+            return h.strip()
+        async with httpx.AsyncClient(timeout=10, follow_redirects=True, headers={"User-Agent": "Mozilla/5.0"}) as client:
+            sm = await client.get(f"{base}/sitemap.xml")
+            if sm.status_code != 200:
+                return None
+            locs = re.findall(r"(?is)<loc>\s*([^<\s]+)\s*</loc>", sm.text or "")
+            if not locs:
+                return None
+            candidates = []
+            for u in locs[:5000]:
+                ul = str(u).lower()
+                sc = 0.0
+                if "/docs/" in ul:
+                    sc += 2.0
+                if any(b in ul for b in ("/quiz", "/chapter-quiz", "/certifications", "/about")):
+                    sc -= 2.0
+                sc += sum(1.0 for t in tks if t in ul)
+                if sc > 0:
+                    candidates.append((sc, str(u)))
+            candidates.sort(key=lambda x: x[0], reverse=True)
+            for _, u in candidates[:max(6, int(max_urls))]:
+                try:
+                    r = await client.get(u)
+                    if r.status_code != 200:
+                        continue
+                    txt = _to_text(r.text or "")
+                    if len(txt) < 260:
+                        continue
+                    tl = txt.lower()
+                    # Require at least two title/content tokens in page text
+                    hits = sum(1 for t in tks if t in tl)
+                    if hits < 2:
                         continue
                     ans = try_extract_outcomes_answer(q, txt, debug=None)
                     if ans and _is_quality_outcomes_answer_text(ans) and _outcomes_answer_matches_scope(q, ans):
