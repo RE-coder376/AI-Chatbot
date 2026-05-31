@@ -611,6 +611,75 @@ async def _filter_live_sources(urls: list[str], max_check: int = 6, ttl_s: int =
     except Exception:
         return list(urls or [])[:8]
 
+
+async def _live_site_query_rescue_context(q: str, cfg: dict, max_urls: int = 3, max_chars: int = 9000) -> tuple[str, list[str]]:
+    """Universal fallback: pull likely pages from sitemap when vector retrieval misses."""
+    try:
+        base = str((cfg or {}).get("crawl_url") or "").strip().rstrip("/")
+        if not base or not str(q or "").strip():
+            return ("", [])
+        import httpx
+        import urllib.parse as _up
+        ql = str(q or "").lower()
+        q_tokens = [t for t in re.findall(r"[a-zA-Z0-9]{3,}", ql) if t not in {
+            "what", "which", "when", "where", "why", "how", "from", "with", "that", "this", "according", "chapter", "part"
+        }][:16]
+        if not q_tokens:
+            return ("", [])
+        def _to_text(html: str) -> str:
+            h = re.sub(r"(?is)<script[^>]*>.*?</script>", " ", html or "")
+            h = re.sub(r"(?is)<style[^>]*>.*?</style>", " ", h)
+            h = re.sub(r"(?is)<noscript[^>]*>.*?</noscript>", " ", h)
+            h = re.sub(r"(?is)<[^>]+>", " ", h)
+            h = re.sub(r"\s+", " ", h)
+            return h.strip()
+        async with httpx.AsyncClient(timeout=10, follow_redirects=True, headers={"User-Agent": "Mozilla/5.0"}) as client:
+            sm = await client.get(f"{base}/sitemap.xml")
+            if sm.status_code != 200:
+                return ("", [])
+            locs = re.findall(r"(?is)<loc>\s*([^<\s]+)\s*</loc>", sm.text or "")
+            if not locs:
+                return ("", [])
+            scored = []
+            for u in locs[:4000]:
+                ul = str(u).lower()
+                pu = _up.urlparse(str(u))
+                path = (pu.path or "").lower()
+                score = 0.0
+                if "/docs/" in ul:
+                    score += 2.0
+                if any(b in path for b in ("/quiz", "/chapter-quiz", "/certifications", "/about")):
+                    score -= 2.5
+                token_hits = sum(1.0 for t in q_tokens if t in ul)
+                score += token_hits
+                if score > 1.0:
+                    scored.append((score, str(u)))
+            if not scored:
+                return ("", [])
+            scored.sort(key=lambda x: x[0], reverse=True)
+            picked = []
+            chunks = []
+            for _, u in scored[:max(1, int(max_urls) * 3)]:
+                if len(picked) >= int(max_urls):
+                    break
+                try:
+                    r = await client.get(u)
+                    if r.status_code != 200:
+                        continue
+                    txt = _to_text(r.text or "")
+                    if len(txt) < 180:
+                        continue
+                    picked.append(u)
+                    chunks.append(txt[:2600])
+                except Exception:
+                    continue
+            if not chunks:
+                return ("", [])
+            merged = "\n\n".join(chunks)
+            return (merged[:max(1200, int(max_chars))], picked[:8])
+    except Exception:
+        return ("", [])
+
 FEEDBACK_FILE = FEEDBACK_FILE_GLOBAL  # alias — use _feedback_file() for per-DB access
 
 def get_system_prompt(cfg, context, doc_count: int = 0, is_urdu: bool = False, user_lang: str = "English", is_product_db: bool = False):
@@ -2488,6 +2557,22 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
     context_addresses_query = _context_addresses_query(context, q)
     _trace_decision(workflow_debug, "context_addresses_query", bool(context_addresses_query))
 
+    # Universal fallback when retrieval misses: probe sitemap pages live.
+    if (not _is_api_only) and (not context_addresses_query):
+        try:
+            _resc_ctx, _resc_src = await _live_site_query_rescue_context(q, cfg, max_urls=3, max_chars=9000)
+            if _resc_ctx:
+                context = _resc_ctx
+                doc_count = max(int(doc_count or 0), 1)
+                if _resc_src:
+                    sources = list(dict.fromkeys((sources or []) + _resc_src))[:8]
+                context_addresses_query = _context_addresses_query(context, q)
+                _trace_event(workflow_trace, "retrieval_live_rescue", rescued=True, source_count=len(_resc_src or []), context_chars=len(_resc_ctx or ""))
+                _trace_decision(workflow_debug, "live_rescue_used", True)
+                _trace_decision(workflow_debug, "context_addresses_query_after_live_rescue", bool(context_addresses_query))
+        except Exception:
+            pass
+
     # ── Deterministic outcomes extractor (universal) ─────────────────────────────
     # For "goals / objectives / what will I learn" questions, if the retrieved KB
     # already contains a clean bullet list, return it directly (no LLM needed).
@@ -3554,7 +3639,21 @@ async def chat(request: Request):
 
         # Sparse KB guard — skip for api-only DBs so LLM can use training knowledge
         _t_api_only = (not cfg.get("crawl_url", "")) and bool(cfg.get("api_sources"))
-        if not _t_api_only and not _context_addresses_query(context, q):
+        _ctx_hit = _context_addresses_query(context, q)
+        if (not _t_api_only) and (not _ctx_hit):
+            try:
+                _resc_ctx, _resc_src = await _live_site_query_rescue_context(q, cfg, max_urls=3, max_chars=9000)
+                if _resc_ctx:
+                    context = _resc_ctx
+                    doc_count = max(int(doc_count or 0), 1)
+                    if _resc_src:
+                        sources = list(dict.fromkeys((sources or []) + _resc_src))[:8]
+                    _ctx_hit = _context_addresses_query(context, q)
+                    _trace_event(workflow_trace, "retrieve_live_rescue", source_count=len(_resc_src or []), context_chars=len(_resc_ctx or ""))
+                    workflow_debug["guard_decisions"]["live_rescue_used"] = True
+            except Exception:
+                pass
+        if not _t_api_only and not _ctx_hit:
             bot_name = cfg.get("bot_name", "AI Assistant")
             topics   = cfg.get("topics", "our available content")
             contact  = cfg.get("contact_email", "")
