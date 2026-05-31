@@ -3571,7 +3571,10 @@ async def chat(request: Request):
                 # If user explicitly requests sources but retrieval returned none,
                 # do not allow fabricated citation blocks in model text.
                 if re.search(r"(?i)\b(source|sources|cite|citation|reference|references)\b", q or "") and not (sources or []):
-                    _ans = re.sub(r"(?is)\n?\s*(sources?|references?)\s*:\s*.*$", "", str(_ans or "")).strip()
+                    _ans = str(_ans or "")
+                    _ans = re.sub(r"(?is)\n\s*(?:sources?|references?)\s*:\s*(?:.|\n)*?(?=\n\n[A-Z][^\n]{0,80}:|\Z)", "\n", _ans)
+                    _ans = re.sub(r"(?im)^\s*[-*]\s*https?://\S+\s*$", "", _ans)
+                    _ans = re.sub(r"\n{3,}", "\n\n", _ans).strip()
                 if context and not _is_product_db_local:
                     _qf = _deterministic_extractive_quote_answer(q, context)
                     if _qf:
