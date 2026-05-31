@@ -4264,6 +4264,8 @@ async def _extract_outcomes_from_source_urls(q: str, sources: list[str], limit: 
                     if len(txt) < 120:
                         continue
                     ans = try_extract_outcomes_answer(q, txt, debug=None)
+                    if ans and _is_strict_scope_query(q) and _source_url_matches_scope(q, str(u)):
+                        return ans
                     if ans and _is_quality_outcomes_answer_text(ans) and (_outcomes_answer_matches_scope(q, ans) or _source_url_matches_scope(q, str(u))):
                         return ans
                 except Exception:
@@ -4369,12 +4371,16 @@ async def _live_site_outcomes_probe(q: str, cfg: dict, max_urls: int = 4) -> str
                     if r.status_code != 200:
                         continue
                     _html_ans = _extract_outcomes_from_html(r.text or "", q=q)
+                    if _html_ans and _is_strict_scope_query(q) and _source_url_matches_scope(q, str(u)):
+                        return _html_ans
                     if _html_ans and _is_quality_outcomes_answer_text(_html_ans) and (_outcomes_answer_matches_scope(q, _html_ans) or _source_url_matches_scope(q, str(u))):
                         return _html_ans
                     txt = _to_text(r.text or "")
                     if len(txt) < 120:
                         continue
                     ans = try_extract_outcomes_answer(q, txt, debug=None)
+                    if ans and _is_strict_scope_query(q) and _source_url_matches_scope(q, str(u)):
+                        return ans
                     if ans and _is_quality_outcomes_answer_text(ans) and (_outcomes_answer_matches_scope(q, ans) or _source_url_matches_scope(q, str(u))):
                         return ans
                 except Exception:
@@ -4429,6 +4435,8 @@ async def _live_site_content_outcomes_probe(q: str, cfg: dict, max_urls: int = 2
                     if r.status_code != 200:
                         continue
                     _html_ans = _extract_outcomes_from_html(r.text or "", q=q)
+                    if _html_ans and _is_strict_scope_query(q) and _source_url_matches_scope(q, str(u)):
+                        return _html_ans
                     if _html_ans and _is_quality_outcomes_answer_text(_html_ans) and (_outcomes_answer_matches_scope(q, _html_ans) or _source_url_matches_scope(q, str(u))):
                         return _html_ans
                     txt = _to_text(r.text or "")
@@ -4440,6 +4448,8 @@ async def _live_site_content_outcomes_probe(q: str, cfg: dict, max_urls: int = 2
                     if hits < 2:
                         continue
                     ans = try_extract_outcomes_answer(q, txt, debug=None)
+                    if ans and _is_strict_scope_query(q) and _source_url_matches_scope(q, str(u)):
+                        return ans
                     if ans and _is_quality_outcomes_answer_text(ans) and (_outcomes_answer_matches_scope(q, ans) or _source_url_matches_scope(q, str(u))):
                         return ans
                 except Exception:
