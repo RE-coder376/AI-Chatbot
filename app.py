@@ -4228,6 +4228,47 @@ async def _extract_outcomes_from_source_urls(q: str, sources: list[str], limit: 
         return None
     return None
 
+def _extract_outcomes_from_html(html: str, q: str = "") -> str | None:
+    """Robust outcomes extractor from raw HTML, preserving list items."""
+    try:
+        if not html:
+            return None
+        h = re.sub(r"(?is)<script[^>]*>.*?</script>", " ", html)
+        h = re.sub(r"(?is)<style[^>]*>.*?</style>", " ", h)
+        h = re.sub(r"(?is)<noscript[^>]*>.*?</noscript>", " ", h)
+        # Locate likely goals section start
+        m = re.search(r"(?is)(by\s+completing[^<]{0,160}you\s+will\s*:|by\s+the\s+end[^<]{0,160}you\s+will\s+be\s+able\s+to\s*:|>\s*goals\s*<|>\s*learning\s+outcomes?\s*<)", h)
+        hs = h[m.start():] if m else h
+        # Pull bullet/list items
+        items = []
+        for li in re.findall(r"(?is)<li[^>]*>(.*?)</li>", hs):
+            t = re.sub(r"(?is)<[^>]+>", " ", li)
+            t = re.sub(r"\s+", " ", t).strip(" -:\t\r\n")
+            if len(t) >= 12 and len(t) <= 260:
+                items.append(t)
+            if len(items) >= 16:
+                break
+        # Fallback: sentence-style outcomes after marker
+        if len(items) < 3:
+            plain = re.sub(r"(?is)<[^>]+>", " ", hs)
+            plain = re.sub(r"\s+", " ", plain).strip()
+            m2 = re.search(r"(?is)(by\s+completing[^:]{0,140}:|by\s+the\s+end[^:]{0,140}:)\s*(.{80,1800})", plain)
+            if m2:
+                tail = m2.group(2)
+                segs = [s.strip(" -") for s in re.split(r"\s*(?:\u2022|;|\.\s+(?=[A-Z]))\s*", tail) if s.strip()]
+                for s in segs:
+                    if len(s) >= 12 and len(s) <= 220:
+                        items.append(s)
+                    if len(items) >= 12:
+                        break
+        # quality filter
+        items = [x for x in items if not re.search(r"(?i)\b(previous|next|quiz|certification|copyright|privacy|site\s+index)\b", x)]
+        if len(items) < 3:
+            return None
+        return "Learning outcomes:\n\n" + "\n".join(f"- {it}" for it in items[:12])
+    except Exception:
+        return None
+
 
 async def _live_site_outcomes_probe(q: str, cfg: dict, max_urls: int = 4) -> str | None:
     """Universal fallback: probe sitemap pages on-demand for explicit outcomes lists."""
@@ -4282,6 +4323,9 @@ async def _live_site_outcomes_probe(q: str, cfg: dict, max_urls: int = 4) -> str
                     r = await client.get(str(u))
                     if r.status_code != 200:
                         continue
+                    _html_ans = _extract_outcomes_from_html(r.text or "", q=q)
+                    if _html_ans and _is_quality_outcomes_answer_text(_html_ans) and _outcomes_answer_matches_scope(q, _html_ans):
+                        return _html_ans
                     txt = _to_text(r.text or "")
                     if len(txt) < 120:
                         continue
@@ -4339,6 +4383,9 @@ async def _live_site_content_outcomes_probe(q: str, cfg: dict, max_urls: int = 2
                     r = await client.get(u)
                     if r.status_code != 200:
                         continue
+                    _html_ans = _extract_outcomes_from_html(r.text or "", q=q)
+                    if _html_ans and _is_quality_outcomes_answer_text(_html_ans) and _outcomes_answer_matches_scope(q, _html_ans):
+                        return _html_ans
                     txt = _to_text(r.text or "")
                     if len(txt) < 260:
                         continue
