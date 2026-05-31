@@ -3238,6 +3238,19 @@ async def chat(request: Request):
                         asyncio.create_task(_auto_crawl_db(tenant_db_name, db_cfg.get("crawl_url", ""), max_pages=0))
             except Exception as _selfheal_e:
                 logger.warning(f"[TENANT-SELFHEAL] trigger failed for '{tenant_db_name}': {_selfheal_e}")
+            # Short recovery loop: allow self-heal tasks to create/open DB before failing request.
+            try:
+                for _ in range(6):  # ~3s total
+                    await asyncio.sleep(0.5)
+                    _db_instance_cache.pop(tenant_db_name, None)
+                    tenant_db_instance = _get_db_instance(tenant_db_name)
+                    if tenant_db_instance is not None:
+                        _db_instance_cache[tenant_db_name] = tenant_db_instance
+                        _tenant_restore_inflight.discard(tenant_db_name)
+                        break
+            except Exception:
+                pass
+        if tenant_db_instance is None:
             return JSONResponse(
                 {"error": f"Tenant DB '{tenant_db_name}' is unavailable and restore has been triggered. Please retry shortly."},
                 status_code=503
