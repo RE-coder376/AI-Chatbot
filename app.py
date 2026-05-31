@@ -2672,6 +2672,15 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
                 yield f"data: {json.dumps(_metadata_payload(_lead_on, sources[:5]))}\n\n"
                 yield "data: {\"type\": \"done\"}\n\n"
                 return
+            _ctx_fb = _fallback_scoped_outcomes_from_context(q, context or "")
+            if _ctx_fb and _is_quality_outcomes_answer_text(_ctx_fb):
+                if visitor_id:
+                    _run_in_bg(save_visitor_turn, visitor_id, "assistant", _ctx_fb, db_name)
+                yield f"data: {json.dumps({'type': 'chunk', 'content': _ctx_fb})}\n\n"
+                _lead_on = not cfg.get("disable_lead_box", False)
+                yield f"data: {json.dumps(_metadata_payload(_lead_on, sources[:5]))}\n\n"
+                yield "data: {\"type\": \"done\"}\n\n"
+                return
             _msg2 = "I couldn't find an explicit learning-goals list for that exact chapter/part in the retrieved context."
             if visitor_id:
                 _run_in_bg(save_visitor_turn, visitor_id, "assistant", _msg2, db_name)
@@ -3709,6 +3718,20 @@ async def chat(request: Request):
                         "answer_artifacts": workflow_debug["answer_artifacts"],
                     }
                 return JSONResponse(payload)
+            _ctx_fb2 = _fallback_scoped_outcomes_from_context(q, context or "")
+            if _ctx_fb2 and _is_quality_outcomes_answer_text(_ctx_fb2):
+                payload = {
+                    "answer": _ctx_fb2,
+                    "sources": (sources or [])[:5],
+                    "evidence_spans": _evidence_spans_for_answer(q, context or ""),
+                }
+                if debug_effective:
+                    payload["debug"] = {
+                        "workflow_trace": workflow_trace,
+                        "guard_decisions": workflow_debug["guard_decisions"],
+                        "answer_artifacts": workflow_debug["answer_artifacts"],
+                    }
+                return JSONResponse(payload)
             payload = {
                 "answer": "I couldn't find an explicit learning-goals list for that exact chapter/part in the retrieved context.",
                 "sources": (sources or [])[:5],
@@ -4222,6 +4245,39 @@ def _outcomes_answer_matches_scope(q: str, text: str) -> bool:
         return True
     except Exception:
         return False
+
+def _fallback_scoped_outcomes_from_context(q: str, context: str) -> str | None:
+    """Deterministic fallback for strict chapter/part goals queries when extractor misses markers."""
+    try:
+        if (not q) or (not context) or (not _is_strict_scope_query(q)):
+            return None
+        ql = (q or "").lower()
+        title = _extract_title_phrase(q or "")
+        tks = [w.lower() for w in re.findall(r"[a-zA-Z]{4,}", title) if w.lower() not in {"chapter","part","goals","goal","learning","outcomes","according","book"}][:8]
+        cl = (context or "").lower()
+        if tks and (sum(1 for t in tks if t in cl) < 2):
+            return None
+        verbs = {"identify","structure","apply","build","verify","run","retrofit","install","design","validate","define","prepare","generate","version","package","deploy","evaluate","integrate","use","understand","explain"}
+        bad = re.compile(r"(?i)\b(previous|next|chapter\s+quiz|try with ai|prompt\s+\d+|authors|company|privacy|copy as markdown|on this page)\b")
+        out: list[str] = []
+        for ln in str(context).splitlines():
+            t = (ln or "").strip().strip("-* \t")
+            if not t or len(t) < 14 or len(t) > 240:
+                continue
+            if "?" in t or "http://" in t.lower() or "https://" in t.lower():
+                continue
+            if bad.search(t):
+                continue
+            w0 = (re.findall(r"[a-zA-Z]+", t.lower())[:1] or [""])[0]
+            if w0 in verbs:
+                out.append(t)
+            elif out and len(out) >= 4:
+                break
+        if len(out) < 3:
+            return None
+        return "Learning outcomes:\n\n" + "\n".join(f"- {x}" for x in out[:12])
+    except Exception:
+        return None
 
 def _source_url_matches_scope(q: str, url: str) -> bool:
     """Scope matcher using URL anchors for strict chapter/part/title queries."""
