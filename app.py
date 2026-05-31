@@ -1976,6 +1976,18 @@ def _context_has_scope_anchor(context: str, q: str) -> bool:
             return False
     return True
 
+
+def _is_strict_scope_with_dead_sources(q: str, sources: list[str], cfg: dict) -> bool:
+    try:
+        if not _is_strict_scope_query(q):
+            return False
+        if not str((cfg or {}).get("crawl_url") or "").strip():
+            return False
+        # If strict scoped query has no live sources after filtering, treat as source-unavailable.
+        return not bool(sources or [])
+    except Exception:
+        return False
+
 # ── Intent classifier ────────────────────────────────────────────────────────
 _GREETING_RE = re.compile(
     r'^\s*(hi+|hello+|hey+|salam|assalam[\w\s]*|good\s+(morning|afternoon|evening|day)'
@@ -2527,6 +2539,15 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
                 return
         except Exception:
             pass
+        if _is_strict_scope_with_dead_sources(q, sources or [], cfg):
+            _msg = "The requested chapter/part source pages are currently unavailable on the site, so I can’t extract verified goals right now."
+            if visitor_id:
+                _run_in_bg(save_visitor_turn, visitor_id, "assistant", _msg, db_name)
+            yield f"data: {json.dumps({'type': 'chunk', 'content': _msg})}\n\n"
+            _lead_on = not cfg.get("disable_lead_box", False)
+            yield f"data: {json.dumps(_metadata_payload(_lead_on, []))}\n\n"
+            yield "data: {\"type\": \"done\"}\n\n"
+            return
 
     # ── Sparse KB guard — skip for api-only DBs (no KB, LLM uses training knowledge) ──
     if not _is_api_only and not context_addresses_query:
@@ -3494,6 +3515,19 @@ async def chat(request: Request):
                     "answer": _lg_probe,
                     "sources": (sources or [])[:5],
                     "evidence_spans": _evidence_spans_for_answer(q, context or ""),
+                }
+                if debug_effective:
+                    payload["debug"] = {
+                        "workflow_trace": workflow_trace,
+                        "guard_decisions": workflow_debug["guard_decisions"],
+                        "answer_artifacts": workflow_debug["answer_artifacts"],
+                    }
+                return JSONResponse(payload)
+            if _is_strict_scope_with_dead_sources(q, sources or [], cfg):
+                payload = {
+                    "answer": "The requested chapter/part source pages are currently unavailable on the site, so I can’t extract verified goals right now.",
+                    "sources": [],
+                    "evidence_spans": [],
                 }
                 if debug_effective:
                     payload["debug"] = {
