@@ -2478,7 +2478,8 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
         context, doc_count, sources = await retrieve_context(q, None, expansion_task=_early_expansion_task, history=history)
         _trace_event(workflow_trace, "retrieval_path", path="api_only")
     _trace_event(workflow_trace, "retrieval_result", doc_count=doc_count, source_count=len(sources or []), context_chars=len(context or ""))
-    sources = await _filter_live_sources(sources or [], max_check=6)
+    if _is_strict_scope_query(q):
+        sources = await _filter_live_sources(sources or [], max_check=6)
     _trace_decision(workflow_debug, "retrieval_doc_count", int(doc_count or 0))
     _trace_decision(workflow_debug, "retrieval_source_count", len(sources or []))
     _trace_decision(workflow_debug, "is_api_only", bool(_is_api_only))
@@ -3408,7 +3409,8 @@ async def chat(request: Request):
         except Exception:
             pass
         context, doc_count, sources = await retrieve_context(q, tenant_db_instance, history=hist)
-        sources = await _filter_live_sources(sources or [], max_check=6)
+        if _is_strict_scope_query(q):
+            sources = await _filter_live_sources(sources or [], max_check=6)
         try:
             workflow_debug["answer_artifacts"]["retrieve_doc_count"] = int(doc_count or 0)
             workflow_debug["answer_artifacts"]["retrieve_sources_count"] = int(len(sources or []))
