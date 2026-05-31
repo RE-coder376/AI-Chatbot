@@ -3475,7 +3475,7 @@ async def chat(request: Request):
                         "answer_artifacts": workflow_debug["answer_artifacts"],
                     }
                 return JSONResponse(payload)
-            _lg_probe = await _live_site_outcomes_probe(q, cfg, max_urls=4)
+            _lg_probe = await _live_site_outcomes_probe(q, cfg, max_urls=16)
             if _lg_probe:
                 payload = {
                     "answer": _lg_probe,
