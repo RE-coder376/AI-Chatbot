@@ -4422,10 +4422,40 @@ async def _live_site_content_outcomes_probe(q: str, cfg: dict, max_urls: int = 2
             h = re.sub(r"\s+", " ", h)
             return h.strip()
         async with httpx.AsyncClient(timeout=10, follow_redirects=True, headers={"User-Agent": "Mozilla/5.0"}) as client:
-            sm = await client.get(f"{base}/sitemap.xml")
-            if sm.status_code != 200:
-                return None
-            locs = re.findall(r"(?is)<loc>\s*([^<\s]+)\s*</loc>", sm.text or "")
+            async def _collect_sitemap_urls(root: str, max_files: int = 16, max_locs: int = 12000) -> list[str]:
+                pending = [root]
+                seen = set()
+                out: list[str] = []
+                while pending and len(seen) < max_files and len(out) < max_locs:
+                    sm_url = pending.pop(0)
+                    if not sm_url or sm_url in seen:
+                        continue
+                    seen.add(sm_url)
+                    try:
+                        rr = await client.get(sm_url)
+                    except Exception:
+                        continue
+                    if rr.status_code != 200:
+                        continue
+                    xml = rr.text or ""
+                    locs2 = re.findall(r"(?is)<loc>\s*([^<\s]+)\s*</loc>", xml)
+                    if not locs2:
+                        continue
+                    for loc in locs2:
+                        u = str(loc).strip()
+                        if not u:
+                            continue
+                        ul = u.lower()
+                        if ul.endswith(".xml") or "/sitemap" in ul:
+                            if u not in seen and len(seen) + len(pending) < max_files:
+                                pending.append(u)
+                            continue
+                        out.append(u)
+                        if len(out) >= max_locs:
+                            break
+                return out
+
+            locs = await _collect_sitemap_urls(f"{base}/sitemap.xml")
             if not locs:
                 return None
             candidates = []
