@@ -771,6 +771,11 @@ async def _live_site_query_rescue_context(q: str, cfg: dict, max_urls: int = 3, 
         }][:16]
         if not q_tokens:
             return ("", [])
+        product_intent = bool(re.search(
+            r"\b(price|prices|cost|available|availability|stock|under|below|buy|show|list|sell|products?|toys?|cars?|pens?|notebooks?)\b",
+            ql,
+            re.I,
+        ))
         def _to_text(html: str) -> str:
             try:
                 from bs4 import BeautifulSoup as _BS
@@ -803,6 +808,13 @@ async def _live_site_query_rescue_context(q: str, cfg: dict, max_urls: int = 3, 
                 score = 0.0
                 if "/docs/" in ul:
                     score += 2.0
+                if product_intent:
+                    if "/products/" in path:
+                        score += 5.0
+                    if "/collections/" in path:
+                        score += 1.5
+                    if any(b in path for b in ("/pages/", "/blogs/", "/polic", "/contact", "/about", "sitemap", "agents.md")):
+                        score -= 5.0
                 if any(b in path for b in ("/quiz", "/chapter-quiz", "/certifications", "/about")):
                     score -= 2.5
                 token_hits = sum(1.0 for t in q_tokens if t in ul)
