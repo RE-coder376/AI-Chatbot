@@ -4597,6 +4597,8 @@ def _preferred_sources_for_product_answer(q: str, sources: list[str], limit: int
                 prod.append(u)
             else:
                 other.append(u)
+        if not prod:
+            return []
         out = prod + other
         dedup = []
         seen = set()
