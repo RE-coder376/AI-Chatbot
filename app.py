@@ -742,12 +742,22 @@ async def _live_site_query_rescue_context(q: str, cfg: dict, max_urls: int = 3, 
         if not q_tokens:
             return ("", [])
         def _to_text(html: str) -> str:
-            h = re.sub(r"(?is)<script[^>]*>.*?</script>", " ", html or "")
-            h = re.sub(r"(?is)<style[^>]*>.*?</style>", " ", h)
-            h = re.sub(r"(?is)<noscript[^>]*>.*?</noscript>", " ", h)
-            h = re.sub(r"(?is)<[^>]+>", " ", h)
-            h = re.sub(r"\s+", " ", h)
-            return h.strip()
+            try:
+                from bs4 import BeautifulSoup as _BS
+                soup = _BS(html or "", "html.parser")
+                for bad in soup(["script", "style", "noscript", "nav", "header", "footer", "aside"]):
+                    bad.decompose()
+                main = soup.find("main") or soup.find("article") or soup.body or soup
+                txt = main.get_text("\n", strip=True) if main else soup.get_text("\n", strip=True)
+            except Exception:
+                h = re.sub(r"(?is)<script[^>]*>.*?</script>", " ", html or "")
+                h = re.sub(r"(?is)<style[^>]*>.*?</style>", " ", h)
+                h = re.sub(r"(?is)<noscript[^>]*>.*?</noscript>", " ", h)
+                h = re.sub(r"(?is)<[^>]+>", " ", h)
+                txt = h
+            txt = re.sub(r"[ \t]+", " ", txt or "")
+            txt = re.sub(r"\n{3,}", "\n\n", txt)
+            return (txt or "").strip()
         async with httpx.AsyncClient(timeout=10, follow_redirects=True, headers={"User-Agent": "Mozilla/5.0"}) as client:
             sm = await client.get(f"{base}/sitemap.xml")
             if sm.status_code != 200:
@@ -783,6 +793,51 @@ async def _live_site_query_rescue_context(q: str, cfg: dict, max_urls: int = 3, 
                         continue
                     txt = _to_text(r.text or "")
                     if len(txt) < 180:
+                        continue
+                    # Extract token-matching evidence lines instead of taking the page prefix
+                    # (prefix often contains menus/navigation on docs sites).
+                    _nav_bad = ("skip to main content", "toggle theme", "toggle menu", "copy as markdown", "on this page", "ctrl k")
+                    lines = [ln.strip() for ln in re.split(r"[\r\n]+", txt) if ln and ln.strip()]
+                    cands = []
+                    for ln in lines:
+                        if len(ln) < 35 or len(ln) > 420:
+                            continue
+                        ll = ln.lower()
+                        if any(nb in ll for nb in _nav_bad):
+                            continue
+                        hit = sum(1 for t in q_tokens[:14] if t in ll)
+                        if hit <= 0:
+                            continue
+                        bonus = 0.0
+                        if re.search(r"(?i)\b(is|means|defined|used|goal|objective|outcome|chapter|part|policy|role)\b", ln):
+                            bonus += 1.5
+                        cands.append((hit + bonus, ln))
+                    if cands:
+                        cands.sort(key=lambda x: x[0], reverse=True)
+                        seen = set()
+                        picked_lines = []
+                        for _, ln in cands:
+                            key = re.sub(r"\W+", "", ln.lower())[:120]
+                            if key in seen:
+                                continue
+                            seen.add(key)
+                            picked_lines.append(ln)
+                            if len(picked_lines) >= 12:
+                                break
+                        txt = "\n".join(picked_lines)
+                    else:
+                        # Fallback when token lines are sparse: keep only first prose-like block.
+                        prose = []
+                        for ln in lines:
+                            ll = ln.lower()
+                            if any(nb in ll for nb in _nav_bad):
+                                continue
+                            if len(ln) >= 60:
+                                prose.append(ln)
+                            if len(prose) >= 10:
+                                break
+                        txt = "\n".join(prose) if prose else txt
+                    if len(txt) < 140:
                         continue
                     picked.append(u)
                     chunks.append(txt[:2600])
