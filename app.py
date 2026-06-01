@@ -3009,7 +3009,7 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
         yield f"data: {json.dumps({'type': 'chunk', 'content': _prod_det})}\n\n"
         _lead_on = not cfg.get("disable_lead_box", False)
         _trace_artifact(workflow_debug, "final_answer", _prod_det[:4000])
-        yield f"data: {json.dumps(_metadata_payload(_lead_on, sources[:5]))}\n\n"
+        yield f"data: {json.dumps(_metadata_payload(_lead_on, _preferred_sources_for_product_answer(q, sources, 5)))}\n\n"
         yield "data: {\"type\": \"done\"}\n\n"
         return
 
