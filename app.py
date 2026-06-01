@@ -579,7 +579,7 @@ def check_rate_limit(ip: str, store: dict, limit: int, window: int = 60) -> bool
         return True
 
 
-async def _filter_live_sources(urls: list[str], max_check: int = 6, ttl_s: int = 900) -> list[str]:
+async def _filter_live_sources(urls: list[str], max_check: int = 6, ttl_s: int = 900, fail_open: bool = True) -> list[str]:
     """Keep only sources that are currently reachable (fast check with small cache)."""
     try:
         import httpx
@@ -616,16 +616,33 @@ async def _filter_live_sources(urls: list[str], max_check: int = 6, ttl_s: int =
                         else:
                             alive = False
                     except Exception:
-                        # Fail-open to avoid false "dead-source" negatives caused by transient
-                        # network restrictions between hosting regions.
-                        alive = True
+                        # For strict scoped retrieval we prefer fail-closed behavior to avoid
+                        # stale/dead URLs crowding out valid evidence. Non-strict paths can fail-open.
+                        alive = bool(fail_open)
                     _source_alive_cache[u] = (alive, now)
                     if alive:
                         out.append(u)
         # If checks were inconclusive and dropped everything, keep original sources.
-        return (out[:8] if out else list(urls or [])[:8])
+        return (out[:8] if out else (list(urls or [])[:8] if fail_open else []))
     except Exception:
-        return list(urls or [])[:8]
+        return (list(urls or [])[:8] if fail_open else [])
+
+
+def _evict_sources_from_db(db_inst, dead_urls: list[str]):
+    """Best-effort cleanup: remove chunks tied to dead source URLs."""
+    try:
+        if not db_inst or not dead_urls:
+            return
+        coll = getattr(db_inst, "_collection", None)
+        if coll is None:
+            return
+        for u in list(dict.fromkeys(dead_urls))[:64]:
+            try:
+                coll.delete(where={"source": str(u)})
+            except Exception:
+                continue
+    except Exception:
+        pass
 
 
 async def _live_site_query_rescue_context(q: str, cfg: dict, max_urls: int = 3, max_chars: int = 9000) -> tuple[str, list[str]]:
@@ -2565,7 +2582,11 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
     _trace_event(workflow_trace, "retrieval_result", doc_count=doc_count, source_count=len(sources or []), context_chars=len(context or ""))
     if _is_strict_scope_query(q):
         _trace_event(workflow_trace, "strict_sources_pre_filter", source_count=len(sources or []), sample=list((sources or [])[:5]))
-        sources = await _filter_live_sources(sources or [], max_check=6)
+        _pre_sources = list(sources or [])
+        sources = await _filter_live_sources(sources or [], max_check=6, fail_open=False)
+        _dead_sources = [u for u in _pre_sources if u not in set(sources or [])]
+        if _dead_sources and _local_db is not None:
+            _run_in_bg(_evict_sources_from_db, _local_db, _dead_sources)
         _trace_event(workflow_trace, "strict_sources_post_filter", source_count=len(sources or []), sample=list((sources or [])[:5]))
     _trace_decision(workflow_debug, "retrieval_doc_count", int(doc_count or 0))
     _trace_decision(workflow_debug, "retrieval_source_count", len(sources or []))
@@ -3575,7 +3596,11 @@ async def chat(request: Request):
             pass
         context, doc_count, sources = await retrieve_context(q, tenant_db_instance, history=hist)
         if _is_strict_scope_query(q):
-            sources = await _filter_live_sources(sources or [], max_check=6)
+            _pre_sources = list(sources or [])
+            sources = await _filter_live_sources(sources or [], max_check=6, fail_open=False)
+            _dead_sources = [u for u in _pre_sources if u not in set(sources or [])]
+            if _dead_sources and tenant_db_instance is not None:
+                _run_in_bg(_evict_sources_from_db, tenant_db_instance, _dead_sources)
         try:
             workflow_debug["answer_artifacts"]["retrieve_doc_count"] = int(doc_count or 0)
             workflow_debug["answer_artifacts"]["retrieve_sources_count"] = int(len(sources or []))
