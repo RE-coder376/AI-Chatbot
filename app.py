@@ -2248,7 +2248,10 @@ def _context_addresses_query(context: str, q: str) -> bool:
 
 
 def _is_strict_scope_query(q: str) -> bool:
-    return bool(re.search(r"\b(?:chapter|part)\s+\d{1,4}\b", q or "", re.I))
+    return bool(
+        re.search(r"\b(?:chapter|part)\s+\d{1,4}\b", q or "", re.I)
+        or re.search(r"^\s*in\s+[^,\n]{6,200}\s*,\s*(?:what|why|how|which|who|when)\b", q or "", re.I)
+    )
 
 
 def _context_has_scope_anchor(context: str, q: str) -> bool:
@@ -4434,10 +4437,13 @@ def _deterministic_scoped_fact_answer(q: str, kb_context: str) -> str | None:
 
         bad = re.compile(r"(?i)\b(prompt\s+\d+|try with ai|chapter\s+quiz|quiz|previous|next|copy as markdown|ctrl\+|on this page)\b")
         candidates = []
+        _english_q = bool(re.search(r"[A-Za-z]", q or "")) and (not _is_urdu_script(q or ""))
         for s in _sentences(ctx):
             if len(s) < 40 or len(s) > 320:
                 continue
             if bad.search(s):
+                continue
+            if _english_q and re.search(r"[\u0600-\u06FF\u0900-\u097F]", s):
                 continue
             sl = s.lower()
             hit = sum(1 for t in key_tks[:12] if t in sl)
