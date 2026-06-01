@@ -3685,6 +3685,22 @@ async def chat(request: Request):
             except Exception:
                 pass
         if tenant_db_instance is None:
+            try:
+                _fallback_cfg = get_config(tenant_db_name)
+                if _is_greeting(q):
+                    _bot = _fallback_cfg.get("bot_name", "AI Assistant")
+                    _topics = _fallback_cfg.get("topics", "our products and services")
+                    return JSONResponse({
+                        "answer": f"Hello! I'm {_bot}. I can help you with {_topics}. What would you like to know?",
+                        "sources": [],
+                    })
+                if _fallback_cfg.get("crawl_url"):
+                    _resc_ctx, _resc_src = await _live_site_query_rescue_context(q, _fallback_cfg, max_urls=5, max_chars=14000)
+                    _prod_ans = _deterministic_product_catalog_answer(q, _resc_ctx or "")
+                    if _prod_ans:
+                        return JSONResponse({"answer": _prod_ans, "sources": (_resc_src or [])[:5]})
+            except Exception as _tenant_live_fallback_e:
+                logger.warning(f"[TENANT-SELFHEAL] live fallback failed for '{tenant_db_name}': {_tenant_live_fallback_e}")
             return JSONResponse(
                 {"error": f"Tenant DB '{tenant_db_name}' is unavailable and restore has been triggered. Please retry shortly."},
                 status_code=503
