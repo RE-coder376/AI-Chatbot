@@ -2796,6 +2796,42 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
             return
 
     # ── Sparse KB guard — skip for api-only DBs (no KB, LLM uses training knowledge) ──
+    # Deterministic strict-scope factual extractor (non-goals).
+    # For chapter/part factual prompts, prefer direct evidence-built answers before LLM synthesis.
+    if _is_strict_scope_query(q) and (not _LEARNING_GOALS_Q_RE.search(q)):
+        _sf = _deterministic_scoped_fact_answer(q, context or "")
+        if (_sf is None) and _local_db:
+            try:
+                _ctx_sf2, _dc_sf2, _src_sf2 = await retrieve_context(
+                    q, _local_db, k=60, fast=True, expansion_task=None, history=history
+                )
+                _sf2 = _deterministic_scoped_fact_answer(q, _ctx_sf2 or "")
+                if _sf2:
+                    context, doc_count, sources = _ctx_sf2, _dc_sf2, _src_sf2
+                    _sf = _sf2
+                    context_addresses_query = True
+                    _trace_event(
+                        workflow_trace,
+                        "retrieval_retry",
+                        reason="strict_scoped_fact_extractor",
+                        k=60,
+                        doc_count=int(_dc_sf2 or 0),
+                        source_count=len(_src_sf2 or []),
+                    )
+            except Exception as _sf_re2:
+                logger.debug(f"[RETRIEVAL] strict fact retry failed: {_sf_re2}")
+        if _sf:
+            _trace_event(workflow_trace, "guard_exit", guard="deterministic_strict_scoped_fact_extractor")
+            _trace_decision(workflow_debug, "exit_guard", "deterministic_strict_scoped_fact_extractor")
+            if visitor_id:
+                _run_in_bg(save_visitor_turn, visitor_id, "assistant", _sf, db_name)
+            yield f"data: {json.dumps({'type': 'chunk', 'content': _sf})}\n\n"
+            _lead_on = not cfg.get("disable_lead_box", False)
+            _trace_artifact(workflow_debug, "final_answer", _sf[:4000])
+            yield f"data: {json.dumps(_metadata_payload(_lead_on, sources[:5]))}\n\n"
+            yield "data: {\"type\": \"done\"}\n\n"
+            return
+
     if not _is_api_only and not context_addresses_query:
         _trace_event(workflow_trace, "guard_exit", guard="sparse_kb_context_miss", doc_count=doc_count)
         _trace_decision(workflow_debug, "exit_guard", "sparse_kb_context_miss")
@@ -3729,6 +3765,32 @@ async def chat(request: Request):
                 }
             return JSONResponse(payload)
 
+        # Deterministic strict-scope factual extractor (non-goals).
+        if _is_strict_scope_query(q) and (not _LEARNING_GOALS_Q_RE.search(q)):
+            _sf = _deterministic_scoped_fact_answer(q, context or "")
+            if (_sf is None) and tenant_db_instance:
+                try:
+                    _ctx_sf2, _dc_sf2, _src_sf2 = await retrieve_context(q, tenant_db_instance, k=60, fast=True)
+                    _sf2 = _deterministic_scoped_fact_answer(q, _ctx_sf2 or "")
+                    if _sf2:
+                        context, doc_count, sources = _ctx_sf2, _dc_sf2, _src_sf2
+                        _sf = _sf2
+                except Exception:
+                    pass
+            if _sf:
+                payload = {
+                    "answer": _sf,
+                    "sources": (sources or [])[:5],
+                    "evidence_spans": _evidence_spans_for_answer(q, context or ""),
+                }
+                if debug_effective:
+                    payload["debug"] = {
+                        "workflow_trace": workflow_trace,
+                        "guard_decisions": workflow_debug["guard_decisions"],
+                        "answer_artifacts": workflow_debug["answer_artifacts"],
+                    }
+                return JSONResponse(payload)
+
         # Hard evidence lock for explicit Chapter/Part questions.
         # For learning-goals intents, let the dedicated goals branch run first.
         if _is_strict_scope_query(q) and (not _LEARNING_GOALS_Q_RE.search(q)) and not _context_has_scope_anchor(context or "", q):
@@ -4142,6 +4204,81 @@ def _best_explicit_evidence_sentence(q: str, kb_context: str) -> str | None:
         if len(out) < 40:
             return None
         return out[:280]
+    except Exception:
+        return None
+
+
+def _deterministic_scoped_fact_answer(q: str, kb_context: str) -> str | None:
+    """Deterministic strict-scope answer builder for non-goals chapter/part factual prompts."""
+    try:
+        if not q or not kb_context or (not _is_strict_scope_query(q)):
+            return None
+        if _LEARNING_GOALS_Q_RE.search(q or ""):
+            return None
+        ql = (q or "").lower()
+        ctx = str(kb_context or "")
+        cl = ctx.lower()
+        # Require chapter/part anchor presence in context for high-precision strict answers.
+        if not _context_has_scope_anchor(ctx, q):
+            return None
+
+        stop = {
+            "what","which","who","when","where","why","how","according","book","chapter","part","section",
+            "this","that","with","from","about","into","your","their","there","these","those","main","role","used"
+        }
+        tmatch = re.search(r"\b(?:chapter|part)\s+\d{1,4}\s*[:\-]\s*([^\n]{4,200})", q, re.I)
+        title_tks = [w.lower() for w in re.findall(r"[a-zA-Z]{4,}", tmatch.group(1) if tmatch else "") if w.lower() not in stop][:8]
+        q_tks = [w.lower() for w in re.findall(r"[a-zA-Z]{4,}", ql) if w.lower() not in stop][:12]
+        key_tks = list(dict.fromkeys(title_tks + q_tks))
+        if not key_tks:
+            return None
+
+        def _sentences(text: str) -> list[str]:
+            parts = []
+            for p in re.split(r"[\n\r]+", text):
+                p = p.strip()
+                if not p:
+                    continue
+                # keep natural line boundaries from docs; they tend to be cleaner than full prose splitting
+                parts.append(p)
+            return parts
+
+        bad = re.compile(r"(?i)\b(prompt\s+\d+|try with ai|chapter\s+quiz|quiz|previous|next|copy as markdown|ctrl\+|on this page)\b")
+        candidates = []
+        for s in _sentences(ctx):
+            if len(s) < 40 or len(s) > 320:
+                continue
+            if bad.search(s):
+                continue
+            sl = s.lower()
+            hit = sum(1 for t in key_tks[:12] if t in sl)
+            if hit <= 0:
+                continue
+            # Prefer definitional lines and role/use lines.
+            bonus = 0
+            if re.search(r"(?i)\b(is|means|defined as|used to|ensures|prevents|so that|because|role)\b", s):
+                bonus += 2
+            if re.search(r"(?i)\b(outbox|rls|roles|policy|having|where|aggregate|null|group by)\b", s):
+                bonus += 2
+            score = hit + bonus
+            candidates.append((score, s))
+
+        if not candidates:
+            return None
+        candidates.sort(key=lambda x: x[0], reverse=True)
+        picked = []
+        seen = set()
+        for _, s in candidates:
+            k = re.sub(r"\W+", "", s.lower())[:120]
+            if k in seen:
+                continue
+            seen.add(k)
+            picked.append(s.strip())
+            if len(picked) >= 4:
+                break
+        if len(picked) < 2:
+            return None
+        return "\n".join(f"- {p}" for p in picked)
     except Exception:
         return None
 
