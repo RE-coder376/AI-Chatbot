@@ -2064,6 +2064,30 @@ async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansio
     else:
         top = _combined_before_cap[:40]
 
+    # Product-intent guard: favor actual catalog pages over blogs/about pages.
+    # Universal behavior for ecommerce-like DBs.
+    if _has_product_meta and top:
+        _q_l = (q or "").lower()
+        _product_intent = bool(re.search(
+            r"\b(price|cost|how much|buy|available|availability|in stock|stock|show|list|best|top|affordable|under\s+\d+|pen|pencil|notebook|book|stroller|diaper|product|products)\b",
+            _q_l,
+            re.I
+        ))
+        if _product_intent:
+            _catalog_docs = []
+            _other_docs = []
+            for _r in top:
+                _src = str((getattr(_r, "metadata", None) or {}).get("source") or "").lower()
+                if ("/products/" in _src) or ("/collections/" in _src):
+                    _catalog_docs.append(_r)
+                elif any(x in _src for x in ("/pages/", "/blogs/", "/about", "/contact")):
+                    _other_docs.append(_r)
+                else:
+                    _other_docs.append(_r)
+            if _catalog_docs:
+                # Keep mostly catalog docs first; retain a small tail of others for edge cases.
+                top = _catalog_docs[:36] + _other_docs[:4]
+
     # ── Product catalog: dedup + GPU ranking ─────────────────────────────────
     if _has_product_meta:
         # Dedup: same product+price should appear only once
