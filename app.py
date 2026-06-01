@@ -2956,6 +2956,20 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
         yield "data: {\"type\": \"done\"}\n\n"
         return
 
+    is_product_db = _check_is_product_db(_local_db, db_name)
+    _prod_det = _deterministic_product_catalog_answer(q, context or "")
+    if is_product_db and _prod_det:
+        _trace_event(workflow_trace, "guard_exit", guard="deterministic_product_catalog_answer")
+        _trace_decision(workflow_debug, "exit_guard", "deterministic_product_catalog_answer")
+        if visitor_id:
+            _run_in_bg(save_visitor_turn, visitor_id, "assistant", _prod_det, db_name)
+        yield f"data: {json.dumps({'type': 'chunk', 'content': _prod_det})}\n\n"
+        _lead_on = not cfg.get("disable_lead_box", False)
+        _trace_artifact(workflow_debug, "final_answer", _prod_det[:4000])
+        yield f"data: {json.dumps(_metadata_payload(_lead_on, sources[:5]))}\n\n"
+        yield "data: {\"type\": \"done\"}\n\n"
+        return
+
     # Cap context per provider to avoid payload limits
     # Use _peek_provider() for primary choice; also check if ANY groq key exists in pool
     # because the retry loop may rotate to groq even if peek said another provider first
@@ -2972,7 +2986,6 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
     elif (_has_groq or _prov == 'groq') and len(context) > _GROQ_MAX_CONTEXT_CHARS:
         context = context[:_GROQ_MAX_CONTEXT_CHARS]
 
-    is_product_db = _check_is_product_db(_local_db, db_name)
     sys_msg = get_system_prompt(cfg, context, doc_count, is_urdu=is_urdu, user_lang=user_lang,
                                 is_product_db=is_product_db)
     if page_url:
@@ -4065,6 +4078,18 @@ async def chat(request: Request):
                 }
             return JSONResponse(payload)
 
+        _is_product_db_local = _check_is_product_db(tenant_db_instance, tenant_db_name)
+        _prod_det = _deterministic_product_catalog_answer(q, context or "")
+        if _is_product_db_local and _prod_det:
+            payload = {"answer": _prod_det, "sources": (sources or [])[:5]}
+            if debug_effective:
+                payload["debug"] = {
+                    "workflow_trace": workflow_trace,
+                    "guard_decisions": workflow_debug["guard_decisions"],
+                    "answer_artifacts": workflow_debug["answer_artifacts"],
+                }
+            return JSONResponse(payload)
+
         # Cap context per provider to avoid payload limits
         _prov2 = _peek_provider()
         try:
@@ -4079,7 +4104,6 @@ async def chat(request: Request):
         elif (_has_groq2 or _prov2 == 'groq') and len(context) > _GROQ_MAX_CONTEXT_CHARS:
             context = context[:_GROQ_MAX_CONTEXT_CHARS]
 
-        _is_product_db_local = _check_is_product_db(tenant_db_instance, tenant_db_name)
         sys_msg = get_system_prompt(cfg, context, doc_count, user_lang=user_lang,
                                     is_product_db=_is_product_db_local)
         messages = [SystemMessage(content=sys_msg)]
@@ -4372,6 +4396,108 @@ def _deterministic_scoped_fact_answer(q: str, kb_context: str) -> str | None:
         if len(picked) < 2:
             return None
         return "\n".join(f"- {p}" for p in picked)
+    except Exception:
+        return None
+
+
+def _deterministic_product_catalog_answer(q: str, kb_context: str, max_items: int = 5) -> str | None:
+    """Build a concise product answer directly from retrieved catalog text."""
+    try:
+        if not q or not kb_context:
+            return None
+        ql = q.lower()
+        if not re.search(
+            r"\b(show|list|which|what|price|prices|cost|available|availability|stock|under|below|sell|products?|toys?|pens?|notebooks?|cars?)\b",
+            ql,
+            re.I,
+        ):
+            return None
+        max_price = None
+        pm = re.search(r"(?:under|below|less than|max(?:imum)?|within)\s+(?:rs\.?\s*)?([\d,]+)", ql, re.I)
+        if pm:
+            try:
+                max_price = float(pm.group(1).replace(",", ""))
+            except Exception:
+                max_price = None
+        stop = {
+            "show", "list", "which", "what", "price", "prices", "cost", "available", "availability",
+            "stock", "under", "below", "sell", "products", "product", "toys", "have", "with",
+            "best", "top", "affordable", "currently", "school", "baby", "kids"
+        }
+        anchors = [w for w in re.findall(r"[a-zA-Z]{4,}", ql) if w not in stop][:10]
+        docs = [d.strip() for d in re.split(r"\n\s*\n", kb_context or "") if d.strip()]
+        items = []
+        seen = set()
+        nav_bad = ("about us", "faq", "contact us", "privacy policy", "terms and conditions", "return & exchange")
+        for doc in docs:
+            dl = doc.lower()
+            if not ("rs." in dl or "rs " in dl):
+                continue
+            if not ("add to cart" in dl or "shopping cart" in dl or "sale price" in dl or "regular price" in dl):
+                continue
+            if any(b in dl[:180] for b in nav_bad) and "add to cart" not in dl:
+                continue
+            if anchors:
+                hit = False
+                for a in anchors:
+                    aa = a[:-1] if a.endswith("s") else a
+                    if a in dl or (aa and aa in dl):
+                        hit = True
+                        break
+                if not hit and max_price is None:
+                    continue
+            title = ""
+            m = re.search(r"^\s*([^.\n]{4,90}?)(?:\s*&ndash;|\s+-\s+|\s+–\s+)", doc)
+            if m:
+                title = m.group(1).strip()
+            if not title:
+                m = re.search(r"Shopping Cart\s+([^.\n]{4,90}?)\s+Rs\.?", doc, re.I)
+                if m:
+                    title = m.group(1).strip()
+            if not title:
+                m = re.search(r"([A-Z][A-Za-z0-9 '&/().-]{4,90}?)\s+Rs\.?\s*[\d,]+", doc)
+                if m:
+                    title = m.group(1).strip()
+            title = re.sub(r"\s+", " ", title).strip(" -:|")
+            title = re.sub(r"(?i)\s*(babyfy|stationery studio|our company)$", "", title).strip(" -:|")
+            if len(title) < 3 or title.lower() in {"home page", "faq", "about us", "contact us"}:
+                continue
+            prices = []
+            for raw in re.findall(r"Rs\.?\s*([\d,]+(?:\.\d{1,2})?)", doc, re.I):
+                try:
+                    val = float(raw.replace(",", ""))
+                except Exception:
+                    continue
+                if val < 50:
+                    continue
+                prices.append(val)
+            if not prices:
+                continue
+            price = min(prices)
+            if max_price is not None and price > max_price:
+                continue
+            key = title.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            availability = "sold out" if re.search(r"(?i)\b(sold out|currently unavailable)\b", doc) else "available"
+            note = ""
+            desc = re.search(r"Description\s+(.{40,180})", doc, re.I | re.S)
+            if desc:
+                note = re.sub(r"\s+", " ", desc.group(1)).strip()
+            items.append((title, price, availability, note))
+            if len(items) >= max_items:
+                break
+        if not items:
+            return None
+        lines = ["Here are matching products from the catalog:"]
+        for idx, (title, price, availability, note) in enumerate(items, 1):
+            price_s = f"Rs.{price:,.0f}" if float(price).is_integer() else f"Rs.{price:,.2f}"
+            line = f"{idx}. {title} - {price_s} - {availability}"
+            if note:
+                line += f". {note[:140]}"
+            lines.append(line)
+        return "\n".join(lines)
     except Exception:
         return None
 
