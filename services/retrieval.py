@@ -1152,6 +1152,22 @@ def _retrieval_visible_doc(doc) -> bool:
             return False
         if ("on this page" in tl and "copy as markdown" in tl and "ctrl+" in tl and not _looks_substantial):
             return False
+        # Drop long navigation/index dumps that can look "substantial" by length alone.
+        _chapter_part_mentions = tl.count("chapter ") + tl.count("part ")
+        if (
+            _chapter_part_mentions >= 12
+            and "skip to main content" in tl
+            and ("toggle menu" in tl or "search..." in tl)
+        ):
+            return False
+        # Heuristic for menu-heavy documents: many short lines + UI hints + almost no prose.
+        _lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+        if _lines:
+            _short_lines = sum(1 for ln in _lines if len(ln) <= 48)
+            _short_ratio = _short_lines / max(1, len(_lines))
+            _sentence_marks = text.count(".") + text.count("!") + text.count("?")
+            if _nav_hits >= 2 and _short_ratio >= 0.60 and _sentence_marks <= 4 and len(_lines) >= 14:
+                return False
         sample = text[:200]
         if len(sample) > 20:
             # Drop control-char heavy chunks (these poison the LLM context and often
