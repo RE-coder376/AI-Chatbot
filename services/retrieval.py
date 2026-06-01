@@ -1628,6 +1628,12 @@ async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansio
         _is_product_db = bool(_check_is_product_db(db, _db_name_guess)) if db is not None else False
     except Exception:
         _is_product_db = False
+    _pm = re.search(r'(?:under|below|less\s+than|max(?:imum)?|budget\s+of|within)\s+(?:rs\.?\s*)?\$?([\d,]+)', q, re.I)
+    if _pm:
+        try:
+            _max_price = float(_pm.group(1).replace(',', ''))
+        except Exception:
+            _max_price = None
     try:
         _sample = db._collection.get(limit=1, include=["metadatas"]) if db else None
         if _sample and _sample.get("metadatas") and _sample["metadatas"][0].get("price") is not None:
@@ -1637,10 +1643,8 @@ async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansio
 
     if _has_product_meta:
         # Price
-        _pm = re.search(r'(?:under|below|less\s+than|max(?:imum)?|budget\s+of|within)\s+\$?([\d,]+)', q, re.I)
         if _pm:
             try:
-                _max_price = float(_pm.group(1).replace(',', ''))
                 _meta_conds.append({"price": {"$lte": _max_price}})
             except: pass
         # RAM minimum
@@ -1676,6 +1680,36 @@ async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansio
             _combined_filter = _meta_conds[0] if len(_meta_conds) == 1 else {"$and": _meta_conds}
             k = max(k, 60)
             logger.info(f"[META-FILTER] {_combined_filter}")
+
+    # Product budget rescue for catalog DBs whose prices live only in text.
+    if _is_product_db and _max_price is not None and db is not None:
+        try:
+            from langchain_core.documents import Document
+            total = min(int(db._collection.count() or 0), 2500)
+            raw = db._collection.get(limit=total, include=["documents", "metadatas"])
+            for doc_text, meta in zip(raw.get("documents", []), raw.get("metadatas", [])):
+                if not doc_text:
+                    continue
+                body = str(doc_text)
+                bl = body.lower()
+                src = str((meta or {}).get("source") or "").lower()
+                if "/products/" not in src and not ("add to cart" in bl or "shopping cart" in bl):
+                    continue
+                prices = []
+                for raw_price in re.findall(r"Rs\.?\s*([\d,]+(?:\.\d{1,2})?)", body, re.I):
+                    try:
+                        val = float(raw_price.replace(",", ""))
+                    except Exception:
+                        continue
+                    if val >= 50:
+                        prices.append(val)
+                if prices and min(prices) <= _max_price:
+                    key = body[:100]
+                    if key not in rescue_seen:
+                        rescue_seen.add(key)
+                        rescue_results.append(Document(page_content=body, metadata=meta or {}))
+        except Exception:
+            pass
 
     # Defaults so post-processing always has bound locals even when Chroma retrieval is skipped
     # (e.g., api-only DB mode, null DB, or retrieval disabled).
