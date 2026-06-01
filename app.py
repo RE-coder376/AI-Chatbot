@@ -4260,6 +4260,7 @@ def _fallback_scoped_outcomes_from_context(q: str, context: str) -> str | None:
         verbs = {"identify","structure","apply","build","verify","run","retrofit","install","design","validate","define","prepare","generate","version","package","deploy","evaluate","integrate","use","understand","explain"}
         bad = re.compile(r"(?i)\b(previous|next|chapter\s+quiz|try with ai|prompt\s+\d+|authors|company|privacy|copy as markdown|on this page)\b")
         out: list[str] = []
+        soft: list[str] = []
         for ln in str(context).splitlines():
             t = (ln or "").strip().strip("-* \t")
             if not t or len(t) < 14 or len(t) > 240:
@@ -4271,9 +4272,25 @@ def _fallback_scoped_outcomes_from_context(q: str, context: str) -> str | None:
             w0 = (re.findall(r"[a-zA-Z]+", t.lower())[:1] or [""])[0]
             if w0 in verbs:
                 out.append(t)
+            elif re.match(r"^[A-Za-z][A-Za-z0-9 ,()/:-]{14,220}$", t):
+                soft.append(t)
             elif out and len(out) >= 4:
                 break
         if len(out) < 3:
+            # Some domains store outcomes as terse noun-phrases (not verb-start bullets).
+            # Keep this conservative: only use short clean lines and avoid prompt-like fragments.
+            soft2 = []
+            for s in soft[:40]:
+                sl = s.lower()
+                if re.search(r"(?i)\b(prompt|exercise|quiz|capstone|prerequisite|lesson progression|chapter progression)\b", sl):
+                    continue
+                if len(s.split()) < 4:
+                    continue
+                soft2.append(s)
+                if len(soft2) >= 8:
+                    break
+            if len(soft2) >= 3:
+                return "Learning outcomes:\n\n" + "\n".join(f"- {x}" for x in soft2[:8])
             return None
         return "Learning outcomes:\n\n" + "\n".join(f"- {x}" for x in out[:12])
     except Exception:
