@@ -2776,7 +2776,7 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
     if _is_strict_scope_query(q):
         _trace_event(workflow_trace, "strict_sources_pre_filter", source_count=len(sources or []), sample=list((sources or [])[:5]))
         _pre_sources = list(sources or [])
-        sources = await _filter_live_sources(sources or [], max_check=6, fail_open=False)
+        sources = await _filter_live_sources(sources or [], max_check=6, fail_open=True)
         _dead_sources = [u for u in _pre_sources if u not in set(sources or [])]
         if _dead_sources and _local_db is not None:
             _run_in_bg(_mark_sources_status, _local_db, _dead_sources, "removed")
@@ -3878,7 +3878,7 @@ async def chat(request: Request):
         context, doc_count, sources = await retrieve_context(q, tenant_db_instance, history=hist)
         if _is_strict_scope_query(q):
             _pre_sources = list(sources or [])
-            sources = await _filter_live_sources(sources or [], max_check=6, fail_open=False)
+            sources = await _filter_live_sources(sources or [], max_check=6, fail_open=True)
             _dead_sources = [u for u in _pre_sources if u not in set(sources or [])]
             if _dead_sources and tenant_db_instance is not None:
                 _run_in_bg(_mark_sources_status, tenant_db_instance, _dead_sources, "removed")
