@@ -817,6 +817,9 @@ def _doc_matches_strict_scope(doc, q: str, title_phrase: str) -> bool:
         pt = _extract_part_number(q or "")
         tks = [w.lower() for w in re.findall(r"[a-zA-Z0-9]{4,}", title_phrase or "")][:10]
         tks = [t for t in tks if t not in {"chapter", "part", "learning", "goals", "outcomes", "according", "book"}]
+        focus = _extract_focus_phrase(q or "")
+        focus_tks = [w.lower() for w in re.findall(r"[a-zA-Z0-9]{4,}", focus or "")][:8]
+        focus_hit = any((ft in src or ft in body) for ft in focus_tks) if focus_tks else False
 
         num_hit = False
         if ch is not None:
@@ -839,6 +842,8 @@ def _doc_matches_strict_scope(doc, q: str, title_phrase: str) -> bool:
         if num_hit and (phrase_hit or not tks):
             return True
         if phrase_hit and (ch is None and pt is None):
+            if focus_tks and not focus_hit:
+                return False
             return True
         if num_hit and _has_explicit_outcomes_marker(body):
             return True
