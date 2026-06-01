@@ -777,6 +777,11 @@ def _extract_title_phrase(q: str) -> str:
             phrase = re.sub(r"\s+according\s+to\s+.*$", "", phrase, flags=re.I).strip()
             phrase = re.sub(r"\s+from\s+the\s+book\s*$", "", phrase, flags=re.I).strip()
             return phrase
+        m2 = re.search(r"^\s*in\s+([^,\n]{6,200})\s*,\s*(?:what|why|how|which|who|when)\b", q or "", re.I)
+        if m2:
+            phrase = m2.group(1).strip().strip('"\'')
+            phrase = re.sub(r"\s{2,}", " ", phrase).strip()
+            return phrase
     except Exception:
         pass
     return ''
@@ -1418,6 +1423,8 @@ async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansio
     # Tight latency path for strict chapter/part questions:
     # keep retrieval focused and avoid broad expansion drift.
     _strict_scope_q = bool(re.search(r"\b(?:chapter|part)\s+\d{1,4}\b", q or "", re.I))
+    if not _strict_scope_q and re.search(r"^\s*in\s+[^,\n]{6,200}\s*,\s*(?:what|why|how|which|who|when)\b", q or "", re.I):
+        _strict_scope_q = True
     if _strict_scope_q:
         fast = True
         k = min(k, 18)

@@ -2597,7 +2597,7 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
         re.IGNORECASE
     )
     _OOS_RE = re.compile(
-        r'\b(solve|calculate|compute|evaluate|integrate|differentiate|simplify|factor|'
+        r'\b(solve|calculate|compute|integrate|differentiate|simplify|factor|'
         r'derivative of|integral of|capital of|weather in|stock price|'
         r'recipe for|how to cook|biryani|calories in|convert \d|square root|'
         r'who won|world cup|football|cricket|current president|prime minister of|'
