@@ -258,6 +258,25 @@ def _widget_signing_secret() -> str:
     return ""
 
 
+def _canonical_db_name(name: str, allow_missing: bool = False) -> str:
+    """Normalize DB names to a canonical on-disk directory name.
+    - case-insensitive match against existing directories
+    - fallback to lower-case validated name when creating new DBs
+    """
+    n = _validate_db_name((name or "").strip())
+    n_low = n.lower()
+    try:
+        if DATABASES_DIR.exists():
+            for d in DATABASES_DIR.iterdir():
+                if d.is_dir() and d.name.lower() == n_low:
+                    return d.name
+    except Exception:
+        pass
+    if allow_missing:
+        return n_low
+    return n
+
+
 def _b64u(data: bytes) -> str:
     return base64.urlsafe_b64encode(data).decode("ascii").rstrip("=")
 
@@ -271,7 +290,7 @@ def _make_widget_token(db_name: str, expires_at: str) -> str:
     secret = _widget_signing_secret()
     if not secret:
         return ""
-    payload = {"db": db_name, "exp": expires_at or "", "v": 1}
+    payload = {"db": _canonical_db_name(db_name, allow_missing=True), "exp": expires_at or "", "v": 1}
     payload_b64 = _b64u(json.dumps(payload, separators=(",", ":"), ensure_ascii=True).encode("utf-8"))
     sig = hmac.new(secret.encode("utf-8"), payload_b64.encode("ascii"), hashlib.sha256).digest()
     sig_b64 = _b64u(sig)
@@ -294,7 +313,7 @@ def _parse_widget_token(key: str) -> tuple[str, str]:
         if not hmac.compare_digest(expected_sig, sig_b64):
             return "", "invalid"
         payload = json.loads(_b64u_dec(payload_b64).decode("utf-8"))
-        db_name = str(payload.get("db", "") or "").strip()
+        db_name = _canonical_db_name(str(payload.get("db", "") or "").strip())
         expires_at = str(payload.get("exp", "") or "")
         if not db_name:
             return "", "invalid"
@@ -316,7 +335,10 @@ def _resolve_widget_key(key: str) -> tuple[str, str]:
     cached_valid_db = ""
     cached = _widget_key_cache.get(key)
     if isinstance(cached, dict):
-        _db = str(cached.get("db") or "")
+        try:
+            _db = _canonical_db_name(str(cached.get("db") or "").strip())
+        except Exception:
+            _db = str(cached.get("db") or "").strip()
         _exp = str(cached.get("expires_at") or "")
         if _db:
             if _exp and _widget_key_is_expired(_exp):
@@ -326,7 +348,10 @@ def _resolve_widget_key(key: str) -> tuple[str, str]:
             cached_valid_db = _db
     elif isinstance(cached, str) and cached:
         # backward compatibility for old cache shape
-        cached_valid_db = cached
+        try:
+            cached_valid_db = _canonical_db_name(str(cached).strip())
+        except Exception:
+            cached_valid_db = str(cached).strip()
     if not DATABASES_DIR.exists():
         return "", "invalid"
     # Local untracked fallback store (survives process restarts when secrets sync lags).
@@ -340,8 +365,12 @@ def _resolve_widget_key(key: str) -> tuple[str, str]:
             exp = str(_meta.get("widget_key_expires_at") or "")
             if exp and _widget_key_is_expired(exp):
                 return "", "expired"
-            _widget_key_cache[key] = {"db": str(_dbn), "expires_at": exp}
-            return str(_dbn), "valid"
+            try:
+                _dbn2 = _canonical_db_name(str(_dbn).strip())
+            except Exception:
+                _dbn2 = str(_dbn).strip()
+            _widget_key_cache[key] = {"db": _dbn2, "expires_at": exp}
+            return _dbn2, "valid"
     except Exception:
         pass
     for db_dir in DATABASES_DIR.iterdir():
@@ -398,6 +427,7 @@ def _persist_widget_key_local(db_name: str, widget_key: str, created_at: str, ex
     try:
         if not db_name or not widget_key:
             return
+        db_name = _canonical_db_name(db_name, allow_missing=True)
         data = _load_widget_key_store()
         data[db_name] = {
             "widget_key": widget_key,
@@ -1157,7 +1187,7 @@ def _extract_admin_db(request: Request, fallback: str = "") -> str:
           or request.query_params.get("db_name", "")
           or fallback)
     db = db.strip() or _get_active_db()
-    return _validate_db_name(db) if db else ""
+    return _canonical_db_name(db) if db else ""
 
 async def _get_intro_questions(db_name: str, db, cfg) -> list:
     """Return 4 quick-reply suggestions for the active DB.
@@ -6651,7 +6681,7 @@ async def create_db(request: Request, password: str = Form(...), name: str = For
     cfg = get_config()
     try: admin_auth(password, cfg)
     except HTTPException: return JSONResponse({"detail": "Unauthorized"}, status_code=401)
-    try: db_name = _validate_db_name(name.lower())
+    try: db_name = _canonical_db_name(name, allow_missing=True)
     except HTTPException: return JSONResponse({"detail": "Invalid database name"}, status_code=400)
     db_path = DATABASES_DIR / db_name
     db_path.mkdir(parents=True, exist_ok=True)
@@ -6691,7 +6721,7 @@ async def create_db(request: Request, password: str = Form(...), name: str = For
 @app.post("/admin/delete-db")
 async def delete_db(request: Request, password: str = Form(...), name: str = Form(...)):
     password = _extract_password(request, password)
-    try: db_name_req = _validate_db_name(name.lower())
+    try: db_name_req = _canonical_db_name(name)
     except HTTPException: return JSONResponse({"detail": "Invalid database name"}, status_code=400)
     # Accept root password OR the DB's own password (client self-delete)
     admin_auth(password, get_config(db_name_req))
@@ -6739,9 +6769,9 @@ async def delete_db(request: Request, password: str = Form(...), name: str = For
 @app.post("/admin/rename-db")
 async def rename_db(request: Request, password: str = Form(...), old_name: str = Form(...), new_name: str = Form(...)):
     password = _extract_password(request, password)
-    try: old = _validate_db_name(old_name.lower().strip())
+    try: old = _canonical_db_name(old_name.strip())
     except HTTPException: return JSONResponse({"detail": "Invalid source name"}, status_code=400)
-    try: new = _validate_db_name(new_name.lower().strip())
+    try: new = _canonical_db_name(new_name.strip(), allow_missing=True)
     except HTTPException: return JSONResponse({"detail": "Invalid target name"}, status_code=400)
     admin_auth(password, get_config(old))
     if old == new: return {"success": False, "message": "Names are identical."}
