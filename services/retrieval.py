@@ -1620,6 +1620,9 @@ async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansio
     _combined_filter = None
     _max_price = None
     _has_product_meta = False
+    _meta_conds = []
+    _required_flags = {}
+    _ram_min_req = None
     _db_name_guess = str(getattr(db, "_db_name", "") or "")
     try:
         _is_product_db = bool(_check_is_product_db(db, _db_name_guess)) if db is not None else False
@@ -1633,9 +1636,6 @@ async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansio
         logger.warning(f"[META-FILTER] Sample check failed: {_pfe}")
 
     if _has_product_meta:
-        _meta_conds = []
-        _required_flags = {}   # boolean fields required post-retrieval
-        _ram_min_req = None    # RAM minimum for post-filter
         # Price
         _pm = re.search(r'(?:under|below|less\s+than|max(?:imum)?|budget\s+of|within)\s+\$?([\d,]+)', q, re.I)
         if _pm:
