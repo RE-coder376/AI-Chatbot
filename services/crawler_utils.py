@@ -56,17 +56,30 @@ def _canonical_source_url(url: str) -> str:
 
 
 def _check_is_product_db(db, db_name: str = "") -> bool:
-    """Return True if the DB collection has product metadata (price/ram_gb/gpu_vram_gb).
+    """Return True if the DB collection looks like a product/catalog DB.
     Result cached per db_name so the sample query runs at most once per DB."""
     if db_name and db_name in _product_db_cache:
         return _product_db_cache[db_name]
     result = False
     if db:
         try:
-            sample = db._collection.get(limit=1, include=["metadatas"])
-            if sample and sample.get("metadatas") and sample["metadatas"][0]:
-                m = sample["metadatas"][0]
-                result = m.get("price") is not None or m.get("ram_gb") is not None or m.get("gpu_vram_gb") is not None
+            sample = db._collection.get(limit=24, include=["documents", "metadatas"])
+            docs = sample.get("documents") or []
+            metas = sample.get("metadatas") or []
+            for i, m in enumerate(metas):
+                m = m or {}
+                text = str(docs[i] if i < len(docs) else "" or "")
+                source = str(m.get("source") or "").lower()
+                if m.get("price") is not None or m.get("ram_gb") is not None or m.get("gpu_vram_gb") is not None:
+                    result = True
+                    break
+                if "/products/" in source or "/collections/" in source:
+                    result = True
+                    break
+                tl = text.lower()
+                if ("rs." in tl or "pkr" in tl or "$" in tl) and ("add to cart" in tl or "shopping cart" in tl):
+                    result = True
+                    break
         except Exception:
             pass
     if db_name:
