@@ -5,9 +5,11 @@ No shared mutable app state. Safe to import from anywhere.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import urllib.parse
+from datetime import datetime, timezone
 from typing import Any
 
 from services.safety import (
@@ -283,6 +285,8 @@ def _prepare_crawl_page(text: str, url: str, title_hint: str = "") -> tuple[str,
     had_boilerplate = cleaned != raw and bool(_BOILERPLATE_SIGNAL_RE.search(raw))
     structural = _looks_structural_page(url, cleaned)
     page_type = _classify_page_type(url, cleaned, product_like, structural)
+    now_iso = datetime.now(timezone.utc).isoformat()
+    content_hash = hashlib.sha256(cleaned.encode("utf-8", errors="ignore")).hexdigest() if cleaned else ""
     meta = {
         "structural": structural,
         "page_type": page_type,
@@ -291,6 +295,10 @@ def _prepare_crawl_page(text: str, url: str, title_hint: str = "") -> tuple[str,
         "body_fallback_used": False,
         "had_boilerplate": had_boilerplate,
         "extraction_mode": "body_text",
+        "crawled_at": now_iso,
+        "last_verified_at": now_iso,
+        "source_status": "live",
+        "content_hash": content_hash,
     }
     if product_like:
         product = _extract_product_summary(cleaned, url, title_hint=title_hint)
@@ -426,6 +434,9 @@ def _smart_chunk_page(text: str, url: str, chunk_size: int = 400, chunk_step: in
     page_meta = page_meta or {}
     _canon_source = _canonical_source_url(str((page_meta or {}).get("source_canonical") or url or ""))
     _base_meta = {"source": (_canon_source or url), "source_canonical": (_canon_source or str(url or ""))}
+    for _k in ("crawled_at", "last_verified_at", "source_status", "content_hash"):
+        if page_meta.get(_k) is not None:
+            _base_meta[_k] = page_meta.get(_k)
     if page_meta.get("structural"):
         _base_meta["structural"] = True
     if page_meta.get("contaminated"):
@@ -451,6 +462,16 @@ def _smart_chunk_page(text: str, url: str, chunk_size: int = 400, chunk_step: in
         _base_meta["extraction_mode"] = page_meta.get("extraction_mode")
     _base_meta["dedup_applied"] = False
 
+    def _finalize_docs(out_docs: list) -> list:
+        for _idx, _doc in enumerate(out_docs or []):
+            _m = dict(getattr(_doc, "metadata", None) or {})
+            _m["chunk_index"] = int(_idx)
+            _m["section_id"] = str(_m.get("section_id") or f"s{_idx}")
+            _sample = str(getattr(_doc, "page_content", "") or "")
+            _m["chunk_hash"] = hashlib.sha256(_sample.encode("utf-8", errors="ignore")).hexdigest()
+            _doc.metadata = _m
+        return out_docs
+
     product_meta = page_meta.get("product") or {}
     if page_meta.get("page_type") == "product" and product_meta.get("title") and (product_meta.get("price_label") or product_meta.get("description")):
         lines = [f"Product: {product_meta['title']}"]
@@ -472,7 +493,7 @@ def _smart_chunk_page(text: str, url: str, chunk_size: int = 400, chunk_step: in
         _prod_meta["body_fallback_used"] = bool(product_meta.get("body_fallback_used"))
         _prod_meta.update(_extract_product_metadata(_prod_text))
         docs.append(Document(page_content=_prod_text, metadata=_prod_meta))
-        return _merge_variant_docs(docs)
+        return _finalize_docs(_merge_variant_docs(docs))
 
     # ── Mode 1: product page ──────────────────────────────────────────────────
     if len(_PROD_PRICE_RE.findall(clean)) >= 1 and _PROD_SPEC_RE.search(clean):
@@ -533,9 +554,10 @@ def _smart_chunk_page(text: str, url: str, chunk_size: int = 400, chunk_step: in
                 _prod_meta = dict(_base_meta)
                 _prod_meta.update({"price": price_num, "product_title": name})
                 _prod_meta.update(_extract_product_metadata(_prod_text))
+                _prod_meta["section_id"] = f"product_{len(docs)}"
                 docs.append(Document(page_content=_prod_text, metadata=_prod_meta))
             if docs:
-                return _merge_variant_docs(docs)
+                return _finalize_docs(_merge_variant_docs(docs))
 
     # ── Mode 2: FAQ / section page ────────────────────────────────────────────
     sections = _FAQ_SPLIT_RE.split(clean)
@@ -543,9 +565,11 @@ def _smart_chunk_page(text: str, url: str, chunk_size: int = 400, chunk_step: in
         for sec in sections:
             sec = sec.strip()
             if len(sec) > 40:
-                docs.append(Document(page_content=sec[:2000], metadata=dict(_base_meta)))
+                _m2 = dict(_base_meta)
+                _m2["section_id"] = f"faq_{len(docs)}"
+                docs.append(Document(page_content=sec[:2000], metadata=_m2))
         if docs:
-            return docs
+            return _finalize_docs(docs)
 
     # ── Mode 2.5: bullet/list page ────────────────────────────────────────────
     # Preserve newline structure for outcomes/checklists/release notes. Generic
@@ -562,14 +586,18 @@ def _smart_chunk_page(text: str, url: str, chunk_size: int = 400, chunk_step: in
                 if len(ln) > 500:
                     continue
                 if buf and (buf_chars + len(ln) + 1 > 2000):
-                    docs.append(Document(page_content="\n".join(buf).strip(), metadata=dict(_base_meta)))
+                    _m3 = dict(_base_meta)
+                    _m3["section_id"] = f"list_{len(docs)}"
+                    docs.append(Document(page_content="\n".join(buf).strip(), metadata=_m3))
                     buf, buf_chars = [], 0
                 buf.append(ln)
                 buf_chars += len(ln) + 1
             if buf:
-                docs.append(Document(page_content="\n".join(buf).strip(), metadata=dict(_base_meta)))
+                _m4 = dict(_base_meta)
+                _m4["section_id"] = f"list_{len(docs)}"
+                docs.append(Document(page_content="\n".join(buf).strip(), metadata=_m4))
             if docs:
-                return docs
+                return _finalize_docs(docs)
     except Exception:
         pass
 
@@ -578,10 +606,12 @@ def _smart_chunk_page(text: str, url: str, chunk_size: int = 400, chunk_step: in
     for j in range(0, max(1, len(words)), chunk_step):
         chunk = " ".join(words[j:j + chunk_size])
         if len(chunk) > 20:
-            docs.append(Document(page_content=chunk, metadata=dict(_base_meta)))
+            _m5 = dict(_base_meta)
+            _m5["section_id"] = f"generic_{len(docs)}"
+            docs.append(Document(page_content=chunk, metadata=_m5))
         if j + chunk_size >= len(words):
             break
-    return docs
+    return _finalize_docs(docs)
 
 
 def _extract_product_metadata(text: str) -> dict:

@@ -1097,6 +1097,9 @@ async def _extract_search_entity(q: str) -> str:
 def _retrieval_visible_doc(doc) -> bool:
     meta = (getattr(doc, "metadata", None) or {})
     source = str(meta.get("source") or "")
+    src_status = str(meta.get("source_status") or "").strip().lower()
+    if src_status in {"removed", "deleted"}:
+        return False
     # Structural exclusion: use URL pattern (reliable) rather than stale metadata flags
     # (metadata was written by older crawler versions that had false-positive structural
     # detection on Docusaurus/educational pages — "skip to main content" nav landmark).

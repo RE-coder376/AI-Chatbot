@@ -645,6 +645,88 @@ def _evict_sources_from_db(db_inst, dead_urls: list[str]):
         pass
 
 
+def _mark_sources_status(db_inst, urls: list[str], status: str = "removed"):
+    """Best-effort metadata status update for source URLs across all chunks."""
+    try:
+        if not db_inst or not urls:
+            return
+        coll = getattr(db_inst, "_collection", None)
+        if coll is None:
+            return
+        now_iso = datetime.now(timezone.utc).isoformat()
+        for u in list(dict.fromkeys(urls))[:64]:
+            try:
+                rows = coll.get(where={"source": str(u)}, include=["metadatas"])
+            except Exception:
+                rows = None
+            ids = list((rows or {}).get("ids") or [])
+            metas = list((rows or {}).get("metadatas") or [])
+            if not ids:
+                continue
+            new_metas = []
+            for m in metas:
+                mm = dict(m or {})
+                mm["source_status"] = str(status or "removed")
+                mm["last_verified_at"] = now_iso
+                if status in {"removed", "archived"} and ("archived_at" not in mm):
+                    mm["archived_at"] = now_iso
+                new_metas.append(mm)
+            try:
+                coll.update(ids=ids, metadatas=new_metas)
+            except Exception:
+                continue
+    except Exception:
+        pass
+
+
+def _reconcile_missing_sources(db_inst, live_urls: list[str], base_url: str):
+    """Mark previously indexed same-site sources as removed when absent from latest crawl URL set."""
+    try:
+        if not db_inst or not live_urls or not base_url:
+            return
+        import urllib.parse as _up
+        coll = getattr(db_inst, "_collection", None)
+        if coll is None:
+            return
+        base_host = (_up.urlparse(str(base_url)).netloc or "").lower()
+        if base_host.startswith("www."):
+            base_host = base_host[4:]
+        live = set(str(u).strip() for u in live_urls if str(u).startswith(("http://", "https://")))
+        if not live:
+            return
+        # Page through ids+metadatas to avoid huge single payloads.
+        off = 0
+        batch = 800
+        stale_urls = set()
+        while True:
+            try:
+                rows = coll.get(limit=batch, offset=off, include=["metadatas"])
+            except Exception:
+                break
+            ids = list((rows or {}).get("ids") or [])
+            metas = list((rows or {}).get("metadatas") or [])
+            if not ids:
+                break
+            for m in metas:
+                src = str((m or {}).get("source") or "").strip()
+                if not src.startswith(("http://", "https://")):
+                    continue
+                host = (_up.urlparse(src).netloc or "").lower()
+                if host.startswith("www."):
+                    host = host[4:]
+                if host != base_host:
+                    continue
+                if src not in live:
+                    stale_urls.add(src)
+            off += len(ids)
+            if len(ids) < batch:
+                break
+        if stale_urls:
+            _mark_sources_status(db_inst, list(stale_urls), "removed")
+    except Exception:
+        pass
+
+
 async def _live_site_query_rescue_context(q: str, cfg: dict, max_urls: int = 3, max_chars: int = 9000) -> tuple[str, list[str]]:
     """Universal fallback: pull likely pages from sitemap when vector retrieval misses."""
     try:
@@ -2586,7 +2668,9 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
         sources = await _filter_live_sources(sources or [], max_check=6, fail_open=False)
         _dead_sources = [u for u in _pre_sources if u not in set(sources or [])]
         if _dead_sources and _local_db is not None:
-            _run_in_bg(_evict_sources_from_db, _local_db, _dead_sources)
+            _run_in_bg(_mark_sources_status, _local_db, _dead_sources, "removed")
+            if bool(cfg.get("purge_removed_sources", False)):
+                _run_in_bg(_evict_sources_from_db, _local_db, _dead_sources)
         _trace_event(workflow_trace, "strict_sources_post_filter", source_count=len(sources or []), sample=list((sources or [])[:5]))
     _trace_decision(workflow_debug, "retrieval_doc_count", int(doc_count or 0))
     _trace_decision(workflow_debug, "retrieval_source_count", len(sources or []))
@@ -3600,7 +3684,9 @@ async def chat(request: Request):
             sources = await _filter_live_sources(sources or [], max_check=6, fail_open=False)
             _dead_sources = [u for u in _pre_sources if u not in set(sources or [])]
             if _dead_sources and tenant_db_instance is not None:
-                _run_in_bg(_evict_sources_from_db, tenant_db_instance, _dead_sources)
+                _run_in_bg(_mark_sources_status, tenant_db_instance, _dead_sources, "removed")
+                if bool(cfg.get("purge_removed_sources", False)):
+                    _run_in_bg(_evict_sources_from_db, tenant_db_instance, _dead_sources)
         try:
             workflow_debug["answer_artifacts"]["retrieve_doc_count"] = int(doc_count or 0)
             workflow_debug["answer_artifacts"]["retrieve_sources_count"] = int(len(sources or []))
@@ -9203,6 +9289,14 @@ async def crawl_site(data: dict, request: Request):
                 logger.info(f"[POST-CRAWL] local_db reloaded from disk: {_cnt_after} chunks")
                 # Re-prime BM25 cache with updated chunks (evicted above at line 8865)
                 asyncio.create_task(_prewarm_bm25())
+            # Reconcile removed/missing sources against the latest crawl URL set.
+            try:
+                _live_urls = [_canonical_source_url(u) for u in (to_crawl or []) if str(u).startswith(("http://", "https://"))]
+                _target_db = local_db if (db_name == _active_now and local_db is not None) else (_db_instance_cache.get(db_name) or None)
+                if _target_db is not None and _live_urls:
+                    _run_in_bg(_reconcile_missing_sources, _target_db, _live_urls, base)
+            except Exception:
+                pass
             yield _send(f"🔄 DB reloaded in memory — no restart needed.")
             yield _send(f"✅ Done! {total_chunks} chunks ingested into '{db_name}'.")
             _write_crawl_status(db_name, "success")
