@@ -264,6 +264,76 @@ def _github_sync_download(load_db_callback=None):
         logger.error(f"[GH-SYNC] Download error: {e}")
 
 
+def _github_sync_download_one(db_name: str) -> bool:
+    """Download and extract one DB zip from the GitHub release."""
+    import zipfile
+    import requests as _req
+
+    db_name = (db_name or "").strip()
+    if not db_name:
+        return False
+    pat = os.environ.get("GITHUB_PAT", "").strip()
+    if not pat:
+        logger.warning("[GH-SYNC] Cannot restore %s: no GITHUB_PAT set", db_name)
+        return False
+    DATABASES_DIR.mkdir(exist_ok=True)
+    api_hdr = {"Authorization": f"token {pat}", "User-Agent": "chatbot-sync"}
+    bin_hdr = {**api_hdr, "Accept": "application/octet-stream"}
+    tmp_zip = Path(f"/tmp/{db_name}_single_sync.zip")
+    try:
+        release_url = f"https://api.github.com/repos/{_GITHUB_USERNAME}/{_GITHUB_REPO}/releases/tags/databases-latest"
+        resp = _req.get(release_url, headers=api_hdr, timeout=30)
+        if resp.status_code != 200:
+            logger.warning("[GH-SYNC] Single restore release fetch failed for %s: %s", db_name, resp.status_code)
+            return False
+        asset = next((a for a in resp.json().get("assets", []) if a.get("name") == f"{db_name}.zip"), None)
+        if not asset:
+            logger.warning("[GH-SYNC] Single restore missing asset: %s.zip", db_name)
+            return False
+        asset_url = f"https://api.github.com/repos/{_GITHUB_USERNAME}/{_GITHUB_REPO}/releases/assets/{asset['id']}"
+        logger.info("[GH-SYNC] Single restore downloading %s.zip (%.1fMB)", db_name, asset.get("size", 0) / 1024 / 1024)
+        with _req.get(asset_url, headers=bin_hdr, stream=True, timeout=600) as r:
+            r.raise_for_status()
+            with open(tmp_zip, "wb") as fout:
+                for chunk in r.iter_content(chunk_size=65536):
+                    if chunk:
+                        fout.write(chunk)
+        db_extract_dir = DATABASES_DIR / db_name
+        db_extract_dir.mkdir(parents=True, exist_ok=True)
+        with zipfile.ZipFile(tmp_zip, "r") as z:
+            for member in z.namelist():
+                rel = member[len(db_name) + 1:] if member.startswith(f"{db_name}/") else member
+                rel = rel.replace("\\", "/")
+                if not rel:
+                    continue
+                dest = db_extract_dir / rel
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                if member.endswith("/"):
+                    dest.mkdir(exist_ok=True)
+                    continue
+                if rel == "config.json" and dest.exists():
+                    continue
+                tmp_dest = dest.with_name(dest.name + ".tmp_sync")
+                with z.open(member) as src, open(tmp_dest, "wb") as dst:
+                    while True:
+                        buf = src.read(65536)
+                        if not buf:
+                            break
+                        dst.write(buf)
+                os.replace(str(tmp_dest), str(dest))
+        tmp_zip.unlink(missing_ok=True)
+        _github_sync_result["last_single_restore"] = f"{db_name} ok"
+        logger.info("[GH-SYNC] Single restore complete: %s", db_name)
+        return True
+    except Exception as e:
+        logger.warning("[GH-SYNC] Single restore failed for %s: %s", db_name, e)
+        try:
+            tmp_zip.unlink(missing_ok=True)
+        except Exception:
+            pass
+        return False
+
+
 def _github_backup_crawled_urls(db_name: str):
     """Upload crawled_urls.txt to GitHub Contents API (small file, no size limit issue).
     Called after every auto-crawl so fresh deploys don't re-crawl all pages."""

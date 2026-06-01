@@ -477,7 +477,7 @@ _status = "starting"
 from services.github_sync import (
     _GITHUB_USERNAME, _GITHUB_REPO, _GITHUB_CLONE_DIR,
     _github_sync_result, _github_repo_url, _git,
-    _github_sync_download, _github_backup_crawled_urls,
+    _github_sync_download, _github_sync_download_one, _github_backup_crawled_urls,
     _github_backup_crawl_times, _github_upload_active_db,
     _github_sync_upload, _github_sync_delete, _github_clear_db_data,
 )
@@ -3638,7 +3638,15 @@ async def chat(request: Request):
         if tenant_db_instance is None:
             # Universal self-heal: trigger restore/crawl once, then tell client to retry shortly.
             try:
-                if tenant_db_name not in _tenant_restore_inflight:
+                if os.environ.get("GITHUB_PAT", "").strip():
+                    restored_now = await asyncio.to_thread(_github_sync_download_one, tenant_db_name)
+                    if restored_now:
+                        _db_instance_cache.pop(tenant_db_name, None)
+                        tenant_db_instance = _get_db_instance(tenant_db_name)
+                        if tenant_db_instance is not None:
+                            _db_instance_cache[tenant_db_name] = tenant_db_instance
+                            _tenant_restore_inflight.discard(tenant_db_name)
+                if tenant_db_instance is None and tenant_db_name not in _tenant_restore_inflight:
                     _tenant_restore_inflight.add(tenant_db_name)
                     db_cfg = get_config(tenant_db_name)
                     if os.environ.get("GITHUB_PAT", "").strip() and _github_sync_result.get("status") != "running":
