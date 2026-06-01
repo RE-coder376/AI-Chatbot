@@ -2840,7 +2840,7 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
         yield f"data: {json.dumps({'type': 'chunk', 'content': _outcomes_ans})}\n\n"
         _lead_on = not cfg.get("disable_lead_box", False)
         _trace_artifact(workflow_debug, "final_answer", _outcomes_ans[:4000])
-        yield f"data: {json.dumps(_metadata_payload(_lead_on, sources[:5]))}\n\n"
+        yield f"data: {json.dumps(_metadata_payload(_lead_on, _preferred_sources_for_product_answer(q, sources, 5)))}\n\n"
         yield "data: {\"type\": \"done\"}\n\n"
         return
     elif _outcomes_ans:
@@ -2957,7 +2957,7 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
         yield f"data: {json.dumps({'type': 'chunk', 'content': _prod_det})}\n\n"
         _lead_on = not cfg.get("disable_lead_box", False)
         _trace_artifact(workflow_debug, "final_answer", _prod_det[:4000])
-        yield f"data: {json.dumps(_metadata_payload(_lead_on, sources[:5]))}\n\n"
+        yield f"data: {json.dumps(_metadata_payload(_lead_on, _preferred_sources_for_product_answer(q, sources, 5)))}\n\n"
         yield "data: {\"type\": \"done\"}\n\n"
         return
 
@@ -3741,7 +3741,7 @@ async def chat(request: Request):
                     _resc_ctx, _resc_src = await _live_site_query_rescue_context(q, _fallback_cfg, max_urls=5, max_chars=14000)
                     _prod_ans = _deterministic_product_catalog_answer(q, _resc_ctx or "")
                     if _prod_ans:
-                        return JSONResponse({"answer": _prod_ans, "sources": (_resc_src or [])[:5]})
+                        return JSONResponse({"answer": _prod_ans, "sources": _preferred_sources_for_product_answer(q, (_resc_src or []), 5)})
             except Exception as _tenant_live_fallback_e:
                 logger.warning(f"[TENANT-SELFHEAL] live fallback failed for '{tenant_db_name}': {_tenant_live_fallback_e}")
             return JSONResponse(
@@ -4088,7 +4088,7 @@ async def chat(request: Request):
         _is_product_db_local = _check_is_product_db(tenant_db_instance, tenant_db_name) or ("smart_search" in set(cfg.get("features", [])))
         _prod_det = _deterministic_product_catalog_answer(q, context or "")
         if _is_product_db_local and _prod_det:
-            payload = {"answer": _prod_det, "sources": (sources or [])[:5]}
+            payload = {"answer": _prod_det, "sources": _preferred_sources_for_product_answer(q, (sources or []), 5)}
             if debug_effective:
                 payload["debug"] = {
                     "workflow_trace": workflow_trace,
@@ -4153,7 +4153,7 @@ async def chat(request: Request):
 
         _prod_det = _deterministic_product_catalog_answer(q, context or "")
         if _is_product_db_local and _prod_det:
-            payload = {"answer": _prod_det, "sources": (sources or [])[:5]}
+            payload = {"answer": _prod_det, "sources": _preferred_sources_for_product_answer(q, (sources or []), 5)}
             if debug_effective:
                 payload["debug"] = {
                     "workflow_trace": workflow_trace,
@@ -4580,6 +4580,36 @@ def _deterministic_product_catalog_answer(q: str, kb_context: str, max_items: in
         return "\n".join(lines)
     except Exception:
         return None
+
+
+def _preferred_sources_for_product_answer(q: str, sources: list[str], limit: int = 5) -> list[str]:
+    try:
+        srcs = [str(s).strip() for s in (sources or []) if str(s).strip()]
+        if not srcs:
+            return []
+        ql = (q or "").lower()
+        if not re.search(r"\b(product|products|price|prices|cost|sell|available|stock|toy|toys|pen|pens|notebook|notebooks|rc|car|cars)\b", ql):
+            return srcs[:limit]
+        prod, other = [], []
+        for u in srcs:
+            ul = u.lower()
+            if any(k in ul for k in ("/product/", "/products/", "/collections/", "/category/", "/shop/")):
+                prod.append(u)
+            else:
+                other.append(u)
+        out = prod + other
+        dedup = []
+        seen = set()
+        for u in out:
+            if u in seen:
+                continue
+            seen.add(u)
+            dedup.append(u)
+            if len(dedup) >= limit:
+                break
+        return dedup
+    except Exception:
+        return (sources or [])[:limit]
 
 
 def _evidence_spans_for_answer(q: str, kb_context: str, max_spans: int = 3) -> list[str]:
