@@ -2598,7 +2598,7 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
     )
     _OOS_RE = re.compile(
         r'\b(solve|calculate|compute|evaluate|integrate|differentiate|simplify|factor|'
-        r'derivative of|integral of|what is \d|capital of|weather in|stock price|'
+        r'derivative of|integral of|capital of|weather in|stock price|'
         r'recipe for|how to cook|biryani|calories in|convert \d|square root|'
         r'who won|world cup|football|cricket|current president|prime minister of|'
         r'news about|latest news|definition of|wikipedia|synonym for|'

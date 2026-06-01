@@ -2170,6 +2170,38 @@ async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansio
     )
     if _has_productish_sources and re.search(r"\b(price|pricing|cost|how much|sku|size|color|pack|piece|pieces)\b", q, re.I):
         top.sort(key=lambda r: _product_query_rerank_score(q, r), reverse=True)
+
+    # Language-aware source preference:
+    # For English queries, avoid mixing romanized/transliterated duplicates when
+    # an equivalent non-roman page is present in the candidate set.
+    try:
+        _q_is_englishish = (not _is_urdu_script(q or "")) and bool(re.search(r"[A-Za-z]", q or ""))
+        if _q_is_englishish and top:
+            def _canon_src(_u: str) -> str:
+                _u = str(_u or "")
+                _u = _u.replace("/roman/docs/", "/docs/")
+                _u = _u.replace("/roman/", "/")
+                return _u
+            _picked = {}
+            _order = []
+            for _r in top:
+                _src = str((getattr(_r, "metadata", None) or {}).get("source") or "")
+                _key = _canon_src(_src)
+                _is_roman = ("/roman/" in _src)
+                if _key not in _picked:
+                    _picked[_key] = _r
+                    _order.append(_key)
+                    continue
+                _prev = _picked[_key]
+                _prev_src = str((getattr(_prev, "metadata", None) or {}).get("source") or "")
+                _prev_is_roman = ("/roman/" in _prev_src)
+                if _prev_is_roman and not _is_roman:
+                    _picked[_key] = _r
+            _top2 = [_picked[k] for k in _order if k in _picked]
+            if _top2:
+                top = _top2
+    except Exception:
+        pass
     sources = []
     for r in top:
         src = r.metadata.get("source", "")
