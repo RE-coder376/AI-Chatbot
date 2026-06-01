@@ -888,6 +888,20 @@ def _question_heading_anchors(q: str, title_phrase: str = "") -> list[str]:
     return out
 
 
+def _extract_focus_phrase(q: str) -> str:
+    try:
+        qq = (q or "").strip()
+        m = re.search(r"\bwhat\s+(?:is|does)\s+(.+?)(?:\?|$)", qq, re.I)
+        if not m:
+            return ""
+        phrase = m.group(1).strip()
+        phrase = re.sub(r"\b(?:used for|use for|do|does|mean|means|evaluate|test|simulate|trying to detect)\b.*$", "", phrase, flags=re.I).strip()
+        phrase = re.sub(r"^[Tt]he\s+", "", phrase).strip()
+        return phrase[:120]
+    except Exception:
+        return ""
+
+
 def _evidence_rerank_score(doc, q: str, title_phrase: str) -> float:
     """Evidence-first score: exact title/heading/anchor hits before broad semantic hits."""
     try:
@@ -986,6 +1000,12 @@ def _heuristic_rerank_score(doc, q: str, title_phrase: str) -> float:
                 score -= 12.0
             if "/docs/" not in sl:
                 score -= 6.0
+        # For English queries, prefer canonical /docs over romanized paths to reduce mixed-language context.
+        if (not _is_urdu_script(q or "")) and bool(re.search(r"[A-Za-z]", q or "")):
+            if "/roman/" in sl:
+                score -= 10.0
+            elif "/docs/" in sl:
+                score += 2.0
 
         # Penalize prompt-template blocks. These often mention many relevant keywords but
         # are not the canonical "outcomes/policy/spec" sections users ask for.
@@ -1015,6 +1035,20 @@ def _heuristic_rerank_score(doc, q: str, title_phrase: str) -> float:
                 score += t_hit * 2.5
                 t_url_hit = sum(1 for t in tks[:6] if t in sl)
                 score += t_url_hit * 1.0
+
+        # Concept-focused boost: "what is X / what does X ..."
+        _focus = _extract_focus_phrase(q)
+        if _focus:
+            _fl = _focus.lower()
+            _f_tokens = [t for t in re.findall(r"[a-zA-Z0-9]{4,}", _fl) if t not in {"what", "does", "used", "for", "mean", "means"}][:8]
+            if _fl in bl:
+                score += 10.0
+            if _fl in sl:
+                score += 7.0
+            if _f_tokens:
+                _fh = sum(1 for t in _f_tokens if t in bl)
+                _fh_url = sum(1 for t in _f_tokens if t in sl)
+                score += (_fh * 1.8) + (_fh_url * 1.6)
 
         # Reward outcome-marker docs when the question is asking for goals/learning/outcomes.
         if _OUTCOMES_INTENT_RE.search(q or ''):
@@ -2207,6 +2241,10 @@ async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansio
             _top2 = [_picked[k] for k in _order if k in _picked]
             if _top2:
                 top = _top2
+            # If English query has both roman and non-roman candidates, keep non-roman for cleaner context.
+            _non_roman = [r for r in top if "/roman/" not in str(((getattr(r, "metadata", None) or {}).get("source")) or "").lower()]
+            if _non_roman:
+                top = _non_roman
     except Exception:
         pass
     sources = []
