@@ -1620,6 +1620,11 @@ async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansio
     _combined_filter = None
     _max_price = None
     _has_product_meta = False
+    _db_name_guess = str(getattr(db, "_db_name", "") or "")
+    try:
+        _is_product_db = bool(_check_is_product_db(db, _db_name_guess)) if db is not None else False
+    except Exception:
+        _is_product_db = False
     try:
         _sample = db._collection.get(limit=1, include=["metadatas"]) if db else None
         if _sample and _sample.get("metadatas") and _sample["metadatas"][0].get("price") is not None:
@@ -1769,7 +1774,7 @@ async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansio
         # Fire policy search when: (a) query explicitly mentions policy terms, OR
         # (b) DB is a product/retail catalog (_has_product_meta) — covers "Deli Punch shipping?"
         # type queries where the user asks about a product but the answer lives in a policy chunk.
-        if _POLICY_Q_RE.search(q) or _has_product_meta:
+        if _POLICY_Q_RE.search(q) or _has_product_meta or _is_product_db:
             _policy_task = loop.run_in_executor(
                 None, lambda: db.similarity_search(
                     "shipping delivery return policy discount rules refund charges", k=5
@@ -1957,7 +1962,7 @@ async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansio
     
 
     # Heuristic rerank for non-product DBs: improves chapter/part/title lookup accuracy.
-    if not _has_product_meta and _combined_before_cap:
+    if not (_has_product_meta or _is_product_db) and _combined_before_cap:
         _title_phrase = _extract_title_phrase(q)
         chapter_no = _extract_chapter_number(q)
         part_no = _extract_part_number(q)
@@ -2041,7 +2046,7 @@ async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansio
                 key=lambda d: (1 if _has_outcome_marker(d) else 0, _heuristic_rerank_score(d, q, _title_phrase)),
                 reverse=True,
             )
-    if _has_product_meta and (_required_flags or _ram_min_req is not None or _max_price is not None):
+    if (_has_product_meta or _is_product_db) and (_required_flags or _ram_min_req is not None or _max_price is not None):
         _post_filtered = []
         for r in _combined_before_cap:
             _rm2 = r.metadata or {}
@@ -2066,7 +2071,7 @@ async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansio
 
     # Product-intent guard: favor actual catalog pages over blogs/about pages.
     # Universal behavior for ecommerce-like DBs.
-    if _has_product_meta and top:
+    if (_has_product_meta or _is_product_db) and top:
         _q_l = (q or "").lower()
         _product_intent = bool(re.search(
             r"\b(price|cost|how much|buy|available|availability|in stock|stock|show|list|best|top|affordable|under\s+\d+|pen|pencil|notebook|book|stroller|diaper|product|products)\b",
@@ -2089,7 +2094,7 @@ async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansio
                 top = _catalog_docs[:36] + _other_docs[:4]
 
     # ── Product catalog: dedup + GPU ranking ─────────────────────────────────
-    if _has_product_meta:
+    if _has_product_meta or _is_product_db:
         # Dedup: same product+price should appear only once
         _dedup_seen, _deduped = set(), []
         for r in top:
