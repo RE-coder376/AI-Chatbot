@@ -4333,6 +4333,15 @@ def _deterministic_extractive_quote_answer(q: str, kb_context: str) -> str | Non
         # Evidence-first: if we can find one explicit supporting sentence/line, return it first.
         explicit = _best_explicit_evidence_sentence(q, kb_context)
         if explicit:
+            _el = explicit.strip()
+            _el = re.sub(r"^\s*[:\-–]+\s*", "", _el)
+            _el_l = _el.lower()
+            # Reject common noisy/generic instruction-like lines.
+            if any(b in _el_l for b in ("generic knowledge", "translate", "translating", "think through", "naming conventions")):
+                explicit = None
+            else:
+                explicit = _el
+        if explicit:
             # For learning-goals style questions, single-line quote is usually insufficient;
             # let the dedicated outcomes extractor/LLM answer instead.
             if _LEARNING_GOALS_Q_RE.search(ql):
@@ -4389,7 +4398,10 @@ def _deterministic_extractive_quote_answer(q: str, kb_context: str) -> str | Non
             return None
         if re.search(r'(?im)^\s*part\s+\d+\b', window) and len(re.findall(r'(?im)^\s*part\s+\d+\b', window))>=3:
             return None
-        if any(b in window.lower() for b in ['on this page','copy as markdown','ctrl+']):
+        _wl = window.lower()
+        if any(b in _wl for b in ['on this page','copy as markdown','ctrl+']):
+            return None
+        if any(b in _wl for b in ("generic knowledge", "translating the", "think through", "naming conventions")):
             return None
         return window
     except Exception:
