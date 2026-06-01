@@ -2092,6 +2092,28 @@ async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansio
             if _catalog_docs:
                 # Keep mostly catalog docs first; retain a small tail of others for edge cases.
                 top = _catalog_docs[:36] + _other_docs[:4]
+            # Query-anchor pass: keep docs that match concrete product words in query.
+            _stop = {
+                "show", "list", "best", "top", "affordable", "price", "prices", "cost", "available",
+                "availability", "stock", "under", "with", "for", "products", "product", "have", "give",
+                "school", "use"
+            }
+            _anchors = [w.lower() for w in re.findall(r"[a-zA-Z]{4,}", _q_l) if w.lower() not in _stop][:8]
+            if _anchors:
+                _matched = []
+                _rest = []
+                for _r in top:
+                    _src = str((getattr(_r, "metadata", None) or {}).get("source") or "").lower()
+                    _txt = str(getattr(_r, "page_content", "") or "").lower()[:1400]
+                    _ok = False
+                    for _a in _anchors:
+                        _a2 = _a[:-1] if _a.endswith("s") else _a
+                        if (_a in _src) or (_a2 and _a2 in _src) or (_a in _txt) or (_a2 and _a2 in _txt):
+                            _ok = True
+                            break
+                    (_matched if _ok else _rest).append(_r)
+                if _matched:
+                    top = _matched[:34] + _rest[:6]
 
     # ── Product catalog: dedup + GPU ranking ─────────────────────────────────
     if _has_product_meta or _is_product_db:
