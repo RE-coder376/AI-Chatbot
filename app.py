@@ -2126,9 +2126,22 @@ def health():
     # HF Spaces exposes commit id in env vars; include it so we can verify deployments.
     sha = (os.getenv('SPACE_REPO_SHA') or os.getenv('HF_SPACE_REPO_SHA') or os.getenv('GIT_SHA') or '')
     space_id = (os.getenv('SPACE_ID') or os.getenv('HF_SPACE_ID') or '')
+    last_chat_error = {}
+    try:
+        if _last_chat_error:
+            last_chat_error = {
+                "ts": _last_chat_error.get("ts", ""),
+                "db": _last_chat_error.get("db", ""),
+                "stream": _last_chat_error.get("stream", ""),
+                "type": _last_chat_error.get("type", ""),
+                "error": str(_last_chat_error.get("error", ""))[:220],
+            }
+    except Exception:
+        last_chat_error = {}
 
     return {
         "status": "ok" if _status in ("ready", "ready_no_db") else _status,
+        "code_version": "product-fallback-v2",
         "active_db": active,
         "docs_indexed": doc_count,
         "keys_file": KEYS_FILE.exists(),
@@ -2136,6 +2149,7 @@ def health():
         "providers": providers,
         "any_key_ready": any_key_ready(),
         "github_sync": _github_sync_result,
+        "last_chat_error": last_chat_error,
         "git_sha": sha,
         "space_id": space_id,
     }
