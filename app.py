@@ -2931,6 +2931,20 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
             yield "data: {\"type\": \"done\"}\n\n"
             return
 
+    is_product_db = _check_is_product_db(_local_db, db_name) or ("smart_search" in set(cfg.get("features", [])))
+    _prod_det = _deterministic_product_catalog_answer(q, context or "")
+    if is_product_db and _prod_det:
+        _trace_event(workflow_trace, "guard_exit", guard="deterministic_product_catalog_answer")
+        _trace_decision(workflow_debug, "exit_guard", "deterministic_product_catalog_answer")
+        if visitor_id:
+            _run_in_bg(save_visitor_turn, visitor_id, "assistant", _prod_det, db_name)
+        yield f"data: {json.dumps({'type': 'chunk', 'content': _prod_det})}\n\n"
+        _lead_on = not cfg.get("disable_lead_box", False)
+        _trace_artifact(workflow_debug, "final_answer", _prod_det[:4000])
+        yield f"data: {json.dumps(_metadata_payload(_lead_on, sources[:5]))}\n\n"
+        yield "data: {\"type\": \"done\"}\n\n"
+        return
+
     if not _is_api_only and not context_addresses_query:
         _trace_event(workflow_trace, "guard_exit", guard="sparse_kb_context_miss", doc_count=doc_count)
         _trace_decision(workflow_debug, "exit_guard", "sparse_kb_context_miss")
@@ -2970,7 +2984,6 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
         yield "data: {\"type\": \"done\"}\n\n"
         return
 
-    is_product_db = _check_is_product_db(_local_db, db_name) or ("smart_search" in set(cfg.get("features", [])))
     _prod_det = _deterministic_product_catalog_answer(q, context or "")
     if is_product_db and _prod_det:
         _trace_event(workflow_trace, "guard_exit", guard="deterministic_product_catalog_answer")
@@ -4054,6 +4067,18 @@ async def chat(request: Request):
                 }
             return JSONResponse(payload)
 
+        _is_product_db_local = _check_is_product_db(tenant_db_instance, tenant_db_name) or ("smart_search" in set(cfg.get("features", [])))
+        _prod_det = _deterministic_product_catalog_answer(q, context or "")
+        if _is_product_db_local and _prod_det:
+            payload = {"answer": _prod_det, "sources": (sources or [])[:5]}
+            if debug_effective:
+                payload["debug"] = {
+                    "workflow_trace": workflow_trace,
+                    "guard_decisions": workflow_debug["guard_decisions"],
+                    "answer_artifacts": workflow_debug["answer_artifacts"],
+                }
+            return JSONResponse(payload)
+
         # Sparse KB guard — skip for api-only DBs so LLM can use training knowledge
         _t_api_only = (not cfg.get("crawl_url", "")) and bool(cfg.get("api_sources"))
         _ctx_hit = _context_addresses_query(context, q)
@@ -4108,7 +4133,6 @@ async def chat(request: Request):
                 }
             return JSONResponse(payload)
 
-        _is_product_db_local = _check_is_product_db(tenant_db_instance, tenant_db_name) or ("smart_search" in set(cfg.get("features", [])))
         _prod_det = _deterministic_product_catalog_answer(q, context or "")
         if _is_product_db_local and _prod_det:
             payload = {"answer": _prod_det, "sources": (sources or [])[:5]}
@@ -4454,7 +4478,7 @@ def _deterministic_product_catalog_answer(q: str, kb_context: str, max_items: in
             "stock", "under", "below", "sell", "products", "product", "toys", "have", "with",
             "best", "top", "affordable", "currently", "school", "baby", "kids"
         }
-        anchors = [w for w in re.findall(r"[a-zA-Z]{4,}", ql) if w not in stop][:10]
+        anchors = [w for w in re.findall(r"[a-zA-Z]{2,}", ql) if w not in stop][:10]
         docs = [d.strip() for d in re.split(r"\n\s*\n", kb_context or "") if d.strip()]
         items = []
         seen = set()
@@ -4467,15 +4491,6 @@ def _deterministic_product_catalog_answer(q: str, kb_context: str, max_items: in
                 continue
             if any(b in dl[:180] for b in nav_bad) and "add to cart" not in dl:
                 continue
-            if anchors:
-                hit = False
-                for a in anchors:
-                    aa = a[:-1] if a.endswith("s") else a
-                    if a in dl or (aa and aa in dl):
-                        hit = True
-                        break
-                if not hit and max_price is None:
-                    continue
             title = ""
             m = re.search(r"^\s*([^.\n]{4,90}?)(?:\s*&ndash;|\s+-\s+|\s+–\s+)", doc)
             if m:
@@ -4492,6 +4507,23 @@ def _deterministic_product_catalog_answer(q: str, kb_context: str, max_items: in
             title = re.sub(r"(?i)\s*(babyfy|stationery studio|our company)$", "", title).strip(" -:|")
             if len(title) < 3 or title.lower() in {"home page", "faq", "about us", "contact us"}:
                 continue
+            title_l = title.lower()
+            if anchors:
+                hit = False
+                for a in anchors:
+                    variants = {a}
+                    if a.endswith("s") and len(a) > 3:
+                        variants.add(a[:-1])
+                    if a == "rc":
+                        variants.update({"remote", "control"})
+                    for v in variants:
+                        if re.search(rf"\b{re.escape(v)}\b", title_l):
+                            hit = True
+                            break
+                    if hit:
+                        break
+                if not hit and max_price is None:
+                    continue
             prices = []
             for raw in re.findall(r"Rs\.?\s*([\d,]+(?:\.\d{1,2})?)", doc, re.I):
                 try:
