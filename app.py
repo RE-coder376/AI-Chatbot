@@ -2956,7 +2956,7 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
         yield "data: {\"type\": \"done\"}\n\n"
         return
 
-    is_product_db = _check_is_product_db(_local_db, db_name)
+    is_product_db = _check_is_product_db(_local_db, db_name) or ("smart_search" in set(cfg.get("features", [])))
     _prod_det = _deterministic_product_catalog_answer(q, context or "")
     if is_product_db and _prod_det:
         _trace_event(workflow_trace, "guard_exit", guard="deterministic_product_catalog_answer")
@@ -4078,7 +4078,7 @@ async def chat(request: Request):
                 }
             return JSONResponse(payload)
 
-        _is_product_db_local = _check_is_product_db(tenant_db_instance, tenant_db_name)
+        _is_product_db_local = _check_is_product_db(tenant_db_instance, tenant_db_name) or ("smart_search" in set(cfg.get("features", [])))
         _prod_det = _deterministic_product_catalog_answer(q, context or "")
         if _is_product_db_local and _prod_det:
             payload = {"answer": _prod_det, "sources": (sources or [])[:5]}
