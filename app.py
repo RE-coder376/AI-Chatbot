@@ -771,6 +771,10 @@ async def _live_site_query_rescue_context(q: str, cfg: dict, max_urls: int = 3, 
             "what", "which", "when", "where", "why", "how", "from", "with", "that", "this", "according",
             "chapter", "part", "title", "book", "the"
         }][:10]
+        def _slugify(s: str) -> str:
+            return re.sub(r"-+", "-", re.sub(r"[^a-z0-9]+", "-", (s or "").lower())).strip("-")
+        exact_slug = _slugify(title_phrase or "")
+        alt_slug = _slugify(re.sub(r"^(?:the|a|an)\s+", "", title_phrase or "", flags=re.I))
         q_tokens = [t for t in re.findall(r"[a-zA-Z0-9]{3,}", ql) if t not in {
             "what", "which", "when", "where", "why", "how", "from", "with", "that", "this", "according", "chapter", "part"
         }][:16]
@@ -811,6 +815,11 @@ async def _live_site_query_rescue_context(q: str, cfg: dict, max_urls: int = 3, 
                 pu = _up.urlparse(str(u))
                 path = (pu.path or "").lower()
                 score = 0.0
+                if exact_slug:
+                    if exact_slug and (exact_slug in ul or exact_slug in path):
+                        score += 18.0
+                    if alt_slug and (alt_slug in ul or alt_slug in path):
+                        score += 12.0
                 if "/docs/" in ul:
                     score += 2.0
                 if product_intent:
