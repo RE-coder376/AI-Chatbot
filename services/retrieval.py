@@ -1510,9 +1510,22 @@ async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansio
     search_queries = expand_query(q)
 
     _title_phrase = _extract_title_phrase(q)
+    _scope_phrase = _extract_scope_phrase(q)
+    _focus_phrase = _extract_focus_phrase(q)
     _is_outcomes_intent = bool(_OUTCOMES_INTENT_RE.search(q))
     if _title_phrase and all(_title_phrase.lower() != str(sq).lower() for sq in search_queries):
         search_queries.insert(0, _title_phrase)
+    if _strict_scope_q and _scope_phrase:
+        _combo_qs = [_scope_phrase]
+        if _focus_phrase:
+            _combo_qs.extend([
+                f"{_scope_phrase} {_focus_phrase}",
+                f"{_focus_phrase} {_scope_phrase}",
+            ])
+        for _cq in _combo_qs:
+            _cq = re.sub(r"\s+", " ", (_cq or "").strip())
+            if _cq and all(_cq.lower() != str(sq).lower() for sq in search_queries):
+                search_queries.insert(0, _cq)
 
     # Outcomes-marker-first retrieval: add explicit markers as query variants so we pull the actual
     # learning outcomes list instead of generic book/TOC pages.
