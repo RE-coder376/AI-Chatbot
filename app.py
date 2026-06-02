@@ -3106,21 +3106,29 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
     # ── Sparse KB guard — skip for api-only DBs (no KB, LLM uses training knowledge) ──
     # Deterministic strict-scope factual extractor (non-goals).
     # For chapter/part factual prompts, prefer direct evidence-built answers before LLM synthesis.
-    if _is_strict_scope_query(q) and (not _LEARNING_GOALS_Q_RE.search(q)):
-        if not _context_has_scope_anchor(context or "", q):
-            try:
-                _probe_fact, _probe_src = await _live_site_strict_scope_probe(q, cfg, max_urls=8)
-                if _probe_fact:
-                    context = _probe_fact
-                    doc_count = max(int(doc_count or 0), 1)
-                    if _probe_src:
-                        sources = list(dict.fromkeys(_probe_src))[:8]
-                    context_addresses_query = True
-                    _trace_event(workflow_trace, "retrieve_live_rescue", rescued=True, source_count=len(_probe_src or []), context_chars=len(_probe_fact or ""))
-                    workflow_debug["guard_decisions"]["live_rescue_used"] = True
-            except Exception:
-                pass
-        _sf = _deterministic_scoped_fact_answer(q, context or "")
+        if _is_strict_scope_query(q) and (not _LEARNING_GOALS_Q_RE.search(q)):
+            if not _context_has_scope_anchor(context or "", q):
+                try:
+                    _probe_fact, _probe_src = await _live_site_strict_scope_probe(q, cfg, max_urls=8)
+                    if _probe_fact:
+                        context = _probe_fact
+                        doc_count = max(int(doc_count or 0), 1)
+                        if _probe_src:
+                            sources = list(dict.fromkeys(_probe_src))[:8]
+                        context_addresses_query = True
+                        _trace_event(workflow_trace, "retrieve_live_rescue", rescued=True, source_count=len(_probe_src or []), context_chars=len(_probe_fact or ""))
+                        workflow_debug["guard_decisions"]["live_rescue_used"] = True
+                        if visitor_id:
+                            _run_in_bg(save_visitor_turn, visitor_id, "assistant", _probe_fact, db_name)
+                        yield f"data: {json.dumps({'type': 'chunk', 'content': _probe_fact})}\n\n"
+                        _lead_on = not cfg.get("disable_lead_box", False)
+                        _trace_artifact(workflow_debug, "final_answer", _probe_fact[:4000])
+                        yield f"data: {json.dumps(_metadata_payload(_lead_on, (sources or [])[:5]))}\n\n"
+                        yield "data: {\"type\": \"done\"}\n\n"
+                        return
+                except Exception:
+                    pass
+            _sf = _deterministic_scoped_fact_answer(q, context or "")
         if (_sf is None) and _local_db:
             try:
                 _ctx_sf2, _dc_sf2, _src_sf2 = await retrieve_context(
@@ -4174,6 +4182,18 @@ async def chat(request: Request):
                             sources = list(dict.fromkeys(_probe_src))[:8]
                         _trace_event(workflow_trace, "retrieve_live_rescue", rescued=True, source_count=len(_probe_src or []), context_chars=len(_probe_fact or ""))
                         workflow_debug["guard_decisions"]["live_rescue_used"] = True
+                        payload = {
+                            "answer": _probe_fact,
+                            "sources": (sources or [])[:5],
+                            "evidence_spans": _evidence_spans_for_answer(q, _probe_fact or ""),
+                        }
+                        if debug_effective:
+                            payload["debug"] = {
+                                "workflow_trace": workflow_trace,
+                                "guard_decisions": workflow_debug["guard_decisions"],
+                                "answer_artifacts": workflow_debug["answer_artifacts"],
+                            }
+                        return JSONResponse(payload)
                 except Exception:
                     pass
             _sf = _deterministic_scoped_fact_answer(q, context or "")
