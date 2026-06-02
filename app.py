@@ -2275,6 +2275,120 @@ def _context_has_scope_anchor(context: str, q: str) -> bool:
     return True
 
 
+def _extract_scope_phrase(q: str) -> str:
+    try:
+        m = re.search(r"^\s*in\s+([^,\n]{6,200})\s*,\s*(?:what|why|how|which|who|when)\b", q or "", re.I)
+        if not m:
+            return ""
+        return re.sub(r"\s{2,}", " ", m.group(1).strip().strip('"\'')).strip()[:120]
+    except Exception:
+        return ""
+
+
+def _extract_focus_phrase(q: str) -> str:
+    try:
+        qq = (q or "").strip()
+        m = re.search(r"\bwhat\s+(?:is|does|happens in)\s+(.+?)(?:\?|$)", qq, re.I)
+        if not m:
+            return ""
+        phrase = m.group(1).strip()
+        phrase = re.sub(r"\b(?:used for|use for|do|does|mean|means|evaluate|test|simulate|trying to detect)\b.*$", "", phrase, flags=re.I).strip()
+        phrase = re.sub(r"^[Tt]he\s+", "", phrase).strip()
+        return phrase[:120]
+    except Exception:
+        return ""
+
+
+def _strict_answer_matches_query(q: str, ans: str) -> bool:
+    try:
+        if not q or not ans:
+            return False
+        aq = (ans or "").lower()
+        scope = _extract_scope_phrase(q)
+        focus = _extract_focus_phrase(q)
+        q_terms = [w.lower() for w in re.findall(r"[a-zA-Z]{4,}", q or "") if w.lower() not in _QUERY_STOP][:10]
+        scope_terms = [w.lower() for w in re.findall(r"[a-zA-Z0-9]{4,}", scope or "")][:8]
+        focus_terms = [w.lower() for w in re.findall(r"[a-zA-Z0-9]{4,}", focus or "")][:8]
+        hits = 0
+        for t in scope_terms:
+            if t in aq:
+                hits += 1
+        for t in focus_terms:
+            if t in aq:
+                hits += 1
+        for t in q_terms:
+            if t in aq:
+                hits += 1
+        return hits >= 2
+    except Exception:
+        return False
+
+
+async def _live_site_strict_scope_probe(q: str, cfg: dict, max_urls: int = 8) -> str | None:
+    """Strict-scoped fallback for chapter/section questions when DB retrieval is weak or missing."""
+    try:
+        base = str((cfg or {}).get("crawl_url") or "").strip().rstrip("/")
+        if not base or not _is_strict_scope_query(q):
+            return None
+        scope = _extract_scope_phrase(q)
+        focus = _extract_focus_phrase(q)
+        q_terms = [w.lower() for w in re.findall(r"[a-zA-Z]{4,}", q or "") if w.lower() not in _QUERY_STOP][:10]
+        scope_terms = [w.lower() for w in re.findall(r"[a-zA-Z0-9]{4,}", scope or "")][:8]
+        focus_terms = [w.lower() for w in re.findall(r"[a-zA-Z0-9]{4,}", focus or "")][:8]
+
+        def _html_to_text(html: str) -> str:
+            h = re.sub(r"(?is)<script[^>]*>.*?</script>", " ", html or "")
+            h = re.sub(r"(?is)<style[^>]*>.*?</style>", " ", h)
+            h = re.sub(r"(?is)<noscript[^>]*>.*?</noscript>", " ", h)
+            h = re.sub(r"(?is)<[^>]+>", " ", h)
+            h = re.sub(r"\s+", " ", h)
+            return h.strip()
+
+        async with httpx.AsyncClient(timeout=10, follow_redirects=True, headers={"User-Agent": "Mozilla/5.0"}) as client:
+            sm = await client.get(f"{base}/sitemap.xml")
+            if sm.status_code != 200:
+                return None
+            locs = re.findall(r"(?is)<loc>\s*([^<\s]+)\s*</loc>", sm.text or "")
+            if not locs:
+                return None
+            scored = []
+            for u in locs[:5000]:
+                ul = str(u).lower()
+                sc = 0.0
+                if "/docs/" in ul:
+                    sc += 2.0
+                if scope_terms:
+                    sc += sum(1.2 for t in scope_terms if t in ul)
+                if focus_terms:
+                    sc += sum(1.4 for t in focus_terms if t in ul)
+                if q_terms:
+                    sc += sum(0.7 for t in q_terms if t in ul)
+                if any(b in ul for b in ("/quiz", "/chapter-quiz", "/certifications", "/about")):
+                    sc -= 2.5
+                if sc > 0:
+                    scored.append((sc, u))
+            scored.sort(key=lambda x: x[0], reverse=True)
+            for _, u in scored[:max_urls]:
+                try:
+                    r = await client.get(str(u))
+                    if r.status_code != 200:
+                        continue
+                    txt = _html_to_text(r.text or "")
+                    if len(txt) < 120:
+                        continue
+                    ans = _deterministic_scoped_fact_answer(q, txt)
+                    if ans and _strict_answer_matches_query(q, ans):
+                        return ans
+                    explicit = _best_explicit_evidence_sentence(q, txt)
+                    if explicit and _strict_answer_matches_query(q, explicit):
+                        return explicit
+                except Exception:
+                    continue
+    except Exception:
+        return None
+    return None
+
+
 def _is_strict_scope_with_dead_sources(q: str, sources: list[str], cfg: dict) -> bool:
     try:
         if not _is_strict_scope_query(q):
@@ -2938,6 +3052,16 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
                     )
             except Exception as _sf_re2:
                 logger.debug(f"[RETRIEVAL] strict fact retry failed: {_sf_re2}")
+        if _sf is None:
+            try:
+                _probe_fact = await _live_site_strict_scope_probe(q, cfg, max_urls=8)
+                if _probe_fact:
+                    _sf = _probe_fact
+                    context_addresses_query = True
+                    _trace_event(workflow_trace, "retrieval_live_rescue", rescued=True, source_count=0, context_chars=len(_probe_fact or ""))
+                    _trace_decision(workflow_debug, "live_rescue_used", True)
+            except Exception as _sf_live_re2:
+                logger.debug(f"[RETRIEVAL] strict live probe failed: {_sf_live_re2}")
         if _sf:
             _trace_event(workflow_trace, "guard_exit", guard="deterministic_strict_scoped_fact_extractor")
             _trace_decision(workflow_debug, "exit_guard", "deterministic_strict_scoped_fact_extractor")
