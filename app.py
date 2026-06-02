@@ -3215,6 +3215,16 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
 
     is_product_db = _check_is_product_db(_local_db, db_name) or ("smart_search" in set(cfg.get("features", [])))
     _prod_det = _deterministic_product_catalog_answer(q, context or "")
+    if is_product_db and not _prod_det and str(cfg.get("crawl_url") or "").strip():
+        try:
+            _prod_resc_ctx, _prod_resc_src = await _live_site_query_rescue_context(q, cfg, max_urls=5, max_chars=14000)
+            if _prod_resc_ctx:
+                context = _prod_resc_ctx
+                if _prod_resc_src:
+                    sources = list(dict.fromkeys((sources or []) + _prod_resc_src))[:8]
+                _prod_det = _deterministic_product_catalog_answer(q, context or "")
+        except Exception:
+            pass
     if is_product_db and _prod_det:
         _trace_event(workflow_trace, "guard_exit", guard="deterministic_product_catalog_answer")
         _trace_decision(workflow_debug, "exit_guard", "deterministic_product_catalog_answer")
@@ -3254,19 +3264,29 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
         return
 
     # ── Fast path: bypass LLM for structured Jikan responses ─────────────────
-    _fast_resp = _fast_format_jikan(context, q)
-    if _fast_resp:
-        _trace_event(workflow_trace, "guard_exit", guard="fast_response_formatter")
-        _trace_decision(workflow_debug, "exit_guard", "fast_response_formatter")
-        if visitor_id: _run_in_bg(save_visitor_turn, visitor_id, "assistant", _fast_resp, db_name)
-        yield f"data: {json.dumps({'type': 'chunk', 'content': _fast_resp})}\n\n"
-        _lead_on = not cfg.get("disable_lead_box", False)
-        _trace_artifact(workflow_debug, "final_answer", _fast_resp[:4000])
-        yield f"data: {json.dumps(_metadata_payload(_lead_on, sources[:3]))}\n\n"
-        yield "data: {\"type\": \"done\"}\n\n"
-        return
+        _fast_resp = _fast_format_jikan(context, q)
+        if _fast_resp:
+            _trace_event(workflow_trace, "guard_exit", guard="fast_response_formatter")
+            _trace_decision(workflow_debug, "exit_guard", "fast_response_formatter")
+            if visitor_id: _run_in_bg(save_visitor_turn, visitor_id, "assistant", _fast_resp, db_name)
+            yield f"data: {json.dumps({'type': 'chunk', 'content': _fast_resp})}\n\n"
+            _lead_on = not cfg.get("disable_lead_box", False)
+            _trace_artifact(workflow_debug, "final_answer", _fast_resp[:4000])
+            yield f"data: {json.dumps(_metadata_payload(_lead_on, sources[:3]))}\n\n"
+            yield "data: {\"type\": \"done\"}\n\n"
+            return
 
     _prod_det = _deterministic_product_catalog_answer(q, context or "")
+    if is_product_db and not _prod_det and str(cfg.get("crawl_url") or "").strip():
+        try:
+            _prod_resc_ctx, _prod_resc_src = await _live_site_query_rescue_context(q, cfg, max_urls=5, max_chars=14000)
+            if _prod_resc_ctx:
+                context = _prod_resc_ctx
+                if _prod_resc_src:
+                    sources = list(dict.fromkeys((sources or []) + _prod_resc_src))[:8]
+                _prod_det = _deterministic_product_catalog_answer(q, context or "")
+        except Exception:
+            pass
     if is_product_db and _prod_det:
         _trace_event(workflow_trace, "guard_exit", guard="deterministic_product_catalog_answer")
         _trace_decision(workflow_debug, "exit_guard", "deterministic_product_catalog_answer")
