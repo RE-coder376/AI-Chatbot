@@ -817,8 +817,11 @@ def _doc_matches_strict_scope(doc, q: str, title_phrase: str) -> bool:
         pt = _extract_part_number(q or "")
         tks = [w.lower() for w in re.findall(r"[a-zA-Z0-9]{4,}", title_phrase or "")][:10]
         tks = [t for t in tks if t not in {"chapter", "part", "learning", "goals", "outcomes", "according", "book"}]
+        scope_phrase = _extract_scope_phrase(q or "")
         focus = _extract_focus_phrase(q or "")
+        scope_tks = [w.lower() for w in re.findall(r"[a-zA-Z0-9]{4,}", scope_phrase or "")][:8]
         focus_tks = [w.lower() for w in re.findall(r"[a-zA-Z0-9]{4,}", focus or "")][:8]
+        scope_hit = any((st in src or st in body) for st in scope_tks) if scope_tks else False
         focus_hit = any((ft in src or ft in body) for ft in focus_tks) if focus_tks else False
 
         num_hit = False
@@ -842,7 +845,7 @@ def _doc_matches_strict_scope(doc, q: str, title_phrase: str) -> bool:
         if num_hit and (phrase_hit or not tks):
             return True
         if phrase_hit and (ch is None and pt is None):
-            if focus_tks and not focus_hit:
+            if (scope_tks and not scope_hit) or (focus_tks and not focus_hit):
                 return False
             return True
         if num_hit and _has_explicit_outcomes_marker(body):
@@ -902,6 +905,19 @@ def _extract_focus_phrase(q: str) -> str:
         phrase = m.group(1).strip()
         phrase = re.sub(r"\b(?:used for|use for|do|does|mean|means|evaluate|test|simulate|trying to detect)\b.*$", "", phrase, flags=re.I).strip()
         phrase = re.sub(r"^[Tt]he\s+", "", phrase).strip()
+        return phrase[:120]
+    except Exception:
+        return ""
+
+
+def _extract_scope_phrase(q: str) -> str:
+    try:
+        qq = (q or "").strip()
+        m = re.search(r"^\s*in\s+([^,\n]{6,200})\s*,\s*(?:what|why|how|which|who|when)\b", qq, re.I)
+        if not m:
+            return ""
+        phrase = m.group(1).strip().strip('"\'')
+        phrase = re.sub(r"\s{2,}", " ", phrase).strip()
         return phrase[:120]
     except Exception:
         return ""
@@ -1043,6 +1059,7 @@ def _heuristic_rerank_score(doc, q: str, title_phrase: str) -> float:
 
         # Concept-focused boost: "what is X / what does X ..."
         _focus = _extract_focus_phrase(q)
+        _scope = _extract_scope_phrase(q)
         if _focus:
             _fl = _focus.lower()
             _f_tokens = [t for t in re.findall(r"[a-zA-Z0-9]{4,}", _fl) if t not in {"what", "does", "used", "for", "mean", "means"}][:8]
@@ -1054,6 +1071,17 @@ def _heuristic_rerank_score(doc, q: str, title_phrase: str) -> float:
                 _fh = sum(1 for t in _f_tokens if t in bl)
                 _fh_url = sum(1 for t in _f_tokens if t in sl)
                 score += (_fh * 1.8) + (_fh_url * 1.6)
+        if _scope:
+            _slp = _scope.lower()
+            _s_tokens = [t for t in re.findall(r"[a-zA-Z0-9]{4,}", _slp) if t not in {"what", "does", "used", "for", "mean", "means"}][:8]
+            if _slp in bl:
+                score += 9.0
+            if _slp in sl:
+                score += 7.0
+            if _s_tokens:
+                _sh = sum(1 for t in _s_tokens if t in bl)
+                _sh_url = sum(1 for t in _s_tokens if t in sl)
+                score += (_sh * 1.5) + (_sh_url * 1.4)
 
         # Reward outcome-marker docs when the question is asking for goals/learning/outcomes.
         if _OUTCOMES_INTENT_RE.search(q or ''):
