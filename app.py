@@ -3224,6 +3224,18 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
     # Universal source-page fallback for outcomes/goals queries in streaming mode.
     if _LEARNING_GOALS_Q_RE.search(q):
         try:
+            _direct_probe = await _live_site_content_outcomes_probe(q, cfg, max_urls=32)
+            if _direct_probe:
+                _trace_event(workflow_trace, "guard_exit", guard="direct_live_content_outcomes_probe")
+                _trace_decision(workflow_debug, "exit_guard", "direct_live_content_outcomes_probe")
+                if visitor_id:
+                    _run_in_bg(save_visitor_turn, visitor_id, "assistant", _direct_probe, db_name)
+                yield f"data: {json.dumps({'type': 'chunk', 'content': _direct_probe})}\n\n"
+                _lead_on = not cfg.get("disable_lead_box", False)
+                _trace_artifact(workflow_debug, "final_answer", _direct_probe[:4000])
+                yield f"data: {json.dumps(_metadata_payload(_lead_on, sources[:5]))}\n\n"
+                yield "data: {\"type\": \"done\"}\n\n"
+                return
             _live_outcomes = await _extract_outcomes_from_source_urls(q, sources or [], limit=3)
             if _live_outcomes:
                 _trace_event(workflow_trace, "guard_exit", guard="source_page_outcomes_extractor")
@@ -4504,6 +4516,20 @@ async def chat(request: Request):
 
         # For learning-goals intents, prefer deterministic extraction only.
         if _LEARNING_GOALS_Q_RE.search(q):
+            _lg_direct = await _live_site_content_outcomes_probe(q, cfg, max_urls=32)
+            if _lg_direct:
+                payload = {
+                    "answer": _lg_direct,
+                    "sources": (sources or [])[:5],
+                    "evidence_spans": _evidence_spans_for_answer(q, context or ""),
+                }
+                if debug_effective:
+                    payload["debug"] = {
+                        "workflow_trace": workflow_trace,
+                        "guard_decisions": workflow_debug["guard_decisions"],
+                        "answer_artifacts": workflow_debug["answer_artifacts"],
+                    }
+                return JSONResponse(payload)
             _lg = _deterministic_learning_goals_answer(q, context or "")
             if (
                 _lg
