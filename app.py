@@ -2324,6 +2324,24 @@ def _strict_answer_matches_query(q: str, ans: str) -> bool:
         return False
 
 
+def _strict_query_has_source_anchor(sources: list[str], q: str) -> bool:
+    try:
+        if not sources or not q:
+            return False
+        scope = _extract_scope_phrase(q)
+        focus = _extract_focus_phrase(q)
+        q_terms = [w.lower() for w in re.findall(r"[a-zA-Z0-9]{4,}", f"{scope} {focus}" or "")][:8]
+        if not q_terms:
+            q_terms = [w.lower() for w in re.findall(r"[a-zA-Z0-9]{4,}", q or "") if w.lower() not in _QUERY_STOP][:8]
+        for u in sources:
+            ul = str(u or "").lower()
+            if q_terms and all(t in ul for t in q_terms[:3]):
+                return True
+        return False
+    except Exception:
+        return False
+
+
 async def _live_site_strict_scope_probe(q: str, cfg: dict, max_urls: int = 8) -> tuple[str | None, list[str]]:
     """Strict-scoped fallback for chapter/section questions when DB retrieval is weak or missing."""
     try:
@@ -3107,7 +3125,7 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
     # Deterministic strict-scope factual extractor (non-goals).
     # For chapter/part factual prompts, prefer direct evidence-built answers before LLM synthesis.
         if _is_strict_scope_query(q) and (not _LEARNING_GOALS_Q_RE.search(q)):
-            if not _context_has_scope_anchor(context or "", q):
+            if not _strict_query_has_source_anchor(sources or [], q):
                 try:
                     _probe_fact, _probe_src = await _live_site_strict_scope_probe(q, cfg, max_urls=8)
                     if _probe_fact:
@@ -4172,7 +4190,7 @@ async def chat(request: Request):
 
         # Deterministic strict-scope factual extractor (non-goals).
         if _is_strict_scope_query(q) and (not _LEARNING_GOALS_Q_RE.search(q)):
-            if not _context_has_scope_anchor(context or "", q):
+            if not _strict_query_has_source_anchor(sources or [], q):
                 try:
                     _probe_fact, _probe_src = await _live_site_strict_scope_probe(q, cfg, max_urls=8)
                     if _probe_fact:
@@ -4233,7 +4251,7 @@ async def chat(request: Request):
 
         # Hard evidence lock for explicit Chapter/Part questions.
         # For learning-goals intents, let the dedicated goals branch run first.
-        if _is_strict_scope_query(q) and (not _LEARNING_GOALS_Q_RE.search(q)) and not _context_has_scope_anchor(context or "", q):
+        if _is_strict_scope_query(q) and (not _LEARNING_GOALS_Q_RE.search(q)) and (not _strict_query_has_source_anchor(sources or [], q)):
             payload = {
                 "answer": "I couldn't find explicit evidence for that exact chapter/part in the retrieved context.",
                 "sources": (sources or [])[:5],
