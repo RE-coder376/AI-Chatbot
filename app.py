@@ -3635,13 +3635,21 @@ def _deterministic_learning_goals_answer(q: str, kb_context: str) -> str | None:
             # Split accidental multi-line lumps and evaluate the first meaningful segment.
             t0 = re.split(r"[\n\r]+", t)[0].strip()
             words = t0.split()
-            if len(words) < 3:
+            if len(words) < 2:
                 return False
             w0 = re.sub(r"[^a-z]", "", words[0].lower())
             if w0 in _OUTCOME_VERB_HINTS:
                 return True
             # Also accept explicit outcomes marker phrases.
-            return bool(re.search(r"(?i)\b(you will be able to|by the end)\b", t0))
+            if re.search(r"(?i)\b(you will be able to|by the end)\b", t0):
+                return True
+            # Some curricula use concise noun-phrase bullets (e.g. "Decision framework",
+            # "Compute planning", "Data engineering"). Accept those when they look like
+            # deliberate outcomes rather than nav/template noise.
+            if len(words) <= 10 and len(t0) <= 90:
+                if not re.search(r"(?i)\b(on this page|copy as markdown|ctrl\+|chapter\s+quiz|lesson progression|prerequisites|next|previous)\b", t0):
+                    return True
+            return False
 
         def _extract_bullets_near_anchor(anchor: str) -> str | None:
             if not anchor:
@@ -3872,7 +3880,10 @@ def _deterministic_learning_goals_answer(q: str, kb_context: str) -> str | None:
                 if len(ln) < 3:
                     continue
                 if not _is_quality_outcome_line(ln):
-                    continue
+                    # Allow concise noun-phrase bullets if they are clearly not nav/template text.
+                    if not (2 <= len(ln.split()) <= 10 and len(ln) <= 90 and not _is_generic_goal_heading(ln)
+                            and not re.search(r"(?i)\b(on this page|copy as markdown|ctrl\+|chapter\s+quiz|lesson progression|prerequisites|next|previous)\b", ln)):
+                        continue
                 out_lines.append('- ' + ln)
             if len(out_lines) >= 2:
                 ans = '\n'.join(out_lines[:18])
@@ -4835,8 +4846,7 @@ def _deterministic_product_catalog_answer(q: str, kb_context: str, max_items: in
         }
         anchors = [w for w in re.findall(r"[a-zA-Z]{2,}", ql) if w not in stop][:10]
         docs = [d.strip() for d in re.split(r"\n\s*\n", kb_context or "") if d.strip()]
-        items = []
-        seen = set()
+        candidates = []
         nav_bad = ("about us", "faq", "contact us", "privacy policy", "terms and conditions", "return & exchange")
         for doc in docs:
             dl = doc.lower()
@@ -4863,8 +4873,9 @@ def _deterministic_product_catalog_answer(q: str, kb_context: str, max_items: in
             if len(title) < 3 or title.lower() in {"home page", "faq", "about us", "contact us"}:
                 continue
             title_l = title.lower()
+            anchor_hits = 0
+            exact_anchor_hit = False
             if anchors:
-                hit = False
                 for a in anchors:
                     variants = {a}
                     if a.endswith("s") and len(a) > 3:
@@ -4873,11 +4884,10 @@ def _deterministic_product_catalog_answer(q: str, kb_context: str, max_items: in
                         variants.update({"remote", "control"})
                     for v in variants:
                         if re.search(rf"\b{re.escape(v)}\b", title_l):
-                            hit = True
+                            anchor_hits += 1
+                            exact_anchor_hit = True
                             break
-                    if hit:
-                        break
-                if not hit and max_price is None:
+                if anchor_hits <= 0 and max_price is None:
                     continue
             prices = []
             for raw in re.findall(r"Rs\.?\s*([\d,]+(?:\.\d{1,2})?)", doc, re.I):
@@ -4893,22 +4903,32 @@ def _deterministic_product_catalog_answer(q: str, kb_context: str, max_items: in
             price = min(prices)
             if max_price is not None and price > max_price:
                 continue
-            key = title.lower()
-            if key in seen:
-                continue
-            seen.add(key)
             availability = "sold out" if re.search(r"(?i)\b(sold out|currently unavailable)\b", doc) else "available"
             note = ""
             desc = re.search(r"Description\s+(.{40,180})", doc, re.I | re.S)
             if desc:
                 note = re.sub(r"\s+", " ", desc.group(1)).strip()
-            items.append((title, price, availability, note))
-            if len(items) >= max_items:
-                break
-        if not items:
+            score = 0.0
+            if anchors:
+                score += anchor_hits * 5.0
+                if exact_anchor_hit:
+                    score += 4.0
+                if any(re.search(rf"\b{re.escape(a)}\b", dl[:1200]) for a in anchors[:4]):
+                    score += 1.5
+            if max_price is not None:
+                # Prefer lower prices when the user asked for a cap.
+                score += max(0.0, 6.0 - abs(price - max_price) / max(1.0, max_price / 3.0))
+            if availability == "available":
+                score += 0.5
+            if note:
+                score += 0.25
+            candidates.append((score, title, price, availability, note))
+        if not candidates:
             return None
+        candidates.sort(key=lambda x: (x[0], -x[2]), reverse=True)
+        items = candidates[:max_items]
         lines = ["Here are matching products from the catalog:"]
-        for idx, (title, price, availability, note) in enumerate(items, 1):
+        for idx, (_, title, price, availability, note) in enumerate(items, 1):
             price_s = f"Rs.{price:,.0f}" if float(price).is_integer() else f"Rs.{price:,.2f}"
             line = f"{idx}. {title} - {price_s} - {availability}"
             if note:
@@ -4927,6 +4947,12 @@ def _preferred_sources_for_product_answer(q: str, sources: list[str], limit: int
         ql = (q or "").lower()
         if not re.search(r"\b(product|products|price|prices|cost|sell|available|stock|toy|toys|pen|pens|notebook|notebooks|rc|car|cars)\b", ql):
             return srcs[:limit]
+        stop = {
+            "show", "list", "which", "what", "price", "prices", "cost", "available", "availability",
+            "stock", "under", "below", "sell", "products", "product", "toy", "toys", "pen", "pens",
+            "notebook", "notebooks", "rc", "car", "cars", "best", "top", "affordable", "school", "baby", "kids"
+        }
+        anchors = [w for w in re.findall(r"[a-zA-Z]{3,}", ql) if w not in stop][:8]
         prod, other = [], []
         for u in srcs:
             ul = u.lower()
@@ -4936,6 +4962,18 @@ def _preferred_sources_for_product_answer(q: str, sources: list[str], limit: int
                 other.append(u)
         if not prod:
             return []
+        if anchors:
+            matched = []
+            rest = []
+            for u in prod + other:
+                ul = u.lower()
+                if any(re.search(rf"\b{re.escape(a)}\b", ul) for a in anchors):
+                    matched.append(u)
+                else:
+                    rest.append(u)
+            if matched:
+                prod = matched
+                other = rest
         out = prod + other
         dedup = []
         seen = set()

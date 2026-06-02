@@ -2144,7 +2144,9 @@ async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansio
             # If this is an outcomes intent (goals/learning outcomes) and the query names a specific title,
             # apply the filter even when it yields a small set. It's better to be precise than to mix in
             # unrelated chapters that happen to contain "By the end...".
-            if _is_outcomes_intent and len(_filtered) >= 1:
+            # For strict chapter/part queries, prefer the filtered set whenever it exists so siblings
+            # don't leak into the final context.
+            if (_is_outcomes_intent or _strict_scope_q) and len(_filtered) >= 1:
                 _combined_before_cap = _filtered
             # For non-outcomes queries, keep the old safety valve to avoid empty/narrow context.
             elif len(_filtered) >= 6:
@@ -2244,7 +2246,11 @@ async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansio
                             break
                     (_matched if _ok else _rest).append(_r)
                 if _matched:
-                    top = _matched[:34] + _rest[:6]
+                    # For exact product lookups, keep the matched docs front-and-center.
+                    if len(_anchors) >= 2:
+                        top = _matched[:40]
+                    else:
+                        top = _matched[:34] + _rest[:6]
 
     # ── Product catalog: dedup + GPU ranking ─────────────────────────────────
     if _has_product_meta or _is_product_db:
