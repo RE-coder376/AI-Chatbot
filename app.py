@@ -820,12 +820,33 @@ async def _live_site_query_rescue_context(q: str, cfg: dict, max_urls: int = 3, 
                         r = await client.get(u)
                         if r.status_code != 200:
                             continue
-                        txt = _to_text(r.text or "")
-                        if len(txt) < 180:
+                        html = r.text or ""
+                        txt = _to_text(html)
+                        if len(txt) < 80:
                             continue
-                        lines = [ln.strip() for ln in re.split(r"[\r\n]+", txt) if ln and ln.strip()]
-                        if lines:
-                            return ("\n".join(lines[:120]), [u])
+                        title = ""
+                        mtitle = re.search(r'(?is)<meta[^>]+property=["\']og:title["\'][^>]+content=["\']([^"\']+)["\']', html)
+                        if mtitle:
+                            title = re.sub(r"\s+", " ", mtitle.group(1) or "").strip()
+                        if not title:
+                            mtitle = re.search(r'(?is)<title>([^<]+)</title>', html)
+                            if mtitle:
+                                title = re.sub(r"\s+", " ", mtitle.group(1) or "").strip()
+                        if not title:
+                            title = re.sub(r"\s+", " ", (exact_name or slug)).strip()
+                        prices = []
+                        for raw in re.findall(r"Rs\.?\s*([\d,]+(?:\.\d{1,2})?)", html, re.I):
+                            try:
+                                prices.append(float(raw.replace(",", "")))
+                            except Exception:
+                                pass
+                        price = min(prices) if prices else None
+                        soldout = bool(re.search(r"(?i)\b(sold out|currently unavailable)\b", html))
+                        summary_lines = [title]
+                        if price is not None:
+                            summary_lines.append(f"Rs.{price:,.0f}" if float(price).is_integer() else f"Rs.{price:,.2f}")
+                        summary_lines.append("sold out" if soldout else "available")
+                        return ("\n".join(summary_lines), [u])
                     except Exception:
                         continue
             sm = await client.get(f"{base}/sitemap.xml")
