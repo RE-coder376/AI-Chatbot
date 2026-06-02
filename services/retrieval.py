@@ -822,6 +822,7 @@ def _doc_matches_strict_scope(doc, q: str, title_phrase: str) -> bool:
         body = str(getattr(doc, "page_content", "") or "").lower()
         ch = _extract_chapter_number(q or "")
         pt = _extract_part_number(q or "")
+        title_slug = _slugish(title_phrase or "")
         tks = [w.lower() for w in re.findall(r"[a-zA-Z0-9]{4,}", title_phrase or "")][:10]
         tks = [t for t in tks if t not in {"chapter", "part", "learning", "goals", "outcomes", "according", "book"}]
         scope_phrase = _extract_scope_phrase(q or "")
@@ -848,6 +849,8 @@ def _doc_matches_strict_scope(doc, q: str, title_phrase: str) -> bool:
                 hits = {t for t in tks if (t in src or t in body)}
                 if len(hits) >= 2:
                     phrase_hit = True
+            if title_slug and (title_slug in src or title_slug in body):
+                phrase_hit = True
 
         # Section-style queries: "In <scope>, what ..." should require the scope phrase.
         if scope_tks or focus_tks:
@@ -864,6 +867,8 @@ def _doc_matches_strict_scope(doc, q: str, title_phrase: str) -> bool:
         if phrase_hit and (ch is None and pt is None):
             if (scope_tks and not scope_hit) or (focus_tks and not focus_hit):
                 return False
+            return True
+        if phrase_hit and _has_explicit_outcomes_marker(body):
             return True
         if num_hit and _has_explicit_outcomes_marker(body):
             return True

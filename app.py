@@ -2459,11 +2459,15 @@ def _strict_query_has_source_anchor(sources: list[str], q: str) -> bool:
             return False
         scope = _extract_scope_phrase(q)
         focus = _extract_focus_phrase(q)
+        title_phrase = _extract_title_phrase(q)
+        title_slug = re.sub(r"[^a-z0-9]+", "-", (title_phrase or "").lower()).strip("-")
         q_terms = [w.lower() for w in re.findall(r"[a-zA-Z0-9]{4,}", f"{scope} {focus}" or "")][:8]
         if not q_terms:
             q_terms = [w.lower() for w in re.findall(r"[a-zA-Z0-9]{4,}", q or "") if w.lower() not in _QUERY_STOP][:8]
         for u in sources:
             ul = str(u or "").lower()
+            if title_slug and (title_slug in ul or ul.rstrip("/").endswith(title_slug)):
+                return True
             if q_terms and all(t in ul for t in q_terms[:3]):
                 return True
         return False
@@ -5505,6 +5509,8 @@ def _source_url_matches_scope(q: str, url: str) -> bool:
         ul = str(url or "").lower()
         if not q or not ul:
             return False
+        title_phrase = _extract_title_phrase(q)
+        title_slug = re.sub(r"[^a-z0-9]+", "-", (title_phrase or "").lower()).strip("-")
         mch = re.search(r"\bchapter\s+(\d{1,4})\b", q, re.I)
         mpt = re.search(r"\bpart\s+(\d{1,4})\b", q, re.I)
         num_ok = True
@@ -5519,7 +5525,13 @@ def _source_url_matches_scope(q: str, url: str) -> bool:
             if tks:
                 hit = sum(1 for t in tks if t in ul)
                 req = 2 if len(tks) >= 3 else 1
-                return num_ok and hit >= req
+                if hit >= req and num_ok:
+                    return True
+                if title_slug and (title_slug in ul or ul.rstrip("/").endswith(title_slug)):
+                    return True
+                return False
+        if title_slug and (title_slug in ul or ul.rstrip("/").endswith(title_slug)):
+            return True
         return num_ok
     except Exception:
         return False
