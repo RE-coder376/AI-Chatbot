@@ -2336,6 +2336,10 @@ async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansio
         chunk = _compress_doc(getattr(r, "page_content", "") or "", anchors)
         if not chunk:
             continue
+        if _strict_scope_q or _is_outcomes_intent:
+            src = str((getattr(r, "metadata", None) or {}).get("source") or "").strip()
+            if src:
+                chunk = f"[SOURCE] {src}\n{chunk}"
         if cur_chars + len(chunk) + 2 > MAX_CONTEXT_CHARS:
             remain = max(0, MAX_CONTEXT_CHARS - cur_chars - 2)
             if remain <= 200:
