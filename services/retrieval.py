@@ -1532,6 +1532,7 @@ async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansio
     search_queries = expand_query(q)
 
     _title_phrase = _extract_title_phrase(q)
+    _title_slug = _slugish(_title_phrase or "")
     _scope_phrase = _extract_scope_phrase(q)
     _focus_phrase = _extract_focus_phrase(q)
     _is_outcomes_intent = bool(_OUTCOMES_INTENT_RE.search(q))
@@ -2045,18 +2046,21 @@ async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansio
                         continue
                     if _is_prompt_template_chunk(_txt) and not _has_explicit_outcomes_marker(_txt):
                         continue
-                    # Scoped chapter/part queries: require the same anchor in URL or text.
+                    # Scoped chapter/part queries: require the same anchor in URL or text,
+                    # but allow an exact title slug match as an equivalent anchor.
                     _ch = _extract_chapter_number(q or "")
                     _pt = _extract_part_number(q or "")
                     _txt_l = _txt.lower()
                     if _ch is not None and ("chapter" in (q or "").lower()):
                         _a = f"chapter {_ch}"
                         if (_a not in _src_l) and (_a not in _txt_l):
-                            continue
+                            if not (_title_slug and (_title_slug in _src_l or _title_slug in _txt_l)):
+                                continue
                     if _pt is not None and ("part" in (q or "").lower()):
                         _a = f"part {_pt}"
                         if (_a not in _src_l) and (_a not in _txt_l):
-                            continue
+                            if not (_title_slug and (_title_slug in _src_l or _title_slug in _txt_l)):
+                                continue
                 except Exception:
                     pass
             _k = _r.page_content[:100]
