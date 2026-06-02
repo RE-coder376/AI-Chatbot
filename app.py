@@ -912,9 +912,9 @@ def get_system_prompt(cfg, context, doc_count: int = 0, is_urdu: bool = False, u
         kb_section = context if not context_empty else "(No live API data returned for this query)"
         grounding_rule = (
             f"3b. LIVE API DATA ({doc_count} items). Use the live data above as your primary source.\n"
-            "   For details the API data doesn't explicitly include (e.g. season count, character backstory,\n"
-            "   studio history, episode titles), SUPPLEMENT with your own expert training knowledge.\n"
-            "   You are a domain expert — answer confidently. Never say IDK for facts you know."
+            "   If the live API data does not explicitly confirm a fact, do not guess or fill it from memory.\n"
+            "   If the answer can be derived exactly from the live data (for example counting entries), derive it.\n"
+            "   Otherwise say what the live data confirms and keep it concise."
         )
     elif context_empty:
         kb_section = "(No relevant documents found for this query)"
@@ -962,11 +962,11 @@ PRODUCT CATALOG RULES — MANDATORY for every product response:
     _api_expert_note = ""
     if _is_api_only:
         _api_expert_note = (
-            "\n⚡ EXPERT KNOWLEDGE OVERRIDE (highest priority — overrides Tier 3 above):\n"
-            f"  You are an expert on {topics}. When live API data is absent or thin for a query,\n"
-            "  answer directly from your own training knowledge — do NOT say IDK.\n"
-            "  'NEVER use world knowledge' in Tier 3 does NOT apply to this DB.\n"
-            "  Hard limit: stay within the domain topics listed above.\n"
+            "\n⚡ LIVE API OVERRIDE (highest priority — overrides Tier 3 above):\n"
+            f"  Use live API data as the source of truth for {topics}. If a fact is not explicitly\n"
+            "  confirmed by live data, do not guess. If the answer can be derived exactly from the\n"
+            "  live data (for example, by counting entries), derive it. Otherwise say only what\n"
+            "  the live data confirms.\n"
         )
 
     return f"""You are {bot_name}, the specialized assistant for {biz_name}.

@@ -2527,6 +2527,15 @@ def _fast_format_jikan(context: str, q: str) -> str | None:
         return None
 
     q_lower = q.lower()
+    _season_count_q = re.search(
+        r'(?i)\b(?:how many|what is the number of|number of)\s+seasons?\b|\bseason count\b|\bhow many seasons does\b',
+        q_lower,
+    )
+    if _season_count_q:
+        _season_answer = _fast_format_jikan_season_count(q)
+        if _season_answer:
+            return _season_answer
+
     # Only fast-format clearly structured queries; fall back for detailed info requests
     _needs_llm = re.compile(
         r'\b(tell me about|explain|describe|synopsis|plot|story|review|opinion|compare|versus|vs|'
@@ -2614,6 +2623,89 @@ def _fast_format_jikan(context: str, q: str) -> str | None:
             continue  # Skip search sections; LLM only if no other sections produced output
 
     return "".join(parts).strip() or None
+
+
+def _fast_format_jikan_season_count(q: str) -> str | None:
+    """Count anime season entries directly from live Jikan search results."""
+    try:
+        import urllib.parse as _up
+        import httpx as _hx
+
+        q_norm = re.sub(r'\s+', ' ', q.strip())
+        m = re.search(
+            r'(?i)^\s*(?:how many|what is the number of|number of)\s+seasons?\s+'
+            r'(?:does|did|has|have|is|are)?\s*(.+?)\s*'
+            r'(?:have|has|had|does|did|is|are)?\s*\??$',
+            q_norm,
+        )
+        subject = m.group(1).strip() if m else ""
+        subject = re.sub(r'(?i)\b(?:according to|from|in)\b.*$', '', subject).strip(" .,!?:;")
+        if not subject:
+            return None
+
+        search_url = f"https://api.jikan.moe/v4/anime?q={_up.quote_plus(subject)}&limit=25&order_by=score&sort=desc"
+        with _hx.Client(timeout=10) as client:
+            resp = client.get(search_url, headers={"User-Agent": "Mozilla/5.0"})
+        if resp.status_code != 200:
+            return None
+
+        items = resp.json().get("data", []) or []
+        if not items:
+            return None
+
+        def _norm(text: str) -> str:
+            return re.sub(r'[^a-z0-9]+', ' ', (text or "").lower()).strip()
+
+        subject_norm = _norm(subject)
+        if not subject_norm:
+            return None
+
+        seen_titles: set[str] = set()
+        season_titles: list[str] = []
+        for item in items:
+            if str(item.get("type", "")).strip().lower() not in {"tv", "tv special"}:
+                continue
+
+            candidate_titles = []
+            for key in ("title", "title_english", "title_japanese"):
+                val = item.get(key)
+                if isinstance(val, str) and val.strip():
+                    candidate_titles.append(val.strip())
+            for alt in item.get("titles", []) or []:
+                if isinstance(alt, dict):
+                    val = alt.get("title")
+                    if isinstance(val, str) and val.strip():
+                        candidate_titles.append(val.strip())
+
+            matched = False
+            for title in candidate_titles:
+                title_norm = _norm(title)
+                if not title_norm:
+                    continue
+                if title_norm == subject_norm or title_norm.startswith(subject_norm + " "):
+                    if title not in seen_titles:
+                        seen_titles.add(title)
+                        season_titles.append(title)
+                    matched = True
+                    break
+            if not matched:
+                # Also allow titles whose synonym/title metadata contains the subject phrase.
+                combined = " ".join(candidate_titles)
+                if subject_norm in _norm(combined):
+                    title = candidate_titles[0]
+                    if title not in seen_titles:
+                        seen_titles.add(title)
+                        season_titles.append(title)
+
+        if not season_titles:
+            return None
+
+        count = len(season_titles)
+        subject_clean = subject.strip()
+        return f"{subject_clean} has {count} season" + ("s" if count != 1 else "") + "."
+    except Exception as _e:
+        logger.info(f"[JIKAN SEASON COUNT] failed for query '{q[:80]}': {_e}")
+        return None
 
 
 # NOTE: retrieve_context uses _flatten_to_text for live API fallback formatting. In app.py this
