@@ -102,7 +102,7 @@ def try_extract_outcomes_answer(q: str, context: str, debug: dict | None = None)
             if title_tokens and (not _scope_anchor_present):
                 hit = sum(1 for t in title_tokens[:6] if t and (t in joined))
                 req = 2 if len(title_tokens) >= 3 else 1
-                if hit < req:
+                if hit < req and not (len(items) >= 4 and verb_ratio >= 0.60):
                     return False
             # Learning outcomes should be mostly verb-start imperatives.
             return verb_ratio >= 0.45
@@ -132,7 +132,7 @@ def try_extract_outcomes_answer(q: str, context: str, debug: dict | None = None)
             if (not strong_marker) and title_tokens and (not _scope_anchor_present):
                 hit = sum(1 for t in title_tokens[:6] if t and (t in joined))
                 req = 2 if len(title_tokens) >= 3 else 1
-                if hit < req:
+                if hit < req and not (len(items) >= 4 and verb_ratio >= 0.60):
                     return False
             return True
 
