@@ -2557,7 +2557,7 @@ async def _live_site_strict_scope_probe(q: str, cfg: dict, max_urls: int = 8) ->
                 return None
             exact_urls = []
             if title_slug:
-                for u in locs[:5000]:
+                for u in locs:
                     ul = str(u).lower()
                     if title_slug in ul and ul.rstrip("/").endswith(title_slug):
                         exact_urls.append(str(u))
@@ -5736,7 +5736,7 @@ async def _live_site_content_outcomes_probe(q: str, cfg: dict, max_urls: int = 2
                 return None
             exact_candidates = []
             if tslug:
-                for u in locs[:5000]:
+                for u in locs:
                     ul = str(u).lower()
                     if tslug in ul and ul.rstrip("/").endswith(tslug):
                         exact_candidates.append(str(u))
