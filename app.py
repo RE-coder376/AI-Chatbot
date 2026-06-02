@@ -766,6 +766,11 @@ async def _live_site_query_rescue_context(q: str, cfg: dict, max_urls: int = 3, 
         import httpx
         import urllib.parse as _up
         ql = str(q or "").lower()
+        title_phrase = _extract_title_phrase(q or "")
+        title_tokens = [t for t in re.findall(r"[a-zA-Z0-9]{3,}", (title_phrase or "").lower()) if t not in {
+            "what", "which", "when", "where", "why", "how", "from", "with", "that", "this", "according",
+            "chapter", "part", "title", "book", "the"
+        }][:10]
         q_tokens = [t for t in re.findall(r"[a-zA-Z0-9]{3,}", ql) if t not in {
             "what", "which", "when", "where", "why", "how", "from", "with", "that", "this", "according", "chapter", "part"
         }][:16]
@@ -815,6 +820,13 @@ async def _live_site_query_rescue_context(q: str, cfg: dict, max_urls: int = 3, 
                         score += 1.5
                     if any(b in path for b in ("/pages/", "/blogs/", "/polic", "/contact", "/about", "sitemap", "agents.md")):
                         score -= 5.0
+                    if title_tokens:
+                        if title_phrase and title_phrase.lower().replace(" ", "-") in ul:
+                            score += 10.0
+                        if all(t in ul for t in title_tokens[: min(4, len(title_tokens))]):
+                            score += 8.0
+                        elif any(t in ul for t in title_tokens[:6]):
+                            score += 3.0
                 if any(b in path for b in ("/quiz", "/chapter-quiz", "/certifications", "/about")):
                     score -= 2.5
                 token_hits = sum(1.0 for t in q_tokens if t in ul)
@@ -3217,7 +3229,7 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
     _prod_det = _deterministic_product_catalog_answer(q, context or "")
     if is_product_db and not _prod_det and str(cfg.get("crawl_url") or "").strip():
         try:
-            _prod_resc_ctx, _prod_resc_src = await _live_site_query_rescue_context(q, cfg, max_urls=5, max_chars=14000)
+            _prod_resc_ctx, _prod_resc_src = await _live_site_query_rescue_context(q, cfg, max_urls=12, max_chars=18000)
             if _prod_resc_ctx:
                 context = _prod_resc_ctx
                 if _prod_resc_src:
@@ -3279,7 +3291,7 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
     _prod_det = _deterministic_product_catalog_answer(q, context or "")
     if is_product_db and not _prod_det and str(cfg.get("crawl_url") or "").strip():
         try:
-            _prod_resc_ctx, _prod_resc_src = await _live_site_query_rescue_context(q, cfg, max_urls=5, max_chars=14000)
+            _prod_resc_ctx, _prod_resc_src = await _live_site_query_rescue_context(q, cfg, max_urls=12, max_chars=18000)
             if _prod_resc_ctx:
                 context = _prod_resc_ctx
                 if _prod_resc_src:
