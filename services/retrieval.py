@@ -2532,7 +2532,7 @@ def _fast_format_jikan(context: str, q: str) -> str | None:
         q_lower,
     )
     if _season_count_q:
-        _season_answer = _fast_format_jikan_season_count(q)
+        _season_answer = _fast_format_jikan_season_count(context, q)
         if _season_answer:
             return _season_answer
 
@@ -2625,12 +2625,9 @@ def _fast_format_jikan(context: str, q: str) -> str | None:
     return "".join(parts).strip() or None
 
 
-def _fast_format_jikan_season_count(q: str) -> str | None:
-    """Count anime season entries directly from live Jikan search results."""
+def _fast_format_jikan_season_count(context: str, q: str) -> str | None:
+    """Count anime seasons from live Jikan search results already present in context."""
     try:
-        import urllib.parse as _up
-        import httpx as _hx
-
         q_norm = re.sub(r'\s+', ' ', q.strip())
         m = re.search(
             r'(?i)^\s*(?:how many|what is the number of|number of)\s+seasons?\s+'
@@ -2639,18 +2636,8 @@ def _fast_format_jikan_season_count(q: str) -> str | None:
             q_norm,
         )
         subject = m.group(1).strip() if m else ""
-        subject = re.sub(r'(?i)\b(?:according to|from|in)\b.*$', '', subject).strip(" .,!?:;")
+        subject = re.sub(r'(?i)\b(?:according to|from|in|the book|book)\b.*$', '', subject).strip(" .,!?:;")
         if not subject:
-            return None
-
-        search_url = f"https://api.jikan.moe/v4/anime?q={_up.quote_plus(subject)}&limit=25&order_by=score&sort=desc"
-        with _hx.Client(timeout=10) as client:
-            resp = client.get(search_url, headers={"User-Agent": "Mozilla/5.0"})
-        if resp.status_code != 200:
-            return None
-
-        items = resp.json().get("data", []) or []
-        if not items:
             return None
 
         def _norm(text: str) -> str:
@@ -2660,42 +2647,46 @@ def _fast_format_jikan_season_count(q: str) -> str | None:
         if not subject_norm:
             return None
 
+        # Only parse the anime-search live section. This avoids counting ranking/genre lists.
+        lines = [ln.strip() for ln in context.splitlines() if ln.strip()]
+        search_lines: list[str] = []
+        in_anime_search = False
+        for line in lines:
+            if line.startswith("[Live data from "):
+                src_name = line[len("[Live data from "):-1].lower()
+                in_anime_search = "anime search" in src_name
+                continue
+            if in_anime_search:
+                search_lines.append(line)
+
+        if not search_lines:
+            return None
+
+        def _is_season_like(title: str) -> bool:
+            t = _norm(title)
+            if not t.startswith(subject_norm):
+                return False
+            tail = t[len(subject_norm):].strip()
+            if not tail:
+                return True
+            if re.search(r'\b(season|cour|part|arc|season one|season two|season three)\b', tail):
+                return True
+            if re.match(r'^(1st|2nd|3rd|4th|5th|6th|7th|8th|9th|10th|\d+(?:st|nd|rd|th)?)\b', tail):
+                return True
+            # Exclude obvious non-season variants.
+            if re.search(r'\b(movie|special|ova|ona|recap|summary|mini)\b', tail):
+                return False
+            return False
+
         seen_titles: set[str] = set()
         season_titles: list[str] = []
-        for item in items:
-            if str(item.get("type", "")).strip().lower() not in {"tv", "tv special"}:
+        for line in search_lines:
+            title = line.split(" | ", 1)[0].strip()
+            if not title or title in seen_titles:
                 continue
-
-            candidate_titles = []
-            for key in ("title", "title_english", "title_japanese"):
-                val = item.get(key)
-                if isinstance(val, str) and val.strip():
-                    candidate_titles.append(val.strip())
-            for alt in item.get("titles", []) or []:
-                if isinstance(alt, dict):
-                    val = alt.get("title")
-                    if isinstance(val, str) and val.strip():
-                        candidate_titles.append(val.strip())
-
-            matched = False
-            for title in candidate_titles:
-                title_norm = _norm(title)
-                if not title_norm:
-                    continue
-                if title_norm == subject_norm or title_norm.startswith(subject_norm + " "):
-                    if title not in seen_titles:
-                        seen_titles.add(title)
-                        season_titles.append(title)
-                    matched = True
-                    break
-            if not matched:
-                # Also allow titles whose synonym/title metadata contains the subject phrase.
-                combined = " ".join(candidate_titles)
-                if subject_norm in _norm(combined):
-                    title = candidate_titles[0]
-                    if title not in seen_titles:
-                        seen_titles.add(title)
-                        season_titles.append(title)
+            if _is_season_like(title):
+                seen_titles.add(title)
+                season_titles.append(title)
 
         if not season_titles:
             return None
