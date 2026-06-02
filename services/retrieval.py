@@ -2200,32 +2200,35 @@ async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansio
                             _have_anchor = True
                             break
                 if not _have_anchor:
-                    from langchain_core.documents import Document
-                    _total = min(int(db._collection.count() or 0), 4000)
-                    _raw = db._collection.get(limit=_total, include=["documents", "metadatas"])
-                    _resc_docs = []
-                    _resc_seen = set()
-                    _title_tks = [w.lower() for w in re.findall(r"[a-zA-Z]{4,}", _title_phrase or "")][:10]
-                    _title_tks = [t for t in _title_tks if t not in {"chapter", "part", "learning", "goals", "outcomes", "according", "book"}]
-                    for _doc_text, _meta in zip(_raw.get("documents", []), _raw.get("metadatas", [])):
-                        if not _doc_text:
-                            continue
-                        _src = str((_meta or {}).get("source") or "").lower()
-                        _body = str(_doc_text).lower()
-                        if _title_slug2 and (_title_slug2 not in _src) and (_title_slug2 not in _body):
-                            continue
-                        if _title_tks:
-                            _hit = sum(1 for t in _title_tks if (t in _src) or (t in _body))
-                            if _hit < 2:
+                    def _scan_cluster_rescue():
+                        from langchain_core.documents import Document
+                        _total = min(int(db._collection.count() or 0), 2000)
+                        _raw = db._collection.get(limit=_total, include=["documents", "metadatas"])
+                        _resc_docs = []
+                        _resc_seen = set()
+                        _title_tks = [w.lower() for w in re.findall(r"[a-zA-Z]{4,}", _title_phrase or "")][:10]
+                        _title_tks = [t for t in _title_tks if t not in {"chapter", "part", "learning", "goals", "outcomes", "according", "book"}]
+                        for _doc_text, _meta in zip(_raw.get("documents", []), _raw.get("metadatas", [])):
+                            if not _doc_text:
                                 continue
-                        if not (_has_explicit_outcomes_marker(_body) or re.search(r"\b(by completing|by the end|you will be able to|learning outcomes|objectives?|goals?)\b", _body)):
-                            continue
-                        _doc = Document(page_content=_doc_text, metadata=_meta or {})
-                        _k = str(_meta.get("source") or _doc_text[:120])[:160] if isinstance(_meta, dict) else _doc_text[:120]
-                        if _k in _resc_seen:
-                            continue
-                        _resc_seen.add(_k)
-                        _resc_docs.append(_doc)
+                            _src = str((_meta or {}).get("source") or "").lower()
+                            _body = str(_doc_text).lower()
+                            if _title_slug2 and (_title_slug2 not in _src) and (_title_slug2 not in _body):
+                                continue
+                            if _title_tks:
+                                _hit = sum(1 for t in _title_tks if (t in _src) or (t in _body))
+                                if _hit < 2:
+                                    continue
+                            if not (_has_explicit_outcomes_marker(_body) or re.search(r"\b(by completing|by the end|you will be able to|learning outcomes|objectives?|goals?)\b", _body)):
+                                continue
+                            _doc = Document(page_content=_doc_text, metadata=_meta or {})
+                            _k = str((_meta or {}).get("source") or _doc_text[:120])[:160]
+                            if _k in _resc_seen:
+                                continue
+                            _resc_seen.add(_k)
+                            _resc_docs.append(_doc)
+                        return _resc_docs
+                    _resc_docs = await asyncio.wait_for(asyncio.to_thread(_scan_cluster_rescue), timeout=8)
                     if _resc_docs:
                         _combined_before_cap = _resc_docs[:24] + _combined_before_cap
             except Exception:
