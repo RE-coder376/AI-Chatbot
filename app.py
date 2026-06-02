@@ -2931,6 +2931,19 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
     context_addresses_query = _context_addresses_query(context, q)
     _trace_decision(workflow_debug, "context_addresses_query", bool(context_addresses_query))
 
+    if _is_strict_scope_query(q) and (not context_addresses_query):
+        try:
+            _strict_live_ctx = await _live_site_strict_scope_probe(q, cfg, max_urls=8)
+            if _strict_live_ctx:
+                context = _strict_live_ctx
+                doc_count = max(int(doc_count or 0), 1)
+                context_addresses_query = True
+                _trace_event(workflow_trace, "retrieval_live_rescue", rescued=True, source_count=0, context_chars=len(_strict_live_ctx or ""))
+                _trace_decision(workflow_debug, "live_rescue_used", True)
+                _trace_decision(workflow_debug, "context_addresses_query_after_live_rescue", True)
+        except Exception:
+            pass
+
     # Universal fallback when retrieval misses: probe sitemap pages live.
     if (not _is_api_only) and (not context_addresses_query):
         try:
@@ -4045,6 +4058,16 @@ async def chat(request: Request):
             _trace_event(workflow_trace, "retrieve_done", doc_count=int(doc_count or 0), ctx_chars=int(len(context or "")))
         except Exception:
             pass
+        if _is_strict_scope_query(q) and (not _context_addresses_query(context or "", q)):
+            try:
+                _strict_live_ctx = await _live_site_strict_scope_probe(q, cfg, max_urls=8)
+                if _strict_live_ctx:
+                    context = _strict_live_ctx
+                    doc_count = max(int(doc_count or 0), 1)
+                    _trace_event(workflow_trace, "retrieve_live_rescue", source_count=0, context_chars=len(_strict_live_ctx or ""))
+                    workflow_debug["guard_decisions"]["live_rescue_used"] = True
+            except Exception:
+                pass
 
         # Deterministic outcomes extractor (same as streaming path).
         _outcomes_ans = try_extract_outcomes_answer(q, context or "", debug=workflow_debug.get("answer_artifacts"))
