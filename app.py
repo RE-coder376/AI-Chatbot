@@ -938,6 +938,13 @@ def get_system_prompt(cfg, context, doc_count: int = 0, is_urdu: bool = False, u
 
     sec_section = ""
     if secondary_prompt.strip():
+        if _is_api_only and "EXPERT KNOWLEDGE RULE" in secondary_prompt:
+            secondary_prompt = re.sub(
+                r'(?is)\n*EXPERT KNOWLEDGE RULE.*?(?=\Z)',
+                "\n\nEVIDENCE RULE: For facts that can be derived exactly from live API data, derive them from the live data rather than guessing from memory. If the answer is not explicitly confirmed by live data, say only what the live data confirms and keep it concise.",
+                secondary_prompt,
+                count=1,
+            ).strip()
         sec_section = f"\n\nDOMAIN-SPECIFIC MANDATES (Expert Runbook for {biz_name}):\n{secondary_prompt.strip()}\n"
 
     # Product catalog rules — auto-injected when DB has product metadata (price/ram/gpu fields)
