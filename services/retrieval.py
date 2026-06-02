@@ -842,6 +842,16 @@ def _doc_matches_strict_scope(doc, q: str, title_phrase: str) -> bool:
                 if len(hits) >= 2:
                     phrase_hit = True
 
+        # Section-style queries: "In <scope>, what ..." should require the scope phrase.
+        if scope_tks or focus_tks:
+            if scope_tks and not scope_hit:
+                return False
+            if focus_tks and not focus_hit:
+                return False
+            # If we have a section-style query, the scope/focus anchors are enough to treat it as matched.
+            if ch is None and pt is None:
+                return True
+
         if num_hit and (phrase_hit or not tks):
             return True
         if phrase_hit and (ch is None and pt is None):
