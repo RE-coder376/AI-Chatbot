@@ -4685,29 +4685,41 @@ def _deterministic_extractive_quote_answer(q: str, kb_context: str) -> str | Non
                 return None
             return explicit
 
-        # Find a window around the best keyword hit.
+        scope_phrase = _extract_scope_phrase(q or "")
+        focus_phrase = _extract_focus_phrase(q or "")
+        scope_tks = [w.lower() for w in re.findall(r"[a-zA-Z0-9]{4,}", scope_phrase or "")][:8]
+        focus_tks = [w.lower() for w in re.findall(r"[a-zA-Z0-9]{4,}", focus_phrase or "")][:8]
+        blocks = [b.strip() for b in re.split(r"\n\s*\n", ctx) if b.strip()]
         best = None
-        for w in words[:5]:
-            i = ctx_l.find(w)
-            if i == -1:
+        for block in blocks:
+            bl = block.lower()
+            if len(block) < 40:
                 continue
-            lo = max(0, i - 300)
-            hi = min(len(ctx), i + 900)
-            window = ctx[lo:hi]
-            wl = window.lower()
-            hit = sum(1 for x in words if x in wl)
-            # Require at least 2 keywords in same window.
-            if hit < 2:
+            if any(b in bl for b in ("on this page", "copy as markdown", "ctrl+", "site index")):
                 continue
-            # Prefer windows that look like lists/definitions.
-            bonus = 0
-            if re.search(r"\n\s*[-?]\s+", window):
-                bonus += 2
-            if re.search(r":\s*$", window, re.M):
-                bonus += 1
-            score = hit + bonus
-            if best is None or score > best[0]:
-                best = (score, window)
+            if _english_q and re.search(r"[\u0600-\u06FF\u0900-\u097F]", block):
+                continue
+            # Section-style strict queries must anchor to both the scope and the concept, when present.
+            if scope_tks and not any(t in bl for t in scope_tks):
+                continue
+            if focus_tks and not any(t in bl for t in focus_tks):
+                continue
+            hit = sum(1 for x in words if x in bl)
+            if hit < 1:
+                continue
+            score = float(hit)
+            if scope_tks:
+                score += sum(1 for t in scope_tks if t in bl) * 2.0
+            if focus_tks:
+                score += sum(1 for t in focus_tks if t in bl) * 2.5
+            if re.search(r"(?im)^\s*(?:[-*]|\d{1,2}[.)])\s+", block):
+                score += 1.5
+            if re.search(r"(?i)\b(what you will learn|exercise|the lesson learned|lesson learned)\b", block):
+                score += 2.0
+            if re.search(r"(?i)\b(defend|what happens|what is|what does|why use|why)\b", block):
+                score += 1.0
+            if (best is None) or (score > best[0]):
+                best = (score, block)
 
         if not best:
             return None
@@ -4716,9 +4728,22 @@ def _deterministic_extractive_quote_answer(q: str, kb_context: str) -> str | Non
         # Tighten to start at a clean boundary.
         window = re.sub(r"\r", "", window)
         # If there is a strong marker, cut from there.
-        m = re.search(r"(By\s+completing[^\n]{0,160}you\s+will\s*:|By\s+the\s+end\s+of\s+this\s+chapter[^\n]{0,80}:)", window, re.I)
+        m = re.search(r"(By\s+completing[^\n]{0,160}you\s+will\s*:|By\s+the\s+end\s+of\s+this\s+chapter[^\n]{0,80}:|What You Will Learn|Core Skill|Exercises)", window, re.I)
         if m:
             window = window[m.start():]
+
+        # If the block contains a small bullet list, prefer the actual bullet lines.
+        bullets = []
+        for ln in window.splitlines():
+            t = ln.strip()
+            if not t:
+                continue
+            if re.match(r"^\s*(?:[-*]|\d{1,2}[.)])\s+", t):
+                bullets.append(re.sub(r"^\s*(?:[-*]|\d{1,2}[.)])\s+", "", t).strip())
+        if len(bullets) >= 2:
+            bullets = [b for b in bullets if len(b) >= 12][:4]
+            if len(bullets) >= 2:
+                return "\n".join(f"- {b}" for b in bullets)
 
         # Cap quote length.
         window = window[:700].strip()
