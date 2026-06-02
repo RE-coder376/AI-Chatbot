@@ -2324,12 +2324,12 @@ def _strict_answer_matches_query(q: str, ans: str) -> bool:
         return False
 
 
-async def _live_site_strict_scope_probe(q: str, cfg: dict, max_urls: int = 8) -> str | None:
+async def _live_site_strict_scope_probe(q: str, cfg: dict, max_urls: int = 8) -> tuple[str | None, list[str]]:
     """Strict-scoped fallback for chapter/section questions when DB retrieval is weak or missing."""
     try:
         base = str((cfg or {}).get("crawl_url") or "").strip().rstrip("/")
         if not base or not _is_strict_scope_query(q):
-            return None
+            return (None, [])
         scope = _extract_scope_phrase(q)
         focus = _extract_focus_phrase(q)
         q_terms = [w.lower() for w in re.findall(r"[a-zA-Z]{4,}", q or "") if w.lower() not in _QUERY_STOP][:10]
@@ -2402,7 +2402,7 @@ async def _live_site_strict_scope_probe(q: str, cfg: dict, max_urls: int = 8) ->
         async with httpx.AsyncClient(timeout=10, follow_redirects=True, headers={"User-Agent": "Mozilla/5.0"}) as client:
             sm = await client.get(f"{base}/sitemap.xml")
             if sm.status_code != 200:
-                return None
+                return (None, [])
             locs = re.findall(r"(?is)<loc>\s*([^<\s]+)\s*</loc>", sm.text or "")
             if not locs:
                 return None
@@ -2431,23 +2431,23 @@ async def _live_site_strict_scope_probe(q: str, cfg: dict, max_urls: int = 8) ->
                     meta_desc = _extract_meta_description(r.text or "")
                     lesson_summary = _extract_page_lesson_summary(r.text or "")
                     if lesson_summary and _source_url_matches_scope(q, str(u)):
-                        return lesson_summary
+                        return (lesson_summary, [str(u)])
                     if meta_desc and _strict_answer_matches_query(q, meta_desc):
-                        return meta_desc
+                        return (meta_desc, [str(u)])
                     txt = _html_to_text(r.text or "")
                     if len(txt) < 120:
                         continue
                     ans = _deterministic_scoped_fact_answer(q, txt)
                     if ans and _strict_answer_matches_query(q, ans):
-                        return ans
+                        return (ans, [str(u)])
                     explicit = _best_explicit_evidence_sentence(q, txt)
                     if explicit and _strict_answer_matches_query(q, explicit):
-                        return explicit
+                        return (explicit, [str(u)])
                 except Exception:
                     continue
     except Exception:
-        return None
-    return None
+        return (None, [])
+    return (None, [])
 
 
 def _is_strict_scope_with_dead_sources(q: str, sources: list[str], cfg: dict) -> bool:
@@ -2975,10 +2975,12 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
 
     if _is_strict_scope_query(q) and (not context_addresses_query):
         try:
-            _strict_live_ctx = await _live_site_strict_scope_probe(q, cfg, max_urls=8)
+            _strict_live_ctx, _strict_live_src = await _live_site_strict_scope_probe(q, cfg, max_urls=8)
             if _strict_live_ctx:
                 context = _strict_live_ctx
                 doc_count = max(int(doc_count or 0), 1)
+                if _strict_live_src:
+                    sources = list(dict.fromkeys((sources or []) + _strict_live_src))[:8]
                 context_addresses_query = True
                 _trace_event(workflow_trace, "retrieval_live_rescue", rescued=True, source_count=0, context_chars=len(_strict_live_ctx or ""))
                 _trace_decision(workflow_debug, "live_rescue_used", True)
@@ -3128,9 +3130,11 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
                 logger.debug(f"[RETRIEVAL] strict fact retry failed: {_sf_re2}")
         if _sf is None:
             try:
-                _probe_fact = await _live_site_strict_scope_probe(q, cfg, max_urls=8)
+                _probe_fact, _probe_src = await _live_site_strict_scope_probe(q, cfg, max_urls=8)
                 if _probe_fact:
                     _sf = _probe_fact
+                    if _probe_src:
+                        sources = list(dict.fromkeys((sources or []) + _probe_src))[:8]
                     context_addresses_query = True
                     _trace_event(workflow_trace, "retrieval_live_rescue", rescued=True, source_count=0, context_chars=len(_probe_fact or ""))
                     _trace_decision(workflow_debug, "live_rescue_used", True)
@@ -4102,10 +4106,12 @@ async def chat(request: Request):
             pass
         if _is_strict_scope_query(q) and (not _context_addresses_query(context or "", q)):
             try:
-                _strict_live_ctx = await _live_site_strict_scope_probe(q, cfg, max_urls=8)
+                _strict_live_ctx, _strict_live_src = await _live_site_strict_scope_probe(q, cfg, max_urls=8)
                 if _strict_live_ctx:
                     context = _strict_live_ctx
                     doc_count = max(int(doc_count or 0), 1)
+                    if _strict_live_src:
+                        sources = list(dict.fromkeys((sources or []) + _strict_live_src))[:8]
                     _trace_event(workflow_trace, "retrieve_live_rescue", source_count=0, context_chars=len(_strict_live_ctx or ""))
                     workflow_debug["guard_decisions"]["live_rescue_used"] = True
             except Exception:
@@ -4157,9 +4163,11 @@ async def chat(request: Request):
                     pass
             if _sf is None:
                 try:
-                    _probe_fact = await _live_site_strict_scope_probe(q, cfg, max_urls=8)
+                    _probe_fact, _probe_src = await _live_site_strict_scope_probe(q, cfg, max_urls=8)
                     if _probe_fact:
                         _sf = _probe_fact
+                        if _probe_src:
+                            sources = list(dict.fromkeys((sources or []) + _probe_src))[:8]
                         _trace_event(workflow_trace, "retrieve_live_rescue", source_count=0, context_chars=len(_probe_fact or ""))
                         workflow_debug["guard_decisions"]["live_rescue_used"] = True
                 except Exception:
