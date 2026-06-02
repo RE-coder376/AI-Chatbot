@@ -766,7 +766,7 @@ async def _live_site_query_rescue_context(q: str, cfg: dict, max_urls: int = 3, 
         import httpx
         import urllib.parse as _up
         ql = str(q or "").lower()
-        title_phrase = _extract_title_phrase(q or "")
+        title_phrase = _extract_title_phrase(q or "") or _extract_product_name_phrase(q or "")
         title_tokens = [t for t in re.findall(r"[a-zA-Z0-9]{3,}", (title_phrase or "").lower()) if t not in {
             "what", "which", "when", "where", "why", "how", "from", "with", "that", "this", "according",
             "chapter", "part", "title", "book", "the"
@@ -2323,6 +2323,29 @@ def _extract_focus_phrase(q: str) -> str:
         phrase = re.sub(r"\b(?:used for|use for|do|does|mean|means|evaluate|test|simulate|trying to detect)\b.*$", "", phrase, flags=re.I).strip()
         phrase = re.sub(r"^[Tt]he\s+", "", phrase).strip()
         return phrase[:120]
+    except Exception:
+        return ""
+
+
+def _extract_product_name_phrase(q: str) -> str:
+    """Best-effort extraction of an exact product title from a product-style question."""
+    try:
+        qq = (q or "").strip()
+        patterns = [
+            r"(?i)\b(?:price|prices|cost|availability|available|sold out|in stock|stock)\s+(?:of|for|about|on|the)?\s*([^?.!\n]{4,160})",
+            r"(?i)\b(?:what\s+is|what\s+are|is)\s+([^?.!\n]{4,160})\s+(?:sold out|available|in stock)\b",
+            r"(?i)\b(?:tell me about|show me|list|find|buy)\s+([^?.!\n]{4,160})",
+        ]
+        for pat in patterns:
+            m = re.search(pat, qq)
+            if not m:
+                continue
+            phrase = m.group(1).strip().strip('"\'')
+            phrase = re.sub(r"^(?:the|a|an)\s+", "", phrase, flags=re.I).strip()
+            phrase = re.sub(r"\s{2,}", " ", phrase).strip(" -:|")
+            if len(phrase) >= 3:
+                return phrase[:120]
+        return ""
     except Exception:
         return ""
 
@@ -4885,7 +4908,8 @@ def _deterministic_product_catalog_answer(q: str, kb_context: str, max_items: in
             "stock", "under", "below", "sell", "products", "product", "toys", "have", "with",
             "best", "top", "affordable", "currently", "school", "baby", "kids"
         }
-        anchors = [w for w in re.findall(r"[a-zA-Z]{2,}", ql) if w not in stop][:10]
+        _prod_phrase = _extract_product_name_phrase(q or "")
+        anchors = [w for w in re.findall(r"[a-zA-Z]{2,}", (_prod_phrase or ql)) if w not in stop][:10]
         docs = [d.strip() for d in re.split(r"\n\s*\n", kb_context or "") if d.strip()]
         candidates = []
         nav_bad = ("about us", "faq", "contact us", "privacy policy", "terms and conditions", "return & exchange")
@@ -4993,7 +5017,8 @@ def _preferred_sources_for_product_answer(q: str, sources: list[str], limit: int
             "stock", "under", "below", "sell", "products", "product", "toy", "toys", "pen", "pens",
             "notebook", "notebooks", "rc", "car", "cars", "best", "top", "affordable", "school", "baby", "kids"
         }
-        anchors = [w for w in re.findall(r"[a-zA-Z]{3,}", ql) if w not in stop][:8]
+        _prod_phrase = _extract_product_name_phrase(q or "")
+        anchors = [w for w in re.findall(r"[a-zA-Z]{3,}", (_prod_phrase or ql)) if w not in stop][:8]
         prod, other = [], []
         for u in srcs:
             ul = u.lower()
