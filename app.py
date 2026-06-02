@@ -2344,6 +2344,22 @@ async def _live_site_strict_scope_probe(q: str, cfg: dict, max_urls: int = 8) ->
             h = re.sub(r"\s+", " ", h)
             return h.strip()
 
+        def _extract_meta_description(html: str) -> str:
+            try:
+                patterns = [
+                    r'(?is)<meta[^>]+property=["\']og:description["\'][^>]+content=["\']([^"\']+)["\']',
+                    r'(?is)<meta[^>]+name=["\']description["\'][^>]+content=["\']([^"\']+)["\']',
+                ]
+                for pat in patterns:
+                    m = re.search(pat, html or "")
+                    if m:
+                        desc = re.sub(r"\s+", " ", m.group(1) or "").strip()
+                        if len(desc) >= 60:
+                            return desc[:600]
+            except Exception:
+                pass
+            return ""
+
         async with httpx.AsyncClient(timeout=10, follow_redirects=True, headers={"User-Agent": "Mozilla/5.0"}) as client:
             sm = await client.get(f"{base}/sitemap.xml")
             if sm.status_code != 200:
@@ -2373,6 +2389,9 @@ async def _live_site_strict_scope_probe(q: str, cfg: dict, max_urls: int = 8) ->
                     r = await client.get(str(u))
                     if r.status_code != 200:
                         continue
+                    meta_desc = _extract_meta_description(r.text or "")
+                    if meta_desc and _strict_answer_matches_query(q, meta_desc):
+                        return meta_desc
                     txt = _html_to_text(r.text or "")
                     if len(txt) < 120:
                         continue
