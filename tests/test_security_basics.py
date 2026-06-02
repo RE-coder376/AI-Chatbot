@@ -77,6 +77,11 @@ def test_product_query_rerank_score_prefers_exact_product_slug(app_module):
     assert exact_score > neighbor_score
 
 
+def test_extract_product_name_phrase_handles_title_style_queries(app_module):
+    assert app_module._extract_product_name_phrase("What is The Magic of Thinking Big?") == "The Magic of Thinking Big"
+    assert app_module._extract_product_name_phrase('Tell me about "The Magic of Thinking Big"') == "The Magic of Thinking Big"
+
+
 def test_prepare_crawl_page_strips_storefront_boilerplate_and_detects_product(app_module):
     raw = (
         "Piano Wipe Easy Whiteboard Marker Pack Of 12. "
@@ -98,6 +103,20 @@ def test_prepare_crawl_page_strips_storefront_boilerplate_and_detects_product(ap
     assert "price" in meta["used_structured_fields"]
     assert meta["retrieve_eligible"] is True
     assert meta["extraction_mode"] == "structured_product"
+
+
+def test_deterministic_extractive_quote_answer_can_use_strict_scope_evidence(app_module):
+    q = "In Chapter 12: System Defence, what does the page say about traceability?"
+    ctx = (
+        "Chapter 12: System Defence\n\n"
+        "System Defence traceability means every important decision can be traced back to a concrete evidence span.\n"
+        "The defensive layer should prefer exact supporting sentences over loose summaries.\n"
+    )
+
+    ans = app_module._deterministic_extractive_quote_answer(q, ctx)
+
+    assert ans is not None
+    assert "System Defence traceability means every important decision" in ans
 
 
 def test_smart_chunk_page_uses_structured_product_summary_for_rs_pages(app_module):

@@ -155,6 +155,7 @@ from services.retrieval import (
     _get_bm25_index,
     _extract_search_entity,
     async_intent_aware_expansion,
+    _retrieval_visible_doc,
     retrieve_context,
     _fast_format_jikan,
     try_extract_outcomes_answer,
@@ -207,6 +208,13 @@ def _stable_chunk_id(doc) -> str:
         return f"doc_{h}"
     except Exception:
         return f"doc_{uuid.uuid4().hex}"
+
+
+def _is_greeting(q: str) -> bool:
+    try:
+        return bool(re.search(r"(?i)^\s*(hi|hello|hey|salam|assalam|good\s+(morning|afternoon|evening))\b", q or ""))
+    except Exception:
+        return False
 
 
 def _add_documents_deterministic(db, docs) -> None:
@@ -2387,7 +2395,31 @@ def _extract_product_name_phrase(q: str) -> str:
             if not m:
                 continue
             phrase = m.group(1).strip().strip('"\'')
-            phrase = re.sub(r"^(?:the|a|an)\s+", "", phrase, flags=re.I).strip()
+            phrase = re.sub(r"\s{2,}", " ", phrase).strip(" -:|")
+            if len(phrase) >= 3:
+                return phrase[:120]
+        # Fallback: if the query is basically a title or contains a quoted title,
+        # preserve the exact wording instead of forcing it through generic patterns.
+        quoted = re.search(r"[\"“”']([^\"“”']{4,140})[\"“”']", qq)
+        if quoted:
+            phrase = quoted.group(1).strip()
+            phrase = re.sub(r"\s{2,}", " ", phrase).strip(" -:|")
+            if len(phrase) >= 3:
+                return phrase[:120]
+        lead = re.search(r"(?i)^(?:what\s+is|what\s+are|tell\s+me\s+about|show\s+me|find|buy|list)\s+(.+)$", qq)
+        if lead:
+            phrase = lead.group(1).strip().strip('"\'')
+            phrase = re.sub(r"^(?:price|prices|cost|availability|available|sold out|in stock|stock)\s+(?:of|for|about|on|the)?\s+", "", phrase, flags=re.I).strip()
+            phrase = re.sub(r"[?.!]+$", "", phrase).strip(" -:|")
+            if len(phrase) >= 3:
+                return phrase[:120]
+        titleish = re.search(
+            r"\b(?:[A-Z][\w&/.\-']+|[A-Z]{2,})(?:\s+(?:[A-Z][\w&/.\-']+|[A-Z]{2,})){2,8}\b",
+            qq,
+        )
+        if titleish:
+            phrase = titleish.group(0).strip()
+            phrase = re.sub(r"^\b(?:What|Tell|Show|Find|Buy|List|Price|Prices|Cost|Availability|Available|Sold|Stock|In)\b\s+", "", phrase)
             phrase = re.sub(r"\s{2,}", " ", phrase).strip(" -:|")
             if len(phrase) >= 3:
                 return phrase[:120]
@@ -3592,7 +3624,7 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
 
         # ? Quote-first fallback (guarded): if KB already contains a short verbatim answer span, prefer it.
         # This is especially useful for chapter goals/learning outcomes, policies, definitions.
-        if context and not is_product_db and (not _is_strict_scope_query(q)) and (not _LEARNING_GOALS_Q_RE.search(q or "")):
+        if context and not is_product_db and (not _LEARNING_GOALS_Q_RE.search(q or "")):
             _qf = _deterministic_extractive_quote_answer(q, context)
             if _qf:
                 logger.info('[Validator] quote_first_extract ? overriding with verbatim KB span')
@@ -4827,10 +4859,16 @@ def _best_explicit_evidence_sentence(q: str, kb_context: str) -> str | None:
             if any(b in ll for b in ("on this page", "copy as markdown", "ctrl+", "site index")):
                 continue
             hit = sum(1 for w in q_words if w in ll)
-            if hit < 2:
+            if hit < 1:
                 continue
             # Avoid returning bare headings/titles as "evidence".
             if re.match(r"(?i)^\s*(chapter|part|section|lesson|unit)\s+\d+\s*[:\-]?\s*$", ln):
+                continue
+            if hit < 2 and not (
+                re.search(r"(?i)\b(is|means|defined as|used to|ensures|prevents|so that|because|role)\b", ln)
+                or ":" in ln
+                or re.match(r"^\s*(?:[-*]|\d{1,2}[.)])\s+", ln)
+            ):
                 continue
             bonus = 0
             if re.match(r"^\s*(?:[-*]|\d{1,2}[.)])\s+", ln):
@@ -6125,6 +6163,11 @@ def _filter_eval_tests_for_tenant(tests: list[dict], db_name: str, fingerprint: 
             if runtime_grounded and expected_source:
                 kept.append(test)
                 continue
+            if expected_source and not expected_source_in_scope:
+                q_ref_scope_hits = len((_eval_v1._token_set(q) & scope_tokens) | (_eval_v1._token_set(reference_text) & scope_tokens))
+                if q_ref_scope_hits < 2:
+                    dropped += 1
+                    continue
             if not question_in_scope and not reference_in_scope and not expected_source_in_scope:
                 dropped += 1
                 continue
@@ -6158,6 +6201,11 @@ def _owner_eval_judge_keys(data: dict | None) -> list[str]:
     except Exception:
         pass
     return []
+
+
+def _owner_eval_judge_key(data: dict | None = None) -> str:
+    keys = _owner_eval_judge_keys(data)
+    return keys[0] if keys else ""
 
 def _norm_text(s: str) -> str:
     s = (s or "").lower()
