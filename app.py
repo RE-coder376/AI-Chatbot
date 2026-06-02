@@ -2360,6 +2360,45 @@ async def _live_site_strict_scope_probe(q: str, cfg: dict, max_urls: int = 8) ->
                 pass
             return ""
 
+        def _extract_page_lesson_summary(html: str) -> str:
+            try:
+                body = html or ""
+                title = ""
+                mt = re.search(r"(?is)<h1[^>]*>(.*?)</h1>", body)
+                if mt:
+                    title = re.sub(r"(?is)<[^>]+>", " ", mt.group(1) or "")
+                    title = re.sub(r"\s+", " ", title).strip()
+                lesson = ""
+                ml = re.search(
+                    r"(?is)<h2[^>]*>\s*[^<]*The Lesson Learned[^<]*</h2>(.*?)(?:<h2[^>]*>|<div[^>]*role=tabpanel|<nav[^>]*class=\"docusaurus-mt-lg pagination-nav\"|<footer\b)",
+                    body,
+                )
+                if ml:
+                    block = ml.group(1) or ""
+                    paras = re.findall(r"(?is)<p[^>]*>(.*?)</p>", block)
+                    cleaned = []
+                    for p in paras:
+                        txt = re.sub(r"(?is)<[^>]+>", " ", p or "")
+                        txt = re.sub(r"\s+", " ", txt).strip()
+                        if len(txt) >= 40:
+                            cleaned.append(txt)
+                    if cleaned:
+                        lesson = cleaned[0][:700]
+                if not lesson:
+                    # Fall back to the first substantive paragraph after the page intro.
+                    paras = re.findall(r"(?is)<p[^>]*>(.*?)</p>", body)
+                    for p in paras:
+                        txt = re.sub(r"(?is)<[^>]+>", " ", p or "")
+                        txt = re.sub(r"\s+", " ", txt).strip()
+                        if len(txt) >= 80 and "nervous" not in txt.lower():
+                            lesson = txt[:700]
+                            break
+                if title and lesson:
+                    return f"{title}: {lesson}"
+                return lesson or title
+            except Exception:
+                return ""
+
         async with httpx.AsyncClient(timeout=10, follow_redirects=True, headers={"User-Agent": "Mozilla/5.0"}) as client:
             sm = await client.get(f"{base}/sitemap.xml")
             if sm.status_code != 200:
@@ -2390,6 +2429,9 @@ async def _live_site_strict_scope_probe(q: str, cfg: dict, max_urls: int = 8) ->
                     if r.status_code != 200:
                         continue
                     meta_desc = _extract_meta_description(r.text or "")
+                    lesson_summary = _extract_page_lesson_summary(r.text or "")
+                    if lesson_summary and _source_url_matches_scope(q, str(u)):
+                        return lesson_summary
                     if meta_desc and _strict_answer_matches_query(q, meta_desc):
                         return meta_desc
                     txt = _html_to_text(r.text or "")
