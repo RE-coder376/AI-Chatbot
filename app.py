@@ -5582,7 +5582,19 @@ def _extract_outcomes_from_html(html: str, q: str = "") -> str | None:
         h = re.sub(r"(?is)<style[^>]*>.*?</style>", " ", h)
         h = re.sub(r"(?is)<noscript[^>]*>.*?</noscript>", " ", h)
         # Locate likely goals section start
-        m = re.search(r"(?is)(by\s+completing[^<]{0,160}you\s+will\s*:|by\s+the\s+end[^<]{0,160}you\s+will\s+be\s+able\s+to\s*:|>\s*goals\s*<|>\s*learning\s+outcomes?\s*<)", h)
+        m = re.search(
+            r"(?is)("
+            r"by\s+completing[^<]{0,160}you\s+will\s*:"
+            r"|by\s+the\s+end[^<]{0,160}you\s+will\s+be\s+able\s+to\s*:"
+            r"|id=[\"']goals[\"']"
+            r"|id=[\"']learning[-_\s]?outcomes?[\"']"
+            r"|>\s*goals\s*(?:<|$)"
+            r"|>\s*learning\s+outcomes?\s*(?:<|$)"
+            r"|>\s*what\s+you(?:'|’)?ll\s+learn\s*(?:<|$)"
+            r"|>\s*what\s+you\s+will\s+learn\s*(?:<|$)"
+            r")",
+            h,
+        )
         hs = h[m.start():] if m else h
         # Pull bullet/list items
         items = []
