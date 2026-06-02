@@ -2980,7 +2980,7 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
                 context = _strict_live_ctx
                 doc_count = max(int(doc_count or 0), 1)
                 if _strict_live_src:
-                    sources = list(dict.fromkeys((sources or []) + _strict_live_src))[:8]
+                    sources = list(dict.fromkeys(_strict_live_src))[:8]
                 context_addresses_query = True
                 _trace_event(workflow_trace, "retrieval_live_rescue", rescued=True, source_count=0, context_chars=len(_strict_live_ctx or ""))
                 _trace_decision(workflow_debug, "live_rescue_used", True)
@@ -3134,7 +3134,7 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
                 if _probe_fact:
                     _sf = _probe_fact
                     if _probe_src:
-                        sources = list(dict.fromkeys((sources or []) + _probe_src))[:8]
+                        sources = list(dict.fromkeys(_probe_src))[:8]
                     context_addresses_query = True
                     _trace_event(workflow_trace, "retrieval_live_rescue", rescued=True, source_count=0, context_chars=len(_probe_fact or ""))
                     _trace_decision(workflow_debug, "live_rescue_used", True)
@@ -4111,7 +4111,7 @@ async def chat(request: Request):
                     context = _strict_live_ctx
                     doc_count = max(int(doc_count or 0), 1)
                     if _strict_live_src:
-                        sources = list(dict.fromkeys((sources or []) + _strict_live_src))[:8]
+                        sources = list(dict.fromkeys(_strict_live_src))[:8]
                     _trace_event(workflow_trace, "retrieve_live_rescue", source_count=0, context_chars=len(_strict_live_ctx or ""))
                     workflow_debug["guard_decisions"]["live_rescue_used"] = True
             except Exception:
@@ -4167,7 +4167,7 @@ async def chat(request: Request):
                     if _probe_fact:
                         _sf = _probe_fact
                         if _probe_src:
-                            sources = list(dict.fromkeys((sources or []) + _probe_src))[:8]
+                            sources = list(dict.fromkeys(_probe_src))[:8]
                         _trace_event(workflow_trace, "retrieve_live_rescue", source_count=0, context_chars=len(_probe_fact or ""))
                         workflow_debug["guard_decisions"]["live_rescue_used"] = True
                 except Exception:
