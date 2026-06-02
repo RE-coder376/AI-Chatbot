@@ -3107,6 +3107,19 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
     # Deterministic strict-scope factual extractor (non-goals).
     # For chapter/part factual prompts, prefer direct evidence-built answers before LLM synthesis.
     if _is_strict_scope_query(q) and (not _LEARNING_GOALS_Q_RE.search(q)):
+        if not _context_has_scope_anchor(context or "", q):
+            try:
+                _probe_fact, _probe_src = await _live_site_strict_scope_probe(q, cfg, max_urls=8)
+                if _probe_fact:
+                    context = _probe_fact
+                    doc_count = max(int(doc_count or 0), 1)
+                    if _probe_src:
+                        sources = list(dict.fromkeys(_probe_src))[:8]
+                    context_addresses_query = True
+                    _trace_event(workflow_trace, "retrieve_live_rescue", rescued=True, source_count=len(_probe_src or []), context_chars=len(_probe_fact or ""))
+                    workflow_debug["guard_decisions"]["live_rescue_used"] = True
+            except Exception:
+                pass
         _sf = _deterministic_scoped_fact_answer(q, context or "")
         if (_sf is None) and _local_db:
             try:
@@ -4151,6 +4164,18 @@ async def chat(request: Request):
 
         # Deterministic strict-scope factual extractor (non-goals).
         if _is_strict_scope_query(q) and (not _LEARNING_GOALS_Q_RE.search(q)):
+            if not _context_has_scope_anchor(context or "", q):
+                try:
+                    _probe_fact, _probe_src = await _live_site_strict_scope_probe(q, cfg, max_urls=8)
+                    if _probe_fact:
+                        context = _probe_fact
+                        doc_count = max(int(doc_count or 0), 1)
+                        if _probe_src:
+                            sources = list(dict.fromkeys(_probe_src))[:8]
+                        _trace_event(workflow_trace, "retrieve_live_rescue", rescued=True, source_count=len(_probe_src or []), context_chars=len(_probe_fact or ""))
+                        workflow_debug["guard_decisions"]["live_rescue_used"] = True
+                except Exception:
+                    pass
             _sf = _deterministic_scoped_fact_answer(q, context or "")
             if (_sf is None) and tenant_db_instance:
                 try:
