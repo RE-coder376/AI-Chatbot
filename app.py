@@ -4071,6 +4071,15 @@ async def chat(request: Request):
                         _sf = _sf2
                 except Exception:
                     pass
+            if _sf is None:
+                try:
+                    _probe_fact = await _live_site_strict_scope_probe(q, cfg, max_urls=8)
+                    if _probe_fact:
+                        _sf = _probe_fact
+                        _trace_event(workflow_trace, "retrieve_live_rescue", source_count=0, context_chars=len(_probe_fact or ""))
+                        workflow_debug["guard_decisions"]["live_rescue_used"] = True
+                except Exception:
+                    pass
             if _sf:
                 payload = {
                     "answer": _sf,
