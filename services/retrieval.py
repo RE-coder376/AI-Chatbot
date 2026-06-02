@@ -787,6 +787,13 @@ def _extract_title_phrase(q: str) -> str:
     return ''
 
 
+def _slugish(text: str) -> str:
+    try:
+        return re.sub(r"[^a-z0-9]+", "-", (text or "").lower()).strip("-")
+    except Exception:
+        return ""
+
+
 def _extract_chapter_number(q: str) -> int | None:
     try:
         m = re.search(r"\bchapter\s*(\d{1,4})\b", q or "", re.I)
@@ -1057,15 +1064,25 @@ def _heuristic_rerank_score(doc, q: str, title_phrase: str) -> float:
         # If a title phrase exists, prioritize docs that contain it.
         if title_phrase:
             tpl = title_phrase.lower()
+            tpl_slug = _slugish(title_phrase)
             if tpl in bl:
                 score += 10.0
-            else:
-                # Partial token overlap with title phrase.
-                tks = [w for w in re.findall(r"[a-zA-Z]{4,}", tpl)][:8]
-                t_hit = sum(1 for t in tks if t in bl)
-                score += t_hit * 2.5
-                t_url_hit = sum(1 for t in tks[:6] if t in sl)
-                score += t_url_hit * 1.0
+            if tpl in sl:
+                score += 16.0
+            if tpl_slug:
+                # Strong preference for the exact slug/root chapter page.
+                if tpl_slug in bl.replace(" ", "-"):
+                    score += 20.0
+                if tpl_slug in sl:
+                    score += 24.0
+                if sl.rstrip("/").endswith(tpl_slug):
+                    score += 20.0
+            # Partial token overlap with title phrase.
+            tks = [w for w in re.findall(r"[a-zA-Z]{4,}", tpl)][:8]
+            t_hit = sum(1 for t in tks if t in bl)
+            score += t_hit * 2.5
+            t_url_hit = sum(1 for t in tks[:6] if t in sl)
+            score += t_url_hit * 1.0
 
         # Concept-focused boost: "what is X / what does X ..."
         _focus = _extract_focus_phrase(q)

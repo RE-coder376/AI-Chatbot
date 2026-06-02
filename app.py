@@ -2477,6 +2477,8 @@ async def _live_site_strict_scope_probe(q: str, cfg: dict, max_urls: int = 8) ->
         base = str((cfg or {}).get("crawl_url") or "").strip().rstrip("/")
         if not base or not _is_strict_scope_query(q):
             return (None, [])
+        title_phrase = _extract_title_phrase(q or "")
+        title_slug = re.sub(r"[^a-z0-9]+", "-", (title_phrase or "").lower()).strip("-")
         scope = _extract_scope_phrase(q)
         focus = _extract_focus_phrase(q)
         q_terms = [w.lower() for w in re.findall(r"[a-zA-Z]{4,}", q or "") if w.lower() not in _QUERY_STOP][:10]
@@ -2553,12 +2555,45 @@ async def _live_site_strict_scope_probe(q: str, cfg: dict, max_urls: int = 8) ->
             locs = re.findall(r"(?is)<loc>\s*([^<\s]+)\s*</loc>", sm.text or "")
             if not locs:
                 return None
+            exact_urls = []
+            if title_slug:
+                for u in locs[:5000]:
+                    ul = str(u).lower()
+                    if title_slug in ul and ul.rstrip("/").endswith(title_slug):
+                        exact_urls.append(str(u))
+            for u in exact_urls[:max(1, int(max_urls))]:
+                try:
+                    r = await client.get(str(u))
+                    if r.status_code != 200:
+                        continue
+                    meta_desc = _extract_meta_description(r.text or "")
+                    lesson_summary = _extract_page_lesson_summary(r.text or "")
+                    if lesson_summary and _source_url_matches_scope(q, str(u)):
+                        return (lesson_summary, [str(u)])
+                    if meta_desc and _strict_answer_matches_query(q, meta_desc):
+                        return (meta_desc, [str(u)])
+                    txt = _html_to_text(r.text or "")
+                    if len(txt) < 120:
+                        continue
+                    ans = _deterministic_scoped_fact_answer(q, txt)
+                    if ans and _strict_answer_matches_query(q, ans):
+                        return (ans, [str(u)])
+                    explicit = _best_explicit_evidence_sentence(q, txt)
+                    if explicit and _strict_answer_matches_query(q, explicit):
+                        return (explicit, [str(u)])
+                except Exception:
+                    continue
             scored = []
             for u in locs[:5000]:
                 ul = str(u).lower()
                 sc = 0.0
                 if "/docs/" in ul:
                     sc += 2.0
+                if title_slug:
+                    if title_slug in ul:
+                        sc += 10.0
+                    if ul.rstrip("/").endswith(title_slug):
+                        sc += 10.0
                 if scope_terms:
                     sc += sum(1.2 for t in scope_terms if t in ul)
                 if focus_terms:
@@ -5623,6 +5658,7 @@ async def _live_site_content_outcomes_probe(q: str, cfg: dict, max_urls: int = 2
         import httpx
         ql = (q or "").lower()
         tphrase = _extract_title_phrase(q or "")
+        tslug = re.sub(r"[^a-z0-9]+", "-", (tphrase or "").lower()).strip("-")
         tks = [w.lower() for w in re.findall(r"[a-zA-Z0-9]{4,}", tphrase)][:12] if tphrase else []
         if not tks:
             tks = [w.lower() for w in re.findall(r"[a-zA-Z0-9]{4,}", ql) if w.lower() not in {"what","which","when","where","why","how","chapter","part","goals","according","book"}][:10]
@@ -5672,12 +5708,48 @@ async def _live_site_content_outcomes_probe(q: str, cfg: dict, max_urls: int = 2
             locs = await _collect_sitemap_urls(f"{base}/sitemap.xml")
             if not locs:
                 return None
+            exact_candidates = []
+            if tslug:
+                for u in locs[:5000]:
+                    ul = str(u).lower()
+                    if tslug in ul and ul.rstrip("/").endswith(tslug):
+                        exact_candidates.append(str(u))
+            for u in exact_candidates[:max(6, int(max_urls))]:
+                try:
+                    r = await client.get(u)
+                    if r.status_code != 200:
+                        continue
+                    _html_ans = _extract_outcomes_from_html(r.text or "", q=q)
+                    if _html_ans and _is_strict_scope_query(q) and _source_url_matches_scope(q, str(u)):
+                        return _html_ans
+                    if _html_ans and _is_quality_outcomes_answer_text(_html_ans) and (_outcomes_answer_matches_scope(q, _html_ans) or _source_url_matches_scope(q, str(u))):
+                        return _html_ans
+                    txt = _to_text(r.text or "")
+                    if len(txt) < 260:
+                        continue
+                    tl = txt.lower()
+                    # Require at least two title/content tokens in page text
+                    hits = sum(1 for t in tks if t in tl)
+                    if hits < 2:
+                        continue
+                    ans = try_extract_outcomes_answer(q, txt, debug=None)
+                    if ans and _is_strict_scope_query(q) and _source_url_matches_scope(q, str(u)):
+                        return ans
+                    if ans and _is_quality_outcomes_answer_text(ans) and (_outcomes_answer_matches_scope(q, ans) or _source_url_matches_scope(q, str(u))):
+                        return ans
+                except Exception:
+                    continue
             candidates = []
             for u in locs[:5000]:
                 ul = str(u).lower()
                 sc = 0.0
                 if "/docs/" in ul:
                     sc += 2.0
+                if tslug:
+                    if tslug in ul:
+                        sc += 10.0
+                    if ul.rstrip("/").endswith(tslug):
+                        sc += 10.0
                 if any(b in ul for b in ("/quiz", "/chapter-quiz", "/certifications", "/about")):
                     sc -= 2.0
                 sc += sum(1.0 for t in tks if t in ul)
