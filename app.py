@@ -785,6 +785,11 @@ async def _live_site_query_rescue_context(q: str, cfg: dict, max_urls: int = 3, 
             ql,
             re.I,
         ))
+        def _slugify(s: str) -> str:
+            return re.sub(r"-+", "-", re.sub(r"[^a-z0-9]+", "-", (s or "").lower())).strip("-")
+        exact_name = _extract_product_name_phrase(q or "") or _extract_title_phrase(q or "")
+        exact_slug = _slugify(exact_name)
+        exact_slug_alt = _slugify(re.sub(r"^(?:the|a|an)\s+", "", exact_name or "", flags=re.I))
         def _to_text(html: str) -> str:
             try:
                 from bs4 import BeautifulSoup as _BS
@@ -803,6 +808,26 @@ async def _live_site_query_rescue_context(q: str, cfg: dict, max_urls: int = 3, 
             txt = re.sub(r"\n{3,}", "\n\n", txt)
             return (txt or "").strip()
         async with httpx.AsyncClient(timeout=10, follow_redirects=True, headers={"User-Agent": "Mozilla/5.0"}) as client:
+            # Exact product-title rescue: try the canonical product slug first.
+            if product_intent and exact_slug:
+                exact_candidates = []
+                for slug in dict.fromkeys([exact_slug, exact_slug_alt]):
+                    if not slug:
+                        continue
+                    exact_candidates.extend([f"{base}/products/{slug}", f"{base}/product/{slug}"])
+                for u in exact_candidates:
+                    try:
+                        r = await client.get(u)
+                        if r.status_code != 200:
+                            continue
+                        txt = _to_text(r.text or "")
+                        if len(txt) < 180:
+                            continue
+                        lines = [ln.strip() for ln in re.split(r"[\r\n]+", txt) if ln and ln.strip()]
+                        if lines:
+                            return ("\n".join(lines[:120]), [u])
+                    except Exception:
+                        continue
             sm = await client.get(f"{base}/sitemap.xml")
             if sm.status_code != 200:
                 return ("", [])
