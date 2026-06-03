@@ -5917,8 +5917,6 @@ async def _live_site_content_outcomes_probe(q: str, cfg: dict, max_urls: int = 2
                     tl = txt.lower()
                     # Require at least two title/content tokens in page text
                     hits = sum(1 for t in tks if t in tl)
-                    if hits < 2:
-                        continue
                     ans = try_extract_outcomes_answer(q, txt, debug=None)
                     if ans and _is_strict_scope_query(q) and _source_url_matches_scope(q, str(u)):
                         return ans
