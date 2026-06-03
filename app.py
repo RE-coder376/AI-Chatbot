@@ -6046,7 +6046,7 @@ async def _live_site_exact_title_probe(q: str, cfg: dict, max_urls: int = 12) ->
             return h.strip()
 
         async with httpx.AsyncClient(timeout=10, follow_redirects=True, headers={"User-Agent": "Mozilla/5.0"}) as client:
-            async def _collect_sitemap_urls(root: str, max_files: int = 16, max_locs: int = 12000) -> list[str]:
+            async def _collect_sitemap_urls(root: str, max_files: int = 64, max_locs: int = 25000) -> list[str]:
                 pending = [root]
                 seen = set()
                 out: list[str] = []
