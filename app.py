@@ -5735,7 +5735,63 @@ async def _live_site_outcomes_probe(q: str, cfg: dict, max_urls: int = 4) -> str
             locs = re.findall(r"(?is)<loc>\s*([^<\s]+)\s*</loc>", sm.text or "")
             if not locs:
                 return None
+            # Some exact chapter/part landing pages are reachable directly but may not be
+            # surfaced early in the sitemap crawl. Try a few title-derived URL guesses first.
+            direct_candidates = []
+            if tphrase:
+                _raw_phrase = re.sub(r"\s+", "-", tphrase.strip()).strip("-")
+                _hyphen_slug = re.sub(r"[^a-z0-9]+", "-", tphrase.lower()).strip("-")
+                _titleish = "-".join(w[:1].upper() + w[1:] for w in re.findall(r"[A-Za-z0-9]+", tphrase))
+                for _seg in (_raw_phrase, _titleish, _hyphen_slug):
+                    if _seg and len(_seg) >= 4:
+                        direct_candidates.append(f"{base}/docs/{_seg}")
+            direct_candidates = list(dict.fromkeys(direct_candidates))
             scored = []
+            for u in direct_candidates[:6]:
+                try:
+                    r = await client.get(u)
+                    if r.status_code != 200:
+                        continue
+                    _html_ans = _extract_outcomes_from_html(r.text or "", q=q)
+                    if _html_ans and _is_strict_scope_query(q) and _source_url_matches_scope(q, str(u)):
+                        return _html_ans
+                    if _html_ans and _is_quality_outcomes_answer_text(_html_ans) and (_outcomes_answer_matches_scope(q, _html_ans) or _source_url_matches_scope(q, str(u))):
+                        return _html_ans
+                    txt = _to_text(r.text or "")
+                    if len(txt) >= 260:
+                        tl = txt.lower()
+                        hits = sum(1 for t in tks if t in tl)
+                        if hits >= 2:
+                            ans = try_extract_outcomes_answer(q, txt, debug=None)
+                            if ans and _is_strict_scope_query(q) and _source_url_matches_scope(q, str(u)):
+                                return ans
+                            if ans and _is_quality_outcomes_answer_text(ans) and (_outcomes_answer_matches_scope(q, ans) or _source_url_matches_scope(q, str(u))):
+                                return ans
+                            try:
+                                from playwright.async_api import async_playwright
+                                async with async_playwright() as pw:
+                                    browser = await pw.chromium.launch(headless=True)
+                                    page = await browser.new_page(viewport={"width": 1440, "height": 2200})
+                                    await page.goto(u, wait_until="domcontentloaded", timeout=15000)
+                                    try:
+                                        await page.wait_for_function(
+                                            "document.body && document.body.innerText.trim().length > 100",
+                                            timeout=3000,
+                                        )
+                                    except Exception:
+                                        pass
+                                    text2 = await page.evaluate("() => (document.body && document.body.innerText) ? document.body.innerText : ''")
+                                    await browser.close()
+                                if text2 and len(text2) >= 200:
+                                    ans2 = try_extract_outcomes_answer(q, text2, debug=None)
+                                    if ans2 and _is_strict_scope_query(q) and _source_url_matches_scope(q, str(u)):
+                                        return ans2
+                                    if ans2 and _is_quality_outcomes_answer_text(ans2) and (_outcomes_answer_matches_scope(q, ans2) or _source_url_matches_scope(q, str(u))):
+                                        return ans2
+                            except Exception:
+                                pass
+                except Exception:
+                    pass
             for u in locs[:3000]:
                 ul = str(u).lower()
                 sc = 0.0
