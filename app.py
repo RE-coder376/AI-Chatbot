@@ -5868,6 +5868,60 @@ async def _live_site_content_outcomes_probe(q: str, cfg: dict, max_urls: int = 2
                         return ans
                     if ans and _is_quality_outcomes_answer_text(ans) and (_outcomes_answer_matches_scope(q, ans) or _source_url_matches_scope(q, str(u))):
                         return ans
+                    # Some docs are rendered client-side, so the raw HTTP text misses the visible outcomes block.
+                    # For exact title candidates, do one bounded browser-rendered pass before giving up.
+                    try:
+                        from playwright.async_api import async_playwright
+                        async with async_playwright() as pw:
+                            browser = await pw.chromium.launch(headless=True)
+                            page = await browser.new_page(viewport={"width": 1440, "height": 2200})
+                            try:
+                                await page.goto(u, wait_until="domcontentloaded", timeout=15000)
+                            except Exception:
+                                await browser.close()
+                                raise
+                            try:
+                                await page.wait_for_function(
+                                    "document.body && document.body.innerText.trim().length > 100",
+                                    timeout=3000,
+                                )
+                            except Exception:
+                                pass
+                            try:
+                                await page.evaluate("""() => {
+                                    document.querySelectorAll('details').forEach(d => d.setAttribute('open', ''));
+                                    document.querySelectorAll(
+                                        '.accordion-button, .accordion-trigger, .accordion-header, ' +
+                                        '[data-toggle], .faq-question, .collapse-trigger, summary'
+                                    ).forEach(el => { try { el.click(); } catch(e) {} });
+                                }""")
+                                await asyncio.sleep(0.4)
+                            except Exception:
+                                pass
+                            text2 = await page.evaluate("() => (document.body && document.body.innerText) ? document.body.innerText : ''")
+                            title2 = ""
+                            try:
+                                title2 = await page.title()
+                            except Exception:
+                                title2 = ""
+                            await browser.close()
+                        if text2 and len(text2) >= 200:
+                            ans2 = try_extract_outcomes_answer(q, text2, debug=None)
+                            if ans2 and _is_strict_scope_query(q) and _source_url_matches_scope(q, str(u)):
+                                return ans2
+                            if ans2 and _is_quality_outcomes_answer_text(ans2) and (_outcomes_answer_matches_scope(q, ans2) or _source_url_matches_scope(q, str(u))):
+                                return ans2
+                            # As a last deterministic fallback, let the browser-rendered text try again through the HTML extractor.
+                            ans3 = _extract_outcomes_from_html(
+                                f"<html><head><title>{title2}</title></head><body>{text2}</body></html>",
+                                q=q,
+                            )
+                            if ans3 and _is_strict_scope_query(q) and _source_url_matches_scope(q, str(u)):
+                                return ans3
+                            if ans3 and _is_quality_outcomes_answer_text(ans3) and (_outcomes_answer_matches_scope(q, ans3) or _source_url_matches_scope(q, str(u))):
+                                return ans3
+                    except Exception:
+                        pass
                 except Exception:
                     continue
             candidates = []
