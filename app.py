@@ -3292,7 +3292,23 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
                 yield f"data: {json.dumps(_metadata_payload(_lead_on, sources[:5]))}\n\n"
                 yield "data: {\"type\": \"done\"}\n\n"
                 return
-            _trace_decision(workflow_debug, "strict_goals_defer_to_llm", True)
+            _ctx_syn = await _synthesize_scoped_outcomes_from_cluster(q, context or "", sources or [])
+            if _ctx_syn:
+                if visitor_id:
+                    _run_in_bg(save_visitor_turn, visitor_id, "assistant", _ctx_syn, db_name)
+                yield f"data: {json.dumps({'type': 'chunk', 'content': _ctx_syn})}\n\n"
+                _lead_on = not cfg.get("disable_lead_box", False)
+                yield f"data: {json.dumps(_metadata_payload(_lead_on, sources[:5]))}\n\n"
+                yield "data: {\"type\": \"done\"}\n\n"
+                return
+            _msg2 = "I couldn't find an explicit learning-goals list for that exact chapter/part in the retrieved context."
+            if visitor_id:
+                _run_in_bg(save_visitor_turn, visitor_id, "assistant", _msg2, db_name)
+            yield f"data: {json.dumps({'type': 'chunk', 'content': _msg2})}\n\n"
+            _lead_on = not cfg.get("disable_lead_box", False)
+            yield f"data: {json.dumps(_metadata_payload(_lead_on, sources[:5]))}\n\n"
+            yield "data: {\"type\": \"done\"}\n\n"
+            return
 
     # ── Sparse KB guard — skip for api-only DBs (no KB, LLM uses training knowledge) ──
     # Deterministic strict-scope factual extractor (non-goals).
@@ -4617,8 +4633,18 @@ async def chat(request: Request):
                         "answer_artifacts": workflow_debug["answer_artifacts"],
                     }
                 return JSONResponse(payload)
-            workflow_debug["guard_decisions"]["strict_goals_defer_to_llm"] = True
-            _trace_decision(workflow_debug, "strict_goals_defer_to_llm", True)
+            payload = {
+                "answer": "I couldn't find an explicit learning-goals list for that exact chapter/part in the retrieved context.",
+                "sources": (sources or [])[:5],
+                "evidence_spans": [],
+            }
+            if debug_effective:
+                payload["debug"] = {
+                    "workflow_trace": workflow_trace,
+                    "guard_decisions": workflow_debug["guard_decisions"],
+                    "answer_artifacts": workflow_debug["answer_artifacts"],
+                }
+            return JSONResponse(payload)
 
         _is_product_db_local = _check_is_product_db(tenant_db_instance, tenant_db_name) or ("smart_search" in set(cfg.get("features", [])))
         _prod_det = _deterministic_product_catalog_answer(q, context or "")
@@ -5484,6 +5510,43 @@ def _fallback_scoped_outcomes_from_context(q: str, context: str) -> str | None:
         return "Learning outcomes:\n\n" + "\n".join(f"- {x}" for x in out[:12])
     except Exception:
         return None
+
+
+async def _synthesize_scoped_outcomes_from_cluster(q: str, context: str, sources: list[str]) -> str | None:
+    """Compact LLM synthesis for strict learning-goals queries when no explicit list is present.
+
+    The prompt is intentionally small: it uses only the retrieved evidence cluster and the source URLs,
+    which makes it much less likely to time out than the full chat-context prompt.
+    """
+    try:
+        if (not q) or (not context) or (not _LEARNING_GOALS_Q_RE.search(q or "")):
+            return None
+        llm = get_fresh_llm()
+        if not llm:
+            return None
+        src_block = "\n".join(f"- {s}" for s in (sources or [])[:6] if s)
+        ctx_lines = [ln.strip() for ln in str(context or "").splitlines() if ln.strip()]
+        ctx_block = "\n".join(ctx_lines[:50])[:3200]
+        sys_msg = (
+            "You extract learning goals from retrieved documentation evidence. "
+            "Answer with 5-8 short bullet points. Use only the evidence below. "
+            "Do not mention that something is missing. Do not add a preamble."
+        )
+        user_msg = (
+            f"Question: {q}\n\n"
+            f"Retrieved sources:\n{src_block or '- (none)'}\n\n"
+            f"Retrieved context:\n{ctx_block}\n"
+        )
+        res = await asyncio.wait_for(
+            llm.ainvoke([SystemMessage(content=sys_msg), HumanMessage(content=user_msg)]),
+            timeout=22,
+        )
+        ans = re.sub(r"^\s*(?:Learning outcomes:|Goals:)\s*", "", str(getattr(res, "content", "") or "").strip(), flags=re.I)
+        if ans and _is_quality_outcomes_answer_text(ans) and _outcomes_answer_matches_scope(q, ans):
+            return ans
+    except Exception:
+        return None
+    return None
 
 def _source_url_matches_scope(q: str, url: str) -> bool:
     """Scope matcher using URL anchors for strict chapter/part/title queries."""
