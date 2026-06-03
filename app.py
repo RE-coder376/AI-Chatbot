@@ -5926,6 +5926,13 @@ async def _live_site_content_outcomes_probe(q: str, cfg: dict, max_urls: int = 2
                                 anchors = await _collect_anchors()
                                 if not anchors:
                                     try:
+                                        # Open the docs search UI the same way a user would.
+                                        for _combo in ("Control+K", "Meta+K", "/"):
+                                            try:
+                                                await page.keyboard.press(_combo)
+                                                await asyncio.sleep(0.8)
+                                            except Exception:
+                                                pass
                                         _search_inputs = await page.locator("input[type='search'], input[placeholder*='Search' i], input[aria-label*='Search' i]").all()
                                     except Exception:
                                         _search_inputs = []
