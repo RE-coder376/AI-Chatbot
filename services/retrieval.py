@@ -1709,7 +1709,10 @@ async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansio
             # "By completing Part 10", grab it first.
             if _pc_anchor:
                 _anchor_phrase = f"by completing {_pc_anchor}"
-                for _needle in (_anchor_phrase, _anchor_phrase.title()):
+                # $contains is case-sensitive; add "By completing Part/Chapter N" variant
+                _pc_proper = re.sub(r'\b(part|chapter|section)\b', lambda m: m.group(0).capitalize(), _pc_anchor)
+                _anchor_proper = f"By completing {_pc_proper}"
+                for _needle in (_anchor_phrase, _anchor_phrase.title(), _anchor_proper):
                     try:
                         raw2 = db._collection.get(where_document={"$contains": _needle}, limit=80)
                         for doc_text, meta in zip(raw2.get('documents', []), raw2.get('metadatas', [])):
@@ -1722,7 +1725,14 @@ async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansio
             # 2) Broad net (marker phrases), then filter hard by anchor tokens.
             # We intentionally include "goals" because some KB pages list outcomes as verb bullets
             # without the literal "you will..." phrase.
-            for _marker in ("you will be able to", "by the end of this chapter", "learning outcomes", "by completing", "goals"):
+            for _marker in (
+                "you will be able to", "You will be able to",
+                "by the end of this chapter", "By the end of this chapter",
+                "learning outcomes", "Learning Outcomes", "Learning outcomes",
+                "by completing", "By completing",
+                "goals", "Goals",
+                "objectives", "Objectives",
+            ):
                 try:
                     raw = db._collection.get(where_document={"$contains": _marker}, limit=250)
                 except Exception:
@@ -1958,7 +1968,7 @@ async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansio
         # Fire policy search when: (a) query explicitly mentions policy terms, OR
         # (b) DB is a product/retail catalog (_has_product_meta) — covers "Deli Punch shipping?"
         # type queries where the user asks about a product but the answer lives in a policy chunk.
-        if _POLICY_Q_RE.search(q) or _has_product_meta or _is_product_db:
+        if _POLICY_Q_RE.search(q):
             _policy_task = loop.run_in_executor(
                 None, lambda: db.similarity_search(
                     "shipping delivery return policy discount rules refund charges", k=5
