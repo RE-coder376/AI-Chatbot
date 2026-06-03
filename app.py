@@ -3794,6 +3794,15 @@ def _deterministic_learning_goals_answer(q: str, kb_context: str) -> str | None:
         if not _LEARNING_GOALS_Q_RE.search(q):
             return None
 
+        # Keep the app-level validator aligned with the shared retrieval extractor.
+        # This gives the newer retrieval logic first chance to claim exact goal lists.
+        try:
+            _shared = try_extract_outcomes_answer(q, kb_context, debug=None)
+            if _shared and _is_quality_outcomes_answer_text(_shared) and _outcomes_answer_matches_scope(q, _shared):
+                return _shared
+        except Exception:
+            pass
+
         chapter_m = re.search(r"\bchapter\s+(\d{1,3})\b", q, re.I)
         wants_chapter = bool(chapter_m)
         chapter_title = ""

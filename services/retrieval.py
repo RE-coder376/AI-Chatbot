@@ -104,8 +104,15 @@ def try_extract_outcomes_answer(q: str, context: str, debug: dict | None = None)
                 req = 2 if len(title_tokens) >= 3 else 1
                 if hit < req and not (len(items) >= 4 and verb_ratio >= 0.60):
                     return False
-            # Learning outcomes should be mostly verb-start imperatives.
-            return verb_ratio >= 0.45
+            # Learning outcomes should usually be verb-start imperatives, but
+            # some exact chapter pages surface as clean topic lists under a strong
+            # explicit marker. Accept those when we already have a scope anchor.
+            if verb_ratio >= 0.45:
+                return True
+            if _scope_anchor_present and len(items) >= 3 and _generic_heading_count(items) == 0:
+                if sum(1 for it in items if "?" in it) == 0:
+                    return True
+            return False
 
         def _valid_chapter_topics_items(items: list[str], strong_marker: bool = False) -> bool:
             # Used for sections like "compare it to what we'll learn in this chapter:" which often
@@ -230,7 +237,7 @@ def try_extract_outcomes_answer(q: str, context: str, debug: dict | None = None)
                         continue
                     if _long >= max(2, len(cand) // 2):
                         continue
-                    if verb_ratio < 0.45:
+                    if verb_ratio < 0.45 and not (_marker_ix is not None and len(cand) >= 3 and _generic_heading_count(cand) == 0):
                         continue
                     if not _valid_outcomes_items(cand):
                         continue
