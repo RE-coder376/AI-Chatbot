@@ -5967,6 +5967,76 @@ async def _live_site_exact_title_probe(q: str, cfg: dict, max_urls: int = 12) ->
         if not title_tokens and not title_slug:
             return (None, [])
 
+        def _norm_title(s: str) -> str:
+            return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9]+", " ", (s or "").lower())).strip()
+
+        @functools.lru_cache(maxsize=1)
+        def _load_search_index_docs() -> list[dict]:
+            try:
+                path = Path(__file__).resolve().parent / "search-index.json"
+                if not path.exists():
+                    return []
+                raw = json.loads(path.read_text(encoding="utf-8"))
+                items = raw
+                if isinstance(raw, dict):
+                    items = [raw]
+                docs: list[dict] = []
+                for item in items if isinstance(items, list) else []:
+                    if isinstance(item, dict) and isinstance(item.get("documents"), list):
+                        for doc in item.get("documents") or []:
+                            if isinstance(doc, dict):
+                                docs.append(doc)
+                    elif isinstance(item, dict) and ("t" in item or "u" in item):
+                        docs.append(item)
+                return docs
+            except Exception:
+                return []
+
+        def _search_index_candidate_urls() -> list[str]:
+            docs = _load_search_index_docs()
+            if not docs:
+                return []
+            tq = _norm_title(title_phrase)
+            tks = set(re.findall(r"[a-z0-9]{4,}", tq))
+            scored: list[tuple[float, str]] = []
+            for doc in docs:
+                try:
+                    u = str(doc.get("u") or "").strip()
+                    t = str(doc.get("t") or "").strip()
+                    if not u or not t:
+                        continue
+                    ul = u.lower()
+                    if base and not ul.startswith(base.lower()):
+                        continue
+                    nt = _norm_title(t)
+                    if not nt:
+                        continue
+                    overlap = len(tks.intersection(set(re.findall(r"[a-z0-9]{4,}", nt))))
+                    score = 0.0
+                    if nt == tq:
+                        score = 100.0
+                    elif tq and (tq in nt or nt in tq):
+                        score = 90.0
+                    elif overlap >= max(2, min(4, len(tks))):
+                        score = 70.0 + overlap
+                    elif overlap >= 1 and (title_slug and title_slug in ul):
+                        score = 60.0 + overlap
+                    elif title_slug and title_slug in ul:
+                        score = 55.0
+                    else:
+                        continue
+                    scored.append((score, u))
+                except Exception:
+                    continue
+            scored.sort(key=lambda x: x[0], reverse=True)
+            out: list[str] = []
+            for _, u in scored:
+                if u not in out:
+                    out.append(u)
+                if len(out) >= max_urls:
+                    break
+            return out
+
         def _html_to_text(html: str) -> str:
             h = re.sub(r"(?is)<script[^>]*>.*?</script>", " ", html or "")
             h = re.sub(r"(?is)<style[^>]*>.*?</style>", " ", h)
@@ -6099,8 +6169,12 @@ async def _live_site_exact_title_probe(q: str, cfg: dict, max_urls: int = 12) ->
                 return None, None
 
             locs = await _collect_sitemap_urls(f"{base}/sitemap.xml")
+            index_candidates = _search_index_candidate_urls()
             nav_href, nav_text = await _browser_find_doc()
             candidates: list[str] = []
+            for u in index_candidates:
+                if u not in candidates:
+                    candidates.append(str(u))
             if nav_href:
                 candidates.append(str(nav_href))
             if title_slug:
