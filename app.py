@@ -6206,7 +6206,9 @@ async def _live_site_exact_title_probe(q: str, cfg: dict, max_urls: int = 12) ->
                     txt = _html_to_text(r.text or "")
                     if len(txt) < 180:
                         continue
-                    ans = _deterministic_exact_title_factual_answer(q, txt, require_title_anchor=False)
+                    ans = _deterministic_exact_title_factual_answer(q, txt, require_title_anchor=True)
+                    if not ans and title_slug and title_slug in str(u).lower():
+                        ans = _deterministic_exact_title_factual_answer(q, txt, require_title_anchor=False)
                     if ans:
                         return ans, [str(u)]
                 except Exception:
