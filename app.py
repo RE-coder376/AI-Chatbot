@@ -2482,6 +2482,11 @@ def _strict_query_has_source_anchor(sources: list[str], q: str) -> bool:
         focus = _extract_focus_phrase(q)
         title_phrase = _extract_title_phrase(q)
         title_slug = re.sub(r"[^a-z0-9]+", "-", (title_phrase or "").lower()).strip("-")
+        title_tokens = [
+            w.lower()
+            for w in re.findall(r"[a-zA-Z0-9]{4,}", title_phrase or "")
+            if w.lower() not in _QUERY_STOP
+        ][:10]
         q_terms = [w.lower() for w in re.findall(r"[a-zA-Z0-9]{4,}", f"{scope} {focus}" or "")][:8]
         if not q_terms:
             q_terms = [w.lower() for w in re.findall(r"[a-zA-Z0-9]{4,}", q or "") if w.lower() not in _QUERY_STOP][:8]
@@ -2489,6 +2494,11 @@ def _strict_query_has_source_anchor(sources: list[str], q: str) -> bool:
             ul = str(u or "").lower()
             if title_slug and (title_slug in ul or ul.rstrip("/").endswith(title_slug)):
                 return True
+            if title_tokens:
+                title_hit = sum(1 for t in title_tokens[:6] if t in ul)
+                title_req = 2 if len(title_tokens) >= 4 else 1
+                if title_hit >= title_req:
+                    return True
             if q_terms and all(t in ul for t in q_terms[:3]):
                 return True
         return False
@@ -5627,6 +5637,11 @@ def _source_url_matches_scope(q: str, url: str) -> bool:
             return False
         title_phrase = _extract_title_phrase(q)
         title_slug = re.sub(r"[^a-z0-9]+", "-", (title_phrase or "").lower()).strip("-")
+        title_tokens = [
+            w.lower()
+            for w in re.findall(r"[a-zA-Z0-9]{4,}", title_phrase or "")
+            if w.lower() not in _QUERY_STOP
+        ][:10]
         mch = re.search(r"\bchapter\s+(\d{1,4})\b", q, re.I)
         mpt = re.search(r"\bpart\s+(\d{1,4})\b", q, re.I)
         num_ok = True
@@ -5645,10 +5660,20 @@ def _source_url_matches_scope(q: str, url: str) -> bool:
                     return True
                 if title_slug and (title_slug in ul or ul.rstrip("/").endswith(title_slug)):
                     return True
+                if title_tokens:
+                    title_hit = sum(1 for t in title_tokens[:6] if t in ul)
+                    title_req = 2 if len(title_tokens) >= 4 else 1
+                    if title_hit >= title_req:
+                        return True
                 return False
         if title_slug and (title_slug in ul or ul.rstrip("/").endswith(title_slug)):
             return True
-        return num_ok
+        if title_tokens:
+            title_hit = sum(1 for t in title_tokens[:6] if t in ul)
+            title_req = 2 if len(title_tokens) >= 4 else 1
+            if title_hit >= title_req:
+                return True
+        return bool(mch or mpt) and num_ok
     except Exception:
         return False
 
