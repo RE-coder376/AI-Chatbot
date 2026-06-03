@@ -4545,6 +4545,7 @@ async def chat(request: Request):
                 }
             return JSONResponse(payload)
 
+        _is_product_db_local = _check_is_product_db(tenant_db_instance, tenant_db_name) or ("smart_search" in set(cfg.get("features", [])))
         if (not _is_product_db_local) and _is_exact_title_factual_query(q):
             try:
                 _exact_ans = _deterministic_exact_title_factual_answer(q, context or "")
