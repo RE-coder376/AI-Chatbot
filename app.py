@@ -905,6 +905,12 @@ async def _live_site_query_rescue_context(q: str, cfg: dict, max_urls: int = 3, 
                 if len(picked) >= int(max_urls):
                     break
                 try:
+                    if exact_slug and title_tokens:
+                        ul = str(u).lower()
+                        title_hits = sum(1 for t in title_tokens[:6] if t in ul)
+                        min_title_hits = 3 if len(title_tokens) >= 4 else 2
+                        if title_hits < min_title_hits and not (exact_slug in ul or ul.rstrip("/").endswith(exact_slug)):
+                            continue
                     r = await client.get(u)
                     if r.status_code != 200:
                         continue
@@ -2626,6 +2632,12 @@ async def _live_site_strict_scope_probe(q: str, cfg: dict, max_urls: int = 8) ->
             scored.sort(key=lambda x: x[0], reverse=True)
             for _, u in scored[:max_urls]:
                 try:
+                    if title_slug and (scope_terms or focus_terms or q_terms):
+                        ul = str(u).lower()
+                        title_hits = sum(1 for t in (scope_terms + focus_terms + q_terms)[:8] if t in ul)
+                        min_title_hits = 3 if len((scope_terms + focus_terms + q_terms)) >= 4 else 2
+                        if title_hits < min_title_hits and not (title_slug in ul or ul.rstrip("/").endswith(title_slug)):
+                            continue
                     r = await client.get(str(u))
                     if r.status_code != 200:
                         continue
@@ -5837,6 +5849,12 @@ async def _live_site_outcomes_probe(q: str, cfg: dict, max_urls: int = 4) -> str
             scored.sort(key=lambda x: x[0], reverse=True)
             for _, u in scored[:max(1, int(max_urls))]:
                 try:
+                    if _is_strict_scope_query(q) and tphrase:
+                        ul = str(u).lower()
+                        title_hits = sum(1 for t in tks if t in ul)
+                        min_title_hits = 3 if len(tks) >= 4 else 2
+                        if title_hits < min_title_hits and not _source_url_matches_scope(q, str(u)):
+                            continue
                     r = await client.get(str(u))
                     if r.status_code != 200:
                         continue
@@ -6051,6 +6069,12 @@ async def _live_site_content_outcomes_probe(q: str, cfg: dict, max_urls: int = 2
                             direct_candidates.append(_u)
             for u in direct_candidates[:max(6, int(max_urls))]:
                 try:
+                    if _is_strict_scope_query(q) and tphrase:
+                        ul = str(u).lower()
+                        title_hits = sum(1 for t in tks if t in ul)
+                        min_title_hits = 3 if len(tks) >= 4 else 2
+                        if title_hits < min_title_hits and not _source_url_matches_scope(q, str(u)):
+                            continue
                     r = await client.get(u)
                     if r.status_code != 200:
                         continue
@@ -6141,6 +6165,12 @@ async def _live_site_content_outcomes_probe(q: str, cfg: dict, max_urls: int = 2
                         exact_candidates.append(str(u))
             for u in exact_candidates[:max(6, int(max_urls))]:
                 try:
+                    if _is_strict_scope_query(q) and tphrase:
+                        ul = str(u).lower()
+                        title_hits = sum(1 for t in tks if t in ul)
+                        min_title_hits = 3 if len(tks) >= 4 else 2
+                        if title_hits < min_title_hits and not _source_url_matches_scope(q, str(u)):
+                            continue
                     r = await client.get(u)
                     if r.status_code != 200:
                         continue
