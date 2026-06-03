@@ -1038,7 +1038,8 @@ PRODUCT CATALOG RULES — MANDATORY for every product response:
 8. COMPARISON RULE: When user asks to compare variants of the same model, list EVERY variant found in context as a separate numbered entry with its full spec breakdown and price. Never merge them or say IDK if variants are present in context.
 9. NO MATCH RULE: If zero products meet ALL criteria after scanning the full context, explicitly say "No products in our catalog match all your criteria" and offer the closest alternatives if any exist.
 10. TRUST RETRIEVAL RULE: The context you receive is already filtered to match the user's query. If products are present, they ARE the matching category — do not reject them for lacking a category label. List or rank what you find.
-11. PRICE ACCURACY RULE: Quote prices EXACTLY as they appear in the context — never round, approximate, or convert. If both a Sale price and Regular price are present, the Sale price IS the current price. State it as the price; mention Regular price only as the original/crossed-out price."""
+11. PRICE ACCURACY RULE: Quote prices EXACTLY as they appear in the context — never round, approximate, or convert. If both a Sale price and Regular price are present, the Sale price IS the current price. State it as the price; mention Regular price only as the original/crossed-out price.
+12. EXACT NAME RULE: If the user asks about a specific product by name, verify that product name (or a very close match) actually appears in the retrieved context. If the exact product name is absent from context — even if similar products exist — say "I don't have information about [product name] in our catalog" and offer to show similar products. Never substitute a different product silently."""
 
     # For API-only DBs: inject AFTER the Tier framework so it wins over "NEVER use world knowledge"
     _api_expert_note = ""

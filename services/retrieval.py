@@ -26,10 +26,16 @@ from services.crawler_utils import (
 logger = logging.getLogger(__name__)
 
 # Debug-only: helps confirm which extractor logic is running on HF.
-_OUTCOMES_EXTRACTOR_VERSION = "2026-05-13.v2"
+_OUTCOMES_EXTRACTOR_VERSION = "2026-06-04.v3"
 
 # Outcomes/learning intent (universal)
-_OUTCOMES_INTENT_RE = re.compile(r"\b(what\s+will\s+i\s+learn|what\s+will\s+we\s+learn|learning\s+outcomes?|objectives?|goals?|by\s+the\s+end|you\s+will\s+be\s+able\s+to)\b", re.I)
+_OUTCOMES_INTENT_RE = re.compile(
+    r"\b(what\s+will\s+i\s+learn|what\s+will\s+we\s+learn|learning\s+outcomes?|objectives?|goals?|"
+    r"by\s+the\s+end|you\s+will\s+be\s+able\s+to|"
+    r"what\s+(?:do|does|will|would)\s+[^.!?]{3,80}\s+cover|"
+    r"what\s+(?:is|are)\s+covered|covers?\b)\b",
+    re.I,
+)
 
 _BULLET_LINE_RE = re.compile(r"^\s*(?:[-*•]|\d{1,2}[.)])\s+(.+?)\s*$")
 
@@ -218,7 +224,10 @@ def try_extract_outcomes_answer(q: str, context: str, debug: dict | None = None)
                 # Strategy B: bare marker word to stop-phrase ("Goals Understand...Learn...")
                 try:
                     _INLINE_STOPS = ("lesson progression", "chapter progression",
-                                     "outcome & method", "why this order", "prerequisites")
+                                     "outcome & method", "outcome and method",
+                                     "why this order", "prerequisites",
+                                     "what this part will teach", "seven chapters",
+                                     "frameworks first", "direct speech")
                     _IVSP = re.compile(
                         r'(?=\b(?:Understand|Map|Learn|Capture|Build|Ship|Use|Integrate|Deliver|'
                         r'Identify|Structure|Apply|Verify|Run|Retrofit|Install|Design|Validate|'
@@ -282,16 +291,23 @@ def try_extract_outcomes_answer(q: str, context: str, debug: dict | None = None)
                     if _BULLET_LINE_RE.match(t):
                         cand.append(_BULLET_LINE_RE.match(t).group(1).strip())
                         continue
-                    if cand and len(t) <= 180 and not re.match(r"(?i)^(?:chapter|part|lesson|section|try with ai|prompt\s+\d+|safety note|prerequisites|authors|company|privacy|previous|next)\b", t):
-                        cand[-1] = (cand[-1].rstrip() + " " + t.strip(" -:•\t")).strip()
-                        continue
-                    # accept short verb-ish lines (no bullet marker)
+                    # Break immediately on any section-boundary line (prevents chapter
+                    # progression / "Why this order" lines from being appended as goals).
+                    if re.match(r"(?i)^(?:chapter|part|lesson|section|try with ai|prompt\s+\d+|safety note|prerequisites|authors|company|privacy|previous|next|why this order|outcome|capstone)\b", t):
+                        break
+                    # Verb-start lines begin a NEW goal item — check BEFORE continuation.
+                    # This prevents "Ship with LiveKit Agents" from being merged into
+                    # the previous goal's continuation text.
                     w0 = (t.split()[:1][0].lower() if t.split() else "")
                     if w0 in _OUTCOME_VERB_HINTS and ("http" not in t.lower()) and ("?" not in t):
                         cand.append(t.strip(" -•\t"))
                         continue
-                    # stop when we hit obvious non-outcomes section headers
-                    if re.search(r"(?i)\\b(previous|next|prerequisites|authors|company|privacy|capstone|lesson progression)\\b", t):
+                    # Non-verb lines are continuations of the last goal item.
+                    if cand and len(t) <= 180:
+                        cand[-1] = (cand[-1].rstrip() + " " + t.strip(" -:•\t")).strip()
+                        continue
+                    # stop on obvious non-outcomes section headers (fixed: \b not \\b)
+                    if re.search(r"(?i)\b(previous|next|prerequisites|authors|company|privacy|capstone|lesson progression|chapter progression|why this order)\b", t):
                         break
                 if 3 <= len(cand) <= 18:
                     starters = [(it.split()[:1][0].lower() if it.split() else "") for it in cand]
@@ -871,6 +887,24 @@ def _extract_title_phrase(q: str) -> str:
             phrase = m2.group(1).strip().strip('"\'')
             phrase = re.sub(r"\s{2,}", " ", phrase).strip()
             return phrase
+        # Handle "Title (N)" pattern: e.g. "Voice Foundations (109)" or "Chapter (79)"
+        # Strip the parenthesised number; strip leading question/filler words.
+        _m3_all = re.findall(
+            r"\b([A-Z][A-Za-z][A-Za-z\s&:\-]{2,70})\s*\(\s*\d{1,4}\s*\)",
+            q or "",
+        )
+        if _m3_all:
+            phrase = _m3_all[-1].strip()
+            _q_stops = {"what", "which", "how", "when", "who", "why", "where",
+                        "do", "does", "is", "are", "the", "a", "an", "in", "of",
+                        "for", "with", "from", "by", "at", "to", "give", "show",
+                        "tell", "list", "explain", "describe", "cover", "covers"}
+            parts = phrase.split()
+            while parts and parts[0].lower() in _q_stops:
+                parts = parts[1:]
+            phrase = " ".join(parts).strip()
+            if len(phrase) >= 4:
+                return phrase
     except Exception:
         pass
     return ''
@@ -1612,6 +1646,9 @@ async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansio
     # keep retrieval focused and avoid broad expansion drift.
     _strict_scope_q = bool(re.search(r"\b(?:chapter|part)\s+\d{1,4}\b", q or "", re.I))
     if not _strict_scope_q and re.search(r"^\s*in\s+[^,\n]{6,200}\s*,\s*(?:what|why|how|which|who|when)\b", q or "", re.I):
+        _strict_scope_q = True
+    # Also treat "Title (N)" queries (e.g. "Voice Foundations (109)") as scoped.
+    if not _strict_scope_q and re.search(r"\b[A-Z][A-Za-z\s]{3,60}\s*\(\s*\d{1,4}\s*\)", q or ""):
         _strict_scope_q = True
     if _strict_scope_q:
         fast = True
