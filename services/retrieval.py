@@ -195,12 +195,20 @@ def try_extract_outcomes_answer(q: str, context: str, debug: dict | None = None)
                 ll = (ln or "").lower()
                 if not any(m in ll for m in markers):
                     continue
-                # If the question names Chapter/Part number, require it to be present in the marker line
-                # (prevents grabbing the wrong chapter's outcomes list).
+                # If the question names Chapter/Part number, require it to be present in the marker
+                # line OR in the nearby context window (page heading a few lines above the marker).
+                # Pure line-check was too strict: most pages have "Learning Outcomes:" without
+                # repeating "Chapter N" on that same line.
                 if chapter_no is not None and ("chapter" in _q_lower) and (f"chapter {chapter_no}" not in ll):
-                    continue
+                    _nearby_ctx = " ".join(lines[max(0, mi - 15): mi + 3]).lower()
+                    if f"chapter {chapter_no}" not in _nearby_ctx:
+                        if not (title_tokens and sum(1 for t in title_tokens[:6] if t in _nearby_ctx) >= 2):
+                            continue
                 if part_no is not None and ("part" in _q_lower) and (f"part {part_no}" not in ll):
-                    continue
+                    _nearby_ctx = " ".join(lines[max(0, mi - 15): mi + 3]).lower()
+                    if f"part {part_no}" not in _nearby_ctx:
+                        if not (title_tokens and sum(1 for t in title_tokens[:6] if t in _nearby_ctx) >= 2):
+                            continue
                 if _q_is_chapter and ("by completing part" in ll):
                     continue
                 cand = []
@@ -2362,13 +2370,14 @@ async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansio
         # For "best gaming / highest VRAM" queries: sort by GPU VRAM descending in Python
         if re.search(r'\bbest\b.*\bgaming\b|\bhighest\b.*\b(?:gpu|vram)\b|\bmost\s+powerful\b', q, re.I):
             top.sort(key=lambda r: r.metadata.get('gpu_vram_gb', 0) if r.metadata else 0, reverse=True)
-    # Product-title rerank: exact product pages should outrank same-brand neighbors for
-    # pricing/detail questions like "Pack Of 12" even on DBs whose chunks are URL/text-only.
+    # Product-title rerank: exact product pages should outrank same-brand neighbors.
+    # Previously only fired for price/size queries — extended to ALL product queries so
+    # name-only lookups like "Pop Up Animals Toy" also land on the exact product page.
     _has_productish_sources = any(
         "/products/" in str(((getattr(r, "metadata", None) or {}).get("source")) or "").lower()
         for r in top[:20]
     )
-    if _has_productish_sources and re.search(r"\b(price|pricing|cost|how much|sku|size|color|pack|piece|pieces)\b", q, re.I):
+    if _has_productish_sources:
         top.sort(key=lambda r: _product_query_rerank_score(q, r), reverse=True)
 
     # Language-aware source preference:
