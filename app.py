@@ -5521,17 +5521,45 @@ async def _synthesize_scoped_outcomes_from_cluster(q: str, context: str, sources
     try:
         if (not q) or (not context) or (not _LEARNING_GOALS_Q_RE.search(q or "")):
             return None
+
+        # First give the deterministic extractor a clean shot on the full retrieved cluster.
+        # The model should only synthesize when the cluster really lacks an explicit bullet list.
+        _det_full = _deterministic_learning_goals_answer(q, context or "")
+        if _det_full and _is_quality_outcomes_answer_text(_det_full) and _outcomes_answer_matches_scope(q, _det_full):
+            return _det_full
+
         llm = get_fresh_llm()
         if not llm:
             return None
         title_phrase = _extract_title_phrase(q or "")
         title_slug = _slugish(title_phrase or "")
+
+        # If the cluster has an explicit outcomes marker, keep a wider marker window so we
+        # don't accidentally trim away the actual bullet list while narrowing the context.
+        marker_window = ""
+        try:
+            _ctx_lower = str(context or "").lower()
+            _marker_pos = -1
+            for _marker in ("by completing", "by the end", "learning outcomes", "objectives", "goals"):
+                _marker_pos = _ctx_lower.find(_marker)
+                if _marker_pos >= 0:
+                    break
+            if _marker_pos >= 0:
+                marker_window = str(context or "")[_marker_pos: min(len(context or ""), _marker_pos + 3600)]
+                _det_marker = _deterministic_learning_goals_answer(q, marker_window or "")
+                if _det_marker and _is_quality_outcomes_answer_text(_det_marker) and _outcomes_answer_matches_scope(q, _det_marker):
+                    return _det_marker
+        except Exception:
+            marker_window = ""
+
         filtered_sources = [s for s in (sources or []) if (not title_slug) or (title_slug in str(s).lower())]
         if filtered_sources:
             sources = filtered_sources
         src_block = "\n".join(f"- {s}" for s in (sources or [])[:6] if s)
         ctx_lines = [ln.strip() for ln in str(context or "").splitlines() if ln.strip()]
-        if title_slug:
+        if marker_window:
+            ctx_lines = [ln.strip() for ln in marker_window.splitlines() if ln.strip()]
+        elif title_slug:
             ctx_lines = [ln for ln in ctx_lines if title_slug in ln.lower() or "voice" in ln.lower() or "livekit" in ln.lower() or "pipecat" in ln.lower() or "realtime" in ln.lower()]
         ctx_block = "\n".join(ctx_lines[:60])[:3600]
         sys_msg = (
