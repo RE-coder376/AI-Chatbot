@@ -5901,27 +5901,44 @@ async def _live_site_content_outcomes_probe(q: str, cfg: dict, max_urls: int = 2
                         page = await browser.new_page(viewport={"width": 1440, "height": 2200})
                         start_urls = [base, f"{base}/docs", f"{base}/docs/"]
                         anchors: list[tuple[int, str, str]] = []
+                        async def _collect_anchors() -> list[tuple[int, str, str]]:
+                            return await page.evaluate("""(tphrase) => {
+                                const slug = (tphrase || '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+                                const words = (tphrase || '').toLowerCase().match(/[a-z0-9]{4,}/g) || [];
+                                const out = [];
+                                for (const a of document.querySelectorAll('a[href]')) {
+                                    const txt = (a.innerText || a.textContent || '').trim().replace(/\\s+/g, ' ');
+                                    const href = (a.href || '').trim();
+                                    let score = 0;
+                                    const hay = (txt + ' ' + href).toLowerCase();
+                                    if (slug && hay.includes(slug)) score += 10;
+                                    for (const w of words.slice(0, 8)) {
+                                        if (hay.includes(w)) score += 2;
+                                    }
+                                    if (score > 0) out.push([score, txt, href]);
+                                }
+                                return out.sort((a,b) => b[0] - a[0]).slice(0, 40);
+                            }""", tphrase or "")
                         for start in start_urls:
                             try:
                                 await page.goto(start, wait_until="networkidle", timeout=25000)
                                 await asyncio.sleep(0.8)
-                                anchors = await page.evaluate("""(tphrase) => {
-                                    const slug = (tphrase || '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
-                                    const words = (tphrase || '').toLowerCase().match(/[a-z0-9]{4,}/g) || [];
-                                    const out = [];
-                                    for (const a of document.querySelectorAll('a[href]')) {
-                                        const txt = (a.innerText || a.textContent || '').trim().replace(/\\s+/g, ' ');
-                                        const href = (a.href || '').trim();
-                                        let score = 0;
-                                        const hay = (txt + ' ' + href).toLowerCase();
-                                        if (slug && hay.includes(slug)) score += 10;
-                                        for (const w of words.slice(0, 8)) {
-                                            if (hay.includes(w)) score += 2;
-                                        }
-                                        if (score > 0) out.push([score, txt, href]);
-                                    }
-                                    return out.sort((a,b) => b[0] - a[0]).slice(0, 40);
-                                }""", tphrase or "")
+                                anchors = await _collect_anchors()
+                                if not anchors:
+                                    try:
+                                        _search_inputs = await page.locator("input[type='search'], input[placeholder*='Search' i], input[aria-label*='Search' i]").all()
+                                    except Exception:
+                                        _search_inputs = []
+                                    for _inp in _search_inputs[:2]:
+                                        try:
+                                            await _inp.click(timeout=1500)
+                                            await _inp.fill(tphrase or q, timeout=1500)
+                                            await asyncio.sleep(1.0)
+                                            anchors = await _collect_anchors()
+                                            if anchors:
+                                                break
+                                        except Exception:
+                                            continue
                                 if anchors:
                                     break
                             except Exception:
