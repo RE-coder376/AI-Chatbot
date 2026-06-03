@@ -5043,7 +5043,65 @@ def _deterministic_scoped_fact_answer(q: str, kb_context: str) -> str | None:
                 parts.append(p)
             return parts
 
+        def _extract_local_section_block() -> str | None:
+            """Try to return a short heading + local body block from the exact page."""
+            lines = _sentences(ctx)
+            if not lines:
+                return None
+            bad = re.compile(r"(?i)\b(prompt\s+\d+|try with ai|chapter\s+quiz|quiz|previous|next|copy as markdown|ctrl\+|on this page)\b")
+            _english_q = bool(re.search(r"[A-Za-z]", q or "")) and (not _is_urdu_script(q or ""))
+            candidates = []
+            for i, s in enumerate(lines):
+                if len(s) < 4 or len(s) > 120:
+                    continue
+                if bad.search(s):
+                    continue
+                if _english_q and re.search(r"[\u0600-\u06FF\u0900-\u097F]", s):
+                    continue
+                sl = s.lower()
+                hit = sum(1 for t in key_tks[:12] if t in sl)
+                if hit <= 0:
+                    continue
+                block = [s]
+                for nxt in lines[i + 1: i + 8]:
+                    t = (nxt or "").strip()
+                    if not t:
+                        continue
+                    if bad.search(t):
+                        break
+                    if len(t) > 280:
+                        break
+                    if re.match(r"^(?:chapter|part|section|lesson|unit)\s+\d+\b", t, re.I):
+                        break
+                    # Stop when we hit a likely new heading after already collecting content.
+                    if len(block) >= 2 and len(t.split()) <= 10 and len(t) <= 120 and re.search(r"[A-Za-z]", t):
+                        nxt_hit = sum(1 for tk in key_tks[:12] if tk in t.lower())
+                        if nxt_hit == 0:
+                            break
+                    if len(t) >= 10:
+                        block.append(t)
+                if len(block) >= 2:
+                    block_txt = "\n".join(block[:8]).strip()
+                    # Require the block to be meaningfully aligned with the query.
+                    blk_hit = sum(1 for t in key_tks[:10] if t in block_txt.lower())
+                    if blk_hit >= 2 or (len(block) >= 3 and blk_hit >= 1):
+                        candidates.append((blk_hit + len(block) * 0.25, block))
+            if not candidates:
+                return None
+            candidates.sort(key=lambda x: x[0], reverse=True)
+            best_block = candidates[0][1]
+            out_lines = []
+            for ln in best_block[:8]:
+                ln = re.sub(r"\s+", " ", ln).strip(" -*•\t")
+                if len(ln) < 3:
+                    continue
+                out_lines.append(f"- {ln}")
+            return "\n".join(out_lines) if len(out_lines) >= 2 else None
+
         bad = re.compile(r"(?i)\b(prompt\s+\d+|try with ai|chapter\s+quiz|quiz|previous|next|copy as markdown|ctrl\+|on this page)\b")
+        local_block = _extract_local_section_block()
+        if local_block and len(local_block.splitlines()) >= 2:
+            return local_block
         candidates = []
         _english_q = bool(re.search(r"[A-Za-z]", q or "")) and (not _is_urdu_script(q or ""))
         for s in _sentences(ctx):
@@ -6075,6 +6133,9 @@ async def _live_site_content_outcomes_probe(q: str, cfg: dict, max_urls: int = 2
                         if _html_ans and _is_quality_outcomes_answer_text(_html_ans) and (_outcomes_answer_matches_scope(q, _html_ans) or _source_url_matches_scope(q, str(nav_href))):
                             return _html_ans
                         txt = _to_text(r.text or "")
+                        _fact_ans = _deterministic_scoped_fact_answer(q, txt)
+                        if _fact_ans and _is_strict_scope_query(q) and _source_url_matches_scope(q, str(nav_href)):
+                            return _fact_ans
                         ans = try_extract_outcomes_answer(q, txt, debug=None)
                         if ans and _is_strict_scope_query(q) and _source_url_matches_scope(q, str(nav_href)):
                             return ans
@@ -6111,6 +6172,9 @@ async def _live_site_content_outcomes_probe(q: str, cfg: dict, max_urls: int = 2
                     txt = _to_text(r.text or "")
                     if len(txt) < 260:
                         continue
+                    _fact_ans = _deterministic_scoped_fact_answer(q, txt)
+                    if _fact_ans and _is_strict_scope_query(q) and _source_url_matches_scope(q, str(u)):
+                        return _fact_ans
                     tl = txt.lower()
                     hits = sum(1 for t in tks if t in tl)
                     ans = try_extract_outcomes_answer(q, txt, debug=None)
@@ -6264,6 +6328,9 @@ async def _live_site_content_outcomes_probe(q: str, cfg: dict, max_urls: int = 2
                                 title2 = ""
                             await browser.close()
                         if text2 and len(text2) >= 200:
+                            _fact_ans2 = _deterministic_scoped_fact_answer(q, text2)
+                            if _fact_ans2 and _is_strict_scope_query(q) and _source_url_matches_scope(q, str(u)):
+                                return _fact_ans2
                             ans2 = try_extract_outcomes_answer(q, text2, debug=None)
                             if ans2 and _is_strict_scope_query(q) and _source_url_matches_scope(q, str(u)):
                                 return ans2
