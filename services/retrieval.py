@@ -208,6 +208,9 @@ def try_extract_outcomes_answer(q: str, context: str, debug: dict | None = None)
                     if _BULLET_LINE_RE.match(t):
                         cand.append(_BULLET_LINE_RE.match(t).group(1).strip())
                         continue
+                    if cand and len(t) <= 180 and not re.match(r"(?i)^(?:chapter|part|lesson|section|try with ai|prompt\s+\d+|safety note|prerequisites|authors|company|privacy|previous|next)\b", t):
+                        cand[-1] = (cand[-1].rstrip() + " " + t.strip(" -:•\t")).strip()
+                        continue
                     # accept short verb-ish lines (no bullet marker)
                     w0 = (t.split()[:1][0].lower() if t.split() else "")
                     if w0 in _OUTCOME_VERB_HINTS and ("http" not in t.lower()) and ("?" not in t):
@@ -418,6 +421,10 @@ def try_extract_outcomes_answer(q: str, context: str, debug: dict | None = None)
                 # Allow a single indented continuation line for the previous bullet.
                 if items and ln and (ln.startswith("  ") or ln.startswith("\t")) and len(ln.strip()) >= 6:
                     items[-1] = (items[-1] + " " + ln.strip()).strip()
+                    i += 1
+                    continue
+                if items and ln and len(ln.strip()) <= 180 and not re.match(r"(?i)^(?:chapter|part|lesson|section|try with ai|prompt\s+\d+|safety note|prerequisites|authors|company|privacy|previous|next)\b", ln.strip()):
+                    items[-1] = (items[-1].rstrip() + " " + ln.strip(" -:•\t")).strip()
                     i += 1
                     continue
                 break
