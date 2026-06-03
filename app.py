@@ -5922,7 +5922,7 @@ async def _live_site_content_outcomes_probe(q: str, cfg: dict, max_urls: int = 2
                         for start in start_urls:
                             try:
                                 await page.goto(start, wait_until="networkidle", timeout=25000)
-                                await asyncio.sleep(0.8)
+                                await page.wait_for_timeout(3500)
                                 anchors = await _collect_anchors()
                                 if not anchors:
                                     try:
@@ -5930,7 +5930,7 @@ async def _live_site_content_outcomes_probe(q: str, cfg: dict, max_urls: int = 2
                                         for _combo in ("Control+K", "Meta+K", "/"):
                                             try:
                                                 await page.keyboard.press(_combo)
-                                                await asyncio.sleep(0.8)
+                                                await page.wait_for_timeout(1500)
                                             except Exception:
                                                 pass
                                         _search_inputs = await page.locator("input[type='search'], input[placeholder*='Search' i], input[aria-label*='Search' i]").all()
