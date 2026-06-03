@@ -2235,7 +2235,7 @@ def health():
 
     return {
         "status": "ok" if _status in ("ready", "ready_no_db") else _status,
-        "code_version": "exact-outcomes-v1",
+        "code_version": "exact-outcomes-v2",
         "active_db": active,
         "docs_indexed": doc_count,
         "keys_file": KEYS_FILE.exists(),
