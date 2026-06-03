@@ -6175,13 +6175,13 @@ async def _live_site_exact_title_probe(q: str, cfg: dict, max_urls: int = 12) ->
             for u in index_candidates:
                 if u not in candidates:
                     candidates.append(str(u))
-            if nav_href:
-                candidates.append(str(nav_href))
             if title_slug:
                 for u in locs:
                     ul = str(u).lower()
                     if title_slug in ul and ul.rstrip("/").endswith(title_slug):
                         candidates.append(str(u))
+            if nav_href:
+                candidates.append(str(nav_href))
             for _cand in (
                 title_phrase,
                 re.sub(r"^(?:chapter|part|section|lesson|unit)\s*\d+[A-Za-z]?\s*[:\-]?\s*", "", title_phrase or "", flags=re.I).strip(),
