@@ -776,6 +776,14 @@ def _extract_title_phrase(q: str) -> str:
             # Strip common trailing glue that isn't part of the title.
             phrase = re.sub(r"\s+according\s+to\s+.*$", "", phrase, flags=re.I).strip()
             phrase = re.sub(r"\s+from\s+the\s+book\s*$", "", phrase, flags=re.I).strip()
+            # If the user included the chapter/part prefix in the extracted title, drop it
+            # so URL/title matching can land on the canonical page slug instead of the scoped prefix.
+            phrase = re.sub(
+                r"^(?:chapter|part|section|lesson|unit)\s*\d+[A-Za-z]?\s*[:\-]?\s*",
+                "",
+                phrase,
+                flags=re.I,
+            ).strip()
             return phrase
         m2 = re.search(r"^\s*in\s+([^,\n]{6,200})\s*,\s*(?:what|why|how|which|who|when)\b", q or "", re.I)
         if m2:
