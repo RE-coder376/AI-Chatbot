@@ -5932,14 +5932,19 @@ async def _live_site_content_outcomes_probe(q: str, cfg: dict, max_urls: int = 2
                             browser = await pw.chromium.launch(headless=True)
                             page = await browser.new_page(viewport={"width": 1440, "height": 2200})
                             try:
-                                await page.goto(u, wait_until="domcontentloaded", timeout=15000)
+                                await page.goto(u, wait_until="networkidle", timeout=25000)
                             except Exception:
                                 await browser.close()
                                 raise
                             try:
                                 await page.wait_for_function(
-                                    "document.body && document.body.innerText.trim().length > 100",
-                                    timeout=3000,
+                                    "() => {\n"
+                                    "  const a = document.querySelector('article');\n"
+                                    "  const m = document.querySelector('main');\n"
+                                    "  const t = (a && a.innerText) || (m && m.innerText) || (document.body && document.body.innerText) || '';\n"
+                                    "  return t.trim().length > 200;\n"
+                                    "}",
+                                    timeout=7000,
                                 )
                             except Exception:
                                 pass
@@ -5954,7 +5959,13 @@ async def _live_site_content_outcomes_probe(q: str, cfg: dict, max_urls: int = 2
                                 await asyncio.sleep(0.4)
                             except Exception:
                                 pass
-                            text2 = await page.evaluate("() => (document.body && document.body.innerText) ? document.body.innerText : ''")
+                            try:
+                                text2 = await page.locator("article").inner_text(timeout=5000)
+                            except Exception:
+                                try:
+                                    text2 = await page.locator("main").inner_text(timeout=5000)
+                                except Exception:
+                                    text2 = await page.evaluate("() => (document.body && document.body.innerText) ? document.body.innerText : ''")
                             title2 = ""
                             try:
                                 title2 = await page.title()
