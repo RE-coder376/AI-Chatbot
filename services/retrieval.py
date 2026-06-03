@@ -40,7 +40,8 @@ _INTERROGATIVE_START = {"what", "which", "why", "how", "when", "where", "who"}
 _OUTCOME_VERB_HINTS = {
     "understand","build","ship","use","integrate","deliver","identify","structure","apply","prepare",
     "run","evaluate","deploy","install","test","design","verify","retrofit","decide","learn","encode",
-    "create","implement","configure","monitor","optimize","define","package"
+    "create","implement","configure","monitor","optimize","define","package",
+    "map","capture","explore","master","analyze","develop","write","generate","complete",
 }
 
 
@@ -190,7 +191,7 @@ def try_extract_outcomes_answer(q: str, context: str, debug: dict | None = None)
         # Marker-first extraction (safer than the old "Goals ..." heuristic):
         # If we see an explicit outcomes marker line, extract short, verb-ish lines immediately after it.
         try:
-            markers = ("by completing", "by the end", "you will be able to", "learning outcomes", "objectives")
+            markers = ("by completing", "by the end", "you will be able to", "learning outcomes", "objectives", "goals")
             for mi, ln in enumerate(lines[:900]):
                 ll = (ln or "").lower()
                 if not any(m in ll for m in markers):
@@ -212,36 +213,62 @@ def try_extract_outcomes_answer(q: str, context: str, debug: dict | None = None)
                 if _q_is_chapter and ("by completing part" in ll):
                     continue
                 cand = []
-                # Inline extraction: goals stored on same line as marker (no newlines after colon)
+                # Inline extraction: goals on same line as marker (no trailing newlines).
+                # Strategy A: colon-delimited ("By completing X, you will: goals...")
+                # Strategy B: bare marker word to stop-phrase ("Goals Understand...Learn...")
                 try:
-                    _colon_pos = -1
+                    _INLINE_STOPS = ("lesson progression", "chapter progression",
+                                     "outcome & method", "why this order", "prerequisites")
+                    _IVSP = re.compile(
+                        r'(?=\b(?:Understand|Map|Learn|Capture|Build|Ship|Use|Integrate|Deliver|'
+                        r'Identify|Structure|Apply|Verify|Run|Retrofit|Install|Design|Validate|'
+                        r'Create|Implement|Configure|Monitor|Optimize|Define|Package|Explore|'
+                        r'Master|Develop|Write|Generate|Complete)\b)'
+                    )
+
+                    def _split_goals(txt: str) -> list[str]:
+                        tl = txt.lower()
+                        stop = len(txt)
+                        for _s in _INLINE_STOPS:
+                            _sp = tl.find(_s)
+                            if 0 < _sp < stop:
+                                stop = _sp
+                        seg = txt[:stop].strip()
+                        if not seg:
+                            return []
+                        parts = [p.strip() for p in re.split(r'\.{3,}', seg) if p.strip()]
+                        if len(parts) < 2:
+                            parts = [p.strip(' :;-') for p in _IVSP.split(seg) if p.strip(' :;-')]
+                        return [p for p in parts if 8 <= len(p) <= 260]
+
+                    # Strategy A: colon-terminated marker phrase
                     for _mp in ("you will:", "able to:", "outcomes:", "objectives:"):
                         _pi = ll.find(_mp)
                         if _pi >= 0:
-                            _colon_pos = _pi + len(_mp) - 1
+                            _res = _split_goals(ln[_pi + len(_mp):].strip())
+                            if len(_res) >= 2:
+                                cand = _res
                             break
-                    if _colon_pos < 0:
-                        for _mp in ("by completing", "by the end", "learning outcomes", "objectives", "goals"):
+
+                    # Strategy B: bare marker word, goals follow up to a stop phrase
+                    if not cand:
+                        for _mp in ("goals", "by completing", "by the end", "learning outcomes", "objectives"):
                             _pi = ll.find(_mp)
-                            if _pi >= 0:
-                                _ck = ll.find(":", _pi)
-                                if _ck >= 0:
-                                    _colon_pos = _ck
-                                    break
-                    if _colon_pos >= 0:
-                        _inline_tail = ln[_colon_pos + 1:].strip()
-                        if _inline_tail:
-                            _iparts = [p.strip() for p in re.split(r'\.{3,}', _inline_tail) if p.strip()]
-                            if len(_iparts) < 2:
-                                _iparts = [p.strip(' :;-') for p in re.split(
-                                    r'(?=\b(?:Understand|Learn|Build|Ship|Use|Integrate|Deliver|'
-                                    r'Identify|Structure|Apply|Verify|Run|Retrofit|Install|Design|'
-                                    r'Validate|Create|Implement|Configure|Monitor|Optimize|Define|Package)\b)',
-                                    _inline_tail
-                                ) if p.strip(' :;-')]
-                            _cand_inline = [p for p in _iparts if 8 <= len(p) <= 260]
-                            if len(_cand_inline) >= 2:
-                                cand = _cand_inline
+                            if _pi < 0:
+                                continue
+                            _tail = ln[_pi + len(_mp):].strip()
+                            # Strip short colon-preamble ("By completing X, you will: ...")
+                            _fc = _tail.lower().find(":")
+                            if 0 <= _fc < 100:
+                                _tail = _tail[_fc + 1:].strip()
+                            # Advance to first outcome verb to drop any remaining preamble
+                            _vm = _IVSP.search(_tail)
+                            if _vm:
+                                _tail = _tail[_vm.start():]
+                            _res = _split_goals(_tail)
+                            if len(_res) >= 2:
+                                cand = _res
+                                break
                 except Exception:
                     pass
                 for ln2 in lines[mi + 1: mi + 45]:

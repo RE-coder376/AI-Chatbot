@@ -3845,7 +3845,8 @@ def _deterministic_learning_goals_answer(q: str, kb_context: str) -> str | None:
         _OUTCOME_VERB_HINTS = {
             "understand","build","ship","use","integrate","deliver","identify","structure","apply","prepare",
             "run","evaluate","deploy","install","test","design","verify","retrofit","decide","learn","encode",
-            "create","implement","configure","monitor","optimize","define","package","explain"
+            "create","implement","configure","monitor","optimize","define","package","explain",
+            "map","capture","explore","master","analyze","develop","write","generate","complete",
         }
 
         def _is_quality_outcome_line(text: str) -> bool:
@@ -5408,7 +5409,8 @@ def _is_quality_outcomes_answer_text(text: str) -> bool:
     verbs = {
         "understand","build","ship","use","integrate","deliver","identify","structure","apply","prepare",
         "run","evaluate","deploy","install","test","design","verify","retrofit","decide","learn","encode",
-        "create","implement","configure","monitor","optimize","define","package","explain"
+        "create","implement","configure","monitor","optimize","define","package","explain",
+        "map","capture","explore","master","analyze","develop","write","generate","complete",
     }
     for b in bullets:
         b0 = re.split(r"[\r\n]+", b)[0].strip()
