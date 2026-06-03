@@ -3520,16 +3520,16 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
                 context = _exact_probe
                 if _exact_probe_src:
                     sources = list(dict.fromkeys((sources or []) + _exact_probe_src))[:8]
-                _exact_ans = _deterministic_exact_title_factual_answer(q, context or "")
+                _exact_ans = _deterministic_exact_title_factual_answer(q, context or "", require_title_anchor=False)
             if _exact_ans is None:
-                _exact_ans = _deterministic_exact_title_factual_answer(q, context or "")
+                _exact_ans = _deterministic_exact_title_factual_answer(q, context or "", require_title_anchor=False)
             if _exact_ans is None and (not _is_api_only):
                 _exact_ctx, _exact_src = await _live_site_query_rescue_context(q, cfg, max_urls=6, max_chars=12000)
                 if _exact_ctx:
                     context = _exact_ctx
                     if _exact_src:
                         sources = list(dict.fromkeys((sources or []) + _exact_src))[:8]
-                    _exact_ans = _deterministic_exact_title_factual_answer(q, context or "")
+                    _exact_ans = _deterministic_exact_title_factual_answer(q, context or "", require_title_anchor=False)
             if _exact_ans:
                 _trace_event(workflow_trace, "guard_exit", guard="exact_title_factual_adapter")
                 _trace_decision(workflow_debug, "exit_guard", "exact_title_factual_adapter")
@@ -4567,9 +4567,9 @@ async def chat(request: Request):
                     doc_count = max(int(doc_count or 0), 1)
                     if _exact_probe_src:
                         sources = list(dict.fromkeys((sources or []) + _exact_probe_src))[:8]
-                    _exact_ans = _deterministic_exact_title_factual_answer(q, context or "")
+                    _exact_ans = _deterministic_exact_title_factual_answer(q, context or "", require_title_anchor=False)
                 if _exact_ans is None:
-                    _exact_ans = _deterministic_exact_title_factual_answer(q, context or "")
+                    _exact_ans = _deterministic_exact_title_factual_answer(q, context or "", require_title_anchor=False)
                 if _exact_ans is None and (not _is_api_only):
                     _exact_ctx, _exact_src = await _live_site_query_rescue_context(q, cfg, max_urls=6, max_chars=12000)
                     if _exact_ctx:
@@ -4577,7 +4577,7 @@ async def chat(request: Request):
                         doc_count = max(int(doc_count or 0), 1)
                         if _exact_src:
                             sources = list(dict.fromkeys((sources or []) + _exact_src))[:8]
-                        _exact_ans = _deterministic_exact_title_factual_answer(q, context or "")
+                        _exact_ans = _deterministic_exact_title_factual_answer(q, context or "", require_title_anchor=False)
                 if _exact_ans:
                     payload = {
                         "answer": _exact_ans,
@@ -5271,7 +5271,7 @@ def _deterministic_scoped_fact_answer(q: str, kb_context: str) -> str | None:
         return None
 
 
-def _deterministic_exact_title_factual_answer(q: str, kb_context: str) -> str | None:
+def _deterministic_exact_title_factual_answer(q: str, kb_context: str, require_title_anchor: bool = True) -> str | None:
     """Deterministic extractor for exact-title factual questions on doc-style pages."""
     try:
         if not q or not kb_context or (not _is_exact_title_factual_query(q)):
@@ -5288,7 +5288,7 @@ def _deterministic_exact_title_factual_answer(q: str, kb_context: str) -> str | 
             for w in re.findall(r"[A-Za-z0-9]{4,}", ql)
             if w.lower() not in _QUERY_STOP and w.lower() not in set(title_tks[:8])
         ][:12]
-        if title_tks and sum(1 for t in title_tks[:6] if t in cl) < 1:
+        if require_title_anchor and title_tks and sum(1 for t in title_tks[:6] if t in cl) < 1:
             return None
 
         def _lines(text: str) -> list[str]:
@@ -6132,7 +6132,7 @@ async def _live_site_exact_title_probe(q: str, cfg: dict, max_urls: int = 12) ->
                     txt = _html_to_text(r.text or "")
                     if len(txt) < 180:
                         continue
-                    ans = _deterministic_exact_title_factual_answer(q, txt)
+                    ans = _deterministic_exact_title_factual_answer(q, txt, require_title_anchor=False)
                     if ans:
                         return ans, [str(u)]
                 except Exception:
