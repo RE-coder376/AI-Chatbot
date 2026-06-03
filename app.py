@@ -5927,6 +5927,21 @@ async def _live_site_content_outcomes_probe(q: str, cfg: dict, max_urls: int = 2
                                 if not anchors:
                                     try:
                                         # Open the docs search UI the same way a user would.
+                                        for _sel in (
+                                            "button[aria-label*='Search' i]",
+                                            "button[title*='Search' i]",
+                                            "[role='button'][aria-label*='Search' i]",
+                                        ):
+                                            try:
+                                                _btns = await page.locator(_sel).all()
+                                            except Exception:
+                                                _btns = []
+                                            for _btn in _btns[:2]:
+                                                try:
+                                                    await _btn.click(timeout=1500)
+                                                    await page.wait_for_timeout(1200)
+                                                except Exception:
+                                                    continue
                                         for _combo in ("Control+K", "Meta+K", "/"):
                                             try:
                                                 await page.keyboard.press(_combo)
