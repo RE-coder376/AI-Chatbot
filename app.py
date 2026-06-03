@@ -1266,11 +1266,25 @@ def admin_auth(password: str, cfg: dict):
     """Accept if password matches ADMIN_PASSWORD env var (super-admin) OR the DB's own admin_password."""
     root_pw = _get_root_password()
     db_pw = cfg.get("admin_password", "") or ""
+    db_name = str(cfg.get("db_name", "") or "").strip()
     if _password_matches(password, root_pw):
         return "owner"
     if _password_matches(password, db_pw):
         return "client"
+    if not db_pw and db_name and _password_matches(password, db_name):
+        return "client"
     raise HTTPException(status_code=401, detail="Unauthorized")
+
+
+def _client_password_matches_db(password: str, cfg: dict) -> bool:
+    """Allow an implicit client password equal to the DB name when no explicit DB password is set."""
+    db_pw = str(cfg.get("admin_password", "") or "").strip()
+    db_name = str(cfg.get("db_name", "") or "").strip()
+    if _password_matches(password, db_pw):
+        return True
+    if not db_pw and db_name and _password_matches(password, db_name):
+        return True
+    return False
 
 # _extract_password imported from services.auth above
 
@@ -7792,8 +7806,7 @@ async def get_auth_mode(request: Request):
         return {"role": "owner"}
     # Not root — check if DB-specific password matches (already validated by branding call)
     db_cfg = get_config(db_name)
-    db_password = db_cfg.get("admin_password", "")
-    if _password_matches(password, db_password):
+    if _client_password_matches_db(password, db_cfg):
         return {"role": "client", "db": db_name}
     return JSONResponse({"detail": "Unauthorized"}, status_code=401)
 
@@ -8008,9 +8021,8 @@ async def set_active_db(request: Request, password: str = Form(...), name: str =
             return JSONResponse({"detail": "Unauthorized — only the super-admin may switch active DB"}, status_code=401)
     else:
         # No root password configured (single-tenant / local dev): allow switching only to a DB
-        # whose own password matches.
-        db_pw = get_config(name).get("admin_password", "")
-        if not _password_matches(password, db_pw):
+        # whose own password matches, or whose DB name is acting as the implicit client password.
+        if not _client_password_matches_db(password, get_config(name)):
             return JSONResponse({"detail": "Unauthorized"}, status_code=401)
     current = ACTIVE_DB_FILE.read_text(encoding="utf-8").strip() if ACTIVE_DB_FILE.exists() else ""
     if current == name:
@@ -9471,8 +9483,7 @@ def get_db_stats(request: Request, password: str = ""):
     client_db = _extract_admin_db(request)
     if not is_root:
         if client_db:
-            db_pw = get_config(client_db).get("admin_password", "") or ""
-            if not _password_matches(password, db_pw):
+            if not _client_password_matches_db(password, get_config(client_db)):
                 return JSONResponse({"detail": "Unauthorized"}, status_code=401)
         else:
             return JSONResponse({"detail": "Unauthorized"}, status_code=401)

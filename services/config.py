@@ -151,6 +151,7 @@ def get_config(db_name: str = "") -> dict:
         for k, v in _load_db_secrets(active).items():
             if v != "" and v is not None:
                 root[k] = v
+        root["db_name"] = active
         if db_name and not db_cfg_loaded:
             # When a specific tenant is requested but has no readable config.json,
             # avoid leaking the root tenant's business identity/topics into eval
