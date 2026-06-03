@@ -6005,8 +6005,100 @@ async def _live_site_exact_title_probe(q: str, cfg: dict, max_urls: int = 12) ->
                             break
                 return out
 
+            async def _browser_find_doc() -> tuple[str | None, str | None]:
+                try:
+                    from playwright.async_api import async_playwright
+                    async with async_playwright() as pw:
+                        browser = await pw.chromium.launch(headless=True)
+                        page = await browser.new_page(viewport={"width": 1440, "height": 2200})
+                        start_urls = [base, f"{base}/docs", f"{base}/docs/"]
+                        anchors: list[tuple[int, str, str]] = []
+                        async def _collect_anchors() -> list[tuple[int, str, str]]:
+                            return await page.evaluate("""(titlePhrase) => {
+                                const slug = (titlePhrase || '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+                                const words = (titlePhrase || '').toLowerCase().match(/[a-z0-9]{4,}/g) || [];
+                                const out = [];
+                                for (const a of document.querySelectorAll('a[href]')) {
+                                    const txt = (a.innerText || a.textContent || '').trim().replace(/\\s+/g, ' ');
+                                    const href = (a.href || '').trim();
+                                    let score = 0;
+                                    const hay = (txt + ' ' + href).toLowerCase();
+                                    if (slug && hay.includes(slug)) score += 10;
+                                    for (const w of words.slice(0, 8)) {
+                                        if (hay.includes(w)) score += 2;
+                                    }
+                                    if (score > 0) out.push([score, txt, href]);
+                                }
+                                return out.sort((a,b) => b[0] - a[0]).slice(0, 40);
+                            }""", title_phrase or "")
+                        for start in start_urls:
+                            try:
+                                await page.goto(start, wait_until="networkidle", timeout=25000)
+                                await page.wait_for_timeout(2500)
+                                anchors = await _collect_anchors()
+                                if not anchors:
+                                    try:
+                                        for _sel in (
+                                            "button[aria-label*='Search' i]",
+                                            "button[title*='Search' i]",
+                                            "[role='button'][aria-label*='Search' i]",
+                                        ):
+                                            try:
+                                                _btns = await page.locator(_sel).all()
+                                            except Exception:
+                                                _btns = []
+                                            for _btn in _btns[:2]:
+                                                try:
+                                                    await _btn.click(timeout=1500)
+                                                    await page.wait_for_timeout(1200)
+                                                except Exception:
+                                                    continue
+                                        for _combo in ("Control+K", "Meta+K", "/"):
+                                            try:
+                                                await page.keyboard.press(_combo)
+                                                await page.wait_for_timeout(1200)
+                                            except Exception:
+                                                pass
+                                        _search_inputs = await page.locator("input[type='search'], input[placeholder*='Search' i], input[aria-label*='Search' i]").all()
+                                    except Exception:
+                                        _search_inputs = []
+                                    for _inp in _search_inputs[:2]:
+                                        try:
+                                            await _inp.click(timeout=1500)
+                                            await _inp.fill(title_phrase or q, timeout=1500)
+                                            await asyncio.sleep(1.0)
+                                            anchors = await _collect_anchors()
+                                            if anchors:
+                                                break
+                                        except Exception:
+                                            continue
+                                if anchors:
+                                    break
+                            except Exception:
+                                continue
+                        await browser.close()
+                    for score, txt, href in anchors[:20]:
+                        try:
+                            if not href:
+                                continue
+                            ul = href.lower()
+                            if title_slug and title_slug in ul:
+                                return href, txt
+                            if title_tokens and sum(1 for t in title_tokens[:6] if t in ul) >= (2 if len(title_tokens) >= 4 else 1):
+                                return href, txt
+                            if title_phrase.lower() in (txt or "").lower():
+                                return href, txt
+                        except Exception:
+                            continue
+                except Exception:
+                    return None, None
+                return None, None
+
             locs = await _collect_sitemap_urls(f"{base}/sitemap.xml")
+            nav_href, nav_text = await _browser_find_doc()
             candidates: list[str] = []
+            if nav_href:
+                candidates.append(str(nav_href))
             if title_slug:
                 for u in locs:
                     ul = str(u).lower()
