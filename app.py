@@ -5892,10 +5892,78 @@ async def _live_site_content_outcomes_probe(q: str, cfg: dict, max_urls: int = 2
                             break
                 return out
 
+            async def _browser_find_doc_from_nav() -> tuple[str | None, str | None]:
+                """Find a likely doc URL by inspecting rendered site navigation/search links."""
+                try:
+                    from playwright.async_api import async_playwright
+                    async with async_playwright() as pw:
+                        browser = await pw.chromium.launch(headless=True)
+                        page = await browser.new_page(viewport={"width": 1440, "height": 2200})
+                        start_urls = [base, f"{base}/docs", f"{base}/docs/"]
+                        anchors: list[tuple[int, str, str]] = []
+                        for start in start_urls:
+                            try:
+                                await page.goto(start, wait_until="networkidle", timeout=25000)
+                                await asyncio.sleep(0.8)
+                                anchors = await page.evaluate("""(tphrase) => {
+                                    const slug = (tphrase || '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+                                    const words = (tphrase || '').toLowerCase().match(/[a-z0-9]{4,}/g) || [];
+                                    const out = [];
+                                    for (const a of document.querySelectorAll('a[href]')) {
+                                        const txt = (a.innerText || a.textContent || '').trim().replace(/\\s+/g, ' ');
+                                        const href = (a.href || '').trim();
+                                        let score = 0;
+                                        const hay = (txt + ' ' + href).toLowerCase();
+                                        if (slug && hay.includes(slug)) score += 10;
+                                        for (const w of words.slice(0, 8)) {
+                                            if (hay.includes(w)) score += 2;
+                                        }
+                                        if (score > 0) out.push([score, txt, href]);
+                                    }
+                                    return out.sort((a,b) => b[0] - a[0]).slice(0, 40);
+                                }""", tphrase or "")
+                                if anchors:
+                                    break
+                            except Exception:
+                                continue
+                        await browser.close()
+                    for score, txt, href in anchors[:20]:
+                        try:
+                            if not href:
+                                continue
+                            if any(bad in href.lower() for bad in ("/quiz", "/chapter-quiz", "/about", "/certifications")):
+                                continue
+                            if tslug and tslug not in href.lower() and tslug not in (txt or "").lower().replace(" ", "-"):
+                                continue
+                            return href, txt
+                        except Exception:
+                            continue
+                except Exception:
+                    return None, None
+                return None, None
+
             locs = await _collect_sitemap_urls(f"{base}/sitemap.xml")
             if not locs:
                 return None
             exact_candidates = []
+            nav_href, nav_text = await _browser_find_doc_from_nav()
+            if nav_href:
+                try:
+                    r = await client.get(nav_href)
+                    if r.status_code == 200:
+                        _html_ans = _extract_outcomes_from_html(r.text or "", q=q)
+                        if _html_ans and _is_strict_scope_query(q) and _source_url_matches_scope(q, str(nav_href)):
+                            return _html_ans
+                        if _html_ans and _is_quality_outcomes_answer_text(_html_ans) and (_outcomes_answer_matches_scope(q, _html_ans) or _source_url_matches_scope(q, str(nav_href))):
+                            return _html_ans
+                        txt = _to_text(r.text or "")
+                        ans = try_extract_outcomes_answer(q, txt, debug=None)
+                        if ans and _is_strict_scope_query(q) and _source_url_matches_scope(q, str(nav_href)):
+                            return ans
+                        if ans and _is_quality_outcomes_answer_text(ans) and (_outcomes_answer_matches_scope(q, ans) or _source_url_matches_scope(q, str(nav_href))):
+                            return ans
+                except Exception:
+                    pass
             if tslug:
                 for u in locs:
                     ul = str(u).lower()
