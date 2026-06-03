@@ -3512,6 +3512,8 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
 
     if (not is_product_db) and _is_exact_title_factual_query(q):
         try:
+            _trace_event(workflow_trace, "exact_title_factual_enter")
+            _trace_decision(workflow_debug, "exact_title_factual_query", True)
             _exact_ans = None
             _exact_probe, _exact_probe_src = await _live_site_exact_title_probe(q, cfg, max_urls=8)
             if _exact_probe:
@@ -4556,6 +4558,8 @@ async def chat(request: Request):
         _is_product_db_local = _check_is_product_db(tenant_db_instance, tenant_db_name) or ("smart_search" in set(cfg.get("features", [])))
         if (not _is_product_db_local) and _is_exact_title_factual_query(q):
             try:
+                _trace_event(workflow_trace, "exact_title_factual_enter")
+                _trace_decision(workflow_debug, "exact_title_factual_query", True)
                 _exact_ans = None
                 _exact_probe, _exact_probe_src = await _live_site_exact_title_probe(q, cfg, max_urls=8)
                 if _exact_probe:
