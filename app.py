@@ -3316,32 +3316,6 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
     elif _outcomes_ans:
         _trace_decision(workflow_debug, "outcomes_extractor_rejected_low_quality", True)
 
-    # Exact-title factual adapter for doc-style questions like "What are the four TTS modes in Give It a Voice?"
-    if (not _is_product_db_local) and _is_exact_title_factual_query(q):
-        try:
-            _exact_ans = _deterministic_exact_title_factual_answer(q, context or "")
-            if _exact_ans is None and (not _is_api_only):
-                _exact_ctx, _exact_src = await _live_site_query_rescue_context(q, cfg, max_urls=6, max_chars=12000)
-                if _exact_ctx:
-                    context = _exact_ctx
-                    doc_count = max(int(doc_count or 0), 1)
-                    if _exact_src:
-                        sources = list(dict.fromkeys((sources or []) + _exact_src))[:8]
-                    _exact_ans = _deterministic_exact_title_factual_answer(q, context or "")
-            if _exact_ans:
-                _trace_event(workflow_trace, "guard_exit", guard="exact_title_factual_adapter")
-                _trace_decision(workflow_debug, "exit_guard", "exact_title_factual_adapter")
-                if visitor_id:
-                    _run_in_bg(save_visitor_turn, visitor_id, "assistant", _exact_ans, db_name)
-                yield f"data: {json.dumps({'type': 'chunk', 'content': _exact_ans})}\n\n"
-                _lead_on = not cfg.get("disable_lead_box", False)
-                _trace_artifact(workflow_debug, "final_answer", _exact_ans[:4000])
-                yield f"data: {json.dumps(_metadata_payload(_lead_on, (sources or [])[:5]))}\n\n"
-                yield "data: {\"type\": \"done\"}\n\n"
-                return
-        except Exception:
-            pass
-
     # Universal source-page fallback for outcomes/goals queries in streaming mode.
     if _LEARNING_GOALS_Q_RE.search(q):
         try:
@@ -3535,6 +3509,30 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
         yield f"data: {json.dumps(_metadata_payload(_lead_on, _preferred_sources_for_product_answer(q, sources, 5)))}\n\n"
         yield "data: {\"type\": \"done\"}\n\n"
         return
+
+    if (not is_product_db) and _is_exact_title_factual_query(q):
+        try:
+            _exact_ans = _deterministic_exact_title_factual_answer(q, context or "")
+            if _exact_ans is None and (not _is_api_only):
+                _exact_ctx, _exact_src = await _live_site_query_rescue_context(q, cfg, max_urls=6, max_chars=12000)
+                if _exact_ctx:
+                    context = _exact_ctx
+                    if _exact_src:
+                        sources = list(dict.fromkeys((sources or []) + _exact_src))[:8]
+                    _exact_ans = _deterministic_exact_title_factual_answer(q, context or "")
+            if _exact_ans:
+                _trace_event(workflow_trace, "guard_exit", guard="exact_title_factual_adapter")
+                _trace_decision(workflow_debug, "exit_guard", "exact_title_factual_adapter")
+                if visitor_id:
+                    _run_in_bg(save_visitor_turn, visitor_id, "assistant", _exact_ans, db_name)
+                yield f"data: {json.dumps({'type': 'chunk', 'content': _exact_ans})}\n\n"
+                _lead_on = not cfg.get("disable_lead_box", False)
+                _trace_artifact(workflow_debug, "final_answer", _exact_ans[:4000])
+                yield f"data: {json.dumps(_metadata_payload(_lead_on, (sources or [])[:5]))}\n\n"
+                yield "data: {\"type\": \"done\"}\n\n"
+                return
+        except Exception:
+            pass
 
     if not _is_api_only and not context_addresses_query:
         _trace_event(workflow_trace, "guard_exit", guard="sparse_kb_context_miss", doc_count=doc_count)
