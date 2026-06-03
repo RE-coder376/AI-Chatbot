@@ -5851,6 +5851,19 @@ async def _live_site_content_outcomes_probe(q: str, cfg: dict, max_urls: int = 2
             tks = [w.lower() for w in re.findall(r"[a-zA-Z0-9]{4,}", ql) if w.lower() not in {"what","which","when","where","why","how","chapter","part","goals","according","book"}][:10]
         if not tks:
             return None
+        title_variants: list[str] = []
+        for _cand in (
+            tphrase,
+            re.sub(
+                r"^(?:chapter|part|section|lesson|unit)\s*\d+[A-Za-z]?\s*[:\-]?\s*",
+                "",
+                tphrase or "",
+                flags=re.I,
+            ).strip(),
+        ):
+            _cand = str(_cand or "").strip()
+            if _cand and _cand not in title_variants:
+                title_variants.append(_cand)
         def _to_text(html: str) -> str:
             h = re.sub(r"(?is)<script[^>]*>.*?</script>", " ", html or "")
             h = re.sub(r"(?is)<style[^>]*>.*?</style>", " ", h)
@@ -6003,6 +6016,101 @@ async def _live_site_content_outcomes_probe(q: str, cfg: dict, max_urls: int = 2
                             return ans
                 except Exception:
                     pass
+            direct_candidates = []
+            for _phrase in title_variants[:2]:
+                _raw_phrase = re.sub(r"\s+", "-", _phrase.strip()).strip("-")
+                _hyphen_slug = re.sub(r"[^a-z0-9]+", "-", _phrase.lower()).strip("-")
+                _titleish = "-".join(w[:1].upper() + w[1:] for w in re.findall(r"[A-Za-z0-9]+", _phrase))
+                for _seg in (_raw_phrase, _titleish, _hyphen_slug):
+                    if _seg and len(_seg) >= 4:
+                        _u = f"{base}/docs/{_seg}"
+                        if _u not in direct_candidates:
+                            direct_candidates.append(_u)
+            for u in direct_candidates[:max(6, int(max_urls))]:
+                try:
+                    r = await client.get(u)
+                    if r.status_code != 200:
+                        continue
+                    _html_ans = _extract_outcomes_from_html(r.text or "", q=q)
+                    if _html_ans and _is_strict_scope_query(q) and _source_url_matches_scope(q, str(u)):
+                        return _html_ans
+                    if _html_ans and _is_quality_outcomes_answer_text(_html_ans) and (_outcomes_answer_matches_scope(q, _html_ans) or _source_url_matches_scope(q, str(u))):
+                        return _html_ans
+                    txt = _to_text(r.text or "")
+                    if len(txt) < 260:
+                        continue
+                    tl = txt.lower()
+                    hits = sum(1 for t in tks if t in tl)
+                    ans = try_extract_outcomes_answer(q, txt, debug=None)
+                    if ans and _is_strict_scope_query(q) and _source_url_matches_scope(q, str(u)):
+                        return ans
+                    if ans and _is_quality_outcomes_answer_text(ans) and (_outcomes_answer_matches_scope(q, ans) or _source_url_matches_scope(q, str(u))):
+                        return ans
+                    if hits >= 2:
+                        try:
+                            from playwright.async_api import async_playwright
+                            async with async_playwright() as pw:
+                                browser = await pw.chromium.launch(headless=True)
+                                page = await browser.new_page(viewport={"width": 1440, "height": 2200})
+                                try:
+                                    await page.goto(u, wait_until="networkidle", timeout=25000)
+                                except Exception:
+                                    await browser.close()
+                                    raise
+                                try:
+                                    await page.wait_for_function(
+                                        "() => {\n"
+                                        "  const a = document.querySelector('article');\n"
+                                        "  const m = document.querySelector('main');\n"
+                                        "  const t = (a && a.innerText) || (m && m.innerText) || (document.body && document.body.innerText) || '';\n"
+                                        "  return t.trim().length > 200;\n"
+                                        "}",
+                                        timeout=7000,
+                                    )
+                                except Exception:
+                                    pass
+                                try:
+                                    await page.evaluate("""() => {
+                                        document.querySelectorAll('details').forEach(d => d.setAttribute('open', ''));
+                                        document.querySelectorAll(
+                                            '.accordion-button, .accordion-trigger, .accordion-header, ' +
+                                            '[data-toggle], .faq-question, .collapse-trigger, summary'
+                                        ).forEach(el => { try { el.click(); } catch(e) {} });
+                                    }""")
+                                    await asyncio.sleep(0.4)
+                                except Exception:
+                                    pass
+                                try:
+                                    text2 = await page.locator("article").inner_text(timeout=5000)
+                                except Exception:
+                                    try:
+                                        text2 = await page.locator("main").inner_text(timeout=5000)
+                                    except Exception:
+                                        text2 = await page.evaluate("() => (document.body && document.body.innerText) ? document.body.innerText : ''")
+                                title2 = ""
+                                try:
+                                    title2 = await page.title()
+                                except Exception:
+                                    title2 = ""
+                                await browser.close()
+                            if text2 and len(text2) >= 200:
+                                ans2 = try_extract_outcomes_answer(q, text2, debug=None)
+                                if ans2 and _is_strict_scope_query(q) and _source_url_matches_scope(q, str(u)):
+                                    return ans2
+                                if ans2 and _is_quality_outcomes_answer_text(ans2) and (_outcomes_answer_matches_scope(q, ans2) or _source_url_matches_scope(q, str(u))):
+                                    return ans2
+                                ans3 = _extract_outcomes_from_html(
+                                    f"<html><head><title>{title2}</title></head><body>{text2}</body></html>",
+                                    q=q,
+                                )
+                                if ans3 and _is_strict_scope_query(q) and _source_url_matches_scope(q, str(u)):
+                                    return ans3
+                                if ans3 and _is_quality_outcomes_answer_text(ans3) and (_outcomes_answer_matches_scope(q, ans3) or _source_url_matches_scope(q, str(u))):
+                                    return ans3
+                        except Exception:
+                            pass
+                except Exception:
+                    continue
             if tslug:
                 for u in locs:
                     ul = str(u).lower()
