@@ -5524,13 +5524,20 @@ async def _synthesize_scoped_outcomes_from_cluster(q: str, context: str, sources
         llm = get_fresh_llm()
         if not llm:
             return None
+        title_phrase = _extract_title_phrase(q or "")
+        title_slug = _slugish(title_phrase or "")
+        filtered_sources = [s for s in (sources or []) if (not title_slug) or (title_slug in str(s).lower())]
+        if filtered_sources:
+            sources = filtered_sources
         src_block = "\n".join(f"- {s}" for s in (sources or [])[:6] if s)
         ctx_lines = [ln.strip() for ln in str(context or "").splitlines() if ln.strip()]
-        ctx_block = "\n".join(ctx_lines[:50])[:3200]
+        if title_slug:
+            ctx_lines = [ln for ln in ctx_lines if title_slug in ln.lower() or "voice" in ln.lower() or "livekit" in ln.lower() or "pipecat" in ln.lower() or "realtime" in ln.lower()]
+        ctx_block = "\n".join(ctx_lines[:60])[:3600]
         sys_msg = (
             "You extract learning goals from retrieved documentation evidence. "
-            "Answer with 5-8 short bullet points. Use only the evidence below. "
-            "Do not mention that something is missing. Do not add a preamble."
+            "Return only a bullet list. Use only the evidence below. "
+            "Do not summarize the chapter, do not mention missing content, and do not add a preamble."
         )
         user_msg = (
             f"Question: {q}\n\n"
