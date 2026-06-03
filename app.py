@@ -3292,14 +3292,7 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
                 yield f"data: {json.dumps(_metadata_payload(_lead_on, sources[:5]))}\n\n"
                 yield "data: {\"type\": \"done\"}\n\n"
                 return
-            _msg2 = "I couldn't find an explicit learning-goals list for that exact chapter/part in the retrieved context."
-            if visitor_id:
-                _run_in_bg(save_visitor_turn, visitor_id, "assistant", _msg2, db_name)
-            yield f"data: {json.dumps({'type': 'chunk', 'content': _msg2})}\n\n"
-            _lead_on = not cfg.get("disable_lead_box", False)
-            yield f"data: {json.dumps(_metadata_payload(_lead_on, sources[:5]))}\n\n"
-            yield "data: {\"type\": \"done\"}\n\n"
-            return
+            _trace_decision(workflow_debug, "strict_goals_defer_to_llm", True)
 
     # ── Sparse KB guard — skip for api-only DBs (no KB, LLM uses training knowledge) ──
     # Deterministic strict-scope factual extractor (non-goals).
@@ -4624,18 +4617,8 @@ async def chat(request: Request):
                         "answer_artifacts": workflow_debug["answer_artifacts"],
                     }
                 return JSONResponse(payload)
-            payload = {
-                "answer": "I couldn't find an explicit learning-goals list for that exact chapter/part in the retrieved context.",
-                "sources": (sources or [])[:5],
-                "evidence_spans": [],
-            }
-            if debug_effective:
-                payload["debug"] = {
-                    "workflow_trace": workflow_trace,
-                    "guard_decisions": workflow_debug["guard_decisions"],
-                    "answer_artifacts": workflow_debug["answer_artifacts"],
-                }
-            return JSONResponse(payload)
+            workflow_debug["guard_decisions"]["strict_goals_defer_to_llm"] = True
+            _trace_decision(workflow_debug, "strict_goals_defer_to_llm", True)
 
         _is_product_db_local = _check_is_product_db(tenant_db_instance, tenant_db_name) or ("smart_search" in set(cfg.get("features", [])))
         _prod_det = _deterministic_product_catalog_answer(q, context or "")
