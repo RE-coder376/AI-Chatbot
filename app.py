@@ -3512,7 +3512,15 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
 
     if (not is_product_db) and _is_exact_title_factual_query(q):
         try:
-            _exact_ans = _deterministic_exact_title_factual_answer(q, context or "")
+            _exact_ans = None
+            _exact_probe, _exact_probe_src = await _live_site_exact_title_probe(q, cfg, max_urls=8)
+            if _exact_probe:
+                context = _exact_probe
+                if _exact_probe_src:
+                    sources = list(dict.fromkeys((sources or []) + _exact_probe_src))[:8]
+                _exact_ans = _deterministic_exact_title_factual_answer(q, context or "")
+            if _exact_ans is None:
+                _exact_ans = _deterministic_exact_title_factual_answer(q, context or "")
             if _exact_ans is None and (not _is_api_only):
                 _exact_ctx, _exact_src = await _live_site_query_rescue_context(q, cfg, max_urls=6, max_chars=12000)
                 if _exact_ctx:
@@ -4548,7 +4556,16 @@ async def chat(request: Request):
         _is_product_db_local = _check_is_product_db(tenant_db_instance, tenant_db_name) or ("smart_search" in set(cfg.get("features", [])))
         if (not _is_product_db_local) and _is_exact_title_factual_query(q):
             try:
-                _exact_ans = _deterministic_exact_title_factual_answer(q, context or "")
+                _exact_ans = None
+                _exact_probe, _exact_probe_src = await _live_site_exact_title_probe(q, cfg, max_urls=8)
+                if _exact_probe:
+                    context = _exact_probe
+                    doc_count = max(int(doc_count or 0), 1)
+                    if _exact_probe_src:
+                        sources = list(dict.fromkeys((sources or []) + _exact_probe_src))[:8]
+                    _exact_ans = _deterministic_exact_title_factual_answer(q, context or "")
+                if _exact_ans is None:
+                    _exact_ans = _deterministic_exact_title_factual_answer(q, context or "")
                 if _exact_ans is None and (not _is_api_only):
                     _exact_ctx, _exact_src = await _live_site_query_rescue_context(q, cfg, max_urls=6, max_chars=12000)
                     if _exact_ctx:
@@ -5930,6 +5947,103 @@ def _source_url_matches_scope(q: str, url: str) -> bool:
         return bool(mch or mpt) and num_ok
     except Exception:
         return False
+
+
+async def _live_site_exact_title_probe(q: str, cfg: dict, max_urls: int = 12) -> tuple[str | None, list[str]]:
+    """Probe the live site for an exact title-specific factual page."""
+    try:
+        base = str((cfg or {}).get("crawl_url") or "").strip().rstrip("/")
+        if not base:
+            return (None, [])
+        title_phrase = _extract_doc_title_phrase(q or "")
+        if not title_phrase:
+            return (None, [])
+        title_slug = re.sub(r"[^a-z0-9]+", "-", (title_phrase or "").lower()).strip("-")
+        title_tokens = [w.lower() for w in re.findall(r"[a-zA-Z0-9]{4,}", title_phrase) if w.lower() not in _QUERY_STOP][:10]
+        if not title_tokens and not title_slug:
+            return (None, [])
+
+        def _html_to_text(html: str) -> str:
+            h = re.sub(r"(?is)<script[^>]*>.*?</script>", " ", html or "")
+            h = re.sub(r"(?is)<style[^>]*>.*?</style>", " ", h)
+            h = re.sub(r"(?is)<noscript[^>]*>.*?</noscript>", " ", h)
+            h = re.sub(r"(?is)<[^>]+>", " ", h)
+            h = re.sub(r"\s+", " ", h)
+            return h.strip()
+
+        async with httpx.AsyncClient(timeout=10, follow_redirects=True, headers={"User-Agent": "Mozilla/5.0"}) as client:
+            async def _collect_sitemap_urls(root: str, max_files: int = 16, max_locs: int = 12000) -> list[str]:
+                pending = [root]
+                seen = set()
+                out: list[str] = []
+                while pending and len(seen) < max_files and len(out) < max_locs:
+                    sm_url = pending.pop(0)
+                    if not sm_url or sm_url in seen:
+                        continue
+                    seen.add(sm_url)
+                    try:
+                        rr = await client.get(sm_url)
+                    except Exception:
+                        continue
+                    if rr.status_code != 200:
+                        continue
+                    xml = rr.text or ""
+                    locs2 = re.findall(r"(?is)<loc>\s*([^<\s]+)\s*</loc>", xml)
+                    if not locs2:
+                        continue
+                    for loc in locs2:
+                        u = str(loc).strip()
+                        if not u:
+                            continue
+                        ul = u.lower()
+                        if ul.endswith(".xml") or "/sitemap" in ul:
+                            if u not in seen and len(seen) + len(pending) < max_files:
+                                pending.append(u)
+                            continue
+                        out.append(u)
+                        if len(out) >= max_locs:
+                            break
+                return out
+
+            locs = await _collect_sitemap_urls(f"{base}/sitemap.xml")
+            candidates: list[str] = []
+            if title_slug:
+                for u in locs:
+                    ul = str(u).lower()
+                    if title_slug in ul and ul.rstrip("/").endswith(title_slug):
+                        candidates.append(str(u))
+            for _cand in (
+                title_phrase,
+                re.sub(r"^(?:chapter|part|section|lesson|unit)\s*\d+[A-Za-z]?\s*[:\-]?\s*", "", title_phrase or "", flags=re.I).strip(),
+            ):
+                _cand = str(_cand or "").strip()
+                if not _cand:
+                    continue
+                _raw_phrase = re.sub(r"\s+", "-", _cand.strip()).strip("-")
+                _hyphen_slug = re.sub(r"[^a-z0-9]+", "-", _cand.lower()).strip("-")
+                _titleish = "-".join(w[:1].upper() + w[1:] for w in re.findall(r"[A-Za-z0-9]+", _cand))
+                for _seg in (_raw_phrase, _titleish, _hyphen_slug):
+                    if _seg and len(_seg) >= 4:
+                        _u = f"{base}/docs/{_seg}"
+                        if _u not in candidates:
+                            candidates.append(_u)
+            candidates = candidates[:max_urls]
+            for u in candidates:
+                try:
+                    r = await client.get(u)
+                    if r.status_code != 200:
+                        continue
+                    txt = _html_to_text(r.text or "")
+                    if len(txt) < 180:
+                        continue
+                    ans = _deterministic_exact_title_factual_answer(q, txt)
+                    if ans:
+                        return ans, [str(u)]
+                except Exception:
+                    continue
+        return None, []
+    except Exception:
+        return None, []
 
 
 async def _extract_outcomes_from_source_urls(q: str, sources: list[str], limit: int = 3) -> str | None:
