@@ -2449,6 +2449,60 @@ def _extract_product_name_phrase(q: str) -> str:
         return ""
 
 
+def _extract_doc_title_phrase(q: str) -> str:
+    """Best-effort extraction of an exact document/page title from a title-specific factual question."""
+    try:
+        qq = (q or "").strip()
+        patterns = [
+            r"(?i)\b(?:in|of|about|for|on|from|within)\s+([^?.!\n]{4,160})",
+            r"(?i)\b(?:tell me about|show me|describe|explain|what is|what are|what does|what do|what will i learn in|what will i learn from)\s+([^?.!\n]{4,160})",
+        ]
+        for pat in patterns:
+            m = re.search(pat, qq)
+            if not m:
+                continue
+            phrase = m.group(1).strip().strip('"\'')
+            phrase = re.sub(r"\s{2,}", " ", phrase).strip(" -:|")
+            phrase = re.sub(r"^(?:the|a|an)\s+", "", phrase, flags=re.I).strip()
+            if len(re.findall(r"[A-Za-z0-9]{3,}", phrase)) >= 2:
+                return phrase[:120]
+        quoted = re.search(r"[\"“”']([^\"“”']{4,140})[\"“”']", qq)
+        if quoted:
+            phrase = quoted.group(1).strip()
+            phrase = re.sub(r"\s{2,}", " ", phrase).strip(" -:|")
+            if len(re.findall(r"[A-Za-z0-9]{3,}", phrase)) >= 2:
+                return phrase[:120]
+        titleish = re.search(
+            r"\b(?:[A-Z][\w&/.\-']+|[A-Z]{2,})(?:\s+(?:[A-Z][\w&/.\-']+|[A-Z]{2,})){1,10}\b",
+            qq,
+        )
+        if titleish:
+            phrase = titleish.group(0).strip()
+            phrase = re.sub(r"^(?:What|Tell|Show|Find|Buy|List|Price|Prices|Cost|Availability|Available|Sold|Stock|In)\b\s+", "", phrase)
+            phrase = re.sub(r"\s{2,}", " ", phrase).strip(" -:|")
+            if len(re.findall(r"[A-Za-z0-9]{3,}", phrase)) >= 2:
+                return phrase[:120]
+        return ""
+    except Exception:
+        return ""
+
+
+def _is_exact_title_factual_query(q: str) -> bool:
+    try:
+        if not q or _is_strict_scope_query(q) or _LEARNING_GOALS_Q_RE.search(q or ""):
+            return False
+        if re.search(r"(?i)\b(?:price|prices|cost|availability|available|stock|sold out|in stock|buy|sale)\b", q or ""):
+            return False
+        title = _extract_doc_title_phrase(q or "")
+        if not title:
+            return False
+        if not re.search(r"(?i)\b(?:what|which|who|when|where|why|how|tell me|show me|describe|explain|what is|what are|what does|what do|what will|how many)\b", q or ""):
+            return False
+        return True
+    except Exception:
+        return False
+
+
 def _strict_answer_matches_query(q: str, ans: str) -> bool:
     try:
         if not q or not ans:
@@ -3261,6 +3315,32 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
         return
     elif _outcomes_ans:
         _trace_decision(workflow_debug, "outcomes_extractor_rejected_low_quality", True)
+
+    # Exact-title factual adapter for doc-style questions like "What are the four TTS modes in Give It a Voice?"
+    if (not _is_product_db_local) and _is_exact_title_factual_query(q):
+        try:
+            _exact_ans = _deterministic_exact_title_factual_answer(q, context or "")
+            if _exact_ans is None and (not _is_api_only):
+                _exact_ctx, _exact_src = await _live_site_query_rescue_context(q, cfg, max_urls=6, max_chars=12000)
+                if _exact_ctx:
+                    context = _exact_ctx
+                    doc_count = max(int(doc_count or 0), 1)
+                    if _exact_src:
+                        sources = list(dict.fromkeys((sources or []) + _exact_src))[:8]
+                    _exact_ans = _deterministic_exact_title_factual_answer(q, context or "")
+            if _exact_ans:
+                _trace_event(workflow_trace, "guard_exit", guard="exact_title_factual_adapter")
+                _trace_decision(workflow_debug, "exit_guard", "exact_title_factual_adapter")
+                if visitor_id:
+                    _run_in_bg(save_visitor_turn, visitor_id, "assistant", _exact_ans, db_name)
+                yield f"data: {json.dumps({'type': 'chunk', 'content': _exact_ans})}\n\n"
+                _lead_on = not cfg.get("disable_lead_box", False)
+                _trace_artifact(workflow_debug, "final_answer", _exact_ans[:4000])
+                yield f"data: {json.dumps(_metadata_payload(_lead_on, (sources or [])[:5]))}\n\n"
+                yield "data: {\"type\": \"done\"}\n\n"
+                return
+        except Exception:
+            pass
 
     # Universal source-page fallback for outcomes/goals queries in streaming mode.
     if _LEARNING_GOALS_Q_RE.search(q):
@@ -4467,6 +4547,33 @@ async def chat(request: Request):
                 }
             return JSONResponse(payload)
 
+        if (not _is_product_db_local) and _is_exact_title_factual_query(q):
+            try:
+                _exact_ans = _deterministic_exact_title_factual_answer(q, context or "")
+                if _exact_ans is None and (not _is_api_only):
+                    _exact_ctx, _exact_src = await _live_site_query_rescue_context(q, cfg, max_urls=6, max_chars=12000)
+                    if _exact_ctx:
+                        context = _exact_ctx
+                        doc_count = max(int(doc_count or 0), 1)
+                        if _exact_src:
+                            sources = list(dict.fromkeys((sources or []) + _exact_src))[:8]
+                        _exact_ans = _deterministic_exact_title_factual_answer(q, context or "")
+                if _exact_ans:
+                    payload = {
+                        "answer": _exact_ans,
+                        "sources": (sources or [])[:5],
+                        "evidence_spans": _evidence_spans_for_answer(q, _exact_ans),
+                    }
+                    if debug_effective:
+                        payload["debug"] = {
+                            "workflow_trace": workflow_trace,
+                            "guard_decisions": workflow_debug["guard_decisions"],
+                            "answer_artifacts": workflow_debug["answer_artifacts"],
+                        }
+                    return JSONResponse(payload)
+            except Exception:
+                pass
+
         # Deterministic strict-scope factual extractor (non-goals).
         if _is_strict_scope_query(q) and (not _LEARNING_GOALS_Q_RE.search(q)):
             try:
@@ -5140,6 +5247,96 @@ def _deterministic_scoped_fact_answer(q: str, kb_context: str) -> str | None:
         if len(picked) < 2:
             return None
         return "\n".join(f"- {p}" for p in picked)
+    except Exception:
+        return None
+
+
+def _deterministic_exact_title_factual_answer(q: str, kb_context: str) -> str | None:
+    """Deterministic extractor for exact-title factual questions on doc-style pages."""
+    try:
+        if not q or not kb_context or (not _is_exact_title_factual_query(q)):
+            return None
+        title = _extract_doc_title_phrase(q or "")
+        if not title:
+            return None
+        ctx = str(kb_context or "")
+        cl = ctx.lower()
+        title_tks = [w.lower() for w in re.findall(r"[A-Za-z0-9]{4,}", title) if w.lower() not in _QUERY_STOP][:10]
+        ql = (q or "").lower()
+        focus_tks = [
+            w.lower()
+            for w in re.findall(r"[A-Za-z0-9]{4,}", ql)
+            if w.lower() not in _QUERY_STOP and w.lower() not in set(title_tks[:8])
+        ][:12]
+        if title_tks and sum(1 for t in title_tks[:6] if t in cl) < 1:
+            return None
+
+        def _lines(text: str) -> list[str]:
+            out = []
+            for raw in re.split(r"[\r\n]+", text or ""):
+                t = re.sub(r"\s+", " ", (raw or "").strip())
+                if t:
+                    out.append(t)
+            return out
+
+        bad = re.compile(r"(?i)\b(prompt\s+\d+|try with ai|chapter\s+quiz|quiz|previous|next|copy as markdown|ctrl\+|on this page|lesson progression|prerequisites)\b")
+        lines = _lines(ctx)
+        if not lines:
+            return None
+        candidates: list[tuple[float, list[str]]] = []
+        for i, s in enumerate(lines):
+            if len(s) < 4 or len(s) > 160:
+                continue
+            if bad.search(s):
+                continue
+            sl = s.lower()
+            hit = sum(1 for t in focus_tks[:12] if t in sl)
+            title_hit = sum(1 for t in title_tks[:8] if t in sl)
+            if hit <= 0 and title_hit <= 0:
+                continue
+            block = [s]
+            for nxt in lines[i + 1: i + 8]:
+                t = (nxt or "").strip()
+                if not t or bad.search(t):
+                    continue
+                if re.match(r"^(?:chapter|part|section|lesson|unit)\s+\d+\b", t, re.I):
+                    break
+                if len(block) >= 2 and len(t.split()) <= 10 and len(t) <= 120 and re.search(r"[A-Za-z]", t):
+                    nxt_hit = sum(1 for tk in focus_tks[:12] if tk in t.lower())
+                    if nxt_hit == 0:
+                        break
+                if len(t) >= 8:
+                    block.append(t)
+            if len(block) < 2:
+                continue
+            block_txt = "\n".join(block[:8]).strip()
+            blk_focus_hit = sum(1 for t in focus_tks[:12] if t in block_txt.lower())
+            blk_title_hit = sum(1 for t in title_tks[:8] if t in block_txt.lower())
+            if (blk_focus_hit + blk_title_hit) < 1:
+                continue
+            if len(block_txt) < 40:
+                continue
+            score = (blk_focus_hit * 1.5) + blk_title_hit + (len(block) * 0.2)
+            if re.search(r"(?i)\b(is|means|used to|used for|lets you|allows you|covers|includes|contains|modes?|steps?|mcp|tts|stt|llm)\b", block_txt):
+                score += 1.5
+            if re.search(r"(?m)^\s*(?:[-*]|\d{1,2}[.)])\s+", block_txt):
+                score += 1.0
+            candidates.append((score, block))
+        if not candidates:
+            return None
+        candidates.sort(key=lambda x: x[0], reverse=True)
+        best = candidates[0][1]
+        out = []
+        for ln in best[:8]:
+            ln = re.sub(r"\s+", " ", ln).strip(" -*•\t")
+            if len(ln) >= 4:
+                out.append(ln)
+        if len(out) < 2:
+            return None
+        ans = "\n".join(f"- {ln}" for ln in out[:6])
+        if len(ans) < 40:
+            return None
+        return ans
     except Exception:
         return None
 
