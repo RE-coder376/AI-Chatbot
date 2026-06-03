@@ -212,6 +212,38 @@ def try_extract_outcomes_answer(q: str, context: str, debug: dict | None = None)
                 if _q_is_chapter and ("by completing part" in ll):
                     continue
                 cand = []
+                # Inline extraction: goals stored on same line as marker (no newlines after colon)
+                try:
+                    _colon_pos = -1
+                    for _mp in ("you will:", "able to:", "outcomes:", "objectives:"):
+                        _pi = ll.find(_mp)
+                        if _pi >= 0:
+                            _colon_pos = _pi + len(_mp) - 1
+                            break
+                    if _colon_pos < 0:
+                        for _mp in ("by completing", "by the end", "learning outcomes", "objectives", "goals"):
+                            _pi = ll.find(_mp)
+                            if _pi >= 0:
+                                _ck = ll.find(":", _pi)
+                                if _ck >= 0:
+                                    _colon_pos = _ck
+                                    break
+                    if _colon_pos >= 0:
+                        _inline_tail = ln[_colon_pos + 1:].strip()
+                        if _inline_tail:
+                            _iparts = [p.strip() for p in re.split(r'\.{3,}', _inline_tail) if p.strip()]
+                            if len(_iparts) < 2:
+                                _iparts = [p.strip(' :;-') for p in re.split(
+                                    r'(?=\b(?:Understand|Learn|Build|Ship|Use|Integrate|Deliver|'
+                                    r'Identify|Structure|Apply|Verify|Run|Retrofit|Install|Design|'
+                                    r'Validate|Create|Implement|Configure|Monitor|Optimize|Define|Package)\b)',
+                                    _inline_tail
+                                ) if p.strip(' :;-')]
+                            _cand_inline = [p for p in _iparts if 8 <= len(p) <= 260]
+                            if len(_cand_inline) >= 2:
+                                cand = _cand_inline
+                except Exception:
+                    pass
                 for ln2 in lines[mi + 1: mi + 45]:
                     t = (ln2 or "").strip()
                     if not t:

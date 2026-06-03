@@ -3788,16 +3788,13 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
 # Learning/goals extractor: when the KB contains an explicit outcomes list, prefer a deterministic answer.
 _LEARNING_GOALS_Q_RE = re.compile(r"\b(goals?|objective[s]?|learning\s+outcomes?|outcomes?|what\s+will\s+i\s+learn|what\s+will\s+we\s+learn|what\s+you\'?ll\s+learn|by\s+the\s+end|able\s+to|you\s+will\s+learn)\b", re.I)
 _LEARNING_GOALS_MARKER_RE = re.compile(
-    r"("
+    r"(?:"
+    # These already embed the colon — no extra delimiter needed
     r"By\s+completing[^\n]{0,180}?:"
     r"|By\s+the\s+end[^\n]{0,180}?:"
-    r"|What\s+you\'?ll\s+learn"
-    r"|What\s+you\s+will\s+learn"
-    r"|Learning\s+outcomes?"
-    r"|Objectives?"
-    r"|Goals?"
-    r")"
-    r"\s*(?::|\n)",
+    # These need an explicit colon or newline to delimit them
+    r"|(?:What\s+you\'?ll\s+learn|What\s+you\s+will\s+learn|Learning\s+outcomes?|Objectives?|Goals?)\s*(?::|\n)"
+    r")",
     re.I,
 )
 
