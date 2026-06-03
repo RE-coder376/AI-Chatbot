@@ -2354,6 +2354,10 @@ def _is_strict_scope_query(q: str) -> bool:
     return bool(
         re.search(r"\b(?:chapter|part)\s+\d{1,4}\b", q or "", re.I)
         or re.search(r"^\s*in\s+[^,\n]{6,200}\s*,\s*(?:what|why|how|which|who|when)\b", q or "", re.I)
+        or re.search(
+            r"\bin\s+[A-Z][A-Za-z\-']+(?:\s+(?:[A-Z][A-Za-z\-']+|[a-z]{1,4})){1,8}\s*\??$",
+            q or "",
+        )
     )
 
 
@@ -2642,6 +2646,18 @@ async def _live_site_strict_scope_probe(q: str, cfg: dict, max_urls: int = 8) ->
             if sm.status_code != 200:
                 return (None, [])
             locs = re.findall(r"(?is)<loc>\s*([^<\s]+)\s*</loc>", sm.text or "")
+            # Expand sitemap index (sub-sitemaps end with .xml)
+            if locs and all(str(u).strip().lower().endswith(".xml") for u in locs[:5]):
+                expanded = []
+                for _sub in locs[:15]:
+                    try:
+                        _sr = await client.get(str(_sub))
+                        if _sr.status_code == 200:
+                            expanded.extend(re.findall(r"(?is)<loc>\s*([^<\s]+)\s*</loc>", _sr.text or ""))
+                    except Exception:
+                        continue
+                if expanded:
+                    locs = expanded
             if not locs:
                 return None
             exact_urls = []
@@ -6333,6 +6349,18 @@ async def _live_site_outcomes_probe(q: str, cfg: dict, max_urls: int = 4) -> str
             if sm.status_code != 200:
                 return None
             locs = re.findall(r"(?is)<loc>\s*([^<\s]+)\s*</loc>", sm.text or "")
+            # Expand sitemap index (sub-sitemaps end with .xml)
+            if locs and all(str(u).strip().lower().endswith(".xml") for u in locs[:5]):
+                expanded = []
+                for _sub in locs[:15]:
+                    try:
+                        _sr = await client.get(str(_sub))
+                        if _sr.status_code == 200:
+                            expanded.extend(re.findall(r"(?is)<loc>\s*([^<\s]+)\s*</loc>", _sr.text or ""))
+                    except Exception:
+                        continue
+                if expanded:
+                    locs = expanded
             if not locs:
                 return None
             # Some exact chapter/part landing pages are reachable directly but may not be

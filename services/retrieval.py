@@ -907,6 +907,17 @@ def _extract_title_phrase(q: str) -> str:
                 return phrase
     except Exception:
         pass
+    # Pattern 4: "[question] in [Title Case Phrase]?" — title at end, no chapter number.
+    # e.g. "What are the four TTS modes in Give It a Voice?"
+    m4 = re.search(
+        r"\bin\s+([A-Z][A-Za-z\-']+(?:\s+(?:[A-Z][A-Za-z\-']+|[a-z]{1,4})){1,8})\s*\??$",
+        q or "",
+    )
+    if m4:
+        phrase = m4.group(1).strip().strip("\"'")
+        phrase = re.sub(r"\s{2,}", " ", phrase).strip()
+        if len(phrase) >= 4:
+            return phrase
     return ''
 
 
@@ -1649,6 +1660,12 @@ async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansio
         _strict_scope_q = True
     # Also treat "Title (N)" queries (e.g. "Voice Foundations (109)") as scoped.
     if not _strict_scope_q and re.search(r"\b[A-Z][A-Za-z\s]{3,60}\s*\(\s*\d{1,4}\s*\)", q or ""):
+        _strict_scope_q = True
+    # Pattern 4: "[question] in [Title Case]?" — title at end of query.
+    if not _strict_scope_q and re.search(
+        r"\bin\s+[A-Z][A-Za-z\-']+(?:\s+(?:[A-Z][A-Za-z\-']+|[a-z]{1,4})){1,8}\s*\??$",
+        q or "",
+    ):
         _strict_scope_q = True
     if _strict_scope_q:
         fast = True
