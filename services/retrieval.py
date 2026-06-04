@@ -26,7 +26,7 @@ from services.crawler_utils import (
 logger = logging.getLogger(__name__)
 
 # Debug-only: helps confirm which extractor logic is running on HF.
-_OUTCOMES_EXTRACTOR_VERSION = "2026-06-04.v6"
+_OUTCOMES_EXTRACTOR_VERSION = "2026-06-04.v7"
 
 # Outcomes/learning intent (universal)
 # Note: "principles/steps/rules" queries intentionally excluded — they go through LLM directly.
@@ -869,6 +869,9 @@ def _has_explicit_outcomes_marker(text: str) -> bool:
             or ("by the end of this chapter" in tl)
             or ("by completing" in tl)
             or ("you will be able to" in tl)
+            or ("you should be able to" in tl)
+            or ("by chapter end" in tl)
+            or ("when you finish this" in tl)
         )
     except Exception:
         return False
@@ -2279,10 +2282,16 @@ async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansio
                         """True if the doc URL or text matches the title phrase (slug or tokens)."""
                         if title_slug and (title_slug in src_l or title_slug in txt_l):
                             return True
-                        # Token fallback: 1+ distinctive word (5+ chars) from title in URL
+                        # Token fallback: require 2+ hits across URL + body combined.
+                        # "employee"/"employees" excluded — too common across unrelated AF pages.
+                        _stop = {"chapter","learning","goals","objectives","outcomes","agent","agents","employee","employees"}
                         _ttf = [w.lower() for w in re.findall(r"[a-zA-Z]{5,}", title_phrase or "")][:6]
-                        _ttf = [t for t in _ttf if t not in {"chapter","learning","goals","objectives","outcomes","agent","agents"}]
-                        return bool(_ttf and any(t in src_l for t in _ttf))
+                        _ttf = [t for t in _ttf if t not in _stop]
+                        if not _ttf:
+                            return False
+                        _url_hits = sum(1 for t in _ttf if t in src_l)
+                        _body_hits = sum(1 for t in _ttf if t in txt_l)
+                        return (_url_hits + _body_hits) >= 2
                     if _ch is not None and ("chapter" in (q or "").lower()):
                         _a = f"chapter {_ch}"
                         if (_a not in _src_l) and (_a not in _txt_l):
@@ -2447,19 +2456,28 @@ async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansio
                         _resc_docs = []
                         _resc_seen = set()
                         _title_tks = [w.lower() for w in re.findall(r"[a-zA-Z]{4,}", _title_phrase or "")][:10]
-                        _title_tks = [t for t in _title_tks if t not in {"chapter", "part", "learning", "goals", "outcomes", "according", "book"}]
+                        # "your"/"agent"/"agents" excluded: too common across AF pages, causes false positives
+                        _title_tks = [t for t in _title_tks if t not in {"chapter", "part", "learning", "goals", "outcomes", "according", "book", "your", "agent", "agents"}]
                         for _doc_text, _meta in zip(_raw.get("documents", []), _raw.get("metadatas", [])):
                             if not _doc_text:
                                 continue
                             _src = str((_meta or {}).get("source") or "").lower()
                             _body = str(_doc_text).lower()
                             if _title_slug2 and (_title_slug2 not in _src) and (_title_slug2 not in _body):
-                                continue
-                            if _title_tks:
+                                # Slug mismatch (e.g. "linux-mastery" vs "linux-operations-for-agent-deployment"):
+                                # fall back to requiring 2+ title token hits across URL + body.
+                                if not _title_tks:
+                                    continue
                                 _hit = sum(1 for t in _title_tks if (t in _src) or (t in _body))
                                 if _hit < 2:
                                     continue
-                            if not (_has_explicit_outcomes_marker(_body) or re.search(r"\b(by completing|by the end|you will be able to|learning outcomes|objectives?|goals?)\b", _body)):
+                            elif _title_tks:
+                                _hit = sum(1 for t in _title_tks if (t in _src) or (t in _body))
+                                if _hit < 2:
+                                    continue
+                            if not (_has_explicit_outcomes_marker(_body) or re.search(
+                                r"\b(by completing|by the end|you will be able to|you should be able to"
+                                r"|by chapter end|when you finish this|learning outcomes|objectives?|goals?)\b", _body)):
                                 continue
                             _doc = Document(page_content=_doc_text, metadata=_meta or {})
                             _k = str((_meta or {}).get("source") or _doc_text[:120])[:160]
