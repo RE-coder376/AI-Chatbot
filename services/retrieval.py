@@ -26,15 +26,15 @@ from services.crawler_utils import (
 logger = logging.getLogger(__name__)
 
 # Debug-only: helps confirm which extractor logic is running on HF.
-_OUTCOMES_EXTRACTOR_VERSION = "2026-06-04.v4"
+_OUTCOMES_EXTRACTOR_VERSION = "2026-06-04.v5"
 
 # Outcomes/learning intent (universal)
+# Note: "principles/steps/rules" queries intentionally excluded — they go through LLM directly.
 _OUTCOMES_INTENT_RE = re.compile(
     r"\b(what\s+will\s+i\s+learn|what\s+will\s+we\s+learn|learning\s+outcomes?|objectives?|goals?|"
     r"by\s+the\s+end|you\s+will\s+be\s+able\s+to|"
     r"what\s+(?:do|does|will|would)\s+[^.!?]{3,80}\s+cover|"
-    r"what\s+(?:is|are)\s+covered|covers?\b|"
-    r"what\s+are\s+the\s+(?:\w+\s+){0,4}(?:principles?|steps?|rules?|methods?|practices?|phases?|pillars?|concepts?|lessons?)\b)\b",
+    r"what\s+(?:is|are)\s+covered|covers?\b)\b",
     re.I,
 )
 
@@ -50,6 +50,7 @@ _OUTCOME_VERB_HINTS = {
     "create","implement","configure","monitor","optimize","define","package",
     "map","capture","explore","master","analyze","develop","write","generate","complete",
     "starts","restarts","logs","accepts","executes","survives","recognizes","recognise","debug","debugs",
+    "can","configure","move","read","set","direct","establish","manage","enable","perform",
 }
 
 
@@ -86,7 +87,10 @@ def try_extract_outcomes_answer(q: str, context: str, debug: dict | None = None)
         def _valid_outcomes_items(items: list[str]) -> bool:
             if not (3 <= len(items) <= 25):
                 return False
-            starters = [(it.split()[:1][0].lower() if it.split() else "") for it in items]
+            # Strip "You can/should/will/are able to" prefix before checking verb starters
+            # e.g. "You can evaluate a migration..." → "evaluate a migration..."
+            _stripped = [re.sub(r"^you\s+(?:can|should|will|are\s+able\s+to)\s+", "", it, flags=re.I) for it in items]
+            starters = [(_s.split()[:1][0].lower() if _s.split() else "") for _s in _stripped]
             verbish = sum(1 for s in starters if s in _OUTCOME_VERB_HINTS)
             verb_ratio = verbish / max(1.0, float(len(items)))
             # Reject prompt templates / nav / diagnostic checklists.
@@ -886,6 +890,17 @@ def _extract_title_phrase(q: str) -> str:
                 flags=re.I,
             ).strip()
             return phrase
+        # Pattern 1b: "Chapter/Part N[A-Za-z]? Title" — no colon/dash separator.
+        # e.g. "Chapter 22 Linux Operations for Agent Deployment" → "Linux Operations for Agent Deployment"
+        # e.g. "Chapter 21B Postgres as System of Record" → "Postgres as System of Record"
+        m1b = re.search(r"\b(?:chapter|part|section|lesson|unit)\s+\d+[A-Za-z]?\s+(.+)", q or '', re.I)
+        if m1b:
+            phrase = m1b.group(1).strip().strip('"\'')
+            phrase = re.sub(r"\s*\??\s*$", "", phrase).strip()
+            phrase = re.sub(r"\s+according\s+to\s+.*$", "", phrase, flags=re.I).strip()
+            phrase = re.sub(r"\s+from\s+the\s+book\s*$", "", phrase, flags=re.I).strip()
+            if len(phrase) >= 5 and not re.match(r"^(what|why|how|which|who|when|where|are|is|do|does)\b", phrase, re.I):
+                return phrase
         m2 = re.search(r"^\s*in\s+([^,\n]{6,200})\s*,\s*(?:what|why|how|which|who|when)\b", q or "", re.I)
         if m2:
             phrase = m2.group(1).strip().strip('"\'')
@@ -922,6 +937,22 @@ def _extract_title_phrase(q: str) -> str:
         phrase = re.sub(r"\s{2,}", " ", phrase).strip()
         if len(phrase) >= 4:
             return phrase
+    # Pattern 5: "N principles/steps/rules of [Topic]" — extract the topic.
+    # e.g. "What are the seven principles of General Agent Problem Solving" → "General Agent Problem Solving"
+    try:
+        m5 = re.search(
+            r"\b(?:principles?|steps?|rules?|methods?|practices?|phases?|pillars?|concepts?|lessons?)\b[^.?]*\bof\s+(.+?)(?:\?|\s*$)",
+            q or '', re.I
+        )
+        if m5:
+            phrase = m5.group(1).strip().strip('"\'')
+            phrase = re.sub(r"\s*\??$", "", phrase).strip()
+            if (len(phrase) >= 6
+                    and not re.match(r"^(chapter|part|section|lesson|unit)\b", phrase, re.I)
+                    and not re.match(r"^(what|why|how|which|who|when|where|are|is|do|does)\b", phrase, re.I)):
+                return phrase
+    except Exception:
+        pass
     return ''
 
 
@@ -1812,17 +1843,19 @@ async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansio
             for r in _keyword_rescue(rescue_q, db, rescue_seen):
                 rescue_results.append(r)
 
-    # Title-slug source rescue: when query has an exact named title (e.g. "Give It a Voice"),
-    # pull all chunks whose source URL contains that slug before vector search can miss them.
-    if not _skip_chromadb and _strict_scope_q and _title_slug and len(_title_slug) >= 6 and db is not None:
+    # Title-phrase document rescue: when the query has an extracted title phrase (e.g. "Give It a Voice",
+    # "Postgres as System of Record"), search document TEXT for that phrase to pull the actual page.
+    # Uses where_document $contains (SQLite FTS, case-insensitive) instead of metadata substring match
+    # (ChromaDB doesn't support $contains on string metadata fields).
+    if not _skip_chromadb and _title_phrase and len(_title_phrase) >= 6 and db is not None:
         try:
             from langchain_core.documents import Document as _Doc
-            _slug_raw = db._collection.get(
-                where={"source": {"$contains": _title_slug}},
+            _phrase_raw = db._collection.get(
+                where_document={"$contains": _title_phrase},
                 include=["documents", "metadatas"],
                 limit=10,
             )
-            for _sd, _sm in zip(_slug_raw.get("documents", []), _slug_raw.get("metadatas", [])):
+            for _sd, _sm in zip(_phrase_raw.get("documents", []), _phrase_raw.get("metadatas", [])):
                 if _sd:
                     _sk = _sd[:100]
                     if _sk not in rescue_seen:
@@ -1840,8 +1873,9 @@ async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansio
             _tks = [w for w in re.findall(r'[a-zA-Z]{4,}', _tpl)][:10]
             # "agent(s)" is too generic to be a reliable anchor token across most KBs.
             _tks = [t for t in _tks if t not in {"agent", "agents"}]
-            _pc = re.search(r"\b(part|chapter)\s+(\d{1,3})\b", q, re.I)
-            _pc_anchor = (f"{_pc.group(1).lower()} {_pc.group(2)}" if _pc else "")
+            # Handle alphanumeric chapter IDs like "21B" (digit + optional letter)
+            _pc = re.search(r"\b(part|chapter)\s+(\d{1,3}[A-Za-z]?)\b", q, re.I)
+            _pc_anchor = (f"{_pc.group(1).lower()} {_pc.group(2).lower()}" if _pc else "")
             # Broad net first (common outcomes markers), then we filter hard by anchor tokens.
             # This avoids DB-specific hardcoding while still reliably surfacing outcome bullets.
             # 1) Direct anchor phrase (highest precision when present).
@@ -1867,7 +1901,11 @@ async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansio
             # without the literal "you will..." phrase.
             for _marker in (
                 "you will be able to", "You will be able to",
+                "you should be able to", "You should be able to",
                 "by the end of this chapter", "By the end of this chapter",
+                "by chapter end", "By chapter end",
+                "when you finish this chapter", "When you finish this chapter",
+                "when you finish this", "When you finish this",
                 "learning outcomes", "Learning Outcomes", "Learning outcomes",
                 "by completing", "By completing",
                 "goals", "Goals",
@@ -1883,14 +1921,16 @@ async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansio
                     src = str((meta or {}).get('source') or '').lower()
                     body = str(doc_text).lower()
                     # Only keep chunks that look like an outcomes list.
-                    if not re.search(r"(?i)\b(by (the end of|completing|after completing|upon completing)\b|you will be able to\b|learning outcomes\b|objectives?\b|goals?\b)", doc_text):
+                    if not re.search(r"(?i)\b(by (the end of|completing|after completing|upon completing|chapter end)\b|you (will|should) be able to\b|when you finish this\b|learning outcomes\b|objectives?\b|goals?\b)", doc_text):
                         continue
                     # If the query names a specific Part/Chapter, require that exact anchor to appear somewhere
                     # in the chunk or its source URL (prevents extracting the wrong outcomes list).
                     # Exception: relax when title tokens provide sufficient anchor (handles chapter-number
                     # mismatches, e.g. user says "Chapter 22" but site calls it "Chapter 11").
                     if _pc_anchor and (_pc_anchor not in body) and (_pc_anchor not in src):
-                        if not _tks or sum(1 for t in _tks if (t in src) or (t in body)) < 2:
+                        # When _tks is empty (no title phrase extracted), let the chunk through;
+                        # the broader token filter below will handle further filtering.
+                        if _tks and sum(1 for t in _tks if (t in src) or (t in body)) < 2:
                             continue
                     if _tks:
                         # Require at least 2 title tokens in either URL or body
