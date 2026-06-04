@@ -26,7 +26,7 @@ from services.crawler_utils import (
 logger = logging.getLogger(__name__)
 
 # Debug-only: helps confirm which extractor logic is running on HF.
-_OUTCOMES_EXTRACTOR_VERSION = "2026-06-04.v5"
+_OUTCOMES_EXTRACTOR_VERSION = "2026-06-04.v6"
 
 # Outcomes/learning intent (universal)
 # Note: "principles/steps/rules" queries intentionally excluded — they go through LLM directly.
@@ -189,7 +189,7 @@ def try_extract_outcomes_answer(q: str, context: str, debug: dict | None = None)
             _wants_ch = ("chapter" in ql) and (chapter_no is not None)
             for _mi, _ln in enumerate(lines[:800]):
                 _ll = (_ln or "").lower()
-                if not re.search(r"\b(by completing|by the end|you will be able to|learning outcomes|objectives|goals)\b", _ll):
+                if not re.search(r"\b(by completing|by the end|you will be able to|you should be able to|by chapter end|when you finish this|learning outcomes|outcomes|objectives|goals)\b", _ll):
                     continue
                 if _wants_part and (f"part {part_no}" not in _ll):
                     continue
@@ -205,7 +205,8 @@ def try_extract_outcomes_answer(q: str, context: str, debug: dict | None = None)
         # Marker-first extraction (safer than the old "Goals ..." heuristic):
         # If we see an explicit outcomes marker line, extract short, verb-ish lines immediately after it.
         try:
-            markers = ("by completing", "by the end", "you will be able to", "learning outcomes", "objectives", "goals")
+            markers = ("by completing", "by the end", "you will be able to", "you should be able to",
+                       "by chapter end", "when you finish this", "learning outcomes", "outcomes", "objectives", "goals")
             for mi, ln in enumerate(lines[:900]):
                 ll = (ln or "").lower()
                 if not any(m in ll for m in markers):
@@ -2274,15 +2275,23 @@ async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansio
                     _ch = _extract_chapter_number(q or "")
                     _pt = _extract_part_number(q or "")
                     _txt_l = _txt.lower()
+                    def _scope_url_match(src_l, txt_l, title_slug, title_phrase):
+                        """True if the doc URL or text matches the title phrase (slug or tokens)."""
+                        if title_slug and (title_slug in src_l or title_slug in txt_l):
+                            return True
+                        # Token fallback: 1+ distinctive word (5+ chars) from title in URL
+                        _ttf = [w.lower() for w in re.findall(r"[a-zA-Z]{5,}", title_phrase or "")][:6]
+                        _ttf = [t for t in _ttf if t not in {"chapter","learning","goals","objectives","outcomes","agent","agents"}]
+                        return bool(_ttf and any(t in src_l for t in _ttf))
                     if _ch is not None and ("chapter" in (q or "").lower()):
                         _a = f"chapter {_ch}"
                         if (_a not in _src_l) and (_a not in _txt_l):
-                            if not (_title_slug and (_title_slug in _src_l or _title_slug in _txt_l)):
+                            if not _scope_url_match(_src_l, _txt_l, _title_slug, _title_phrase):
                                 continue
                     if _pt is not None and ("part" in (q or "").lower()):
                         _a = f"part {_pt}"
                         if (_a not in _src_l) and (_a not in _txt_l):
-                            if not (_title_slug and (_title_slug in _src_l or _title_slug in _txt_l)):
+                            if not _scope_url_match(_src_l, _txt_l, _title_slug, _title_phrase):
                                 continue
                 except Exception:
                     pass
