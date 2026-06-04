@@ -26,7 +26,7 @@ from services.crawler_utils import (
 logger = logging.getLogger(__name__)
 
 # Debug-only: helps confirm which extractor logic is running on HF.
-_OUTCOMES_EXTRACTOR_VERSION = "2026-06-04.v8"
+_OUTCOMES_EXTRACTOR_VERSION = "2026-06-04.v9"
 
 # Outcomes/learning intent (universal)
 # Note: "principles/steps/rules" queries intentionally excluded — they go through LLM directly.
@@ -51,6 +51,8 @@ _OUTCOME_VERB_HINTS = {
     "map","capture","explore","master","analyze","develop","write","generate","complete",
     "starts","restarts","logs","accepts","executes","survives","recognizes","recognise","debug","debugs",
     "can","configure","move","read","set","direct","establish","manage","enable","perform",
+    # v9: narrative-outcome verbs (lowercase 3rd-person / base forms for Q4-style chunks)
+    "answers","uses","browses","speaks","operates","handles","connects","responds","have","has","get","gets",
 }
 
 
@@ -103,7 +105,7 @@ def try_extract_outcomes_answer(q: str, context: str, debug: dict | None = None)
                 return False
             if re.search(r"\b(mkdir|cd\s+~/?|kubectl|pip\s+install|npm\s+install|git\s+clone|python\s+-m)\b", joined):
                 return False
-            if re.search(r"\b(?:learning-spec|readme)\.md\b|\b[a-z0-9_\\-/]+\.py\b|\b[a-z0-9_\\-/]+\.md\b", joined):
+            if re.search(r"\b(?:learning-spec|readme)\.md\b|\b[-a-z0-9_\\/]+\.py\b|\b[-a-z0-9_\\/]+\.md\b", joined):
                 return False
             longish = sum(1 for it in items if len(it) > 140 or it.count(".") >= 2 or it.count(":") >= 2)
             if longish >= max(2, len(items) // 2):
@@ -114,9 +116,18 @@ def try_extract_outcomes_answer(q: str, context: str, debug: dict | None = None)
             # only when the retrieved context itself has no explicit chapter/part anchor.
             if title_tokens and (not _scope_anchor_present):
                 hit = sum(1 for t in title_tokens[:6] if t and (t in joined))
-                req = 2 if len(title_tokens) >= 3 else 1
+                # Question-format items (Why?/How?) rephrase chapter content, not the title —
+                # one matching title token is sufficient evidence they're from the right chapter.
+                _is_q_items = sum(1 for it in items if it.rstrip().endswith("?") and
+                                  (it.split()[:1][0].lower() if it.split() else "") in _INTERROGATIVE_START
+                                  ) >= max(2, len(items) // 2)
+                req = 1 if _is_q_items else (2 if len(title_tokens) >= 3 else 1)
                 if hit < req and not (len(items) >= 4 and verb_ratio >= 0.60):
                     return False
+                # Q-format items that passed the title-token check are valid:
+                # they rephrase chapter content, so low verb_ratio is expected.
+                if _is_q_items and len(items) >= 3 and _generic_heading_count(items) == 0:
+                    return True
             # Learning outcomes should usually be verb-start imperatives, but
             # some exact chapter pages surface as clean topic lists under a strong
             # explicit marker. Accept those when we already have a scope anchor.
@@ -142,7 +153,7 @@ def try_extract_outcomes_answer(q: str, context: str, debug: dict | None = None)
                 return False
             if re.search(r"\b(mkdir|cd\s+~/?|kubectl|pip\s+install|npm\s+install|git\s+clone|python\s+-m)\b", joined):
                 return False
-            if re.search(r"\b(?:learning-spec|readme)\.md\b|\b[a-z0-9_\\-/]+\.py\b|\b[a-z0-9_\\-/]+\.md\b", joined):
+            if re.search(r"\b(?:learning-spec|readme)\.md\b|\b[-a-z0-9_\\/]+\.py\b|\b[-a-z0-9_\\/]+\.md\b", joined):
                 return False
             # Keep them reasonably short and list-like.
             longish = sum(1 for it in items if len(it) > 140 or it.count(".") >= 2 or it.count(":") >= 2)
@@ -223,7 +234,11 @@ def try_extract_outcomes_answer(q: str, context: str, debug: dict | None = None)
                 if chapter_no is not None and ("chapter" in _q_lower) and (f"chapter {chapter_no}" not in ll):
                     _nearby_ctx = " ".join(lines[max(0, mi - 15): mi + 3]).lower()
                     if f"chapter {chapter_no}" not in _nearby_ctx:
-                        if not (title_tokens and sum(1 for t in title_tokens[:6] if t in _nearby_ctx) >= 2):
+                        # Strong markers like "by the end of this chapter" are reliable enough
+                        # with only 1 matching title token (the chunk simply omits the chapter number).
+                        _strong_marker = _has_explicit_outcomes_marker(ll)
+                        _tok_req = 1 if _strong_marker else 2
+                        if not (title_tokens and sum(1 for t in title_tokens[:6] if t in _nearby_ctx) >= _tok_req):
                             continue
                 if part_no is not None and ("part" in _q_lower) and (f"part {part_no}" not in ll):
                     _nearby_ctx = " ".join(lines[max(0, mi - 15): mi + 3]).lower()

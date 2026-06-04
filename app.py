@@ -5725,6 +5725,8 @@ def _is_quality_outcomes_answer_text(text: str) -> bool:
         "operate","operates","respond","responds","handle","handles","connect","connects",
         "enable","enables","expose","exposes","move","moves","read","reads","set","sets",
         "establish","establishes","manage","manages","perform","performs",
+        # v9: outcome-style verbs LLM may generate for narrative goal chunks
+        "have","has","get","gets","receive","receives","uses","builds",
     }
     for b in bullets:
         b0 = re.split(r"[\r\n]+", b)[0].strip()
@@ -5732,7 +5734,7 @@ def _is_quality_outcomes_answer_text(text: str) -> bool:
             bad += 1
             continue
         w = b0.split()
-        if len(w) < 3:
+        if len(w) < 2:  # v9: allow 2-word bullets ("Use tools", "Deploy agent")
             bad += 1
             continue
         w0 = re.sub(r"[^a-z]", "", w[0].lower())
@@ -5790,6 +5792,8 @@ def _outcomes_answer_matches_scope(q: str, text: str) -> bool:
                         "operate","operates","respond","responds","handle","handles","connect","connects",
                         "enable","enables","expose","exposes","move","moves","read","reads","set",
                         "establish","manage","perform",
+                        # v9: outcome-style verbs for narrative goal chunks
+                        "have","has","get","gets","receive","receives","uses","builds",
                     }
                     def _bullet_is_verbish(b: str) -> bool:
                         w0 = (re.findall(r"[a-zA-Z]+", b.lower())[:1] or [""])[0]
@@ -5917,7 +5921,8 @@ async def _synthesize_scoped_outcomes_from_cluster(q: str, context: str, sources
         ctx_block = "\n".join(ctx_lines[:60])[:3600]
         sys_msg = (
             "You extract learning goals from retrieved documentation evidence. "
-            "Return only a bullet list. Use only the evidence below. "
+            "Return only a bullet list using imperative action verbs (Build, Deploy, Configure, Use, Enable, etc.). "
+            "Use only the evidence below. "
             "Do not summarize the chapter, do not mention missing content, and do not add a preamble."
         )
         user_msg = (
