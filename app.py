@@ -1278,7 +1278,7 @@ def admin_auth(password: str, cfg: dict):
         return "owner"
     if _password_matches(password, db_pw):
         return "client"
-    if not db_pw and db_name and _password_matches(password, db_name):
+    if db_name and _password_matches(password, db_name):
         return "client"
     raise HTTPException(status_code=401, detail="Unauthorized")
 
@@ -1289,7 +1289,7 @@ def _client_password_matches_db(password: str, cfg: dict) -> bool:
     db_name = str(cfg.get("db_name", "") or "").strip()
     if _password_matches(password, db_pw):
         return True
-    if not db_pw and db_name and _password_matches(password, db_name):
+    if db_name and _password_matches(password, db_name):
         return True
     return False
 
