@@ -26,14 +26,15 @@ from services.crawler_utils import (
 logger = logging.getLogger(__name__)
 
 # Debug-only: helps confirm which extractor logic is running on HF.
-_OUTCOMES_EXTRACTOR_VERSION = "2026-06-04.v3"
+_OUTCOMES_EXTRACTOR_VERSION = "2026-06-04.v4"
 
 # Outcomes/learning intent (universal)
 _OUTCOMES_INTENT_RE = re.compile(
     r"\b(what\s+will\s+i\s+learn|what\s+will\s+we\s+learn|learning\s+outcomes?|objectives?|goals?|"
     r"by\s+the\s+end|you\s+will\s+be\s+able\s+to|"
     r"what\s+(?:do|does|will|would)\s+[^.!?]{3,80}\s+cover|"
-    r"what\s+(?:is|are)\s+covered|covers?\b)\b",
+    r"what\s+(?:is|are)\s+covered|covers?\b|"
+    r"what\s+are\s+the\s+(?:\w+\s+){0,4}(?:principles?|steps?|rules?|methods?|practices?|phases?|pillars?|concepts?|lessons?)\b)\b",
     re.I,
 )
 
@@ -45,9 +46,10 @@ def is_outcomes_question(q: str) -> bool:
 _INTERROGATIVE_START = {"what", "which", "why", "how", "when", "where", "who"}
 _OUTCOME_VERB_HINTS = {
     "understand","build","ship","use","integrate","deliver","identify","structure","apply","prepare",
-    "run","evaluate","deploy","install","test","design","verify","retrofit","decide","learn","encode",
+    "run","runs","evaluate","deploy","install","test","design","verify","retrofit","decide","learn","encode",
     "create","implement","configure","monitor","optimize","define","package",
     "map","capture","explore","master","analyze","develop","write","generate","complete",
+    "starts","restarts","logs","accepts","executes","survives","recognizes","recognise","debug","debugs",
 }
 
 
@@ -160,9 +162,11 @@ def try_extract_outcomes_answer(q: str, context: str, debug: dict | None = None)
         title_tokens = [w.lower() for w in re.findall(r"[a-zA-Z]{4,}", title_phrase)][:10] if title_phrase else []
         lines = [ln.rstrip() for ln in str(context).splitlines()]
         _ctx_lower = str(context).lower()
+        _title_token_hits = sum(1 for t in title_tokens[:6] if t and t in _ctx_lower) if title_tokens else 0
         _scope_anchor_present = bool(
             (chapter_anchor and chapter_anchor in _ctx_lower) or
-            (part_anchor and part_anchor in _ctx_lower)
+            (part_anchor and part_anchor in _ctx_lower) or
+            (title_tokens and _title_token_hits >= (2 if len(title_tokens) >= 3 else 1))
         )
         if debug is not None:
             try:
@@ -1808,6 +1812,25 @@ async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansio
             for r in _keyword_rescue(rescue_q, db, rescue_seen):
                 rescue_results.append(r)
 
+    # Title-slug source rescue: when query has an exact named title (e.g. "Give It a Voice"),
+    # pull all chunks whose source URL contains that slug before vector search can miss them.
+    if not _skip_chromadb and _strict_scope_q and _title_slug and len(_title_slug) >= 6 and db is not None:
+        try:
+            from langchain_core.documents import Document as _Doc
+            _slug_raw = db._collection.get(
+                where={"source": {"$contains": _title_slug}},
+                include=["documents", "metadatas"],
+                limit=10,
+            )
+            for _sd, _sm in zip(_slug_raw.get("documents", []), _slug_raw.get("metadatas", [])):
+                if _sd:
+                    _sk = _sd[:100]
+                    if _sk not in rescue_seen:
+                        rescue_seen.add(_sk)
+                        rescue_results.append(_Doc(page_content=_sd, metadata=_sm or {}))
+        except Exception:
+            pass
+
     # Outcomes rescue (universal): when user asks learning outcomes/goals, directly pull chunks likely to
     # contain outcomes lists and then filter by the title phrase tokens in URL/body.
     if _is_outcomes_intent and db is not None:
@@ -1864,8 +1887,11 @@ async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansio
                         continue
                     # If the query names a specific Part/Chapter, require that exact anchor to appear somewhere
                     # in the chunk or its source URL (prevents extracting the wrong outcomes list).
+                    # Exception: relax when title tokens provide sufficient anchor (handles chapter-number
+                    # mismatches, e.g. user says "Chapter 22" but site calls it "Chapter 11").
                     if _pc_anchor and (_pc_anchor not in body) and (_pc_anchor not in src):
-                        continue
+                        if not _tks or sum(1 for t in _tks if (t in src) or (t in body)) < 2:
+                            continue
                     if _tks:
                         # Require at least 2 title tokens in either URL or body
                         hit = sum(1 for t in _tks if (t in src) or (t in body))
