@@ -26,7 +26,7 @@ from services.crawler_utils import (
 logger = logging.getLogger(__name__)
 
 # Debug-only: helps confirm which extractor logic is running on HF.
-_OUTCOMES_EXTRACTOR_VERSION = "2026-06-04.v7"
+_OUTCOMES_EXTRACTOR_VERSION = "2026-06-04.v8"
 
 # Outcomes/learning intent (universal)
 # Note: "principles/steps/rules" queries intentionally excluded — they go through LLM directly.
@@ -123,7 +123,12 @@ def try_extract_outcomes_answer(q: str, context: str, debug: dict | None = None)
             if verb_ratio >= 0.45:
                 return True
             if _scope_anchor_present and len(items) >= 3 and _generic_heading_count(items) == 0:
-                if sum(1 for it in items if "?" in it) == 0:
+                _q_count = sum(1 for it in items if "?" in it)
+                if _q_count == 0:
+                    return True  # clean non-question items with scope anchor
+                # Also accept majority-question items — "By chapter end, answer these questions:" format
+                _q_starters = sum(1 for it in items if re.match(r"^(?:why|how|when|what|which|where)\b", it.strip().lower()))
+                if _q_starters >= max(3, len(items) // 2):
                     return True
             return False
 
@@ -234,14 +239,20 @@ def try_extract_outcomes_answer(q: str, context: str, debug: dict | None = None)
                 try:
                     _INLINE_STOPS = ("lesson progression", "chapter progression",
                                      "outcome & method", "outcome and method",
-                                     "why this order", "prerequisites",
+                                     "why this order", "prerequisites", "prerequisite",
                                      "what this part will teach", "seven chapters",
-                                     "frameworks first", "direct speech")
+                                     "frameworks first", "direct speech",
+                                     "this is a real", "not a toy example")
                     _IVSP = re.compile(
                         r'(?=\b(?:Understand|Map|Learn|Capture|Build|Ship|Use|Integrate|Deliver|'
-                        r'Identify|Structure|Apply|Verify|Run|Retrofit|Install|Design|Validate|'
+                        r'Identify|Structure|Apply|Verify|Run|Runs|Retrofit|Install|Design|Validate|'
                         r'Create|Implement|Configure|Monitor|Optimize|Define|Package|Explore|'
-                        r'Master|Develop|Write|Generate|Complete)\b)'
+                        r'Master|Develop|Write|Generate|Complete|'
+                        r'Start|Starts|Restart|Restarts|Log|Logs|Accept|Accepts|Execute|Executes|'
+                        r'Survive|Survives|Can|Answer|Answers|Browse|Browses|Speak|Speaks|'
+                        r'Operate|Operates|Respond|Responds|Handle|Handles|Connect|Connects|'
+                        r'Enable|Enables|Expose|Exposes|Move|Moves|Read|Reads|'
+                        r'Set|Sets|Establish|Establishes|Manage|Manages|Perform|Performs)\b)'
                     )
 
                     def _split_goals(txt: str) -> list[str]:
@@ -287,6 +298,16 @@ def try_extract_outcomes_answer(q: str, context: str, debug: dict | None = None)
                             if len(_res) >= 2:
                                 cand = _res
                                 break
+                    # Strategy C: question-format goals ("answer these N questions: Why...? How...?")
+                    if not cand:
+                        _is_q_anchor = any(ph in ll for ph in ("answer these", "answer the following", "answer each"))
+                        if _is_q_anchor:
+                            # find colon and split by "?"
+                            _q_ci = ll.find(":")
+                            _q_tail = ln[_q_ci + 1:].strip() if _q_ci >= 0 else ln
+                            _q_items = [p.strip() + "?" for p in _q_tail.split("?") if len(p.strip()) > 10]
+                            if len(_q_items) >= 3:
+                                cand = _q_items[:10]
                 except Exception:
                     pass
                 for ln2 in lines[mi + 1: mi + 45]:

@@ -5716,9 +5716,15 @@ def _is_quality_outcomes_answer_text(text: str) -> bool:
     good = 0
     verbs = {
         "understand","build","ship","use","integrate","deliver","identify","structure","apply","prepare",
-        "run","evaluate","deploy","install","test","design","verify","retrofit","decide","learn","encode",
+        "run","runs","evaluate","deploy","install","test","design","verify","retrofit","decide","learn","encode",
         "create","implement","configure","monitor","optimize","define","package","explain",
         "map","capture","explore","master","analyze","develop","write","generate","complete",
+        # v8 additions: deployment/ops verbs + narrative-extraction verbs
+        "start","starts","restart","restarts","log","logs","accept","accepts","execute","executes",
+        "survive","survives","can","answer","answers","browse","browses","speak","speaks",
+        "operate","operates","respond","responds","handle","handles","connect","connects",
+        "enable","enables","expose","exposes","move","moves","read","reads","set","sets",
+        "establish","establishes","manage","manages","perform","performs",
     }
     for b in bullets:
         b0 = re.split(r"[\r\n]+", b)[0].strip()
@@ -5730,7 +5736,8 @@ def _is_quality_outcomes_answer_text(text: str) -> bool:
             bad += 1
             continue
         w0 = re.sub(r"[^a-z]", "", w[0].lower())
-        if w0 in verbs or re.search(r"(?i)\b(you will be able to|by the end)\b", b0):
+        _is_q_item = b0.rstrip().endswith("?") and w0 in {"why","how","when","what","which","where"}
+        if w0 in verbs or re.search(r"(?i)\b(you will be able to|by the end|you should be able to)\b", b0) or _is_q_item:
             good += 1
         else:
             bad += 1
@@ -5773,8 +5780,24 @@ def _outcomes_answer_matches_scope(q: str, text: str) -> bool:
                     # Some sites store clean outcomes bullets without repeating chapter/part header
                     # inside each chunk. Accept only strong verb-ish outcome lists with no conflicting scope.
                     bullets = [ln.strip()[2:].strip() for ln in str(text or "").splitlines() if ln.strip().startswith("- ")]
-                    verb_hints = {"identify","structure","apply","build","verify","run","retrofit","install","design","validate","define","prepare","generate","version","package","deploy","evaluate","integrate","use","understand","explain"}
-                    verbish = sum(1 for b in bullets if (re.findall(r"[a-zA-Z]+", b.lower())[:1] or [""])[0] in verb_hints)
+                    verb_hints = {
+                        "identify","structure","apply","build","verify","run","runs","retrofit","install","design",
+                        "validate","define","prepare","generate","version","package","deploy","evaluate","integrate",
+                        "use","understand","explain","create","implement","configure","monitor","optimize","develop",
+                        # v8 additions
+                        "start","starts","restart","restarts","log","logs","accept","accepts","execute","executes",
+                        "survive","survives","can","answer","answers","browse","browses","speak","speaks",
+                        "operate","operates","respond","responds","handle","handles","connect","connects",
+                        "enable","enables","expose","exposes","move","moves","read","reads","set",
+                        "establish","manage","perform",
+                    }
+                    def _bullet_is_verbish(b: str) -> bool:
+                        w0 = (re.findall(r"[a-zA-Z]+", b.lower())[:1] or [""])[0]
+                        if w0 in verb_hints:
+                            return True
+                        # also count question-format items (Why/How/When/What)
+                        return bool(b.rstrip().endswith("?") and w0 in {"why","how","when","what","which","where"})
+                    verbish = sum(1 for b in bullets if _bullet_is_verbish(b))
                     has_conflict = False
                     if mch:
                         has_conflict = bool(re.search(r"\bchapter\s+(?!%s\b)\d{1,4}\b" % re.escape(mch.group(1)), text_l))
