@@ -1273,23 +1273,17 @@ def admin_auth(password: str, cfg: dict):
     """Accept if password matches ADMIN_PASSWORD env var (super-admin) OR the DB's own admin_password."""
     root_pw = _get_root_password()
     db_pw = cfg.get("admin_password", "") or ""
-    db_name = str(cfg.get("db_name", "") or "").strip()
     if _password_matches(password, root_pw):
         return "owner"
     if _password_matches(password, db_pw):
-        return "client"
-    if not db_pw and db_name and _password_matches(password, db_name):
         return "client"
     raise HTTPException(status_code=401, detail="Unauthorized")
 
 
 def _client_password_matches_db(password: str, cfg: dict) -> bool:
-    """Allow an implicit client password equal to the DB name when no explicit DB password is set."""
+    """Allow client access only when the explicit DB password matches."""
     db_pw = str(cfg.get("admin_password", "") or "").strip()
-    db_name = str(cfg.get("db_name", "") or "").strip()
     if _password_matches(password, db_pw):
-        return True
-    if not db_pw and db_name and _password_matches(password, db_name):
         return True
     return False
 
@@ -8679,19 +8673,21 @@ async def create_db(request: Request, password: str = Form(...), name: str = For
     except HTTPException: return JSONResponse({"detail": "Unauthorized"}, status_code=401)
     try: db_name = _canonical_db_name(name, allow_missing=True)
     except HTTPException: return JSONResponse({"detail": "Invalid database name"}, status_code=400)
+    db_password = db_password.strip()
+    if not db_password:
+        return JSONResponse({"detail": "Client password is required"}, status_code=400)
     db_path = DATABASES_DIR / db_name
     db_path.mkdir(parents=True, exist_ok=True)
     # Write public per-DB config and store the client password in untracked secrets.
     db_cfg_path = db_path / "config.json"
     if not db_cfg_path.exists():
         db_cfg_path.write_text(json.dumps({}, indent=2), encoding="utf-8")
-        if db_password.strip():
-            _save_db_secrets(db_name, {"admin_password": db_password.strip()})
-    elif db_password.strip():
+        _save_db_secrets(db_name, {"admin_password": db_password})
+    elif db_password:
         try:
             existing = json.loads(db_cfg_path.read_text(encoding="utf-8"))
             db_cfg_path.write_text(json.dumps(existing, indent=2), encoding="utf-8")
-            _save_db_secrets(db_name, {"admin_password": db_password.strip()})
+            _save_db_secrets(db_name, {"admin_password": db_password})
         except Exception: pass
     threading.Thread(target=_github_sync_upload, args=(db_name,), daemon=True).start()
     # Remove from deleted_dbs.txt if re-creating a previously-deleted DB
