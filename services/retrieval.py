@@ -977,13 +977,17 @@ def _doc_matches_strict_scope(doc, q: str, title_phrase: str) -> bool:
         phrase_hit = False
         if title_phrase:
             tpl = title_phrase.lower().strip()
-            if tpl and (tpl in src or tpl in body):
+            # Slug-in-URL is the strongest signal — check first
+            if title_slug and title_slug in src:
                 phrase_hit = True
-            elif tks:
+            elif tpl and (tpl in src or tpl in body):
+                phrase_hit = True
+            elif tks and (ch is not None or pt is not None):
+                # Token-only match permitted only when a chapter/part number also anchors the doc
                 hits = {t for t in tks if (t in src or t in body)}
                 if len(hits) >= 2:
                     phrase_hit = True
-            if title_slug and (title_slug in src or title_slug in body):
+            elif title_slug and title_slug in body:
                 phrase_hit = True
 
         # Section-style queries: "In <scope>, what ..." should require the scope phrase.
@@ -2294,12 +2298,16 @@ async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansio
         if _title_phrase:
             _tpl = _title_phrase.lower()
             _tks = [w for w in re.findall(r"[a-zA-Z]{4,}", _tpl)][:10]
+            _tslug = re.sub(r"[^a-z0-9]+", "-", _tpl).strip("-")
 
             def _title_match(d):
                 try:
                     b = str(getattr(d, "page_content", "") or "").lower()
                     s = str((getattr(d, "metadata", None) or {}).get("source") or "").lower()
                     if _tpl and (_tpl in b or _tpl in s):
+                        return True
+                    # Slug-in-URL is a strong exact signal (e.g. "give-it-a-voice" in source path)
+                    if _tslug and _tslug in s:
                         return True
                     if not _tks:
                         return False
@@ -2314,6 +2322,10 @@ async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansio
                     anchors = [t for t in _tks if len(t) >= 7]
                     if anchors:
                         return any(a in hits for a in anchors)
+                    # No long anchors + strict scope: short titles like "Give It a Voice" need slug match.
+                    # Token match alone is too loose when all tokens are common short words.
+                    if _strict_scope_q and _tslug:
+                        return _tslug in s
                     return True
                 except Exception:
                     return False
