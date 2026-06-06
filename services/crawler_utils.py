@@ -700,7 +700,7 @@ def _smart_chunk_page(text: str, url: str, chunk_size: int = 400, chunk_step: in
 
     # Mode 2b: heading-aware page
     try:
-        _heading_hits = list(re.finditer(r"(?=(?:^|\s)(?:##|###)\s+)", raw_text))
+        _heading_hits = list(re.finditer(r"(?m)^(?:##|###)\s+", raw_text))
         if _heading_hits:
             _starts = [m.start() for m in _heading_hits] + [len(raw_text)]
 
@@ -773,7 +773,7 @@ def _smart_chunk_page(text: str, url: str, chunk_size: int = 400, chunk_step: in
 
             for idx, start in enumerate(_starts[:-1]):
                 seg = raw_text[start:_starts[idx + 1]].strip()
-                hm = re.match(r"^\s*(?:##|###)\s+(.+?)\s*(?=(?:##|###)\s+|\Z)", seg, re.S)
+                hm = re.match(r"^(?:##|###)\s+(.+?)\s*(?=\Z|(?:##|###)\s+)", seg, re.S)
                 heading = hm.group(1).strip() if hm else None
                 if len(seg) <= 280:
                     _pending_small_segments.append((seg, heading))
@@ -823,6 +823,8 @@ def _smart_chunk_page(text: str, url: str, chunk_size: int = 400, chunk_step: in
                 if not _chunk:
                     _buf, _chars = [], 0
                     return
+                if _last_heading and not re.match(r"(?m)^\s*(?:##|###)\s+", _chunk):
+                    _chunk = f"## {_last_heading}\n\n{_chunk}"
                 _emit_para_chunk(_chunk)
                 _buf, _chars = [], 0
             for para in _paras:

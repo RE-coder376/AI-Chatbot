@@ -11429,6 +11429,16 @@ async def crawl_site(data: dict, request: Request):
                                                     try { el.click(); } catch(e) {}
                                                 }
                                             });
+                                            document.querySelectorAll('h2, h3').forEach(h => {
+                                                try {
+                                                    const t = (h.innerText || '').replace(/\\s+/g, ' ').trim();
+                                                    if (t) {
+                                                        const repl = document.createElement('div');
+                                                        repl.innerText = (h.tagName === 'H2' ? '## ' : '### ') + t + '\n';
+                                                        h.replaceWith(repl);
+                                                    }
+                                                } catch(e) {}
+                                            });
                                         }""")
                                         await asyncio.sleep(0.5)
                                     except Exception:
@@ -11471,11 +11481,6 @@ async def crawl_site(data: dict, request: Request):
                                                 jsonLdText += ' ' + extract(data);
                                             } catch(e) {}
                                         }
-                                        let headingText = '';
-                                        for (let h of document.querySelectorAll('h2, h3')) {
-                                            const t = (h.innerText || '').replace(/\\s+/g, ' ').trim();
-                                            if (t) headingText += (h.tagName === 'H2' ? '## ' : '### ') + t + '\\n';
-                                        }
                                         let sidebarText = '';
                                         for (let sel of [
                                             '.theme-doc-sidebar-container', '.sidebar-container',
@@ -11515,7 +11520,7 @@ async def crawl_site(data: dict, request: Request):
                                         }
                                         return JSON.stringify({
                                             sidebar: sidebarText,
-                                            body: (headingText + '\\n' + jsonLdText + '\\n' + bodyText).trim()
+                                            body: (jsonLdText + '\\n' + bodyText).trim()
                                         });
                                     }""")
                                     sidebar_raw = ""
