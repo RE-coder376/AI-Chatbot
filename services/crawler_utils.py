@@ -782,7 +782,10 @@ def _smart_chunk_page(text: str, url: str, chunk_size: int = 400, chunk_step: in
     try:
         _paras = [p.strip() for p in re.split(r"\n{2,}", raw_text) if p and p.strip()]
         if len(_paras) >= 2:
-            _last_heading = ""
+            _seed_heading = str((page_meta or {}).get("page_title") or "").strip()
+            if _seed_heading and re.search(r"(?i)(web scraper test sites|all rights reserved|privacy policy|terms of service|home\s*\|\s*[^|]+)$", _seed_heading):
+                _seed_heading = ""
+            _last_heading = _seed_heading
             _buf: list[str] = []
             _chars = 0
             _last_emitted: str | None = None
