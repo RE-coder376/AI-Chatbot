@@ -289,20 +289,8 @@ def _github_sync_download(load_db_callback=None):
                         logger.info(f"[GH-SYNC] ✅ {dest} restored for {db_n}")
                 except Exception as e:
                     logger.warning(f"[GH-SYNC] {dest} restore failed for {db_n}: {e}")
-        # Enforce deleted_dbs.txt — remove DB folders that were deleted (even if config.json is baked into Docker image)
-        try:
-            import base64 as _b64d, shutil as _sh
-            _del_r = _req.get(f"https://api.github.com/repos/{_GITHUB_USERNAME}/{_GITHUB_REPO}/contents/deleted_dbs.txt",
-                              headers=api_hdr, timeout=10)
-            if _del_r.status_code == 200:
-                _deleted_names = set(_b64d.b64decode(_del_r.json().get("content","").replace("\n","")).decode("utf-8").splitlines())
-                for _dn in _deleted_names:
-                    _dn = _dn.strip()
-                    if _dn and (DATABASES_DIR / _dn).exists():
-                        _sh.rmtree(str(DATABASES_DIR / _dn))
-                        logger.info(f"[GH-SYNC] Removed deleted DB '{_dn}' from local disk")
-        except Exception as _del_e:
-            logger.warning(f"[GH-SYNC] deleted_dbs.txt cleanup failed: {_del_e}")
+        # No automatic DB deletion on startup sync.
+        # Explicit admin delete is the only path allowed to remove a DB.
         logger.info("[GH-SYNC] ✅ All databases restored from GitHub")
         # Set active DB priority:
         # 1. ACTIVE_DB env var (explicit deployment override — always wins)
@@ -587,11 +575,14 @@ def _github_clear_db_data(db_name: str):
             logger.warning(f"[GH-SYNC] Could not clear backup {fname} for {db_name}: {e}")
 
 
-def _github_sync_delete(db_name: str):
-    """Remove DB zip from GitHub releases when a DB is deleted."""
+def _github_sync_delete(db_name: str, force: bool = False):
+    """Remove DB zip from GitHub releases when a DB is explicitly deleted."""
     import requests as _req
     pat = os.environ.get("GITHUB_PAT", "").strip()
     if not pat: return
+    if not force:
+        logger.warning(f"[GH-SYNC] Refusing to delete '{db_name}' without explicit force=True")
+        return
     api_hdr = {"Authorization": f"token {pat}", "User-Agent": "chatbot-sync"}
     try:
         rel_resp = _req.get(

@@ -8870,7 +8870,7 @@ async def delete_db(request: Request, password: str = Form(...), name: str = For
                 _db_instance_cache.pop(db_name, None)
                 # Await GitHub delete before responding — daemon threads can be killed on HF restart
                 # causing zips to persist and DBs to resurrect on next boot
-                await asyncio.to_thread(_github_sync_delete, db_name)
+                await asyncio.to_thread(_github_sync_delete, db_name, True)
                 return {"success": True, "message": f"Repository '{db_name}' purged."}
             except Exception as e:
                 if i == 2: return JSONResponse({"detail": f"Purge failed (file lock): {str(e)}"}, status_code=500)
