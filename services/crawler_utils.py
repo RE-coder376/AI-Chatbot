@@ -123,20 +123,91 @@ def _product_query_rerank_score(question: str, doc) -> float:
 
 def _extract_product_summary(text: str, url: str, title_hint: str = "") -> dict:
     body = _strip_storefront_boilerplate(text or "")
-    title = ""
-    used_structured_fields = []
+    used_structured_fields: list[str] = []
     body_fallback_used = False
+
+    def _canonicalize_title(candidate: str) -> str:
+        return _canonical_product_title(candidate or "").strip(" -:|")
+
+    def _is_generic_title(candidate: str) -> bool:
+        cand = _canonicalize_title(candidate)
+        if not cand:
+            return True
+        if len(cand) < 4:
+            return True
+        if "|" in cand or "web scraper test sites" in cand.lower():
+            return True
+        if re.fullmatch(r"[\W_]+", cand):
+            return True
+        words = re.findall(r"[A-Za-z0-9]+", cand)
+        if len(words) <= 1 and re.match(r"(?i)^(?:black|white|blue|grey|gray|silver|gold|red|green|pink|purple|yellow|orange|brown|beige|navy|teal|lavender|maroon|violet|golden|transparent|clear|unknown|default|variant|color|colour)$", cand):
+            return True
+        return False
+
+    def _score_title(candidate: str) -> tuple[int, int, int]:
+        cand = _canonicalize_title(candidate)
+        if not cand:
+            return (0, 0, -10)
+        words = re.findall(r"[A-Za-z0-9]+", cand)
+        penalty = 0
+        if _is_generic_title(cand):
+            penalty += 3
+        if len(words) < 2:
+            penalty += 1
+        return (len(words), len(cand), -penalty)
+
+    title_candidates: list[str] = []
+
+    def _push_title(candidate: str, label: str) -> None:
+        cand = _canonicalize_title(candidate)
+        if not cand:
+            return
+        if cand not in title_candidates:
+            title_candidates.append(cand)
+        if label:
+            used_structured_fields.append(label)
+
     title_match = re.search(r'(?i)\bname:\s*([^\n\.]{4,180})', body)
     if title_match:
-        title = title_match.group(1).strip(" -:")
-        used_structured_fields.append("name")
-    if not title:
-        title = (title_hint or "").strip()
-        if title:
-            used_structured_fields.append("title_hint")
-    if not title:
-        slug = (url or "").rstrip("/").split("/")[-1]
-        title = re.sub(r'[-_]+', ' ', slug).strip().title()
+        _push_title(title_match.group(1), "name")
+    if title_hint:
+        _push_title(title_hint, "title_hint")
+    slug = (url or "").rstrip("/").split("/")[-1]
+    _push_title(re.sub(r'[-_]+', ' ', slug).strip().title(), "slug")
+
+    # If the best title is still generic, try to salvage a better one from the
+    # early body lines before falling back to the weak variant.
+    if title_candidates:
+        title = max(title_candidates, key=_score_title)
+        if _is_generic_title(title):
+            body_candidates: list[str] = []
+            for pat in (
+                r'(?i)\bfull specs?\s*:\s*([^\n]+)',
+                r'(?i)\bdescription\s*:\s*([^\n]+)',
+            ):
+                mm = re.search(pat, body)
+                if not mm:
+                    continue
+                cand = _canonicalize_title((mm.group(1) or "").split(",")[0])
+                if not cand or len(cand) > 120:
+                    continue
+                if _is_generic_title(cand):
+                    continue
+                if re.search(r'(?i)\b(?:price|availability|add to cart|wishlist|reviews?)\b', cand):
+                    continue
+                if re.search(r'(?i)\b(?:rs\.?|pkr|\$)\s*[\d,]+', cand):
+                    continue
+                body_candidates.append(cand)
+            for cand in body_candidates:
+                _push_title(cand, "body_title")
+            non_generic_titles = [cand for cand in title_candidates if not _is_generic_title(cand)]
+            if non_generic_titles:
+                title = max(non_generic_titles, key=_score_title)
+            else:
+                title = max(title_candidates, key=_score_title)
+    else:
+        title = ""
+
     price_label = ""
     price_num = None
     pm = _PRODUCT_PRICE_LINE_RE.search(body) or _PRODUCT_PRICE_CAPTURE_RE.search(body)
@@ -179,8 +250,10 @@ def _extract_product_summary(text: str, url: str, title_hint: str = "") -> dict:
                 break
         desc = " ".join(useful[:3]).strip()
     contaminated = bool(_CONTAMINATION_HINTS_RE.search(body))
+    canonical_title = _canonicalize_title(title)
     return {
         "title": title.strip(),
+        "canonical_title": canonical_title,
         "price_label": price_label.strip(),
         "price_num": price_num,
         "availability": avail,
@@ -325,7 +398,7 @@ def _prepare_crawl_page(text: str, url: str, title_hint: str = "") -> tuple[str,
         meta["extraction_mode"] = "structured_product" if meta["used_structured_fields"] else "body_text"
         if product.get("title") and (product.get("price_label") or product.get("description") or meta["used_structured_fields"]):
             meta["page_type"] = "product"
-    elif meta["page_type"] in {"policy", "unknown"}:
+    elif meta["page_type"] in {"policy", "unknown", "category", "article"}:
         # Product/catalog pages often carry policy/footer boilerplate that can
         # overwhelm the classifier. If structured product signals are present,
         # promote them even when the URL path itself is generic.
@@ -503,6 +576,22 @@ def _smart_chunk_page(text: str, url: str, chunk_size: int = 400, chunk_step: in
             _m = dict(getattr(_doc, "metadata", None) or {})
             _m["chunk_index"] = int(_idx)
             _m["section_id"] = str(_m.get("section_id") or f"s{_idx}")
+            if not _m.get("chunk_kind"):
+                sid = str(_m.get("section_id") or "").lower()
+                if sid.startswith("product_"):
+                    _m["chunk_kind"] = "product"
+                elif sid.startswith("faq_"):
+                    _m["chunk_kind"] = "faq"
+                elif sid.startswith("head_"):
+                    _m["chunk_kind"] = "heading"
+                elif sid.startswith("para_"):
+                    _m["chunk_kind"] = "paragraph"
+                elif sid.startswith("table_"):
+                    _m["chunk_kind"] = "tabular"
+                elif sid.startswith("list_"):
+                    _m["chunk_kind"] = "list"
+                else:
+                    _m["chunk_kind"] = "generic"
             _sample = str(getattr(_doc, "page_content", "") or "")
             _m["chunk_hash"] = hashlib.sha256(_sample.encode("utf-8", errors="ignore")).hexdigest()
             _doc.metadata = _m
@@ -521,6 +610,7 @@ def _smart_chunk_page(text: str, url: str, chunk_size: int = 400, chunk_step: in
         _prod_text = "\n".join(lines).strip()
         _prod_meta = dict(_base_meta)
         _prod_meta["product_title"] = product_meta["title"]
+        _prod_meta["canonical_product_title"] = product_meta.get("canonical_title") or _canonical_product_title(product_meta["title"])
         if product_meta.get("price_num") is not None:
             _prod_meta["price"] = product_meta["price_num"]
         if product_meta.get("availability"):
@@ -589,6 +679,7 @@ def _smart_chunk_page(text: str, url: str, chunk_size: int = 400, chunk_step: in
                 _prod_text = "\n".join(lines)
                 _prod_meta = dict(_base_meta)
                 _prod_meta.update({"price": price_num, "product_title": name})
+                _prod_meta["canonical_product_title"] = _canonical_product_title(name)
                 _prod_meta.update(_extract_product_metadata(_prod_text))
                 _prod_meta["section_id"] = f"product_{len(docs)}"
                 docs.append(Document(page_content=_prod_text, metadata=_prod_meta))
