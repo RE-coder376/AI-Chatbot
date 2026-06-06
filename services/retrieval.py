@@ -26,7 +26,19 @@ from services.crawler_utils import (
 logger = logging.getLogger(__name__)
 
 # Debug-only: helps confirm which extractor logic is running on HF.
-_OUTCOMES_EXTRACTOR_VERSION = "2026-06-04.v9"
+_OUTCOMES_EXTRACTOR_VERSION = "2026-06-06.v23"
+
+
+def _is_binary_chunk(text: str) -> bool:
+    """Return True if a DB chunk contains binary/corrupted data (not readable text)."""
+    if not text:
+        return False
+    sample = text[:200]
+    non_printable = sum(
+        1 for c in sample
+        if ord(c) > 127 or (ord(c) < 32 and c not in "\n\r\t ")
+    )
+    return (non_printable / max(1, len(sample))) > 0.15
 
 # Outcomes/learning intent (universal)
 # Note: "principles/steps/rules" queries intentionally excluded — they go through LLM directly.
@@ -205,7 +217,7 @@ def try_extract_outcomes_answer(q: str, context: str, debug: dict | None = None)
             _wants_ch = ("chapter" in ql) and (chapter_no is not None)
             for _mi, _ln in enumerate(lines[:800]):
                 _ll = (_ln or "").lower()
-                if not re.search(r"\b(by completing|by the end|you will be able to|you should be able to|by chapter end|when you finish this|learning outcomes|outcomes|objectives|goals)\b", _ll):
+                if not re.search(r"\b(by completing|by the end|you will be able to|you should be able to|by chapter end|when you finish this|learning outcomes|outcomes|objectives|goals|chapter contract|competencies)\b", _ll):
                     continue
                 if _wants_part and (f"part {part_no}" not in _ll):
                     continue
@@ -222,7 +234,8 @@ def try_extract_outcomes_answer(q: str, context: str, debug: dict | None = None)
         # If we see an explicit outcomes marker line, extract short, verb-ish lines immediately after it.
         try:
             markers = ("by completing", "by the end", "you will be able to", "you should be able to",
-                       "by chapter end", "when you finish this", "learning outcomes", "outcomes", "objectives", "goals")
+                       "by chapter end", "when you finish this", "learning outcomes", "outcomes", "objectives", "goals",
+                       "chapter contract", "competencies")
             for mi, ln in enumerate(lines[:900]):
                 ll = (ln or "").lower()
                 if not any(m in ll for m in markers):
@@ -283,6 +296,12 @@ def try_extract_outcomes_answer(q: str, context: str, debug: dict | None = None)
                         parts = [p.strip() for p in re.split(r'\.{3,}', seg) if p.strip()]
                         if len(parts) < 2:
                             parts = [p.strip(' :;-') for p in _IVSP.split(seg) if p.strip(' :;-')]
+                        # Filter lesson-table TOC rows: "Build 1 The AI Employee Moment... 2"
+                        # They start with verb+ordinal ("Build 1 X") or end with a dangling
+                        # next-lesson number (" 3" at end-of-string) from table row splitting.
+                        parts = [p for p in parts
+                                 if not re.match(r"^[A-Za-z]\w*\s+\d+\s+\S", p)
+                                 and not re.search(r"\s+\d{1,2}\s*$", p.rstrip())]
                         return [p for p in parts if 8 <= len(p) <= 260]
 
                     # Strategy A: colon-terminated marker phrase
@@ -1005,7 +1024,8 @@ def _slugish(text: str) -> str:
 
 def _extract_chapter_number(q: str) -> int | None:
     try:
-        m = re.search(r"\bchapter\s*(\d{1,4})\b", q or "", re.I)
+        # v11: [A-Za-z]? handles suffixed chapters like "Chapter 21B"
+        m = re.search(r"\bchapter\s*(\d{1,4})[A-Za-z]?\b", q or "", re.I)
         if m:
             return int(m.group(1))
     except Exception:
@@ -1734,7 +1754,8 @@ async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansio
 
     # Tight latency path for strict chapter/part questions:
     # keep retrieval focused and avoid broad expansion drift.
-    _strict_scope_q = bool(re.search(r"\b(?:chapter|part)\s+\d{1,4}\b", q or "", re.I))
+    # v10: \d{1,4}[A-Za-z]? handles suffixed chapters like "Chapter 21B"
+    _strict_scope_q = bool(re.search(r"\b(?:chapter|part)\s+\d{1,4}[A-Za-z]?\b", q or "", re.I))
     if not _strict_scope_q and re.search(r"^\s*in\s+[^,\n]{6,200}\s*,\s*(?:what|why|how|which|who|when)\b", q or "", re.I):
         _strict_scope_q = True
     # Also treat "Title (N)" queries (e.g. "Voice Foundations (109)") as scoped.
@@ -2473,6 +2494,7 @@ async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansio
         # If the exact outcomes page was still not surfaced, do one bounded
         # collection scan for the same section cluster. This is the universal
         # rescue path for dead root URLs and split chapter pages.
+        _resc_best_sk: str | None = None
         if _is_outcomes_intent and _strict_scope_q and _title_phrase and db:
             try:
                 _title_slug2 = _slugish(_title_phrase or "")
@@ -2487,10 +2509,13 @@ async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansio
                 if not _have_anchor:
                     def _scan_cluster_rescue():
                         from langchain_core.documents import Document
-                        _total = min(int(db._collection.count() or 0), 2000)
+                        # v10: increased from 2000; goals chunks for some chapters land at pos 2154-2191
+                        _total = min(int(db._collection.count() or 0), 3000)
                         _raw = db._collection.get(limit=_total, include=["documents", "metadatas"])
                         _resc_docs = []
-                        _resc_seen = set()
+                        # v10: allow up to 3 chunks per source URL; goals pages split across
+                        # chunk boundaries (preamble chunk N, question-list in chunk N+2, etc.)
+                        _resc_src_count: dict = {}
                         _title_tks = [w.lower() for w in re.findall(r"[a-zA-Z]{4,}", _title_phrase or "")][:10]
                         # "your"/"agent"/"agents" excluded: too common across AF pages, causes false positives
                         _title_tks = [t for t in _title_tks if t not in {"chapter", "part", "learning", "goals", "outcomes", "according", "book", "your", "agent", "agents"}]
@@ -2502,27 +2527,52 @@ async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansio
                             if _title_slug2 and (_title_slug2 not in _src) and (_title_slug2 not in _body):
                                 # Slug mismatch (e.g. "linux-mastery" vs "linux-operations-for-agent-deployment"):
                                 # fall back to requiring 2+ title token hits across URL + body.
+                                # v10: 1 hit is enough when: strong marker AND chapter number anchors the page.
                                 if not _title_tks:
                                     continue
                                 _hit = sum(1 for t in _title_tks if (t in _src) or (t in _body))
-                                if _hit < 2:
+                                if _hit < 1:
                                     continue
+                                if _hit < 2:
+                                    _ch_anchor = (f"chapter {chapter_no}" if chapter_no is not None else "")
+                                    if not (_has_explicit_outcomes_marker(_body) and _ch_anchor and _ch_anchor in _body):
+                                        continue
                             elif _title_tks:
                                 _hit = sum(1 for t in _title_tks if (t in _src) or (t in _body))
                                 if _hit < 2:
                                     continue
                             if not (_has_explicit_outcomes_marker(_body) or re.search(
                                 r"\b(by completing|by the end|you will be able to|you should be able to"
-                                r"|by chapter end|when you finish this|learning outcomes|objectives?|goals?)\b", _body)):
+                                r"|by chapter end|when you finish this|learning outcomes|objectives?|goals?"
+                                # v10: project-chapter goals ("Chapter 24 Build Your AI Employee")
+                                r"|this is a project|you will build|you'll build|now build something real)\b", _body)):
                                 continue
                             _doc = Document(page_content=_doc_text, metadata=_meta or {})
-                            _k = str((_meta or {}).get("source") or _doc_text[:120])[:160]
-                            if _k in _resc_seen:
+                            _src_key = str((_meta or {}).get("source") or _doc_text[:120])[:160]
+                            if _resc_src_count.get(_src_key, 0) >= 3:
                                 continue
-                            _resc_seen.add(_k)
+                            _resc_src_count[_src_key] = _resc_src_count.get(_src_key, 0) + 1
                             _resc_docs.append(_doc)
-                        return _resc_docs
-                    _resc_docs = await asyncio.wait_for(asyncio.to_thread(_scan_cluster_rescue), timeout=8)
+                        # v11: identify the best chapter-anchored rescue source for section-lock override
+                        _src_best_scores: dict = {}
+                        for _rd in _resc_docs:
+                            _sk2 = _source_section_key(_rd) or ""
+                            if not _sk2:
+                                continue
+                            _b2 = _rd.page_content.lower()
+                            _s2 = str((_rd.metadata or {}).get("source", "")).lower()
+                            _h2 = sum(1 for t in _title_tks if (t in _s2) or (t in _b2))
+                            _ch2 = bool(chapter_no is not None and f"chapter {chapter_no}" in _b2)
+                            _sc2 = _h2 + int(_ch2) * 2
+                            if _sc2 > _src_best_scores.get(_sk2, 0):
+                                _src_best_scores[_sk2] = _sc2
+                        _best_sk2 = None
+                        if _src_best_scores:
+                            _bk, _bv = max(_src_best_scores.items(), key=lambda kv: kv[1])
+                            if _bv >= 2:
+                                _best_sk2 = _bk
+                        return _resc_docs, _best_sk2
+                    _resc_docs, _resc_best_sk = await asyncio.wait_for(asyncio.to_thread(_scan_cluster_rescue), timeout=8)
                     if _resc_docs:
                         _combined_before_cap = _resc_docs[:24] + _combined_before_cap
             except Exception:
@@ -2530,6 +2580,19 @@ async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansio
 
         # Baseline rerank after optional filtering
         _combined_before_cap.sort(key=lambda d: _heuristic_rerank_score(d, q, _title_phrase), reverse=True)
+
+        # v11: If rescue found a chapter-anchored source, force it to lead before section lock fires.
+        # Uses startswith so multi-lesson chapters (e.g. build-first-ai-employee/project-brief)
+        # are all captured, not just the single page that scored highest.
+        if _resc_best_sk:
+            _resc_lead = [d for d in _combined_before_cap
+                          if ((_source_section_key(d) or "") == _resc_best_sk
+                              or (_source_section_key(d) or "").startswith(_resc_best_sk + "/"))]
+            _resc_tail = [d for d in _combined_before_cap
+                          if not ((_source_section_key(d) or "") == _resc_best_sk
+                                  or (_source_section_key(d) or "").startswith(_resc_best_sk + "/"))]
+            if len(_resc_lead) >= 2:
+                _combined_before_cap = _resc_lead + _resc_tail
 
         # Section lock for strict scoped lookups (Chapter/Part): keep context mostly from
         # the strongest page/section to avoid mixed nearby-chapter contamination.
@@ -2722,7 +2785,10 @@ async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansio
     context_parts = []
     cur_chars = 0
     for r in top[:k]:
-        chunk = _compress_doc(getattr(r, "page_content", "") or "", anchors)
+        raw_text = getattr(r, "page_content", "") or ""
+        if _is_binary_chunk(raw_text):
+            continue
+        chunk = _compress_doc(raw_text, anchors)
         if not chunk:
             continue
         if _strict_scope_q or _is_outcomes_intent:
