@@ -160,6 +160,8 @@ from services.retrieval import (
     _fast_format_jikan,
     try_extract_outcomes_answer,
     is_outcomes_question,
+    _slugish,
+    _extract_title_phrase,
 )
 
 from services.db_instances import (
@@ -2346,7 +2348,7 @@ def _context_addresses_query(context: str, q: str) -> bool:
 
 def _is_strict_scope_query(q: str) -> bool:
     return bool(
-        re.search(r"\b(?:chapter|part)\s+\d{1,4}\b", q or "", re.I)
+        re.search(r"\b(?:chapter|part)\s+\d{1,4}[A-Za-z]?\b", q or "", re.I)
         or re.search(r"^\s*in\s+[^,\n]{6,200}\s*,\s*(?:what|why|how|which|who|when)\b", q or "", re.I)
         or re.search(
             r"\bin\s+[A-Z][A-Za-z\-']+(?:\s+(?:[A-Z][A-Za-z\-']+|[a-z]{1,4})){1,8}\s*\??$",
@@ -2552,6 +2554,9 @@ def _strict_query_has_source_anchor(sources: list[str], q: str) -> bool:
                 if title_hit >= title_req:
                     return True
             if q_terms and all(t in ul for t in q_terms[:3]):
+                return True
+            # Partial match: ≥2 query terms in URL slug handles "in Give It a Voice?" → give-it-a-voice
+            if q_terms and sum(1 for t in q_terms if t in ul) >= 2:
                 return True
         return False
     except Exception:
@@ -3414,6 +3419,7 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
     # ── Sparse KB guard — skip for api-only DBs (no KB, LLM uses training knowledge) ──
     # Deterministic strict-scope factual extractor (non-goals).
     # For chapter/part factual prompts, prefer direct evidence-built answers before LLM synthesis.
+        _sf = None  # v12: init before conditional so reference is safe even when block is skipped
         if _is_strict_scope_query(q) and (not _LEARNING_GOALS_Q_RE.search(q)):
             try:
                 _probe_fact, _probe_src = await _live_site_strict_scope_probe(q, cfg, max_urls=8)
@@ -5727,6 +5733,10 @@ def _is_quality_outcomes_answer_text(text: str) -> bool:
         "establish","establishes","manage","manages","perform","performs",
         # v9: outcome-style verbs LLM may generate for narrative goal chunks
         "have","has","get","gets","receive","receives","uses","builds",
+        # v16: sync with _fallback_scoped_outcomes_from_context verb set
+        "validate","version","give","make","teach","automate","turn","send","extend","add",
+        "put","frame","attach","link","secure","track","migrate","scale","stream",
+        "process","observe","restrict","protect",
     }
     for b in bullets:
         b0 = re.split(r"[\r\n]+", b)[0].strip()
@@ -5745,9 +5755,16 @@ def _is_quality_outcomes_answer_text(text: str) -> bool:
             bad += 1
     # Reject contaminated long-form checklist/template dumps.
     joined = " ".join(bullets).lower()
-    if any(tok in joined for tok in ("what i already know", "analyze the official docs", "lesson progression", "prerequisites", "next", "previous")):
+    # v15: "next"/"previous" tightened to navigation-only context (avoid blocking "next steps" in goals)
+    if any(tok in joined for tok in ("what i already know", "analyze the official docs", "lesson progression", "prerequisites", "next chapter", "next lesson", "next page", "previous chapter", "previous lesson", "previous page")):
         return False
     if sum(1 for b in bullets if len(b) > 220) >= 1:
+        return False
+    # Reject lesson table-of-contents rows (e.g., "Build 1 The AI Employee Moment... 2").
+    # TOC rows start with verb+ordinal AND/OR end with a dangling next-lesson number.
+    _toc_start = sum(1 for b in bullets if re.match(r"^[A-Za-z]\w*\s+\d+\s+\S", b))
+    _toc_end = sum(1 for b in bullets if re.search(r"\s+\d{1,2}\s*$", b.rstrip()))
+    if _toc_start >= 1 and _toc_end >= 1:
         return False
     return good >= 2 and bad < max(2, len(bullets) // 2)
 
@@ -5760,8 +5777,9 @@ def _outcomes_answer_matches_scope(q: str, text: str) -> bool:
         if not q or not text_l:
             return False
         ql = q.lower()
-        mch = re.search(r"\bchapter\s+(\d{1,4})\b", ql)
-        mpt = re.search(r"\bpart\s+(\d{1,4})\b", ql)
+        # v11: [A-Za-z]? handles "Chapter 21B" style suffixed chapter references
+        mch = re.search(r"\bchapter\s+(\d{1,4})[A-Za-z]?\b", ql)
+        mpt = re.search(r"\bpart\s+(\d{1,4})[A-Za-z]?\b", ql)
         chapter_anchor_present = (not mch) or (f"chapter {mch.group(1)}" in text_l)
         part_anchor_present = (not mpt) or (f"part {mpt.group(1)}" in text_l)
         mt = re.search(r"\b(?:chapter|part)\s+\d{1,4}\s*[:\-]\s*([^\n]{4,200})", q, re.I)
@@ -5807,7 +5825,7 @@ def _outcomes_answer_matches_scope(q: str, text: str) -> bool:
                         has_conflict = bool(re.search(r"\bchapter\s+(?!%s\b)\d{1,4}\b" % re.escape(mch.group(1)), text_l))
                     if (not has_conflict) and mpt:
                         has_conflict = bool(re.search(r"\bpart\s+(?!%s\b)\d{1,4}\b" % re.escape(mpt.group(1)), text_l))
-                    if not (len(bullets) >= 3 and verbish >= 2 and (not has_conflict)):
+                    if not (len(bullets) >= 2 and verbish >= 2 and (not has_conflict)):
                         return False
         elif title_req > 0 and title_hit < title_req:
             return False
@@ -5829,26 +5847,42 @@ def _fallback_scoped_outcomes_from_context(q: str, context: str) -> str | None:
         cl = (context or "").lower()
         if tks and (sum(1 for t in tks if t in cl) < 2):
             return None
-        verbs = {"identify","structure","apply","build","verify","run","retrofit","install","design","validate","define","prepare","generate","version","package","deploy","evaluate","integrate","use","understand","explain"}
-        bad = re.compile(r"(?i)\b(previous|next|chapter\s+quiz|try with ai|prompt\s+\d+|authors|company|privacy|copy as markdown|on this page)\b")
+        verbs = {"identify","structure","apply","build","verify","run","retrofit","install","design","validate","define","prepare","generate","version","package","deploy","evaluate","integrate","use","understand","explain",
+                 # v13: extended verbs for lesson-description style goals
+                 "configure","connect","give","make","create","teach","enable","encode","automate","develop","implement","establish","manage","learn","set","write","test","analyze","explore","map","complete","master",
+                 # v14: additional verbs found in chapter descriptions
+                 "turn","send","extend","expose","add","put","frame","attach","link","secure","monitor","store","track","handle","migrate","scale","stream","capture","process","observe","restrict","protect"}
+        # v14: "next"/"previous" narrowed to navigation context only — bare "next" matches "next steps"
+        bad = re.compile(r"(?i)\b(previous\s+(?:chapter|page|lesson|section)|next\s+(?:chapter|page|lesson|section)|chapter\s+quiz|try with ai|prompt\s+\d+|authors|company|privacy|copy as markdown|on this page)\b")
         out: list[str] = []
         soft: list[str] = []
         for ln in str(context).splitlines():
             t = (ln or "").strip().strip("-* \t")
-            if not t or len(t) < 14 or len(t) > 240:
+            if not t:
                 continue
-            if "?" in t or "http://" in t.lower() or "https://" in t.lower():
+            # v12: strip "Description: " / "Note: " prefix so lesson descriptions are verb-matched
+            t_check = re.sub(r"(?i)^(?:description|note|summary|overview)\s*:\s*", "", t).strip()
+            # v13: strip trailing metadata breadcrumb "Part N: ... Chapter N: ..." from descriptions
+            # Must be done BEFORE length check: raw lines include breadcrumb suffix making them >240 chars
+            t_check = re.sub(r"\s*\.\s*Part\s+\d+\s*:.*$", "", t_check, flags=re.I).strip()
+            t_check = re.sub(r"\s+Part\s+\d+\s*:.*$", "", t_check, flags=re.I).strip()
+            # v14: URL/question/bad checks on stripped t_check — raw 1800-char lines contain embedded
+            # URLs in page content; Description: lines are clean after stripping the breadcrumb suffix
+            if "?" in t_check or "http://" in t_check.lower() or "https://" in t_check.lower():
                 continue
-            if bad.search(t):
+            if bad.search(t_check):
                 continue
-            w0 = (re.findall(r"[a-zA-Z]+", t.lower())[:1] or [""])[0]
+            # v13: length check after stripping so long breadcrumb-suffixed lines are not discarded
+            if not t_check or len(t_check) < 14 or len(t_check) > 240:
+                continue
+            w0 = (re.findall(r"[a-zA-Z]+", t_check.lower())[:1] or [""])[0]
             if w0 in verbs:
-                out.append(t)
-            elif re.match(r"^[A-Za-z][A-Za-z0-9 ,()/:-]{14,220}$", t):
-                soft.append(t)
+                out.append(t_check)
+            elif re.match(r"^[A-Za-z][A-Za-z0-9 ,()/:-]{14,220}$", t_check):
+                soft.append(t_check)
             elif out and len(out) >= 4:
                 break
-        if len(out) < 3:
+        if len(out) < 2:
             # Some domains store outcomes as terse noun-phrases (not verb-start bullets).
             # Keep this conservative: only use short clean lines and avoid prompt-like fragments.
             soft2 = []
@@ -5917,7 +5951,17 @@ async def _synthesize_scoped_outcomes_from_cluster(q: str, context: str, sources
         if marker_window:
             ctx_lines = [ln.strip() for ln in marker_window.splitlines() if ln.strip()]
         elif title_slug:
-            ctx_lines = [ln for ln in ctx_lines if title_slug in ln.lower() or "voice" in ln.lower() or "livekit" in ln.lower() or "pipecat" in ln.lower() or "realtime" in ln.lower()]
+            # v11: match by individual slug tokens (not full slug) to handle slug mismatches
+            # e.g. "build-your-ai-employee" tokens ["build","employee"] match "build-first-ai-employee"
+            _SLUG_SW = {"your","this","with","that","from","about","what","will","learn","goal","goals",
+                        "chapter","part","agent","agents","book","first","into","just","more","also"}
+            _slug_tks = [t for t in title_slug.split("-") if len(t) >= 4 and t not in _SLUG_SW]
+            if _slug_tks:
+                ctx_lines = [ln for ln in ctx_lines
+                             if any(t in ln.lower() for t in _slug_tks)
+                             or "voice" in ln.lower() or "livekit" in ln.lower() or "pipecat" in ln.lower() or "realtime" in ln.lower()]
+            else:
+                ctx_lines = [ln for ln in ctx_lines if title_slug in ln.lower() or "voice" in ln.lower() or "livekit" in ln.lower() or "pipecat" in ln.lower() or "realtime" in ln.lower()]
         ctx_block = "\n".join(ctx_lines[:60])[:3600]
         sys_msg = (
             "You extract learning goals from retrieved documentation evidence. "
@@ -5947,6 +5991,12 @@ def _source_url_matches_scope(q: str, url: str) -> bool:
         q = str(q or "")
         ul = str(url or "").lower()
         if not q or not ul:
+            return False
+        # Practice pages (exercises, quizzes, assignments) never satisfy scope for chapter-goals queries.
+        _ql = q.lower()
+        _ul_path = ul.split("?")[0]
+        if any(w in _ul_path for w in ("exercise", "/quiz", "/chapter-quiz", "/assignment", "/certif")) \
+                and not any(w in _ql for w in ("exercise", "quiz", "assignment")):
             return False
         title_phrase = _extract_title_phrase(q)
         title_slug = re.sub(r"[^a-z0-9]+", "-", (title_phrase or "").lower()).strip("-")
@@ -5984,6 +6034,11 @@ def _source_url_matches_scope(q: str, url: str) -> bool:
         if title_tokens:
             title_hit = sum(1 for t in title_tokens[:6] if t in ul)
             title_req = 2 if len(title_tokens) >= 4 else 1
+            # When chapter number is required but absent from URL, demand ≥2 title token hits
+            # so a page from a different chapter (e.g. "meet-your-personal-ai-employee") that
+            # shares only one generic token ("employee") can't masquerade as the right chapter.
+            if mch and not num_ok and len(title_tokens) >= 2:
+                title_req = max(title_req, 2)
             if title_hit >= title_req:
                 return True
         return bool(mch or mpt) and num_ok
@@ -6281,7 +6336,7 @@ async def _extract_outcomes_from_source_urls(q: str, sources: list[str], limit: 
                     if len(txt) < 120:
                         continue
                     ans = try_extract_outcomes_answer(q, txt, debug=None)
-                    if ans and _is_strict_scope_query(q) and _source_url_matches_scope(q, str(u)):
+                    if ans and _is_strict_scope_query(q) and _source_url_matches_scope(q, str(u)) and _is_quality_outcomes_answer_text(ans):
                         return ans
                     if ans and _is_quality_outcomes_answer_text(ans) and (_outcomes_answer_matches_scope(q, ans) or _source_url_matches_scope(q, str(u))):
                         return ans
@@ -6305,12 +6360,15 @@ def _extract_outcomes_from_html(html: str, q: str = "") -> str | None:
             r"(?is)("
             r"by\s+completing[^<]{0,160}you\s+will\s*:"
             r"|by\s+the\s+end[^<]{0,160}you\s+will\s+be\s+able\s+to\s*:"
-            r"|id=[\"']goals[\"']"
-            r"|id=[\"']learning[-_\s]?outcomes?[\"']"
+            r"|by\s+the\s+end\s+of\s+this\s+chapter"
+            r"|id=[\"’]goals[\"’]"
+            r"|id=[\"’]learning[-_\s]?outcomes?[\"’]"
             r"|>\s*goals\s*(?:<|$)"
             r"|>\s*learning\s+outcomes?\s*(?:<|$)"
-            r"|>\s*what\s+you(?:'|’)?ll\s+learn\s*(?:<|$)"
+            r"|>\s*what\s+you(?:’|’)?ll\s+learn\s*(?:<|$)"
             r"|>\s*what\s+you\s+will\s+learn\s*(?:<|$)"
+            r"|>\s*chapter\s+contract\s*(?:<|$)"
+            r"|>\s*competenc(?:y|ies)\s*(?:<|$)"
             r")",
             h,
         )
@@ -6413,7 +6471,7 @@ async def _live_site_outcomes_probe(q: str, cfg: dict, max_urls: int = 4) -> str
                         hits = sum(1 for t in tks if t in tl)
                         if hits >= 2:
                             ans = try_extract_outcomes_answer(q, txt, debug=None)
-                            if ans and _is_strict_scope_query(q) and _source_url_matches_scope(q, str(u)):
+                            if ans and _is_strict_scope_query(q) and _source_url_matches_scope(q, str(u)) and _is_quality_outcomes_answer_text(ans):
                                 return ans
                             if ans and _is_quality_outcomes_answer_text(ans) and (_outcomes_answer_matches_scope(q, ans) or _source_url_matches_scope(q, str(u))):
                                 return ans
@@ -6434,7 +6492,7 @@ async def _live_site_outcomes_probe(q: str, cfg: dict, max_urls: int = 4) -> str
                                     await browser.close()
                                 if text2 and len(text2) >= 200:
                                     ans2 = try_extract_outcomes_answer(q, text2, debug=None)
-                                    if ans2 and _is_strict_scope_query(q) and _source_url_matches_scope(q, str(u)):
+                                    if ans2 and _is_strict_scope_query(q) and _source_url_matches_scope(q, str(u)) and _is_quality_outcomes_answer_text(ans2):
                                         return ans2
                                     if ans2 and _is_quality_outcomes_answer_text(ans2) and (_outcomes_answer_matches_scope(q, ans2) or _source_url_matches_scope(q, str(u))):
                                         return ans2
@@ -6482,7 +6540,7 @@ async def _live_site_outcomes_probe(q: str, cfg: dict, max_urls: int = 4) -> str
                     if len(txt) < 120:
                         continue
                     ans = try_extract_outcomes_answer(q, txt, debug=None)
-                    if ans and _is_strict_scope_query(q) and _source_url_matches_scope(q, str(u)):
+                    if ans and _is_strict_scope_query(q) and _source_url_matches_scope(q, str(u)) and _is_quality_outcomes_answer_text(ans):
                         return ans
                     if ans and _is_quality_outcomes_answer_text(ans) and (_outcomes_answer_matches_scope(q, ans) or _source_url_matches_scope(q, str(u))):
                         return ans
@@ -6669,7 +6727,7 @@ async def _live_site_content_outcomes_probe(q: str, cfg: dict, max_urls: int = 2
                         if _fact_ans and _is_strict_scope_query(q) and _source_url_matches_scope(q, str(nav_href)):
                             return _fact_ans
                         ans = try_extract_outcomes_answer(q, txt, debug=None)
-                        if ans and _is_strict_scope_query(q) and _source_url_matches_scope(q, str(nav_href)):
+                        if ans and _is_strict_scope_query(q) and _source_url_matches_scope(q, str(nav_href)) and _is_quality_outcomes_answer_text(ans):
                             return ans
                         if ans and _is_quality_outcomes_answer_text(ans) and (_outcomes_answer_matches_scope(q, ans) or _source_url_matches_scope(q, str(nav_href))):
                             return ans
@@ -6685,6 +6743,25 @@ async def _live_site_content_outcomes_probe(q: str, cfg: dict, max_urls: int = 2
                         _u = f"{base}/docs/{_seg}"
                         if _u not in direct_candidates:
                             direct_candidates.append(_u)
+            # v17: "Chapter 21B Foo Bar" → also try "{21b}-{title-slug}" and "{21B}-{title-slug}"
+            # so that chapter-prefixed URLs like "21B-postgres-system-of-record" are tried directly.
+            _ch_code_m = re.search(r"\b(?:chapter|part)\s+(\d{1,4}[A-Za-z]+)\b", q or "", re.I)
+            if _ch_code_m and tphrase:
+                _ch_code_orig = _ch_code_m.group(1)  # e.g. "21B"
+                _ch_code_lo = _ch_code_orig.lower()  # e.g. "21b"
+                _title_hyph = re.sub(r"[^a-z0-9]+", "-", tphrase.lower()).strip("-")
+                # Variant: drop only the conjunction "as" (common in chapter titles)
+                _title_no_as = re.sub(r"-as-", "-", f"-{_title_hyph}-").strip("-")
+                # Variant: drop all 1-2 char function words
+                _title_words = re.findall(r"[a-z0-9]+", tphrase.lower())
+                _title_hyph_short = "-".join(w for w in _title_words if len(w) >= 3)
+                for _ch_prefix in (_ch_code_lo, _ch_code_orig):
+                    for _title_part in (_title_no_as, _title_hyph, _title_hyph_short):
+                        if not _title_part:
+                            continue
+                        _u2 = f"{base}/docs/{_ch_prefix}-{_title_part}"
+                        if _u2 not in direct_candidates:
+                            direct_candidates.insert(0, _u2)  # try first
             for u in direct_candidates[:max(6, int(max_urls))]:
                 try:
                     if _is_strict_scope_query(q) and tphrase:
@@ -6710,7 +6787,7 @@ async def _live_site_content_outcomes_probe(q: str, cfg: dict, max_urls: int = 2
                     tl = txt.lower()
                     hits = sum(1 for t in tks if t in tl)
                     ans = try_extract_outcomes_answer(q, txt, debug=None)
-                    if ans and _is_strict_scope_query(q) and _source_url_matches_scope(q, str(u)):
+                    if ans and _is_strict_scope_query(q) and _source_url_matches_scope(q, str(u)) and _is_quality_outcomes_answer_text(ans):
                         return ans
                     if ans and _is_quality_outcomes_answer_text(ans) and (_outcomes_answer_matches_scope(q, ans) or _source_url_matches_scope(q, str(u))):
                         return ans
@@ -6763,7 +6840,7 @@ async def _live_site_content_outcomes_probe(q: str, cfg: dict, max_urls: int = 2
                                 await browser.close()
                             if text2 and len(text2) >= 200:
                                 ans2 = try_extract_outcomes_answer(q, text2, debug=None)
-                                if ans2 and _is_strict_scope_query(q) and _source_url_matches_scope(q, str(u)):
+                                if ans2 and _is_strict_scope_query(q) and _source_url_matches_scope(q, str(u)) and _is_quality_outcomes_answer_text(ans2):
                                     return ans2
                                 if ans2 and _is_quality_outcomes_answer_text(ans2) and (_outcomes_answer_matches_scope(q, ans2) or _source_url_matches_scope(q, str(u))):
                                     return ans2
@@ -6771,7 +6848,7 @@ async def _live_site_content_outcomes_probe(q: str, cfg: dict, max_urls: int = 2
                                     f"<html><head><title>{title2}</title></head><body>{text2}</body></html>",
                                     q=q,
                                 )
-                                if ans3 and _is_strict_scope_query(q) and _source_url_matches_scope(q, str(u)):
+                                if ans3 and _is_strict_scope_query(q) and _source_url_matches_scope(q, str(u)) and _is_quality_outcomes_answer_text(ans3):
                                     return ans3
                                 if ans3 and _is_quality_outcomes_answer_text(ans3) and (_outcomes_answer_matches_scope(q, ans3) or _source_url_matches_scope(q, str(u))):
                                     return ans3
@@ -6807,7 +6884,7 @@ async def _live_site_content_outcomes_probe(q: str, cfg: dict, max_urls: int = 2
                     # Require at least two title/content tokens in page text
                     hits = sum(1 for t in tks if t in tl)
                     ans = try_extract_outcomes_answer(q, txt, debug=None)
-                    if ans and _is_strict_scope_query(q) and _source_url_matches_scope(q, str(u)):
+                    if ans and _is_strict_scope_query(q) and _source_url_matches_scope(q, str(u)) and _is_quality_outcomes_answer_text(ans):
                         return ans
                     if ans and _is_quality_outcomes_answer_text(ans) and (_outcomes_answer_matches_scope(q, ans) or _source_url_matches_scope(q, str(u))):
                         return ans
@@ -6864,7 +6941,7 @@ async def _live_site_content_outcomes_probe(q: str, cfg: dict, max_urls: int = 2
                             if _fact_ans2 and _is_strict_scope_query(q) and _source_url_matches_scope(q, str(u)):
                                 return _fact_ans2
                             ans2 = try_extract_outcomes_answer(q, text2, debug=None)
-                            if ans2 and _is_strict_scope_query(q) and _source_url_matches_scope(q, str(u)):
+                            if ans2 and _is_strict_scope_query(q) and _source_url_matches_scope(q, str(u)) and _is_quality_outcomes_answer_text(ans2):
                                 return ans2
                             if ans2 and _is_quality_outcomes_answer_text(ans2) and (_outcomes_answer_matches_scope(q, ans2) or _source_url_matches_scope(q, str(u))):
                                 return ans2
@@ -6873,7 +6950,7 @@ async def _live_site_content_outcomes_probe(q: str, cfg: dict, max_urls: int = 2
                                 f"<html><head><title>{title2}</title></head><body>{text2}</body></html>",
                                 q=q,
                             )
-                            if ans3 and _is_strict_scope_query(q) and _source_url_matches_scope(q, str(u)):
+                            if ans3 and _is_strict_scope_query(q) and _source_url_matches_scope(q, str(u)) and _is_quality_outcomes_answer_text(ans3):
                                 return ans3
                             if ans3 and _is_quality_outcomes_answer_text(ans3) and (_outcomes_answer_matches_scope(q, ans3) or _source_url_matches_scope(q, str(u))):
                                 return ans3
@@ -6894,6 +6971,8 @@ async def _live_site_content_outcomes_probe(q: str, cfg: dict, max_urls: int = 2
                         sc += 10.0
                 if any(b in ul for b in ("/quiz", "/chapter-quiz", "/certifications", "/about")):
                     sc -= 2.0
+                if "exercise" in ul:
+                    sc -= 4.0
                 sc += sum(1.0 for t in tks if t in ul)
                 if sc > 0:
                     candidates.append((sc, str(u)))
@@ -6917,7 +6996,7 @@ async def _live_site_content_outcomes_probe(q: str, cfg: dict, max_urls: int = 2
                     if hits < 2:
                         continue
                     ans = try_extract_outcomes_answer(q, txt, debug=None)
-                    if ans and _is_strict_scope_query(q) and _source_url_matches_scope(q, str(u)):
+                    if ans and _is_strict_scope_query(q) and _source_url_matches_scope(q, str(u)) and _is_quality_outcomes_answer_text(ans):
                         return ans
                     if ans and _is_quality_outcomes_answer_text(ans) and (_outcomes_answer_matches_scope(q, ans) or _source_url_matches_scope(q, str(u))):
                         return ans
