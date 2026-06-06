@@ -10587,6 +10587,7 @@ async def crawl_site(data: dict, request: Request):
             _manual_registered = True
             _crawling_dbs.add(db_name)
             _crawl_start_times[db_name] = time.time()
+            # Local copy avoids Python treating max_pages as a nested assignment target.
             max_pages_eff = max_pages
             from playwright.async_api import async_playwright
             from playwright_stealth import Stealth as _Stealth
