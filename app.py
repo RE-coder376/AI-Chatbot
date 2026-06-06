@@ -10319,6 +10319,67 @@ def get_db_stats(request: Request, password: str = ""):
         })
     return {"stats": stats}
 
+@app.get("/admin/db-preview")
+def get_db_preview(request: Request, password: str = "", db_name: str = "", limit: int = 20, offset: int = 0, source: str = ""):
+    """
+    Read-only preview of live Chroma chunks for a DB.
+    Useful for inspecting the actual HF-loaded corpus shape and chunk quality.
+    """
+    password = _extract_password(request, password)
+    db_name = _extract_admin_db(request, db_name)
+    cfg = get_config(db_name)
+    try:
+        admin_auth(password, cfg)
+    except HTTPException:
+        return JSONResponse({"detail": "Unauthorized"}, status_code=401)
+
+    limit = max(1, min(int(limit or 20), 100))
+    offset = max(0, int(offset or 0))
+    try:
+        db = _get_db_instance(db_name) if db_name else _get_db_instance(ACTIVE_DB_FILE.read_text(encoding="utf-8").strip())
+    except Exception as e:
+        return JSONResponse({"detail": f"Could not open DB: {e}"}, status_code=500)
+    if db is None:
+        return JSONResponse({"detail": "DB not available"}, status_code=404)
+
+    try:
+        where = {"source": source} if source.strip() else None
+        raw = db._collection.get(
+            limit=limit,
+            offset=offset,
+            include=["documents", "metadatas"],
+            where=where,
+        )
+        docs = raw.get("documents") or []
+        metas = raw.get("metadatas") or []
+        items = []
+        for i, doc in enumerate(docs):
+            md = metas[i] if i < len(metas) and isinstance(metas[i], dict) else {}
+            text = str(doc or "")
+            items.append({
+                "index": offset + i,
+                "source": md.get("source", ""),
+                "source_canonical": md.get("source_canonical", ""),
+                "section_id": md.get("section_id", ""),
+                "content_type": md.get("content_type", ""),
+                "page_title": md.get("page_title", ""),
+                "retrieve_eligible": md.get("retrieve_eligible", None),
+                "quality_score": md.get("quality_score", None),
+                "chunk_hash": md.get("chunk_hash", ""),
+                "preview": text[:1200],
+                "metadata": md,
+            })
+        return {
+            "db_name": db_name,
+            "limit": limit,
+            "offset": offset,
+            "returned": len(items),
+            "filtered_source": source.strip(),
+            "items": items,
+        }
+    except Exception as e:
+        return JSONResponse({"detail": f"Preview failed: {e}"}, status_code=500)
+
 @app.post("/admin/crawl-schedule")
 async def set_crawl_schedule(request: Request, data: dict = None):
     if data is None: data = await request.json()
