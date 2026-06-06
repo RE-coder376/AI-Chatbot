@@ -10336,7 +10336,7 @@ def get_db_preview(request: Request, password: str = "", db_name: str = "", limi
     limit = max(1, min(int(limit or 20), 100))
     offset = max(0, int(offset or 0))
     try:
-        db = _get_db_instance(db_name) if db_name else _get_db_instance(ACTIVE_DB_FILE.read_text(encoding="utf-8").strip())
+        db = _get_db_instance(db_name, refresh=True) if db_name else _get_db_instance(ACTIVE_DB_FILE.read_text(encoding="utf-8").strip(), refresh=True)
     except Exception as e:
         return JSONResponse({"detail": f"Could not open DB: {e}"}, status_code=500)
     if db is None:

@@ -15,7 +15,16 @@ logger = logging.getLogger(__name__)
 _db_instance_cache: dict = {}   # db_name → Chroma instance (LRU, max 50)
 _DB_CACHE_MAX = 1  # Render free tier: 512MB RAM — only 1 extra DB instance in cache
 
-def _ensure_tmp_chroma(db_name: str, src_path: Path) -> Path:
+def _sqlite_mtime(path: Path) -> float | None:
+    try:
+        return path.stat().st_mtime
+    except Exception:
+        return None
+
+def _tmp_chroma_dir(db_name: str) -> Path:
+    return Path(f"/dev/shm/chroma_{db_name}")
+
+def _ensure_tmp_chroma(db_name: str, src_path: Path, refresh: bool = False) -> Path:
     """Copy ChromaDB from overlayfs → /tmp (tmpfs) to avoid SQLite WAL mode failures on Docker.
     On Windows this is unnecessary (no overlayfs) — use src_path directly.
     Falls back to src_path if src has no DB yet (GH sync still running) or tmp copy is corrupt."""
@@ -25,8 +34,14 @@ def _ensure_tmp_chroma(db_name: str, src_path: Path) -> Path:
     # If source has no sqlite3 yet (GH sync still downloading), use src directly
     if not (src_path / "chroma.sqlite3").exists():
         return src_path
-    tmp_path = Path(f"/dev/shm/chroma_{db_name}")
-    if not (tmp_path / "chroma.sqlite3").exists():
+    tmp_path = _tmp_chroma_dir(db_name)
+    src_sqlite = src_path / "chroma.sqlite3"
+    tmp_sqlite = tmp_path / "chroma.sqlite3"
+    src_mtime = _sqlite_mtime(src_sqlite)
+    tmp_mtime = _sqlite_mtime(tmp_sqlite)
+    needs_refresh = refresh or (not tmp_sqlite.exists()) or (src_mtime is not None and (tmp_mtime is None or src_mtime > tmp_mtime + 1e-6))
+    if needs_refresh:
+        _shutil.rmtree(str(tmp_path), ignore_errors=True)
         tmp_path.mkdir(parents=True, exist_ok=True)
         for item in src_path.iterdir():
             if item.name in ("config.json", "visitor_history"):
@@ -49,7 +64,28 @@ def _ensure_tmp_chroma(db_name: str, src_path: Path) -> Path:
         return src_path
     return tmp_path
 
-def _get_or_create_db(db_name: str):
+def _is_cached_instance_stale(db_name: str, instance) -> bool:
+    """Return True when the cached Chroma instance points at older data than the on-disk DB."""
+    db_path = DATABASES_DIR / db_name
+    src_sqlite = db_path / "chroma.sqlite3"
+    if not src_sqlite.exists():
+        return False
+    try:
+        persist_dir = Path(getattr(instance, "_persist_directory", "") or "")
+    except Exception:
+        persist_dir = Path("")
+    if not str(persist_dir):
+        persist_dir = _tmp_chroma_dir(db_name)
+    cached_sqlite = persist_dir / "chroma.sqlite3"
+    src_mtime = _sqlite_mtime(src_sqlite)
+    cached_mtime = _sqlite_mtime(cached_sqlite)
+    if src_mtime is None:
+        return False
+    if cached_mtime is None:
+        return True
+    return src_mtime > cached_mtime + 1e-6
+
+def _get_or_create_db(db_name: str, refresh: bool = False):
     """Return Chroma instance for db_name, creating it fresh if no chroma.sqlite3 exists yet."""
     import app as _app
     existing = _get_db_instance(db_name) if db_name else None
@@ -61,18 +97,24 @@ def _get_or_create_db(db_name: str):
     db_path = DATABASES_DIR / db_name
     db_path.mkdir(parents=True, exist_ok=True)
     from langchain_chroma import Chroma
-    tmp_dir = _ensure_tmp_chroma(db_name, db_path)
+    tmp_dir = _ensure_tmp_chroma(db_name, db_path, refresh=refresh)
     instance = Chroma(persist_directory=str(tmp_dir), embedding_function=_app.embeddings_model)
     instance._db_name = db_name
     _db_instance_cache[db_name] = instance
     return instance
 
-def _get_db_instance(db_name: str):
+def _get_db_instance(db_name: str, refresh: bool = False):
     """Return a Chroma instance for any DB (not just active). Cached per db_name."""
     import app as _app
     from langchain_chroma import Chroma
-    if db_name in _db_instance_cache:
-        return _db_instance_cache[db_name]
+    if refresh:
+        _db_instance_cache.pop(db_name, None)
+    if db_name in _db_instance_cache and not refresh:
+        cached = _db_instance_cache[db_name]
+        if not _is_cached_instance_stale(db_name, cached):
+            return cached
+        logger.info(f"[DB] Cached Chroma for '{db_name}' is stale — rebuilding from disk")
+        _db_instance_cache.pop(db_name, None)
     db_path = DATABASES_DIR / db_name
     if not db_path.exists():
         return None
@@ -104,7 +146,7 @@ def _get_db_instance(db_name: str):
         # so we must query with the same model. bge-base-en-v1.5 is 768-dim and would mismatch.
         emb = _app.embeddings_model  # FastEmbed BAAI/bge-small-en-v1.5, 384-dim
     if src_sqlite.exists():
-        tmp_dir = _ensure_tmp_chroma(db_name, db_path)
+        tmp_dir = _ensure_tmp_chroma(db_name, db_path, refresh=refresh)
     else:
         # Source sqlite missing but tmpfs copy exists; use it directly.
         tmp_dir = Path(f"/dev/shm/chroma_{db_name}")
