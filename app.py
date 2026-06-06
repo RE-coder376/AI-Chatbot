@@ -11094,12 +11094,23 @@ async def crawl_site(data: dict, request: Request):
                                 )
                     for p in batch:
                         raw_text = str(p.get("text") or "")
-                        sample = raw_text[:1000]
-                        if sample:
-                            printable = sum(1 for ch in sample if ch.isprintable() or ch in "\n\r\t")
-                            if printable / max(1, len(sample)) < 0.85:
-                                logger.info(f"[CRAWL] [{worker_label}] [binary-skip] dropping page with low-printability text: {str(p.get('url') or '')[:120]}")
-                                continue
+                        def _printability_ratio(txt: str) -> float:
+                            if not txt:
+                                return 1.0
+                            printable = sum(1 for ch in txt if ch.isprintable() or ch in "\n\r\t")
+                            return printable / max(1, len(txt))
+                        samples = []
+                        if raw_text:
+                            samples.append(raw_text[:1000])
+                            if len(raw_text) > 4000:
+                                mid = len(raw_text) // 2
+                                samples.append(raw_text[max(0, mid - 500):min(len(raw_text), mid + 500)])
+                            if len(raw_text) > 1200:
+                                samples.append(raw_text[-1000:])
+                        sample_ratios = [_printability_ratio(s) for s in samples if s]
+                        if sample_ratios and min(sample_ratios) < 0.85:
+                            logger.info(f"[CRAWL] [{worker_label}] [binary-skip] dropping page with low-printability text: {str(p.get('url') or '')[:120]}")
+                            continue
                         # Navigation/structure docs: store as ONE unit so retrieval gets full structure.
                         # Splitting a 3000-word nav doc into 400-word pieces means each piece only has
                         # a fraction of the site structure — no single retrieval gives the full picture.
@@ -11109,9 +11120,18 @@ async def crawl_site(data: dict, request: Request):
                                 chunks.append(Document(page_content=full_text, metadata={"source": p["url"], "structural": True, "content_type": "site_navigation"}))
                             continue
                         # Change 3: reject binary/garbage text before embedding
-                        _txt_sample = (p.get("text") or "")[:1000]
-                        if _txt_sample and (sum(1 for c in _txt_sample if ord(c) < 32 and c not in '\n\r\t') / len(_txt_sample)) > 0.15:
-                            continue
+                        _txt = p.get("text") or ""
+                        if _txt:
+                            _txt_samples = [_txt[:1000]]
+                            if len(_txt) > 4000:
+                                _mid = len(_txt) // 2
+                                _txt_samples.append(_txt[max(0, _mid - 500):min(len(_txt), _mid + 500)])
+                            if len(_txt) > 1200:
+                                _txt_samples.append(_txt[-1000:])
+                            def _low_binary(txt: str) -> bool:
+                                return (sum(1 for c in txt if ord(c) < 32 and c not in '\n\r\t') / max(1, len(txt))) > 0.15
+                            if any(_low_binary(s) for s in _txt_samples if s):
+                                continue
                         _page_meta = p.get("page_meta") or {}
                         chunks.extend(
                             _smart_chunk_page(p["text"], p["url"], chunk_size, chunk_step, page_meta=_page_meta)
@@ -11409,16 +11429,6 @@ async def crawl_site(data: dict, request: Request):
                                                     try { el.click(); } catch(e) {}
                                                 }
                                             });
-                                            document.querySelectorAll('h2, h3').forEach(h => {
-                                                try {
-                                                    const t = (h.innerText || '').replace(/\\s+/g, ' ').trim();
-                                                    if (t) {
-                                                        const repl = document.createElement('div');
-                                                        repl.innerText = (h.tagName === 'H2' ? '## ' : '### ') + t + '\\n';
-                                                        h.replaceWith(repl);
-                                                    }
-                                                } catch(e) {}
-                                            });
                                         }""")
                                         await asyncio.sleep(0.5)
                                     except Exception:
@@ -11456,10 +11466,15 @@ async def crawl_site(data: dict, request: Request):
                                                     if (obj.sku) parts.push('SKU: ' + obj.sku);
                                                     if (obj.category) parts.push('Category: ' + obj.category);
                                                     if (obj['@graph']) return obj['@graph'].map(extract).join(' ');
-                                                    return parts.join('. ');
+                                                return parts.join('. ');
                                                 };
                                                 jsonLdText += ' ' + extract(data);
                                             } catch(e) {}
+                                        }
+                                        let headingText = '';
+                                        for (let h of document.querySelectorAll('h2, h3')) {
+                                            const t = (h.innerText || '').replace(/\\s+/g, ' ').trim();
+                                            if (t) headingText += (h.tagName === 'H2' ? '## ' : '### ') + t + '\\n';
                                         }
                                         let sidebarText = '';
                                         for (let sel of [
@@ -11500,7 +11515,7 @@ async def crawl_site(data: dict, request: Request):
                                         }
                                         return JSON.stringify({
                                             sidebar: sidebarText,
-                                            body: (jsonLdText + '\\n' + bodyText).trim()
+                                            body: (headingText + '\\n' + jsonLdText + '\\n' + bodyText).trim()
                                         });
                                     }""")
                                     sidebar_raw = ""

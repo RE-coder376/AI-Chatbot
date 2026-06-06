@@ -174,18 +174,39 @@ def _canonical_product_title(text: str) -> str:
 
 
 def _dedupe_repeated_lines(text: str) -> str:
-    lines = [ln.strip() for ln in re.split(r"[\r\n]+", text or "") if ln.strip()]
-    if not lines:
-        return text or ""
-    counts = Counter(lines)
-    kept = []
-    for ln in lines:
-        if counts[ln] >= 3:
-            if ln not in kept:
-                kept.append(ln)
+    raw = text or ""
+    if not raw.strip():
+        return raw
+    blocks = [blk for blk in re.split(r"\n{2,}", raw) if blk.strip()]
+    if len(blocks) <= 1:
+        lines = [ln.strip() for ln in re.split(r"[\r\n]+", raw) if ln.strip()]
+        if not lines:
+            return raw
+        counts = Counter(lines)
+        kept = []
+        for ln in lines:
+            if counts[ln] >= 3:
+                if ln not in kept:
+                    kept.append(ln)
+                continue
+            kept.append(ln)
+        return "\n".join(kept)
+
+    out_blocks = []
+    for blk in blocks:
+        lines = [ln.strip() for ln in re.split(r"[\r\n]+", blk) if ln.strip()]
+        if not lines:
             continue
-        kept.append(ln)
-    return "\n".join(kept)
+        counts = Counter(lines)
+        kept = []
+        for ln in lines:
+            if counts[ln] >= 3:
+                if ln not in kept:
+                    kept.append(ln)
+                continue
+            kept.append(ln)
+        out_blocks.append("\n".join(kept))
+    return "\n\n".join(out_blocks) if out_blocks else raw
 
 
 def _strip_storefront_boilerplate(text: str) -> str:

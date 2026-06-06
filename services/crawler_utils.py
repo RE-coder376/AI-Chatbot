@@ -704,7 +704,7 @@ def _smart_chunk_page(text: str, url: str, chunk_size: int = 400, chunk_step: in
         if _heading_hits:
             _starts = [m.start() for m in _heading_hits] + [len(raw_text)]
 
-            _pending_small_segments: list[str] = []
+            _pending_small_segments: list[tuple[str, str | None]] = []
 
             def _emit_docs_from_text(seg_text: str, heading: str | None):
                 seg_text = (seg_text or "").strip()
@@ -758,7 +758,15 @@ def _smart_chunk_page(text: str, url: str, chunk_size: int = 400, chunk_step: in
                 nonlocal _pending_small_segments
                 if not _pending_small_segments:
                     return
-                merged = "\n\n".join(_pending_small_segments).strip()
+                merged_parts = []
+                for seg_text, seg_heading in _pending_small_segments:
+                    seg_text = (seg_text or "").strip()
+                    if not seg_text:
+                        continue
+                    if seg_heading and not re.match(r"(?m)^\s*(?:##|###)\s+", seg_text):
+                        seg_text = f"## {seg_heading}\n\n{seg_text}"
+                    merged_parts.append(seg_text)
+                merged = "\n\n".join(merged_parts).strip()
                 _pending_small_segments = []
                 if merged:
                     _emit_docs_from_text(merged, None)
@@ -768,7 +776,7 @@ def _smart_chunk_page(text: str, url: str, chunk_size: int = 400, chunk_step: in
                 hm = re.match(r"^\s*(?:##|###)\s+(.+?)\s*(?=(?:##|###)\s+|\Z)", seg, re.S)
                 heading = hm.group(1).strip() if hm else None
                 if len(seg) <= 280:
-                    _pending_small_segments.append(seg)
+                    _pending_small_segments.append((seg, heading))
                     continue
                 _flush_small_segments()
                 _emit_docs_from_text(seg, heading)
@@ -815,8 +823,6 @@ def _smart_chunk_page(text: str, url: str, chunk_size: int = 400, chunk_step: in
                 if not _chunk:
                     _buf, _chars = [], 0
                     return
-                if _last_heading and not re.match(r"(?m)^\s*(?:##|###)\s+", _chunk):
-                    _chunk = f"## {_last_heading}\n\n{_chunk}"
                 _emit_para_chunk(_chunk)
                 _buf, _chars = [], 0
             for para in _paras:
@@ -826,8 +832,6 @@ def _smart_chunk_page(text: str, url: str, chunk_size: int = 400, chunk_step: in
                     _last_heading = _hm.group(1).strip()
                     continue
                 _para_txt = para
-                if _last_heading and not re.match(r"(?m)^\s*(?:##|###)\s+", _para_txt):
-                    _para_txt = f"## {_last_heading}\n\n{_para_txt}"
                 if _buf and (_chars + len(_para_txt) + 2 > 1600):
                     _flush_para_buf()
                 _buf.append(_para_txt)
