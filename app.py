@@ -5119,6 +5119,8 @@ def _best_explicit_evidence_sentence(q: str, kb_context: str) -> str | None:
             ll = ln.lower()
             if any(b in ll for b in ("on this page", "copy as markdown", "ctrl+", "site index")):
                 continue
+            if ln.startswith("[SOURCE]"):
+                continue
             hit = sum(1 for w in q_words if w in ll)
             if hit < 1:
                 continue
@@ -5560,6 +5562,8 @@ def _evidence_spans_for_answer(q: str, kb_context: str, max_spans: int = 3) -> l
                 continue
             tl = t.lower()
             if any(b in tl for b in ("on this page", "copy as markdown", "ctrl+", "site index")):
+                continue
+            if t.startswith("[SOURCE]"):
                 continue
             hit = sum(1 for w in q_words if w in tl)
             if hit >= 2:
