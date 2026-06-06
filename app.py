@@ -490,6 +490,7 @@ from services.github_sync import (
     _github_sync_download, _github_sync_download_one, _github_backup_crawled_urls,
     _github_backup_crawl_times, _github_upload_active_db,
     _github_sync_upload, _github_sync_delete, _github_clear_db_data,
+    _github_update_restore_allowlist,
 )
 
 def _write_crawl_status(db_name: str, status: str):
@@ -8807,6 +8808,7 @@ async def create_db(request: Request, password: str = Form(...), name: str = For
             _save_db_secrets(db_name, {"admin_password": db_password})
         except Exception: pass
     threading.Thread(target=_github_sync_upload, args=(db_name,), daemon=True).start()
+    threading.Thread(target=_github_update_restore_allowlist, args=(db_name, True), daemon=True).start()
     # Remove from deleted_dbs.txt if re-creating a previously-deleted DB
     def _undelete_db(name):
         try:
@@ -8909,6 +8911,8 @@ async def rename_db(request: Request, password: str = Form(...), old_name: str =
     _widget_key_cache.clear(); _widget_key_cache.update(_widget_key_cache_copy)
     _intro_q_cache.pop(old, None); _bm25_cache.pop(old, None); _db_instance_cache.pop(old, None)
     _product_db_cache.pop(old, None)
+    threading.Thread(target=_github_update_restore_allowlist, args=(old, False), daemon=True).start()
+    threading.Thread(target=_github_update_restore_allowlist, args=(new, True), daemon=True).start()
     # Upload new zip to GitHub, delete old zip
     threading.Thread(target=_github_sync_upload, args=(new,), daemon=True).start()
     threading.Thread(target=_github_sync_delete, args=(old,), daemon=True).start()
@@ -10583,6 +10587,7 @@ async def crawl_site(data: dict, request: Request):
             _manual_registered = True
             _crawling_dbs.add(db_name)
             _crawl_start_times[db_name] = time.time()
+            max_pages_eff = max_pages
             from playwright.async_api import async_playwright
             from playwright_stealth import Stealth as _Stealth
             async def stealth(pg): await _Stealth().apply_stealth_async(pg)
@@ -10824,7 +10829,7 @@ async def crawl_site(data: dict, request: Request):
                             if path == prefix or path.startswith(prefix + '/'):
                                 return True
                         return False
-                    to_crawl = [u for u in deduped if _matches_smart(u)][:max_pages]
+                    to_crawl = [u for u in deduped if _matches_smart(u)][:max_pages_eff]
                     yield _send(f"🎯 Smart filter: {len(to_crawl)} URLs match selected groups")
                     if not to_crawl:
                         yield _send("⚠️ 0 URLs matched — check selected groups or use Full Crawl instead")
@@ -10834,10 +10839,10 @@ async def crawl_site(data: dict, request: Request):
                     # If operator requested a full reset (clear_before_crawl),
                     # avoid silently truncating the crawl to a low max_pages.
                     # Expand to the full discovered URL set (within the hard cap).
-                    if clear_first and max_pages and max_pages < len(deduped):
-                        max_pages = min(5000, len(deduped))
-                        yield _send(f"🧹 Clear-before-crawl: expanding max_pages to {max_pages} (full reset)")
-                    to_crawl = deduped[:max_pages]
+                    if clear_first and max_pages_eff and max_pages_eff < len(deduped):
+                        max_pages_eff = min(5000, len(deduped))
+                        yield _send(f"🧹 Clear-before-crawl: expanding max_pages to {max_pages_eff} (full reset)")
+                    to_crawl = deduped[:max_pages_eff]
                 yield _send(f"📋 {len(to_crawl)} unique pages to crawl...")
 
                 # --- Embedding model: always bge-small (384-dim) to match the loader ---
@@ -11026,11 +11031,18 @@ async def crawl_site(data: dict, request: Request):
                                     f"[CRAWL] [{worker_label}] artifact write failed: {type(_art_e).__name__}: {_art_e}"
                                 )
                     for p in batch:
+                        raw_text = str(p.get("text") or "")
+                        sample = raw_text[:1000]
+                        if sample:
+                            printable = sum(1 for ch in sample if ch.isprintable() or ch in "\n\r\t")
+                            if printable / max(1, len(sample)) < 0.85:
+                                logger.info(f"[CRAWL] [{worker_label}] [binary-skip] dropping page with low-printability text: {str(p.get('url') or '')[:120]}")
+                                continue
                         # Navigation/structure docs: store as ONE unit so retrieval gets full structure.
                         # Splitting a 3000-word nav doc into 400-word pieces means each piece only has
                         # a fraction of the site structure — no single retrieval gives the full picture.
                         if "#site-navigation" in p["url"]:
-                            full_text = _clean_text(p["text"])[:8000]  # ~2000 tokens, within embedding limit
+                            full_text = _clean_text(raw_text)[:8000]  # ~2000 tokens, within embedding limit
                             if len(full_text) > 20:
                                 chunks.append(Document(page_content=full_text, metadata={"source": p["url"], "structural": True, "content_type": "site_navigation"}))
                             continue
@@ -11097,6 +11109,9 @@ async def crawl_site(data: dict, request: Request):
                             return {"status": r.status_code, "text": ""}  # skip marker — don't try Playwright
                         if r.status_code not in (200, 301, 302):
                             return None
+                        ctype = (r.headers.get("Content-Type") or "").lower()
+                        if not any(t in ctype for t in ("text/html", "application/xhtml+xml")):
+                            return None
                         # Follow redirect manually if needed
                         if r.status_code in (301, 302) and r.headers.get("Location"):
                             r = await asyncio.to_thread(
@@ -11139,6 +11154,17 @@ async def crawl_site(data: dict, request: Request):
                         # Extract title
                         title_m = re.search(r'<title[^>]*>(.*?)</title>', html, re.DOTALL | re.I)
                         title_text = re.sub(r'<[^>]+>', '', title_m.group(1)).strip() if title_m else ''
+                        # Preserve section boundaries before tag stripping.
+                        html = re.sub(
+                            r'(?is)<h2[^>]*>(.*?)</h2>',
+                            lambda m: "\n\n## " + re.sub(r'<[^>]+>', ' ', m.group(1)).strip() + "\n\n",
+                            html,
+                        )
+                        html = re.sub(
+                            r'(?is)<h3[^>]*>(.*?)</h3>',
+                            lambda m: "\n\n### " + re.sub(r'<[^>]+>', ' ', m.group(1)).strip() + "\n\n",
+                            html,
+                        )
                         # Strip scripts/styles and extract readable text
                         clean = re.sub(r'<script[^>]*>.*?</script>', ' ', html, flags=re.DOTALL | re.I)
                         clean = re.sub(r'<style[^>]*>.*?</style>', ' ', clean, flags=re.DOTALL | re.I)

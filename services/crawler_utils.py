@@ -1,5 +1,5 @@
-"""
-services/crawler_utils.py — Page classification, chunking, and product metadata helpers.
+﻿"""
+services/crawler_utils.py â€” Page classification, chunking, and product metadata helpers.
 No shared mutable app state. Safe to import from anywhere.
 """
 
@@ -33,7 +33,7 @@ from services.safety import (
 )
 
 
-_product_db_cache: dict[str, bool] = {}  # db_name → is_product_db (stable per collection)
+_product_db_cache: dict[str, bool] = {}  # db_name â†’ is_product_db (stable per collection)
 
 
 # Stable per-page URL identity used for dedupe/replace across crawls.
@@ -340,9 +340,11 @@ def _prepare_crawl_page(text: str, url: str, title_hint: str = "") -> tuple[str,
     quarantine_reason = ""
     retrieve_eligible = True
     if meta["page_type"] in {"structural", "category"}:
-        # Change 7: overview/index pages with substantial body content stay eligible
+        # Large structural/category pages are often the canonical overview pages
+        # for doc sets. Keep them searchable when they have real body content.
         if len(cleaned.split()) > 150:
-            pass  # keep retrieve_eligible = True
+            retrieve_eligible = True
+            quarantine_reason = ""
         else:
             retrieve_eligible = False
             quarantine_reason = meta["page_type"]
@@ -355,7 +357,7 @@ def _prepare_crawl_page(text: str, url: str, title_hint: str = "") -> tuple[str,
         quarantine_reason = "weak_product_fallback"
     elif meta["page_type"] in {"product", "unknown"} and float(meta.get("quality_score") or 0.0) < 0.5:
         # Article/faq/policy pages have no structured fields so their score
-        # is capped at 0.4 by design — don't quarantine them on score alone.
+        # is capped at 0.4 by design â€” don't quarantine them on score alone.
         retrieve_eligible = False
         quarantine_reason = "low_quality"
     meta["retrieve_eligible"] = retrieve_eligible
@@ -424,7 +426,7 @@ def _merge_variant_docs(docs: list) -> list:
     return merged
 
 
-# ── Product spec extraction regexes (used by smart chunker) ──────────────────
+# â”€â”€ Product spec extraction regexes (used by smart chunker) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 _PROD_PRICE_RE = re.compile(r'(?i)(?:\$|rs\.?\s*|pkr\s*)(\d[\d,]*\.?\d*)')
 _PROD_SPEC_RE = re.compile(r'\b(?:processor|cpu|ram|memory|storage|ssd|hdd|gpu|graphics|display|battery|os|android|windows|linux|screen)\b', re.I)
 _PROD_SPLIT_RE = re.compile(r'(?i)(?:\$|rs\.?\s*|pkr\s*)(\d[\d,]*\.?\d*)\s+([A-Z][A-Za-z0-9 \(\)\-\.]+?(?:,[^\$]{10,400}?))(?=\s*(?:\$|rs\.?\s*|pkr\s*)|\s*\Z)', re.S)
@@ -435,9 +437,9 @@ def _smart_chunk_page(text: str, url: str, chunk_size: int = 400, chunk_step: in
     from langchain_core.documents import Document
     """
     Smart page chunker. Three modes, tried in order:
-      1. Product page  — $PRICE + spec keywords → one Document per product, price metadata
-      2. FAQ page      — Q&A or heading sections → one Document per section
-      3. Generic       — existing word-based sliding window (unchanged fallback)
+      1. Product page  â€” $PRICE + spec keywords â†’ one Document per product, price metadata
+      2. FAQ page      â€” Q&A or heading sections â†’ one Document per section
+      3. Generic       â€” existing word-based sliding window (unchanged fallback)
     Returns list[Document]. Never raises.
     """
     # Important: preserve newline structure for list-ish pages (outcomes, policies, release notes, etc.).
@@ -512,7 +514,7 @@ def _smart_chunk_page(text: str, url: str, chunk_size: int = 400, chunk_step: in
         docs.append(Document(page_content=_prod_text, metadata=_prod_meta))
         return _finalize_docs(_merge_variant_docs(docs))
 
-    # ── Mode 1: product page ──────────────────────────────────────────────────
+    # â”€â”€ Mode 1: product page â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     if len(_PROD_PRICE_RE.findall(clean)) >= 1 and _PROD_SPEC_RE.search(clean):
         products = []
         for m in _PROD_SPLIT_RE.finditer(clean):
@@ -535,7 +537,7 @@ def _smart_chunk_page(text: str, url: str, chunk_size: int = 400, chunk_step: in
         if len(products) >= 1:
             for price_num, price_label, name, specs in products:
                 lines = [f"Product: {name}", f"Price: {price_label}"]
-                # ── Attribute normalization: inject user-vocabulary tags ──────
+                # â”€â”€ Attribute normalization: inject user-vocabulary tags â”€â”€â”€â”€â”€â”€
                 _attr_tags = []
                 if re.search(r'geforce|gtx|rtx|radeon\s+r[579x]|radeon\s+rx', specs, re.I):
                     _attr_tags.append("gaming laptop dedicated GPU")
@@ -576,7 +578,7 @@ def _smart_chunk_page(text: str, url: str, chunk_size: int = 400, chunk_step: in
             if docs:
                 return _finalize_docs(_merge_variant_docs(docs))
 
-    # ── Mode 2: FAQ / section page ────────────────────────────────────────────
+    # Mode 2: FAQ / section page
     sections = _FAQ_SPLIT_RE.split(clean)
     if len(sections) >= 3:
         for sec in sections:
@@ -588,28 +590,100 @@ def _smart_chunk_page(text: str, url: str, chunk_size: int = 400, chunk_step: in
         if docs:
             return _finalize_docs(docs)
 
-    # ── Mode 2b: heading-aware chunk splitting (Change 4 + 6) ─────────────────
-    # Split on ## / ### markers preserved from h2/h3 tags during extraction.
-    # Each section already starts with its heading, so heading is the natural prefix (Change 6).
-    _heading_sections = re.split(r'\n(?=#{1,3}\s)', raw_text)
-    if len(_heading_sections) >= 2:
-        for sec in _heading_sections:
-            sec = sec.strip()
-            if len(sec) > 40:
-                _hm = re.match(r'^(#{1,3}\s+[^\n]+)', sec)
-                _m2b = dict(_base_meta)
-                _m2b["section_id"] = f"heading_{len(docs)}"
-                if _hm:
-                    _m2b["section_heading"] = _hm.group(1).strip()
-                docs.append(Document(page_content=sec[:2000], metadata=_m2b))
-        if docs:
-            return _finalize_docs(docs)
-
-    # ── Mode 2.5: bullet/list page ────────────────────────────────────────────
-    # Preserve newline structure for outcomes/checklists/release notes. Generic
-    # word-splitting destroys list boundaries and makes retrieval unreliable.
+    # Mode 2b: heading-aware page
     try:
-        # Use raw_text lines (not `clean`) so we don't lose bullets/numbering.
+        _heading_hits = list(re.finditer(r"(?=(?:^|\s)(?:##|###)\s+)", raw_text))
+        if _heading_hits:
+            _starts = [m.start() for m in _heading_hits] + [len(raw_text)]
+            def _emit_heading_segment(seg_text: str, heading: str | None):
+                seg_text = (seg_text or "").strip()
+                if not seg_text:
+                    return
+                if heading and not re.match(r"(?m)^\s*(?:##|###)\s+", seg_text):
+                    seg_text = f"## {heading}\n\n{seg_text}"
+                if len(seg_text) <= 1600:
+                    _meta = dict(_base_meta)
+                    _meta["section_id"] = f"head_{len(docs)}"
+                    if heading:
+                        _meta["heading"] = heading
+                    docs.append(Document(page_content=seg_text, metadata=_meta))
+                    return
+                _parts = [p.strip() for p in re.split(r"\n{2,}|(?<=[.?!])\s{2,}", seg_text) if p.strip()]
+                if len(_parts) <= 1:
+                    _parts = [seg_text[i:i + 1600] for i in range(0, len(seg_text), 1600)]
+                _buf = []
+                _chars = 0
+                for _part in _parts:
+                    if _buf and (_chars + len(_part) + 2 > 1600):
+                        _meta = dict(_base_meta)
+                        _meta["section_id"] = f"head_{len(docs)}"
+                        if heading:
+                            _meta["heading"] = heading
+                        docs.append(Document(page_content="\n\n".join(_buf).strip(), metadata=_meta))
+                        _buf, _chars = [], 0
+                    _buf.append(_part)
+                    _chars += len(_part) + 2
+                if _buf:
+                    _meta = dict(_base_meta)
+                    _meta["section_id"] = f"head_{len(docs)}"
+                    if heading:
+                        _meta["heading"] = heading
+                    docs.append(Document(page_content="\n\n".join(_buf).strip(), metadata=_meta))
+
+            for idx, start in enumerate(_starts[:-1]):
+                seg = raw_text[start:_starts[idx + 1]].strip()
+                hm = re.match(r"^\s*(?:##|###)\s+(.+?)\s*(?=(?:##|###)\s+|\Z)", seg, re.S)
+                heading = hm.group(1).strip() if hm else None
+                _emit_heading_segment(seg, heading)
+            if docs:
+                return _finalize_docs(docs)
+    except Exception:
+        pass
+
+    # Mode 2c: paragraph-aware grouping
+    try:
+        _paras = [p.strip() for p in re.split(r"\n{2,}", raw_text) if p and p.strip()]
+        if len(_paras) >= 2:
+            _last_heading = ""
+            _buf: list[str] = []
+            _chars = 0
+            def _flush_para_buf():
+                nonlocal _buf, _chars
+                if not _buf:
+                    return
+                _chunk = "\n\n".join(_buf).strip()
+                if not _chunk:
+                    _buf, _chars = [], 0
+                    return
+                if _last_heading and not re.match(r"(?m)^\s*(?:##|###)\s+", _chunk):
+                    _chunk = f"## {_last_heading}\n\n{_chunk}"
+                _meta = dict(_base_meta)
+                _meta["section_id"] = f"para_{len(docs)}"
+                if _last_heading:
+                    _meta["heading"] = _last_heading
+                docs.append(Document(page_content=_chunk, metadata=_meta))
+                _buf, _chars = [], 0
+            for para in _paras:
+                _hm = re.match(r"^\s*(?:##|###)\s+(.+?)\s*$", para)
+                if _hm:
+                    _flush_para_buf()
+                    _last_heading = _hm.group(1).strip()
+                    continue
+                _para_txt = para
+                if _last_heading and not re.match(r"(?m)^\s*(?:##|###)\s+", _para_txt):
+                    _para_txt = f"## {_last_heading}\n\n{_para_txt}"
+                if _buf and (_chars + len(_para_txt) + 2 > 1600):
+                    _flush_para_buf()
+                _buf.append(_para_txt)
+                _chars += len(_para_txt) + 2
+            _flush_para_buf()
+            if docs:
+                return _finalize_docs(docs)
+    except Exception:
+        pass
+
+    # Mode 2.5: bullet/list page
+    try:
         _raw_lines = [ln.strip() for ln in raw_text.split("\n") if ln and ln.strip()]
         _bullet_re = re.compile(r"^(?:[-*•]|\d{1,2}[.)])\s+")
         _bullet_lines = [ln for ln in _raw_lines if _bullet_re.match(ln)]
@@ -635,38 +709,7 @@ def _smart_chunk_page(text: str, url: str, chunk_size: int = 400, chunk_step: in
     except Exception:
         pass
 
-    # ── Mode 2c: paragraph-aware grouping (Change 5 + 6) ─────────────────────
-    # Group \n\n-separated paragraphs into chunks ≤1600 chars.
-    # Track current heading and prepend it to each chunk for context (Change 6).
-    _paras = [p.strip() for p in re.split(r'\n{2,}', raw_text) if p.strip() and len(p.strip()) > 40]
-    if len(_paras) >= 2:
-        buf: list[str] = []
-        buf_chars = 0
-        cur_heading = ""
-        for para in _paras:
-            if re.match(r'^#{1,3}\s+\S', para):
-                cur_heading = para.split('\n')[0].strip()
-            if buf and buf_chars + len(para) + 2 > 1600:
-                content = "\n\n".join(buf).strip()
-                if cur_heading and not content.startswith('#'):
-                    content = f"{cur_heading}\n\n{content}"
-                _m2c = dict(_base_meta)
-                _m2c["section_id"] = f"para_{len(docs)}"
-                docs.append(Document(page_content=content, metadata=_m2c))
-                buf, buf_chars = [], 0
-            buf.append(para)
-            buf_chars += len(para) + 2
-        if buf:
-            content = "\n\n".join(buf).strip()
-            if cur_heading and not content.startswith('#'):
-                content = f"{cur_heading}\n\n{content}"
-            _m2c = dict(_base_meta)
-            _m2c["section_id"] = f"para_{len(docs)}"
-            docs.append(Document(page_content=content, metadata=_m2c))
-        if docs:
-            return _finalize_docs(docs)
-
-    # ── Mode 3: generic word-split (existing behaviour — unchanged) ───────────
+    # Mode 3: generic word-split (existing behaviour — unchanged)
     words = clean.split()
     for j in range(0, max(1, len(words)), chunk_step):
         chunk = " ".join(words[j:j + chunk_size])

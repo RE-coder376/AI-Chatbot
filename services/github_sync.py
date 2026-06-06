@@ -15,6 +15,7 @@ from services.config import ACTIVE_DB_FILE, DATABASES_DIR
 logger = logging.getLogger(__name__)
 
 KEYS_FILE = Path("keys.json")
+RESTORE_ALLOWLIST_FILE = Path("restore_allowlist.txt")
 
 _GITHUB_USERNAME = os.getenv("GITHUB_USERNAME", "RE-coder376")
 _GITHUB_REPO     = os.getenv("GITHUB_REPO", "databases")
@@ -23,6 +24,63 @@ _GITHUB_CLONE_DIR = Path("/tmp/chatbot-dbs")
 # Mutable dict — always mutate in-place (never reassign) so callers that hold
 # a reference to this dict see live updates without re-importing.
 _github_sync_result: dict = {"status": "not_run", "detail": ""}
+
+
+def _load_restore_allowlist() -> set[str]:
+    """Return DB names allowed to auto-restore from GitHub snapshots."""
+    allowed: set[str] = set()
+    try:
+        if RESTORE_ALLOWLIST_FILE.exists():
+            allowed = {
+                line.strip()
+                for line in RESTORE_ALLOWLIST_FILE.read_text(encoding="utf-8-sig").splitlines()
+                if line.strip()
+            }
+    except Exception as e:
+        logger.warning(f"[GH-SYNC] Could not read restore allowlist: {e}")
+    return allowed
+
+
+def _save_restore_allowlist(names: set[str]) -> None:
+    try:
+        payload = "\n".join(sorted({str(n).strip() for n in names if str(n).strip()}))
+        RESTORE_ALLOWLIST_FILE.write_text(payload + ("\n" if payload else ""), encoding="utf-8")
+    except Exception as e:
+        logger.warning(f"[GH-SYNC] Could not save restore allowlist: {e}")
+
+
+def _github_update_restore_allowlist(db_name: str, add: bool = True) -> None:
+    """Persist allowlist locally and mirror it to GitHub Contents."""
+    import base64 as _b64, requests as _req
+    name = (db_name or "").strip()
+    if not name:
+        return
+    allow = _load_restore_allowlist()
+    if add:
+        allow.add(name)
+    else:
+        allow.discard(name)
+    _save_restore_allowlist(allow)
+    pat = os.environ.get("GITHUB_PAT", "").strip()
+    if not pat:
+        return
+    api_hdr = {"Authorization": f"token {pat}", "User-Agent": "chatbot-sync"}
+    url = f"https://api.github.com/repos/{_GITHUB_USERNAME}/{_GITHUB_REPO}/contents/restore_allowlist.txt"
+    try:
+        sha = None
+        r = _req.get(url, headers=api_hdr, timeout=10)
+        if r.status_code == 200:
+            sha = r.json().get("sha")
+        payload = "\n".join(sorted(allow))
+        body = {
+            "message": f"restore-allowlist: {'add' if add else 'remove'} {name}",
+            "content": _b64.b64encode((payload + ("\n" if payload else "")).encode()).decode(),
+        }
+        if sha:
+            body["sha"] = sha
+        _req.put(url, json=body, headers=api_hdr, timeout=15)
+    except Exception as e:
+        logger.warning(f"[GH-SYNC] Could not update restore allowlist for {name}: {e}")
 
 
 def _github_repo_url() -> str:
@@ -69,9 +127,12 @@ def _github_sync_download(load_db_callback=None):
             return
         assets = resp.json().get("assets", [])
         zip_assets = [a for a in assets if a["name"].endswith(".zip")]
-        # Download keys.json if present
+        # Download keys.json if present, but never overwrite an existing local copy.
         for asset in assets:
             if asset["name"] == "keys.json":
+                if KEYS_FILE.exists() and KEYS_FILE.stat().st_size > 0:
+                    logger.info("[GH-SYNC] keys.json already present locally — preserving existing file")
+                    break
                 logger.info("[GH-SYNC] Downloading keys.json...")
                 asset_url = f"https://api.github.com/repos/{_GITHUB_USERNAME}/{_GITHUB_REPO}/releases/assets/{asset['id']}"
                 r = _req.get(asset_url, headers=headers, timeout=60)
@@ -79,22 +140,43 @@ def _github_sync_download(load_db_callback=None):
                 KEYS_FILE.write_bytes(r.content)
                 logger.info("[GH-SYNC] ✅ keys.json restored")
                 break
+        # Download restore allowlist early (before zip downloads).
+        try:
+            allow_url = f"https://api.github.com/repos/{_GITHUB_USERNAME}/{_GITHUB_REPO}/contents/restore_allowlist.txt"
+            if RESTORE_ALLOWLIST_FILE.exists() and RESTORE_ALLOWLIST_FILE.stat().st_size > 0:
+                logger.info("[GH-SYNC] restore_allowlist.txt already present locally — preserving existing file")
+            else:
+                r = _req.get(allow_url, headers=api_hdr, timeout=10)
+                if r.status_code == 200:
+                    import base64 as _b64
+                    raw = _b64.b64decode(r.json().get("content", "").replace("\n", ""))
+                    RESTORE_ALLOWLIST_FILE.write_bytes(raw)
+                    logger.info("[GH-SYNC] ✅ restore_allowlist.txt restored")
+        except Exception as e:
+            logger.warning(f"[GH-SYNC] restore_allowlist.txt restore failed: {e}")
         # Download active_db.txt early (before zip downloads) so priority logic below uses the saved value
         try:
             import base64 as _b64
-            r = _req.get(f"https://api.github.com/repos/{_GITHUB_USERNAME}/{_GITHUB_REPO}/contents/active_db.txt", headers=api_hdr, timeout=10)
-            if r.status_code == 200:
-                raw = _b64.b64decode(r.json().get("content", "").replace("\n",""))
-                ACTIVE_DB_FILE.write_bytes(raw)
-                logger.info(f"[GH-SYNC] ✅ active_db.txt restored ({raw.decode().strip()})")
+            if ACTIVE_DB_FILE.exists() and ACTIVE_DB_FILE.stat().st_size > 0:
+                logger.info(f"[GH-SYNC] active_db.txt already present locally — preserving existing file ({ACTIVE_DB_FILE.read_text(encoding='utf-8').strip()})")
+            else:
+                r = _req.get(f"https://api.github.com/repos/{_GITHUB_USERNAME}/{_GITHUB_REPO}/contents/active_db.txt", headers=api_hdr, timeout=10)
+                if r.status_code == 200:
+                    raw = _b64.b64decode(r.json().get("content", "").replace("\n",""))
+                    ACTIVE_DB_FILE.write_bytes(raw)
+                    logger.info(f"[GH-SYNC] ✅ active_db.txt restored ({raw.decode().strip()})")
         except Exception as e:
             logger.warning(f"[GH-SYNC] active_db.txt restore failed: {e}")
         if not zip_assets:
             logger.warning("[GH-SYNC] No zip assets found in release")
             return
+        allowed = _load_restore_allowlist()
 
         def _download_zip(asset):
             db_name = asset["name"][:-4]
+            if allowed and db_name not in allowed:
+                logger.info(f"[GH-SYNC] Skipping restore for {db_name} — not in restore allowlist")
+                return
             size_mb = asset["size"] / 1024 / 1024
             logger.info(f"[GH-SYNC] Downloading {db_name}.zip ({size_mb:.1f}MB)...")
             _github_sync_result["detail"] = f"Restoring {db_name}.zip ({size_mb:.1f}MB)"
@@ -122,39 +204,18 @@ def _github_sync_download(load_db_callback=None):
                     if member.endswith("/"):
                         dest.mkdir(exist_ok=True)
                     else:
-                        # For config.json: only extract from zip if the existing file on disk
-                        # is missing or has empty business_name/topics (i.e. the zip has better data).
-                        # The committed repo config.json is the authoritative source — never
-                        # let an older zip silently overwrite it with blank/default values.
+                        # Hard lock: preserve any existing config.json. Restores may not
+                        # overwrite a config that already exists on disk.
                         if rel == "config.json" and dest.exists():
                             try:
                                 import json as _json
                                 existing = _json.loads(dest.read_text(encoding="utf-8"))
-                                # Identity fields: committed repo version always wins.
-                                # Operational fields: zip version wins (user saved them via admin panel).
-                                if existing.get("business_name") or existing.get("topics"):
-                                    try:
-                                        with z.open(member) as _zf2src:
-                                            zip_cfg = _json.loads(_zf2src.read().decode("utf-8"))
-                                        _OPERATIONAL_KEYS = {
-                                            "auto_crawl_enabled", "crawl_interval_minutes",
-                                            "crawl_url", "last_crawl_time", "last_crawl_chunks",
-                                            "admin_password", "smtp_host", "smtp_port",
-                                            "sender_email", "always_open", "hours",
-                                            "api_sources", "allowed_origins", "widget_key",
-                                            "judge_api_key",
-                                        }
-                                        merged = dict(existing)
-                                        for k in _OPERATIONAL_KEYS:
-                                            if k in zip_cfg:
-                                                merged[k] = zip_cfg[k]
-                                        dest.write_text(_json.dumps(merged, ensure_ascii=False, indent=4), encoding="utf-8")
-                                        logger.info(f"[GH-SYNC] Merged operational fields from zip into committed config for {db_name}")
-                                    except Exception as _me:
-                                        logger.warning(f"[GH-SYNC] Merge failed for {db_name} config: {_me} — keeping committed")
+                                if isinstance(existing, dict) and existing:
+                                    logger.info(f"[GH-SYNC] Preserving existing config.json for {db_name}")
                                     continue
                             except Exception:
-                                pass  # fall through to normal extraction
+                                logger.info(f"[GH-SYNC] Preserving existing config.json for {db_name} (unreadable existing file)")
+                                continue
                         tmp_dest = dest.with_name(dest.name + ".tmp_sync")
                         with z.open(member) as src, open(tmp_dest, "wb") as dst:
                             while True:
@@ -214,13 +275,17 @@ def _github_sync_download(load_db_callback=None):
                 (f"crawl_times_{db_n}.json", "_crawl_times.json"),
             ]:
                 try:
+                    target_file = db_dir / dest
+                    if target_file.exists() and target_file.stat().st_size > 0:
+                        logger.info(f"[GH-SYNC] Preserving existing {dest} for {db_n}")
+                        continue
                     r = _req.get(
                         f"https://api.github.com/repos/{_GITHUB_USERNAME}/{_GITHUB_REPO}/contents/{fname}",
                         headers=headers, timeout=30)
                     if r.status_code == 200:
                         import base64 as _b64
                         raw = _b64.b64decode(r.json().get("content", "").replace("\n",""))
-                        (db_dir / dest).write_bytes(raw)
+                        target_file.write_bytes(raw)
                         logger.info(f"[GH-SYNC] ✅ {dest} restored for {db_n}")
                 except Exception as e:
                     logger.warning(f"[GH-SYNC] {dest} restore failed for {db_n}: {e}")
@@ -290,6 +355,9 @@ def _github_sync_download_one(db_name: str) -> bool:
         if not asset:
             logger.warning("[GH-SYNC] Single restore missing asset: %s.zip", db_name)
             return False
+        if db_name not in _load_restore_allowlist():
+            logger.warning("[GH-SYNC] Single restore skipped for %s — not in restore allowlist", db_name)
+            return False
         asset_url = f"https://api.github.com/repos/{_GITHUB_USERNAME}/{_GITHUB_REPO}/releases/assets/{asset['id']}"
         logger.info("[GH-SYNC] Single restore downloading %s.zip (%.1fMB)", db_name, asset.get("size", 0) / 1024 / 1024)
         with _req.get(asset_url, headers=bin_hdr, stream=True, timeout=600) as r:
@@ -311,7 +379,7 @@ def _github_sync_download_one(db_name: str) -> bool:
                 if member.endswith("/"):
                     dest.mkdir(exist_ok=True)
                     continue
-                if rel == "config.json" and dest.exists():
+                if rel == "config.json" and dest.exists() and dest.stat().st_size > 0:
                     continue
                 tmp_dest = dest.with_name(dest.name + ".tmp_sync")
                 with z.open(member) as src, open(tmp_dest, "wb") as dst:
@@ -559,6 +627,10 @@ def _github_sync_delete(db_name: str):
             logger.info(f"[GH-SYNC] Added {db_name} to deleted_dbs.txt")
         except Exception as _de:
             logger.warning(f"[GH-SYNC] Could not update deleted_dbs.txt: {_de}")
+        try:
+            _github_update_restore_allowlist(db_name, add=False)
+        except Exception as _al_e:
+            logger.warning(f"[GH-SYNC] Could not update restore allowlist for deleted DB {db_name}: {_al_e}")
         # Also remove crawl_times and crawled_urls from Contents API so they can't restore the deleted DB
         for fname in [f"crawl_times_{db_name}.json", f"crawled_urls_{db_name}.txt"]:
             try:
