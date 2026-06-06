@@ -703,7 +703,10 @@ def _smart_chunk_page(text: str, url: str, chunk_size: int = 400, chunk_step: in
         _heading_hits = list(re.finditer(r"(?=(?:^|\s)(?:##|###)\s+)", raw_text))
         if _heading_hits:
             _starts = [m.start() for m in _heading_hits] + [len(raw_text)]
-            def _emit_heading_segment(seg_text: str, heading: str | None):
+
+            _pending_small_segments: list[str] = []
+
+            def _emit_docs_from_text(seg_text: str, heading: str | None):
                 seg_text = (seg_text or "").strip()
                 if not seg_text:
                     return
@@ -712,37 +715,64 @@ def _smart_chunk_page(text: str, url: str, chunk_size: int = 400, chunk_step: in
                 if len(seg_text) <= 1600:
                     _meta = dict(_base_meta)
                     _meta["section_id"] = f"head_{len(docs)}"
+                    _meta["chunk_kind"] = "heading"
                     if heading:
                         _meta["heading"] = heading
                     docs.append(Document(page_content=seg_text, metadata=_meta))
                     return
-                _parts = [p.strip() for p in re.split(r"\n{2,}|(?<=[.?!])\s{2,}", seg_text) if p.strip()]
-                if len(_parts) <= 1:
-                    _parts = [seg_text[i:i + 1600] for i in range(0, len(seg_text), 1600)]
-                _buf = []
-                _chars = 0
-                for _part in _parts:
-                    if _buf and (_chars + len(_part) + 2 > 1600):
-                        _meta = dict(_base_meta)
-                        _meta["section_id"] = f"head_{len(docs)}"
-                        if heading:
-                            _meta["heading"] = heading
-                        docs.append(Document(page_content="\n\n".join(_buf).strip(), metadata=_meta))
-                        _buf, _chars = [], 0
-                    _buf.append(_part)
-                    _chars += len(_part) + 2
-                if _buf:
+
+                # Large sections: split on paragraphs / sentence boundaries and
+                # keep a small overlap so answers spanning a boundary are not lost.
+                blocks = [p.strip() for p in re.split(r"\n{2,}|(?<=[.?!])\s{2,}", seg_text) if p.strip()]
+                if len(blocks) <= 1:
+                    blocks = [seg_text[i:i + 1200] for i in range(0, len(seg_text), 1200)]
+                packed = []
+                buf = []
+                buf_chars = 0
+                for blk in blocks:
+                    if buf and (buf_chars + len(blk) + 2 > 1400):
+                        packed.append("\n\n".join(buf).strip())
+                        tail = packed[-1][-180:].strip()
+                        buf = [tail] if tail else []
+                        buf_chars = len(tail) + (2 if tail else 0)
+                    buf.append(blk)
+                    buf_chars += len(blk) + 2
+                if buf:
+                    packed.append("\n\n".join(buf).strip())
+
+                for idx, piece in enumerate(packed):
+                    if not piece:
+                        continue
+                    if idx and packed[idx - 1]:
+                        prev_tail = packed[idx - 1][-120:].strip()
+                        if prev_tail and not piece.startswith(prev_tail):
+                            piece = f"{prev_tail}\n\n{piece}"
                     _meta = dict(_base_meta)
                     _meta["section_id"] = f"head_{len(docs)}"
+                    _meta["chunk_kind"] = "heading"
                     if heading:
                         _meta["heading"] = heading
-                    docs.append(Document(page_content="\n\n".join(_buf).strip(), metadata=_meta))
+                    docs.append(Document(page_content=piece, metadata=_meta))
+
+            def _flush_small_segments():
+                nonlocal _pending_small_segments
+                if not _pending_small_segments:
+                    return
+                merged = "\n\n".join(_pending_small_segments).strip()
+                _pending_small_segments = []
+                if merged:
+                    _emit_docs_from_text(merged, None)
 
             for idx, start in enumerate(_starts[:-1]):
                 seg = raw_text[start:_starts[idx + 1]].strip()
                 hm = re.match(r"^\s*(?:##|###)\s+(.+?)\s*(?=(?:##|###)\s+|\Z)", seg, re.S)
                 heading = hm.group(1).strip() if hm else None
-                _emit_heading_segment(seg, heading)
+                if len(seg) <= 280:
+                    _pending_small_segments.append(seg)
+                    continue
+                _flush_small_segments()
+                _emit_docs_from_text(seg, heading)
+            _flush_small_segments()
             if docs:
                 return _finalize_docs(docs)
     except Exception:
@@ -755,6 +785,25 @@ def _smart_chunk_page(text: str, url: str, chunk_size: int = 400, chunk_step: in
             _last_heading = ""
             _buf: list[str] = []
             _chars = 0
+            _last_emitted: str | None = None
+
+            def _emit_para_chunk(chunk_text: str):
+                nonlocal _last_emitted
+                chunk_text = (chunk_text or "").strip()
+                if not chunk_text:
+                    return
+                if _last_emitted:
+                    tail = _last_emitted[-120:].strip()
+                    if tail and not chunk_text.startswith(tail):
+                        chunk_text = f"{tail}\n\n{chunk_text}"
+                _last_emitted = chunk_text
+                _meta = dict(_base_meta)
+                _meta["section_id"] = f"para_{len(docs)}"
+                _meta["chunk_kind"] = "paragraph"
+                if _last_heading:
+                    _meta["heading"] = _last_heading
+                docs.append(Document(page_content=chunk_text, metadata=_meta))
+
             def _flush_para_buf():
                 nonlocal _buf, _chars
                 if not _buf:
@@ -765,11 +814,7 @@ def _smart_chunk_page(text: str, url: str, chunk_size: int = 400, chunk_step: in
                     return
                 if _last_heading and not re.match(r"(?m)^\s*(?:##|###)\s+", _chunk):
                     _chunk = f"## {_last_heading}\n\n{_chunk}"
-                _meta = dict(_base_meta)
-                _meta["section_id"] = f"para_{len(docs)}"
-                if _last_heading:
-                    _meta["heading"] = _last_heading
-                docs.append(Document(page_content=_chunk, metadata=_meta))
+                _emit_para_chunk(_chunk)
                 _buf, _chars = [], 0
             for para in _paras:
                 _hm = re.match(r"^\s*(?:##|###)\s+(.+?)\s*$", para)
@@ -868,17 +913,19 @@ def _smart_chunk_page(text: str, url: str, chunk_size: int = 400, chunk_step: in
             for ln in _raw_lines:
                 if len(ln) > 500:
                     continue
-                if buf and (buf_chars + len(ln) + 1 > 2000):
-                    _m3 = dict(_base_meta)
-                    _m3["section_id"] = f"list_{len(docs)}"
-                    docs.append(Document(page_content="\n".join(buf).strip(), metadata=_m3))
-                    buf, buf_chars = [], 0
-                buf.append(ln)
-                buf_chars += len(ln) + 1
-            if buf:
-                _m4 = dict(_base_meta)
-                _m4["section_id"] = f"list_{len(docs)}"
-                docs.append(Document(page_content="\n".join(buf).strip(), metadata=_m4))
+            if buf and (buf_chars + len(ln) + 1 > 2000):
+                _m3 = dict(_base_meta)
+                _m3["section_id"] = f"list_{len(docs)}"
+                _m3["chunk_kind"] = "list"
+                docs.append(Document(page_content="\n".join(buf).strip(), metadata=_m3))
+                buf, buf_chars = [], 0
+            buf.append(ln)
+            buf_chars += len(ln) + 1
+        if buf:
+            _m4 = dict(_base_meta)
+            _m4["section_id"] = f"list_{len(docs)}"
+            _m4["chunk_kind"] = "list"
+            docs.append(Document(page_content="\n".join(buf).strip(), metadata=_m4))
             if docs:
                 return _finalize_docs(docs)
     except Exception:

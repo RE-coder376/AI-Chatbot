@@ -205,7 +205,19 @@ def _strip_storefront_boilerplate(text: str) -> str:
 
 def _trusted_content_metrics(text: str) -> dict:
     body = _clean_text(text or "")
-    sentence_count = len(re.findall(r"[.!?]", body))
+    # Count sentence-like units rather than raw punctuation marks so list-heavy
+    # pages do not look "empty" just because they omit periods.
+    sentence_like = [
+        s.strip()
+        for s in re.split(r"(?<=[.!?])\s+|[\r\n]+", body)
+        if len(s.strip()) >= 20
+    ]
+    bullet_like = [
+        s.strip()
+        for s in re.findall(r"(?m)^\s*(?:[-*•]|\d{1,2}[.)])\s+(.+)$", body)
+        if len(s.strip()) >= 20
+    ]
+    sentence_count = max(len(sentence_like), len(bullet_like))
     prose_chars = len(body)
     paragraphs = [p.strip() for p in re.split(r"[\r\n]+", body) if p.strip()]
     nav_hits = len(_NAV_CONTROL_RE.findall(body))
