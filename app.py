@@ -11279,12 +11279,14 @@ async def crawl_site(data: dict, request: Request):
                         clean = re.sub(r'<h3[^>]*>', '\n### ', clean, flags=re.I)
                         clean = re.sub(r'</h3>', '\n', clean, flags=re.I)
                         clean = re.sub(r'<[^>]+>', ' ', clean)
-                        clean = re.sub(r'\s+', ' ', clean).strip()
+                        clean = re.sub(r'[ \t]+', ' ', clean)
+                        clean = re.sub(r'\n{3,}', '\n\n', clean).strip()
                         combined = f"{title_text}. {ld_text} {clean}".strip()
                         combined, page_meta = _prepare_crawl_page(combined, page_url, title_hint=title_text)
                         page_meta = dict(page_meta or {})
                         page_meta["source_canonical"] = _canonical_source_url(page_url)
-                        combined = re.sub(r'\s+', ' ', _clean_text(combined))
+                        combined = re.sub(r'[ \t]+', ' ', _clean_text(combined))
+                        combined = re.sub(r'\n{3,}', '\n\n', combined).strip()
                         if len(combined) > 100:
                             return {"text": combined, "title": title_text, "page_meta": page_meta}
                         return None
@@ -11407,6 +11409,16 @@ async def crawl_site(data: dict, request: Request):
                                                     try { el.click(); } catch(e) {}
                                                 }
                                             });
+                                            document.querySelectorAll('h2, h3').forEach(h => {
+                                                try {
+                                                    const t = (h.innerText || '').replace(/\\s+/g, ' ').trim();
+                                                    if (t) {
+                                                        const repl = document.createElement('div');
+                                                        repl.innerText = (h.tagName === 'H2' ? '## ' : '### ') + t + '\\n';
+                                                        h.replaceWith(repl);
+                                                    }
+                                                } catch(e) {}
+                                            });
                                         }""")
                                         await asyncio.sleep(0.5)
                                     except Exception:
@@ -11502,7 +11514,8 @@ async def crawl_site(data: dict, request: Request):
                                     text, page_meta = _prepare_crawl_page(text or "", cur_url, title_hint=title)
                                     page_meta = dict(page_meta or {})
                                     page_meta["source_canonical"] = _canonical_source_url(cur_url)
-                                    text = re.sub(r'\s+', ' ', _clean_text(text or "")).strip()
+                                    text = re.sub(r'[ \t]+', ' ', _clean_text(text or ""))
+                                    text = re.sub(r'\n{3,}', '\n\n', text).strip()
                                     if len(text) < 200:
                                         text = f"{title}. {meta_desc}. {text}".strip()
                                     _ocr_start_msg = f"[{worker_label}] [ocr-start] {cur_url[:70]}"
@@ -11519,7 +11532,8 @@ async def crawl_site(data: dict, request: Request):
                                     text, page_meta = _prepare_crawl_page(text or "", cur_url, title_hint=title)
                                     page_meta = dict(page_meta or {})
                                     page_meta["source_canonical"] = _canonical_source_url(cur_url)
-                                    text = re.sub(r'\s+', ' ', _clean_text(text or "")).strip()
+                                    text = re.sub(r'[ \t]+', ' ', _clean_text(text or ""))
+                                    text = re.sub(r'\n{3,}', '\n\n', text).strip()
                                     return text, title, page_meta, sidebar_raw
                                 except Exception as e:
                                     if attempt < 4:
