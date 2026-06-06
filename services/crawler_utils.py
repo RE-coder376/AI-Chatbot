@@ -193,27 +193,30 @@ def _extract_product_summary(text: str, url: str, title_hint: str = "") -> dict:
 
 def _classify_page_type(url: str, cleaned: str, product_like: bool, structural: bool) -> str:
     source = (url or "").lower()
+    body = cleaned or ""
+    metrics = _trusted_content_metrics(body)
     if product_like:
         return "product"
     if structural:
         return "structural"
-    if _POLICY_URL_RE.search(source) or _POLICY_TEXT_RE.search(cleaned):
-        return "policy"
-    if len(_GENERIC_SECTION_SPLIT_RE.split(cleaned)) >= 3:
-        return "faq"
     # Outcomes/learning-goals marker override (universal):
     # Many docs index pages look "category/structural" but still contain the
     # canonical "By completing..., you will:" goals list. Never classify those
     # as category-only content.
-    if re.search(r"(?i)\b(by completing|by the end of this (?:chapter|lesson)|you will be able to|learning outcomes|objectives|goals)\b", cleaned or ""):
+    if re.search(r"(?i)\b(by completing|by the end of this (?:chapter|lesson)|you will be able to|learning outcomes|objectives|goals)\b", body):
         return "article"
-    metrics = _trusted_content_metrics(cleaned)
-    if _CATEGORY_URL_RE.search(source) or (metrics["category_hits"] >= 2 and metrics["sentence_count"] <= 2):
+    if len(_GENERIC_SECTION_SPLIT_RE.split(body)) >= 3:
+        return "faq"
+    if _CATEGORY_URL_RE.search(source) or (metrics["category_hits"] >= 2 and metrics["sentence_count"] <= 3):
         return "category"
     if _ARTICLE_URL_RE.search(source) or (
         metrics["prose_chars"] > 300 and metrics["sentence_count"] >= 2 and metrics["nav_hits"] <= max(2, metrics["sentence_count"])
     ):
         return "article"
+    if _POLICY_URL_RE.search(source):
+        return "policy"
+    if _POLICY_TEXT_RE.search(body) and metrics["policy_hits"] >= 2 and metrics["prose_chars"] < 1400 and metrics["sentence_count"] <= 8:
+        return "policy"
     return "unknown"
 
 
@@ -320,6 +323,20 @@ def _prepare_crawl_page(text: str, url: str, title_hint: str = "") -> tuple[str,
         meta["used_structured_fields"] = list(product.get("used_structured_fields") or [])
         meta["body_fallback_used"] = bool(product.get("body_fallback_used"))
         meta["extraction_mode"] = "structured_product" if meta["used_structured_fields"] else "body_text"
+        if product.get("title") and (product.get("price_label") or product.get("description") or meta["used_structured_fields"]):
+            meta["page_type"] = "product"
+    elif meta["page_type"] in {"policy", "unknown"}:
+        # Product/catalog pages often carry policy/footer boilerplate that can
+        # overwhelm the classifier. If structured product signals are present,
+        # promote them even when the URL path itself is generic.
+        product = _extract_product_summary(cleaned, url, title_hint=title_hint)
+        if product.get("title") and (product.get("price_label") or product.get("description") or product.get("used_structured_fields")):
+            meta["product"] = product
+            meta["page_type"] = "product"
+            meta["contaminated"] = bool(product.get("contaminated"))
+            meta["used_structured_fields"] = list(product.get("used_structured_fields") or [])
+            meta["body_fallback_used"] = bool(product.get("body_fallback_used"))
+            meta["extraction_mode"] = "structured_product" if meta["used_structured_fields"] else "body_text"
     meta["quality_score"] = _quality_score(
         cleaned,
         page_type=meta["page_type"],
@@ -677,6 +694,73 @@ def _smart_chunk_page(text: str, url: str, chunk_size: int = 400, chunk_step: in
                 _buf.append(_para_txt)
                 _chars += len(_para_txt) + 2
             _flush_para_buf()
+            if docs:
+                return _finalize_docs(docs)
+    except Exception:
+        pass
+
+    # Mode 2d: tabular / key-value / code-ish page
+    try:
+        _lines = [ln.rstrip() for ln in raw_text.splitlines()]
+        _nonempty_lines = [ln.strip() for ln in _lines if ln.strip()]
+
+        def _is_rowish(ln: str) -> bool:
+            s = ln.strip()
+            if not s:
+                return False
+            if re.match(r"^\s*(?:##|###)\s+", s):
+                return False
+            if s.startswith(("```", "~~~")):
+                return True
+            if "\t" in s or " | " in s:
+                return True
+            if re.match(r"^[A-Za-z][A-Za-z0-9 _/\-]{1,40}\s*:\s+\S", s):
+                return True
+            if re.match(r"^[A-Za-z][A-Za-z0-9 _/\-]{1,40}\s*=\s*\S", s):
+                return True
+            if re.match(r"^(?:[-*•]|\d{1,2}[.)])\s+\S", s):
+                return True
+            if re.match(r"^\s{2,}\S", ln):
+                return True
+            return False
+
+        _row_lines = [ln for ln in _nonempty_lines if _is_rowish(ln)]
+        if len(_row_lines) >= 4 and len(_row_lines) >= max(4, int(len(_nonempty_lines) * 0.45)):
+            _last_heading = ""
+            _buf: list[str] = []
+            _chars = 0
+
+            def _flush_row_buf():
+                nonlocal _buf, _chars
+                if not _buf:
+                    return
+                _chunk = "\n".join(_buf).strip()
+                if _last_heading and not re.match(r"(?m)^\s*(?:##|###)\s+", _chunk):
+                    _chunk = f"## {_last_heading}\n\n{_chunk}"
+                _meta = dict(_base_meta)
+                _meta["section_id"] = f"table_{len(docs)}"
+                _meta["chunk_kind"] = "tabular"
+                if _last_heading:
+                    _meta["heading"] = _last_heading
+                docs.append(Document(page_content=_chunk[:2400], metadata=_meta))
+                _buf, _chars = [], 0
+
+            for ln in _lines:
+                s = ln.strip()
+                if not s:
+                    continue
+                hm = re.match(r"^\s*(?:##|###)\s+(.+?)\s*$", s)
+                if hm:
+                    _flush_row_buf()
+                    _last_heading = hm.group(1).strip()
+                    continue
+                if not _is_rowish(ln):
+                    continue
+                if _buf and (_chars + len(s) + 1 > 1600):
+                    _flush_row_buf()
+                _buf.append(s)
+                _chars += len(s) + 1
+            _flush_row_buf()
             if docs:
                 return _finalize_docs(docs)
     except Exception:

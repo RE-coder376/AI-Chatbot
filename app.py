@@ -11216,6 +11216,49 @@ async def crawl_site(data: dict, request: Request):
                         # Extract title
                         title_m = re.search(r'<title[^>]*>(.*?)</title>', html, re.DOTALL | re.I)
                         title_text = re.sub(r'<[^>]+>', '', title_m.group(1)).strip() if title_m else ''
+                        # Preserve tables / lists / code blocks before the broad tag strip.
+                        try:
+                            from bs4 import BeautifulSoup as _BS_html
+                            _soup = _BS_html(html, "html.parser")
+                            for _tag in _soup(["script", "style", "noscript"]):
+                                _tag.decompose()
+                            for _table in _soup.find_all("table"):
+                                _rows = []
+                                for _tr in _table.find_all("tr"):
+                                    _cells = [
+                                        re.sub(r"\s+", " ", _c.get_text(" ", strip=True))
+                                        for _c in _tr.find_all(["th", "td"])
+                                    ]
+                                    if _cells:
+                                        _rows.append(" | ".join(_cells))
+                                if _rows:
+                                    _table.replace_with("\n\n" + "\n".join(_rows) + "\n\n")
+                            for _dl in _soup.find_all("dl"):
+                                _rows = []
+                                _dts = _dl.find_all("dt")
+                                _dds = _dl.find_all("dd")
+                                for _dt, _dd in zip(_dts, _dds):
+                                    _term = re.sub(r"\s+", " ", _dt.get_text(" ", strip=True))
+                                    _defn = re.sub(r"\s+", " ", _dd.get_text(" ", strip=True))
+                                    if _term or _defn:
+                                        _rows.append(f"{_term}: {_defn}".strip(": "))
+                                if _rows:
+                                    _dl.replace_with("\n\n" + "\n".join(_rows) + "\n\n")
+                            for _pre in _soup.find_all("pre"):
+                                _code = _pre.get_text("\n", strip=True)
+                                if _code and len(_code) >= 20:
+                                    _pre.replace_with("\n\n```\n" + _code[:6000] + "\n```\n\n")
+                            for _ul in _soup.find_all(["ul", "ol"]):
+                                _items = []
+                                for _li in _ul.find_all("li", recursive=False):
+                                    _li_txt = re.sub(r"\s+", " ", _li.get_text(" ", strip=True))
+                                    if _li_txt:
+                                        _items.append(_li_txt)
+                                if _items:
+                                    _ul.replace_with("\n\n" + "\n".join(f"- {it}" for it in _items) + "\n\n")
+                            html = str(_soup)
+                        except Exception:
+                            pass
                         # Preserve section boundaries before tag stripping.
                         html = re.sub(
                             r'(?is)<h2[^>]*>(.*?)</h2>',
