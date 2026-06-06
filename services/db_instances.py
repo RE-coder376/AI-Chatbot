@@ -24,6 +24,13 @@ def _sqlite_mtime(path: Path) -> float | None:
 def _tmp_chroma_dir(db_name: str) -> Path:
     return Path(f"/dev/shm/chroma_{db_name}")
 
+def _resolve_source_dir(db_path: Path) -> Path | None:
+    """Return the live Chroma source directory, preferring nested chroma/ when present."""
+    for candidate in (db_path / "chroma", db_path):
+        if (candidate / "chroma.sqlite3").exists():
+            return candidate
+    return None
+
 def _ensure_tmp_chroma(db_name: str, src_path: Path, refresh: bool = False) -> Path:
     """Copy ChromaDB from overlayfs → /tmp (tmpfs) to avoid SQLite WAL mode failures on Docker.
     On Windows this is unnecessary (no overlayfs) — use src_path directly.
@@ -67,8 +74,8 @@ def _ensure_tmp_chroma(db_name: str, src_path: Path, refresh: bool = False) -> P
 def _is_cached_instance_stale(db_name: str, instance) -> bool:
     """Return True when the cached Chroma instance points at older data than the on-disk DB."""
     db_path = DATABASES_DIR / db_name
-    src_sqlite = db_path / "chroma.sqlite3"
-    if not src_sqlite.exists():
+    src_dir = _resolve_source_dir(db_path)
+    if src_dir is None:
         return False
     try:
         persist_dir = Path(getattr(instance, "_persist_directory", "") or "")
@@ -77,6 +84,7 @@ def _is_cached_instance_stale(db_name: str, instance) -> bool:
     if not str(persist_dir):
         persist_dir = _tmp_chroma_dir(db_name)
     cached_sqlite = persist_dir / "chroma.sqlite3"
+    src_sqlite = src_dir / "chroma.sqlite3"
     src_mtime = _sqlite_mtime(src_sqlite)
     cached_mtime = _sqlite_mtime(cached_sqlite)
     if src_mtime is None:
@@ -120,9 +128,9 @@ def _get_db_instance(db_name: str, refresh: bool = False):
         return None
     # Don't create a new Chroma instance if no DB file exists (API-only DBs like mal).
     # However, on some Linux deployments we may still have a valid tmpfs copy in /dev/shm.
-    src_sqlite = (db_path / "chroma.sqlite3")
+    src_dir = _resolve_source_dir(db_path)
     tmp_sqlite = Path(f"/dev/shm/chroma_{db_name}/chroma.sqlite3")
-    if not src_sqlite.exists() and not tmp_sqlite.exists():
+    if src_dir is None and not tmp_sqlite.exists():
         return None
     db_cfg_file = db_path / "config.json"
     db_cfg = {}
@@ -145,8 +153,8 @@ def _get_db_instance(db_name: str, refresh: bool = False):
         # All other DBs (bge, multilingual, unset) — crawler always writes bge-small-en-v1.5 (384-dim)
         # so we must query with the same model. bge-base-en-v1.5 is 768-dim and would mismatch.
         emb = _app.embeddings_model  # FastEmbed BAAI/bge-small-en-v1.5, 384-dim
-    if src_sqlite.exists():
-        tmp_dir = _ensure_tmp_chroma(db_name, db_path, refresh=refresh)
+    if src_dir is not None:
+        tmp_dir = _ensure_tmp_chroma(db_name, src_dir, refresh=refresh)
     else:
         # Source sqlite missing but tmpfs copy exists; use it directly.
         tmp_dir = Path(f"/dev/shm/chroma_{db_name}")
