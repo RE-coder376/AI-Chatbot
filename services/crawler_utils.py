@@ -340,8 +340,12 @@ def _prepare_crawl_page(text: str, url: str, title_hint: str = "") -> tuple[str,
     quarantine_reason = ""
     retrieve_eligible = True
     if meta["page_type"] in {"structural", "category"}:
-        retrieve_eligible = False
-        quarantine_reason = meta["page_type"]
+        # Change 7: overview/index pages with substantial body content stay eligible
+        if len(cleaned.split()) > 150:
+            pass  # keep retrieve_eligible = True
+        else:
+            retrieve_eligible = False
+            quarantine_reason = meta["page_type"]
     elif meta.get("contaminated"):
         retrieve_eligible = False
         quarantine_reason = "contaminated"
@@ -584,6 +588,23 @@ def _smart_chunk_page(text: str, url: str, chunk_size: int = 400, chunk_step: in
         if docs:
             return _finalize_docs(docs)
 
+    # ── Mode 2b: heading-aware chunk splitting (Change 4 + 6) ─────────────────
+    # Split on ## / ### markers preserved from h2/h3 tags during extraction.
+    # Each section already starts with its heading, so heading is the natural prefix (Change 6).
+    _heading_sections = re.split(r'\n(?=#{1,3}\s)', raw_text)
+    if len(_heading_sections) >= 2:
+        for sec in _heading_sections:
+            sec = sec.strip()
+            if len(sec) > 40:
+                _hm = re.match(r'^(#{1,3}\s+[^\n]+)', sec)
+                _m2b = dict(_base_meta)
+                _m2b["section_id"] = f"heading_{len(docs)}"
+                if _hm:
+                    _m2b["section_heading"] = _hm.group(1).strip()
+                docs.append(Document(page_content=sec[:2000], metadata=_m2b))
+        if docs:
+            return _finalize_docs(docs)
+
     # ── Mode 2.5: bullet/list page ────────────────────────────────────────────
     # Preserve newline structure for outcomes/checklists/release notes. Generic
     # word-splitting destroys list boundaries and makes retrieval unreliable.
@@ -613,6 +634,37 @@ def _smart_chunk_page(text: str, url: str, chunk_size: int = 400, chunk_step: in
                 return _finalize_docs(docs)
     except Exception:
         pass
+
+    # ── Mode 2c: paragraph-aware grouping (Change 5 + 6) ─────────────────────
+    # Group \n\n-separated paragraphs into chunks ≤1600 chars.
+    # Track current heading and prepend it to each chunk for context (Change 6).
+    _paras = [p.strip() for p in re.split(r'\n{2,}', raw_text) if p.strip() and len(p.strip()) > 40]
+    if len(_paras) >= 2:
+        buf: list[str] = []
+        buf_chars = 0
+        cur_heading = ""
+        for para in _paras:
+            if re.match(r'^#{1,3}\s+\S', para):
+                cur_heading = para.split('\n')[0].strip()
+            if buf and buf_chars + len(para) + 2 > 1600:
+                content = "\n\n".join(buf).strip()
+                if cur_heading and not content.startswith('#'):
+                    content = f"{cur_heading}\n\n{content}"
+                _m2c = dict(_base_meta)
+                _m2c["section_id"] = f"para_{len(docs)}"
+                docs.append(Document(page_content=content, metadata=_m2c))
+                buf, buf_chars = [], 0
+            buf.append(para)
+            buf_chars += len(para) + 2
+        if buf:
+            content = "\n\n".join(buf).strip()
+            if cur_heading and not content.startswith('#'):
+                content = f"{cur_heading}\n\n{content}"
+            _m2c = dict(_base_meta)
+            _m2c["section_id"] = f"para_{len(docs)}"
+            docs.append(Document(page_content=content, metadata=_m2c))
+        if docs:
+            return _finalize_docs(docs)
 
     # ── Mode 3: generic word-split (existing behaviour — unchanged) ───────────
     words = clean.split()

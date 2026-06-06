@@ -11034,6 +11034,10 @@ async def crawl_site(data: dict, request: Request):
                             if len(full_text) > 20:
                                 chunks.append(Document(page_content=full_text, metadata={"source": p["url"], "structural": True, "content_type": "site_navigation"}))
                             continue
+                        # Change 3: reject binary/garbage text before embedding
+                        _txt_sample = (p.get("text") or "")[:1000]
+                        if _txt_sample and (sum(1 for c in _txt_sample if ord(c) < 32 and c not in '\n\r\t') / len(_txt_sample)) > 0.15:
+                            continue
                         _page_meta = p.get("page_meta") or {}
                         chunks.extend(
                             _smart_chunk_page(p["text"], p["url"], chunk_size, chunk_step, page_meta=_page_meta)
@@ -11101,6 +11105,10 @@ async def crawl_site(data: dict, request: Request):
                             )
                             if r.status_code != 200:
                                 return None
+                        # Change 1: skip non-HTML responses (JS, images, binary, octet-stream)
+                        _ct = r.headers.get("content-type", "").lower()
+                        if "text/html" not in _ct and "application/xhtml" not in _ct:
+                            return None
                         html = r.text
                         # Extract JSON-LD structured data (server-rendered by Shopify/WooCommerce)
                         ld_parts = []
@@ -11134,6 +11142,11 @@ async def crawl_site(data: dict, request: Request):
                         # Strip scripts/styles and extract readable text
                         clean = re.sub(r'<script[^>]*>.*?</script>', ' ', html, flags=re.DOTALL | re.I)
                         clean = re.sub(r'<style[^>]*>.*?</style>', ' ', clean, flags=re.DOTALL | re.I)
+                        # Change 2: preserve h2/h3 as ## markers before full tag strip
+                        clean = re.sub(r'<h2[^>]*>', '\n## ', clean, flags=re.I)
+                        clean = re.sub(r'</h2>', '\n', clean, flags=re.I)
+                        clean = re.sub(r'<h3[^>]*>', '\n### ', clean, flags=re.I)
+                        clean = re.sub(r'</h3>', '\n', clean, flags=re.I)
                         clean = re.sub(r'<[^>]+>', ' ', clean)
                         clean = re.sub(r'\s+', ' ', clean).strip()
                         combined = f"{title_text}. {ld_text} {clean}".strip()

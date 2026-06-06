@@ -1077,10 +1077,13 @@ def _doc_matches_strict_scope(doc, q: str, title_phrase: str) -> bool:
                 phrase_hit = True
             elif tpl and (tpl in src or tpl in body):
                 phrase_hit = True
-            elif tks and (ch is not None or pt is not None):
-                # Token-only match permitted only when a chapter/part number also anchors the doc
+            elif tks:
                 hits = {t for t in tks if (t in src or t in body)}
-                if len(hits) >= 2:
+                # With a chapter/part anchor: 2 token hits sufficient.
+                # Without (e.g. "TTS modes in Give It a Voice?"): require ALL title tokens
+                # to hit so we don't false-positive on short/common tokens.
+                required = 2 if (ch is not None or pt is not None) else len(tks)
+                if len(hits) >= required:
                     phrase_hit = True
             elif title_slug and title_slug in body:
                 phrase_hit = True
