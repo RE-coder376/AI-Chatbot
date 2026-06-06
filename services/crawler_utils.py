@@ -55,6 +55,49 @@ def _canonical_source_url(url: str) -> str:
         return (url or "").strip()
 
 
+def _looks_generic_title(title: str) -> bool:
+    cand = _canonical_product_title(title or "").strip(" -:|")
+    if not cand:
+        return True
+    if len(cand) < 4:
+        return True
+    if "|" in cand:
+        return True
+    if re.search(r"(?i)\b(web scraper test sites|all rights reserved|privacy policy|terms of service|home\s*\|\s*[^|]+)$", cand):
+        return True
+    if re.fullmatch(r"[\W_]+", cand):
+        return True
+    words = re.findall(r"[A-Za-z0-9]+", cand)
+    if len(words) <= 1 and re.match(r"(?i)^(?:black|white|blue|grey|gray|silver|gold|red|green|pink|purple|yellow|orange|brown|beige|navy|teal|lavender|maroon|violet|golden|transparent|clear|unknown|default|variant|color|colour)$", cand):
+        return True
+    return False
+
+
+def _derive_page_title(title_hint: str, cleaned: str, product: dict | None = None) -> str:
+    candidates: list[str] = []
+    for cand in [title_hint or "", (product or {}).get("title") or "", (product or {}).get("canonical_title") or ""]:
+        cand = _canonical_product_title(str(cand or "")).strip(" -:|")
+        if cand and cand not in candidates:
+            candidates.append(cand)
+
+    body = cleaned or ""
+    for pat in (
+        r"(?m)^\s*(?:##|###)\s+(.+?)\s*$",
+        r"(?i)\b(?:name|title|product)\s*:\s*([^\n\.]{4,180})",
+        r"(?m)^(?!https?://)([A-Z][^\n]{4,120})$",
+    ):
+        for mm in re.finditer(pat, body):
+            cand = _canonical_product_title((mm.group(1) or "").strip())
+            if cand and cand not in candidates:
+                candidates.append(cand)
+                break
+
+    non_generic = [c for c in candidates if not _looks_generic_title(c)]
+    if non_generic:
+        candidates = non_generic + [c for c in candidates if c not in non_generic]
+    return candidates[0] if candidates else ""
+
+
 def _check_is_product_db(db, db_name: str = "") -> bool:
     """Return True if the DB collection looks like a product/catalog DB.
     Result cached per db_name so the sample query runs at most once per DB."""
@@ -356,6 +399,11 @@ def _page_classifier_confidence(
     if page_type == "category":
         conf = 0.65 if metrics["category_hits"] else 0.5
         return round(max(0.2, min(0.98, conf)), 2)
+    if page_type == "catalog":
+        conf = 0.68 if metrics["category_hits"] or metrics["prose_chars"] > 300 else 0.52
+        if metrics["sentence_count"] >= 3:
+            conf += 0.08
+        return round(max(0.2, min(0.98, conf)), 2)
     if page_type == "article":
         conf = 0.55
         if metrics["prose_chars"] > 300:
@@ -389,6 +437,8 @@ def _prepare_crawl_page(text: str, url: str, title_hint: str = "") -> tuple[str,
         "source_status": "live",
         "content_hash": content_hash,
     }
+    meta["page_title"] = _derive_page_title(title_hint, cleaned)
+    meta["catalog_listing"] = False
     if product_like:
         product = _extract_product_summary(cleaned, url, title_hint=title_hint)
         meta["product"] = product
@@ -398,18 +448,28 @@ def _prepare_crawl_page(text: str, url: str, title_hint: str = "") -> tuple[str,
         meta["extraction_mode"] = "structured_product" if meta["used_structured_fields"] else "body_text"
         if product.get("title") and (product.get("price_label") or product.get("description") or meta["used_structured_fields"]):
             meta["page_type"] = "product"
+            meta["page_title"] = _derive_page_title(title_hint, cleaned, product)
     elif meta["page_type"] in {"policy", "unknown", "category", "article"}:
         # Product/catalog pages often carry policy/footer boilerplate that can
         # overwhelm the classifier. If structured product signals are present,
         # promote them even when the URL path itself is generic.
         product = _extract_product_summary(cleaned, url, title_hint=title_hint)
-        if product.get("title") and (product.get("price_label") or product.get("description") or product.get("used_structured_fields")):
+        multiple_price_hits = len(_PROD_PRICE_CAPTURE_RE.findall(cleaned)) + len(_PRODUCT_PRICE_LINE_RE.findall(cleaned))
+        if product.get("title") and multiple_price_hits >= 2:
+            meta["catalog_listing"] = True
+            meta["catalog_item_count"] = multiple_price_hits
+            meta["page_type"] = "catalog"
+            meta["page_title"] = _derive_page_title(title_hint, cleaned, product)
+        elif product.get("title") and (product.get("price_label") or product.get("description") or product.get("used_structured_fields")):
             meta["product"] = product
             meta["page_type"] = "product"
             meta["contaminated"] = bool(product.get("contaminated"))
             meta["used_structured_fields"] = list(product.get("used_structured_fields") or [])
             meta["body_fallback_used"] = bool(product.get("body_fallback_used"))
             meta["extraction_mode"] = "structured_product" if meta["used_structured_fields"] else "body_text"
+            meta["page_title"] = _derive_page_title(title_hint, cleaned, product)
+        else:
+            meta["page_title"] = _derive_page_title(title_hint, cleaned)
     meta["quality_score"] = _quality_score(
         cleaned,
         page_type=meta["page_type"],
@@ -445,7 +505,7 @@ def _prepare_crawl_page(text: str, url: str, title_hint: str = "") -> tuple[str,
         retrieve_eligible = False
         meta["quality_score"] = min(float(meta.get("quality_score") or 0.0), 0.35)
         quarantine_reason = "weak_product_fallback"
-    elif meta["page_type"] in {"product", "unknown"} and float(meta.get("quality_score") or 0.0) < 0.5:
+    elif meta["page_type"] in {"product", "catalog", "unknown"} and float(meta.get("quality_score") or 0.0) < 0.5:
         # Article/faq/policy pages have no structured fields so their score
         # is capped at 0.4 by design â€” don't quarantine them on score alone.
         retrieve_eligible = False
@@ -580,6 +640,10 @@ def _smart_chunk_page(text: str, url: str, chunk_size: int = 400, chunk_step: in
                 sid = str(_m.get("section_id") or "").lower()
                 if sid.startswith("product_"):
                     _m["chunk_kind"] = "product"
+                elif sid.startswith("catalog_"):
+                    _m["chunk_kind"] = "catalog"
+                elif sid.startswith("category_"):
+                    _m["chunk_kind"] = "category"
                 elif sid.startswith("faq_"):
                     _m["chunk_kind"] = "faq"
                 elif sid.startswith("head_"):
@@ -611,6 +675,7 @@ def _smart_chunk_page(text: str, url: str, chunk_size: int = 400, chunk_step: in
         _prod_meta = dict(_base_meta)
         _prod_meta["product_title"] = product_meta["title"]
         _prod_meta["canonical_product_title"] = product_meta.get("canonical_title") or _canonical_product_title(product_meta["title"])
+        _prod_meta["page_title"] = product_meta.get("title") or _base_meta.get("page_title") or ""
         if product_meta.get("price_num") is not None:
             _prod_meta["price"] = product_meta["price_num"]
         if product_meta.get("availability"):
@@ -618,8 +683,86 @@ def _smart_chunk_page(text: str, url: str, chunk_size: int = 400, chunk_step: in
         _prod_meta["used_structured_fields"] = list(product_meta.get("used_structured_fields") or _base_meta.get("used_structured_fields") or [])
         _prod_meta["body_fallback_used"] = bool(product_meta.get("body_fallback_used"))
         _prod_meta.update(_extract_product_metadata(_prod_text))
+        _prod_meta["section_id"] = "product_0"
+        _prod_meta["chunk_kind"] = "product"
         docs.append(Document(page_content=_prod_text, metadata=_prod_meta))
         return _finalize_docs(_merge_variant_docs(docs))
+
+    # Mode 1b: catalog/listing page â€” split repeated product cards into per-item chunks.
+    if page_meta.get("catalog_listing") or len(_PROD_PRICE_RE.findall(clean)) >= 2:
+        products = []
+        for m in _PROD_SPLIT_RE.finditer(clean):
+            price_str = m.group(1).replace(',', '')
+            try:
+                price_num = float(price_str)
+            except Exception:
+                continue
+            raw = m.group(2).strip()
+            comma_idx = raw.find(',')
+            name = raw[:comma_idx].strip() if comma_idx > 0 else raw
+            specs = raw[comma_idx + 1:].strip() if comma_idx > 0 else ''
+            name = re.sub(r'^[^\s]+(?:\s+[^\s]+){0,3}\.{2,}\s+', '', name).strip()
+            name = re.sub(r'\s+reviews?\s*$', '', name, flags=re.I).strip()
+            if not name or len(name) < 3:
+                continue
+            products.append((price_num, f"${price_str}", name, specs))
+
+        if products:
+            for price_num, price_label, name, specs in products:
+                lines = [f"Product: {name}", f"Price: {price_label}"]
+                _attr_tags = []
+                if re.search(r'geforce|gtx|rtx|radeon\s+r[579x]|radeon\s+rx', specs, re.I):
+                    _attr_tags.append("gaming laptop dedicated GPU")
+                if re.search(r'\btouch\b', specs, re.I) or re.search(r'\btouch\b', name, re.I):
+                    _attr_tags.append("touchscreen display")
+                if re.search(r'2\s*in\s*1|360|yoga|spin\b', name, re.I):
+                    _attr_tags.append("convertible 2-in-1 laptop")
+                if re.search(r'\bssd\b', specs, re.I):
+                    _attr_tags.append("fast SSD storage")
+                if re.search(r'windows', specs, re.I):
+                    _attr_tags.append("Windows laptop")
+                if re.search(r'android', specs, re.I):
+                    _attr_tags.append("Android device")
+                if _attr_tags:
+                    lines.append("Features: " + ", ".join(_attr_tags))
+                for part in [s.strip() for s in specs.split(',')]:
+                    pl = part.lower()
+                    if re.search(r'geforce|nvidia|radeon|amd\s+r|gtx|rtx|mx\d', pl):
+                        lines.append(f"GPU: {part}")
+                    elif re.search(r'\d+\s*gb(?:\s+ram)?$|\bddr\b', pl):
+                        lines.append(f"RAM: {part}")
+                    elif re.search(r'\d+\s*(?:gb|tb)\s+(?:ssd|hdd|emmc)|\d+\s*tb\b', pl):
+                        lines.append(f"Storage: {part}")
+                    elif re.search(r'core\s+i\d|celeron|pentium|ryzen|athlon|snapdragon', pl):
+                        lines.append(f"Processor: {part}")
+                    elif re.search(r'windows|linux|dos|macos|android|chrome\s*os', pl):
+                        lines.append(f"OS: {part}")
+                    elif re.search(r'\d+\.?\d*\"\s*(?:hd|fhd|uhd|ips|touch)?|(?:hd|fhd|uhd|ips)\s+display', pl):
+                        lines.append(f"Display: {part}")
+                if specs:
+                    lines.append(f"Full specs: {name}, {specs}")
+                _card_text = "\n".join(lines).strip()
+                _card_meta = dict(_base_meta)
+                _card_meta["product_title"] = name
+                _card_meta["canonical_product_title"] = _canonical_product_title(name)
+                _card_meta["page_title"] = _base_meta.get("page_title") or name
+                _card_meta["price"] = price_num
+                _card_meta["section_id"] = f"catalog_{len(docs)}"
+                _card_meta["chunk_kind"] = "catalog"
+                _card_meta["catalog_listing"] = True
+                _card_meta.update(_extract_product_metadata(_card_text))
+                docs.append(Document(page_content=_card_text, metadata=_card_meta))
+            if docs:
+                return _finalize_docs(_merge_variant_docs(docs))
+
+        if len(clean.split()) > 80:
+            _cat_meta = dict(_base_meta)
+            _cat_meta["section_id"] = "category_0"
+            _cat_meta["chunk_kind"] = "category"
+            _cat_meta["catalog_listing"] = True
+            _cat_meta["page_title"] = _base_meta.get("page_title") or _derive_page_title(title_hint, clean)
+            docs.append(Document(page_content=clean[:5000], metadata=_cat_meta))
+            return _finalize_docs(docs)
 
     # â”€â”€ Mode 1: product page â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     if len(_PROD_PRICE_RE.findall(clean)) >= 1 and _PROD_SPEC_RE.search(clean):
