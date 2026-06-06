@@ -5608,12 +5608,18 @@ def _deterministic_extractive_quote_answer(q: str, kb_context: str) -> str | Non
             # Reject common noisy/generic instruction-like lines.
             if any(b in _el_l for b in ("generic knowledge", "translate", "translating", "think through", "naming conventions")):
                 explicit = None
+            # Reject title/heading lines that have no verb — they're labels, not answers.
+            elif not re.search(r"\b(is|are|was|were|can|will|would|should|has|have|controls?|means?|does|do|defined|used|allows?|enables?|sends?|fires?|runs?|decides?)\b", _el_l):
+                explicit = None
             else:
                 explicit = _el
         if explicit:
             # For learning-goals style questions, single-line quote is usually insufficient;
             # let the dedicated outcomes extractor/LLM answer instead.
             if _LEARNING_GOALS_Q_RE.search(ql):
+                return None
+            # For "what are the N X" list questions, single sentence is insufficient.
+            if re.search(r"\bwhat\s+are\s+the\s+\w+\b", ql):
                 return None
             return explicit
 
