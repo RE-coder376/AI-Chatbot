@@ -1088,19 +1088,21 @@ def _smart_chunk_page(text: str, url: str, chunk_size: int = 400, chunk_step: in
             for ln in _raw_lines:
                 if len(ln) > 500:
                     continue
-            if buf and (buf_chars + len(ln) + 1 > 2000):
-                _m3 = dict(_base_meta)
-                _m3["section_id"] = f"list_{len(docs)}"
-                _m3["chunk_kind"] = "list"
-                docs.append(Document(page_content="\n".join(buf).strip(), metadata=_m3))
-                buf, buf_chars = [], 0
-            buf.append(ln)
-            buf_chars += len(ln) + 1
-        if buf:
-            _m4 = dict(_base_meta)
-            _m4["section_id"] = f"list_{len(docs)}"
-            _m4["chunk_kind"] = "list"
-            docs.append(Document(page_content="\n".join(buf).strip(), metadata=_m4))
+                if not _bullet_re.match(ln):
+                    continue
+                if buf and (buf_chars + len(ln) + 1 > 2000):
+                    _m3 = dict(_base_meta)
+                    _m3["section_id"] = f"list_{len(docs)}"
+                    _m3["chunk_kind"] = "list"
+                    docs.append(Document(page_content="\n".join(buf).strip(), metadata=_m3))
+                    buf, buf_chars = [], 0
+                buf.append(ln)
+                buf_chars += len(ln) + 1
+            if buf:
+                _m4 = dict(_base_meta)
+                _m4["section_id"] = f"list_{len(docs)}"
+                _m4["chunk_kind"] = "list"
+                docs.append(Document(page_content="\n".join(buf).strip(), metadata=_m4))
             if docs:
                 return _finalize_docs(docs)
     except Exception:
