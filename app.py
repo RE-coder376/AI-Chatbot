@@ -11599,17 +11599,24 @@ async def crawl_site(data: dict, request: Request):
                                         text = " ".join(p for p in [title, meta_desc, sidebar_raw[:1200]] if p).strip()
                                     if len(text) < 200:
                                         text = f"{title}. {meta_desc}. {text}".strip()
-                                    _ocr_start_msg = f"[{worker_label}] [ocr-start] {cur_url[:70]}"
-                                    logger.info(f"[CRAWL] {_ocr_start_msg}")
-                                    await log_queue.put(_ocr_start_msg)
-                                    ocr_text = await _ocr_page_images(pg, worker_label, cur_url)
-                                    if ocr_text:
-                                        text = f"{text} {ocr_text}".strip()
-                                        _ocr_done_msg = f"[{worker_label}] [ocr-done] appended OCR text for {cur_url[:70]}"
+                                    _page_type_for_ocr = str((page_meta or {}).get("page_type") or "").lower()
+                                    _ocr_allowed = _page_type_for_ocr in {"product", "catalog", "unknown"} and len(text) < 1200
+                                    if _ocr_allowed:
+                                        _ocr_start_msg = f"[{worker_label}] [ocr-start] {cur_url[:70]}"
+                                        logger.info(f"[CRAWL] {_ocr_start_msg}")
+                                        await log_queue.put(_ocr_start_msg)
+                                        ocr_text = await _ocr_page_images(pg, worker_label, cur_url)
+                                        if ocr_text:
+                                            text = f"{text} {ocr_text}".strip()
+                                            _ocr_done_msg = f"[{worker_label}] [ocr-done] appended OCR text for {cur_url[:70]}"
+                                        else:
+                                            _ocr_done_msg = f"[{worker_label}] [ocr-done] no OCR text added for {cur_url[:70]}"
+                                        logger.info(f"[CRAWL] {_ocr_done_msg}")
+                                        await log_queue.put(_ocr_done_msg)
                                     else:
-                                        _ocr_done_msg = f"[{worker_label}] [ocr-done] no OCR text added for {cur_url[:70]}"
-                                    logger.info(f"[CRAWL] {_ocr_done_msg}")
-                                    await log_queue.put(_ocr_done_msg)
+                                        _ocr_skip_msg = f"[{worker_label}] [ocr-skip] {cur_url[:70]} ({_page_type_for_ocr or 'unknown'})"
+                                        logger.info(f"[CRAWL] {_ocr_skip_msg}")
+                                        await log_queue.put(_ocr_skip_msg)
                                     text, page_meta = _prepare_crawl_page(text or "", cur_url, title_hint=title)
                                     page_meta = dict(page_meta or {})
                                     page_meta["source_canonical"] = _canonical_source_url(cur_url)
@@ -11699,7 +11706,7 @@ async def crawl_site(data: dict, request: Request):
                                         })
                         except Exception as e:
                             logger.warning(f"[CRAWL] [{worker_label}] [playwright-skip] {cur_url[:70]}: {type(e).__name__}: {e}")
-                            await log_queue.put(f"[{completed}/{len(to_crawl)}] ⏭️  {cur_url[:70]} (fallback timeout/fail)")
+                            await log_queue.put(f"[{completed}/{len(to_crawl)}] ⏭️  {cur_url[:70]} (fallback timeout/fail: {type(e).__name__})")
                     completed += 1
 
                     import hashlib as _hashlib
