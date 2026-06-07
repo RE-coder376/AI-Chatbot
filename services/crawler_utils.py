@@ -117,7 +117,7 @@ def _check_is_product_db(db, db_name: str = "") -> bool:
                 if m.get("price") is not None or m.get("ram_gb") is not None or m.get("gpu_vram_gb") is not None:
                     result = True
                     break
-                if "/products/" in source or "/collections/" in source:
+                if re.search(r"/(?:products?|items?)(?:/|$|#)", source) or "/collections/" in source:
                     result = True
                     break
                 tl = text.lower()

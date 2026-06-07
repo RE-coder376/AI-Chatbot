@@ -276,7 +276,7 @@ def _looks_structural_page(url: str, text: str) -> bool:
 def _looks_like_product_page(url: str, text: str) -> bool:
     source = (url or "").lower()
     body = text or ""
-    if "/products/" in source or re.search(r"(?i)\b@type\b.*\bproduct\b", body):
+    if re.search(r"/(?:products?|items?)(?:/|$|#)", source) or re.search(r"(?i)\b@type\b.*\bproduct\b", body):
         return True
     if _PRODUCT_PRICE_CAPTURE_RE.search(body) and re.search(r"(?i)\b(add to cart|sku|availability|brand|product|variant)\b", body):
         return True

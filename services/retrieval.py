@@ -2100,7 +2100,7 @@ async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansio
                 body = str(doc_text)
                 bl = body.lower()
                 src = str((meta or {}).get("source") or "").lower()
-                if "/products/" not in src and not ("add to cart" in bl or "shopping cart" in bl):
+                if not re.search(r"/(?:products?|items?)(?:/|$|#)", src) and not ("add to cart" in bl or "shopping cart" in bl):
                     continue
                 prices = []
                 for raw_price in re.findall(r"Rs\.?\s*([\d,]+(?:\.\d{1,2})?)", body, re.I):
@@ -2651,7 +2651,7 @@ async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansio
             _other_docs = []
             for _r in top:
                 _src = str((getattr(_r, "metadata", None) or {}).get("source") or "").lower()
-                if ("/products/" in _src) or ("/collections/" in _src):
+                if re.search(r"/(?:products?|items?)(?:/|$|#)", _src) or ("/collections/" in _src):
                     _catalog_docs.append(_r)
                 elif any(x in _src for x in ("/pages/", "/blogs/", "/about", "/contact")):
                     _other_docs.append(_r)
@@ -2704,7 +2704,7 @@ async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansio
     # Previously only fired for price/size queries — extended to ALL product queries so
     # name-only lookups like "Pop Up Animals Toy" also land on the exact product page.
     _has_productish_sources = any(
-        "/products/" in str(((getattr(r, "metadata", None) or {}).get("source")) or "").lower()
+        re.search(r"/(?:products?|items?)(?:/|$|#)", str(((getattr(r, "metadata", None) or {}).get("source")) or "").lower())
         for r in top[:20]
     )
     if _has_productish_sources:
