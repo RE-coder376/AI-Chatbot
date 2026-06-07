@@ -288,6 +288,7 @@ def _looks_like_catalog_page(url: str, text: str) -> bool:
     source = (url or "").lower()
     body = text or ""
     # If this is already a product detail page, do not downgrade it to a catalog/listing page.
+    # This guard exists so detail pages like /product/104 stay product-shaped end to end.
     if _looks_like_product_page(source, body):
         return False
     if re.search(r"(?i)(?:/|#)(?:catalog|category|categories|collection|collections|shop|store|listing|browse|products)(?:/|$|#)", source):
