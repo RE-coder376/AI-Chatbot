@@ -1252,6 +1252,35 @@ def _source_section_key(doc) -> str:
         return ""
 
 
+def _doc_price_value(doc):
+    """Best-effort numeric price for product ranking."""
+    try:
+        meta = (getattr(doc, "metadata", None) or {})
+        price = meta.get("price")
+        if isinstance(price, (int, float)):
+            return float(price)
+        if price is not None:
+            try:
+                return float(str(price).replace(",", "").strip())
+            except Exception:
+                pass
+        body = str(getattr(doc, "page_content", "") or "")
+        m = re.search(r"(?:\$|rs\.?|pkr)\s*([\d,]+(?:\.\d{1,2})?)", body, re.I)
+        if m:
+            return float(m.group(1).replace(",", ""))
+    except Exception:
+        pass
+    return None
+
+
+def _is_price_ranking_query(q: str) -> tuple[bool, bool]:
+    """Return (is_price_ranking, descending)."""
+    ql = (q or "").lower()
+    asc = bool(re.search(r"\b(cheapest|lowest\s+price|lowest\s+priced|least\s+expensive|most\s+affordable|budget)\b", ql))
+    desc = bool(re.search(r"\b(most\s+expensive|highest\s+price|highest\s+priced|priciest|costliest|most\s+costly)\b", ql))
+    return (asc or desc, desc)
+
+
 def _heuristic_rerank_score(doc, q: str, title_phrase: str) -> float:
     try:
         meta = (getattr(doc, 'metadata', None) or {})
@@ -2697,6 +2726,18 @@ async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansio
                 _dedup_seen.add(_pk)
                 _deduped.append(r)
         top = _deduped
+        _is_price_rank_q, _price_desc = _is_price_ranking_query(q or "")
+        if _is_price_rank_q:
+            _priced, _unpriced = [], []
+            for r in top:
+                _pv = _doc_price_value(r)
+                if _pv is None:
+                    _unpriced.append(r)
+                else:
+                    _priced.append((_pv, r))
+            if _priced:
+                _priced.sort(key=lambda t: t[0], reverse=_price_desc)
+                top = [r for _, r in _priced[:40]] + _unpriced[:6]
         # For "best gaming / highest VRAM" queries: sort by GPU VRAM descending in Python
         if re.search(r'\bbest\b.*\bgaming\b|\bhighest\b.*\b(?:gpu|vram)\b|\bmost\s+powerful\b', q, re.I):
             top.sort(key=lambda r: r.metadata.get('gpu_vram_gb', 0) if r.metadata else 0, reverse=True)
@@ -2707,7 +2748,7 @@ async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansio
         re.search(r"/(?:products?|items?)(?:/|$|#)", str(((getattr(r, "metadata", None) or {}).get("source")) or "").lower())
         for r in top[:20]
     )
-    if _has_productish_sources:
+    if _has_productish_sources and not _is_price_ranking_query(q or "")[0]:
         top.sort(key=lambda r: _product_query_rerank_score(q, r), reverse=True)
 
     # Language-aware source preference:

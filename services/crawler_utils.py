@@ -211,11 +211,37 @@ def _extract_product_summary(text: str, url: str, title_hint: str = "") -> dict:
         if label:
             used_structured_fields.append(label)
 
+    def _title_from_body_line(line: str) -> str:
+        raw = re.sub(r"\s+", " ", (line or "")).strip(" -:|")
+        if not raw:
+            return ""
+        raw = re.sub(r'(?i)^(?:product|name|title|model)\s*:\s*', "", raw).strip(" -:|")
+        # Strip leading price labels and keep the trailing model name.
+        raw = re.sub(r'(?i)^(?:\$|rs\.?|pkr)\s*[\d,]+(?:\.\d{1,2})?\s+', "", raw).strip(" -:|")
+        # Trim obvious spec / boilerplate suffixes.
+        raw = re.split(
+            r'(?i)\s+(?:hdd:|ssd:|ram:|processor:|display:|os:|availability:|reviews?|'
+            r'add to cart|wishlist|toggle navigation|cloud scraper|pricing|marketplace|'
+            r'learn documentation|video tutorials|test sites|forum|contact us|copyright|description:)\b',
+            raw,
+        )[0].strip(" -:|")
+        raw = raw.split(",")[0].strip(" -:|")
+        # On long mixed lines, prefer the longest capitalized product-like span.
+        spans = re.findall(
+            r'([A-Z][A-Za-z0-9&\'"()\-]+(?:\s+[A-Z0-9][A-Za-z0-9&\'"()\-]+){1,8})',
+            raw,
+        )
+        spans = [s.strip(" -:|") for s in spans if s and len(s.strip()) <= 90]
+        spans = [s for s in spans if not _is_generic_title(s)]
+        if spans:
+            return max(spans, key=_score_title)
+        return _canonicalize_title(raw).strip(" -:|")
+
     # Prefer a body-derived title when the page title is generic or boilerplate.
     body_lines = [re.sub(r"\s+", " ", ln).strip(" -:|") for ln in re.split(r"[\r\n]+", body) if len(ln.strip()) >= 4]
-    for ln in body_lines[:60]:
-        cand = _canonicalize_title(ln)
-        if not cand or len(cand) > 140:
+    for ln in body_lines[:180]:
+        cand = _title_from_body_line(ln)
+        if not cand or len(cand) > 120:
             continue
         if _is_generic_title(cand):
             continue
@@ -255,6 +281,13 @@ def _extract_product_summary(text: str, url: str, title_hint: str = "") -> dict:
                 if re.search(r'(?i)\b(?:price|availability|add to cart|wishlist|reviews?)\b', cand):
                     continue
                 if re.search(r'(?i)\b(?:rs\.?|pkr|\$)\s*[\d,]+', cand):
+                    continue
+                body_candidates.append(cand)
+            for ln in body_lines[:220]:
+                cand = _title_from_body_line(ln)
+                if not cand or len(cand) > 120:
+                    continue
+                if _is_generic_title(cand):
                     continue
                 body_candidates.append(cand)
             for cand in body_candidates:
