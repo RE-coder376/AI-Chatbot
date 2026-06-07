@@ -75,11 +75,6 @@ def _looks_generic_title(title: str) -> bool:
 
 def _derive_page_title(title_hint: str, cleaned: str, product: dict | None = None) -> str:
     candidates: list[str] = []
-    for cand in [title_hint or "", (product or {}).get("title") or "", (product or {}).get("canonical_title") or ""]:
-        cand = _canonical_product_title(str(cand or "")).strip(" -:|")
-        if cand and cand not in candidates:
-            candidates.append(cand)
-
     body = cleaned or ""
     for pat in (
         r"(?m)^\s*(?:##|###)\s+(.+?)\s*$",
@@ -91,6 +86,11 @@ def _derive_page_title(title_hint: str, cleaned: str, product: dict | None = Non
             if cand and cand not in candidates:
                 candidates.append(cand)
                 break
+
+    for cand in [title_hint or "", (product or {}).get("title") or "", (product or {}).get("canonical_title") or ""]:
+        cand = _canonical_product_title(str(cand or "")).strip(" -:|")
+        if cand and cand not in candidates:
+            candidates.append(cand)
 
     non_generic = [c for c in candidates if not _looks_generic_title(c)]
     if non_generic:
@@ -209,6 +209,21 @@ def _extract_product_summary(text: str, url: str, title_hint: str = "") -> dict:
             title_candidates.append(cand)
         if label:
             used_structured_fields.append(label)
+
+    # Prefer a body-derived title when the page title is generic or boilerplate.
+    body_lines = [re.sub(r"\s+", " ", ln).strip(" -:|") for ln in re.split(r"[\r\n]+", body) if len(ln.strip()) >= 4]
+    for ln in body_lines[:60]:
+        cand = _canonicalize_title(ln)
+        if not cand or len(cand) > 140:
+            continue
+        if _is_generic_title(cand):
+            continue
+        if re.search(r'(?i)\b(?:add to cart|wishlist|reviews?|toggle navigation|cloud scraper|pricing|marketplace|learn documentation|video tutorials|test sites|forum|privacy policy|terms of service|all rights reserved)\b', cand):
+            continue
+        if re.search(r'(?i)^\s*(?:rs\.?|pkr|\$)\s*[\d,]+', cand):
+            continue
+        _push_title(cand, "body_title")
+        break
 
     title_match = re.search(r'(?i)\bname:\s*([^\n\.]{4,180})', body)
     if title_match:
