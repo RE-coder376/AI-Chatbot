@@ -10707,7 +10707,10 @@ async def crawl_site(data: dict, request: Request):
             max_pages_eff = max_pages
             from playwright.async_api import async_playwright
             from playwright_stealth import Stealth as _Stealth
-            async def stealth(pg): await _Stealth().apply_stealth_async(pg)
+            async def stealth(pg):
+                _stealth_result = _Stealth().apply_stealth_async(pg)
+                if inspect.isawaitable(_stealth_result):
+                    await _stealth_result
             yield _send("🔧 Playwright loaded — launching browser...")
             parsed     = urllib.parse.urlparse(url)
             base       = f"{parsed.scheme}://{parsed.netloc}"
