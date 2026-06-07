@@ -11608,8 +11608,17 @@ async def crawl_site(data: dict, request: Request):
                                         text = " ".join(p for p in [title, meta_desc, sidebar_raw[:1200]] if p).strip()
                                     if len(text) < 200:
                                         text = f"{title}. {meta_desc}. {text}".strip()
-                                    _page_type_for_ocr = str((page_meta or {}).get("page_type") or "").lower()
-                                    _ocr_allowed = _page_type_for_ocr in {"product", "catalog", "unknown"} and len(text) < 1200
+                                    _url_l = cur_url.lower()
+                                    _docs_like = (
+                                        "/docs/" in _url_l
+                                        or "/guide" in _url_l
+                                        or "/roman/" in _url_l
+                                        or "/arabic/" in _url_l
+                                        or "/chinese/" in _url_l
+                                        or "/spanish/" in _url_l
+                                        or "/hindi/" in _url_l
+                                    )
+                                    _ocr_allowed = (not _docs_like) and len(text) < 1200
                                     if _ocr_allowed:
                                         _ocr_start_msg = f"[{worker_label}] [ocr-start] {cur_url[:70]}"
                                         logger.info(f"[CRAWL] {_ocr_start_msg}")
@@ -11623,7 +11632,7 @@ async def crawl_site(data: dict, request: Request):
                                         logger.info(f"[CRAWL] {_ocr_done_msg}")
                                         await log_queue.put(_ocr_done_msg)
                                     else:
-                                        _ocr_skip_msg = f"[{worker_label}] [ocr-skip] {cur_url[:70]} ({_page_type_for_ocr or 'unknown'})"
+                                        _ocr_skip_msg = f"[{worker_label}] [ocr-skip] {cur_url[:70]} ({'docs-like' if _docs_like else 'non-docs'})"
                                         logger.info(f"[CRAWL] {_ocr_skip_msg}")
                                         await log_queue.put(_ocr_skip_msg)
                                     text, page_meta = _prepare_crawl_page(text or "", cur_url, title_hint=title)
@@ -11636,7 +11645,7 @@ async def crawl_site(data: dict, request: Request):
                                     return text, title, page_meta, sidebar_raw
                                 except Exception as e:
                                     if attempt < _max_attempts - 1:
-                                        _pw_retry_msg = f"[{worker_label}] [playwright-retry] {attempt + 1}/{_max_attempts} failed for {cur_url[:70]}: {type(e).__name__}"
+                                        _pw_retry_msg = f"[{worker_label}] [playwright-retry] {attempt + 1}/{_max_attempts} failed for {cur_url[:70]}: {type(e).__name__}: {e}"
                                         logger.warning(f"[CRAWL] {_pw_retry_msg}")
                                         await log_queue.put(_pw_retry_msg)
                                         await asyncio.sleep(1 * (attempt + 1))
