@@ -216,9 +216,30 @@ def _extract_product_summary(text: str, url: str, title_hint: str = "") -> dict:
         if not raw:
             return ""
         raw = re.sub(r'(?i)^(?:product|name|title|model)\s*:\s*', "", raw).strip(" -:|")
-        # Strip leading price labels and keep the trailing model name.
-        raw = re.sub(r'(?i)^(?:\$|rs\.?|pkr)\s*[\d,]+(?:\.\d{1,2})?\s+', "", raw).strip(" -:|")
-        # Trim obvious spec / boilerplate suffixes.
+        def _dedupe_repeated_phrase(text: str) -> str:
+            toks = [t for t in re.split(r"\s+", (text or "").strip()) if t]
+            if len(toks) >= 4 and len(toks) % 2 == 0:
+                half = len(toks) // 2
+                if toks[:half] == toks[half:]:
+                    return " ".join(toks[:half]).strip(" -:|")
+            return (text or "").strip(" -:|")
+
+        # Prefer the model-like phrase immediately after a price marker.
+        for pm in re.finditer(r'(?i)(?:\$|rs\.?|pkr)\s*[\d,]+(?:\.\d{1,2})?\s+(.{4,120})', raw):
+            tail = pm.group(1).strip(" -:|")
+            tail = re.split(
+                r'(?i)\s+(?:hdd:|ssd:|ram:|processor:|display:|os:|availability:|reviews?|'
+                r'add to cart|wishlist|toggle navigation|cloud scraper|pricing|marketplace|'
+                r'learn documentation|video tutorials|test sites|forum|contact us|copyright|description:)\b',
+                tail,
+            )[0].strip(" -:|")
+            tail = tail.split(",")[0].strip(" -:|")
+            tail = _dedupe_repeated_phrase(tail)
+            cand = _canonicalize_title(tail)
+            if cand and not _is_generic_title(cand):
+                return cand
+
+        # Strip obvious spec / boilerplate suffixes from generic lines.
         raw = re.split(
             r'(?i)\s+(?:hdd:|ssd:|ram:|processor:|display:|os:|availability:|reviews?|'
             r'add to cart|wishlist|toggle navigation|cloud scraper|pricing|marketplace|'

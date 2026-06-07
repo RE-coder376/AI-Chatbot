@@ -5386,6 +5386,11 @@ def _deterministic_product_catalog_answer(q: str, kb_context: str, max_items: in
         if not q or not kb_context:
             return None
         ql = q.lower()
+        rank_mode = None
+        if re.search(r"\b(cheapest|lowest\s+price|lowest\s+priced|least\s+expensive|most\s+affordable|budget)\b", ql, re.I):
+            rank_mode = "asc"
+        elif re.search(r"\b(most\s+expensive|highest\s+price|highest\s+priced|priciest|costliest|most\s+costly)\b", ql, re.I):
+            rank_mode = "desc"
         if not re.search(
             r"\b(show|list|which|what|price|prices|cost|available|availability|stock|under|below|sell|products?|toys?|pens?|notebooks?|cars?)\b",
             ql,
@@ -5404,8 +5409,11 @@ def _deterministic_product_catalog_answer(q: str, kb_context: str, max_items: in
             "stock", "under", "below", "sell", "products", "product", "toys", "have", "with",
             "best", "top", "affordable", "currently", "school", "baby", "kids"
         }
+        rank_stop = stop | {"cheapest", "lowest", "least", "expensive", "highest", "priced", "priciest", "costliest", "most", "among", "listed", "laptops", "laptop"}
         _prod_phrase = _extract_product_name_phrase(q or "")
-        anchors = [w for w in re.findall(r"[a-zA-Z]{2,}", (_prod_phrase or ql)) if w not in stop][:10]
+        anchors = [w for w in re.findall(r"[a-zA-Z]{2,}", (_prod_phrase or ql)) if w not in (rank_stop if rank_mode else stop)][:10]
+        exact_phrase = re.sub(r"\s{2,}", " ", (_prod_phrase or "").strip(" -:|")).lower()
+        exact_tokens = [w for w in re.findall(r"[a-zA-Z0-9]{3,}", exact_phrase) if w not in stop]
         docs = [d.strip() for d in re.split(r"\n\s*\n", kb_context or "") if d.strip()]
         candidates = []
         nav_bad = ("about us", "faq", "contact us", "privacy policy", "terms and conditions", "return & exchange")
@@ -5436,7 +5444,16 @@ def _deterministic_product_catalog_answer(q: str, kb_context: str, max_items: in
             title_l = title.lower()
             anchor_hits = 0
             exact_anchor_hit = False
-            if anchors:
+            if rank_mode:
+                # Ranking queries should not be forced through title anchors; we rank by price.
+                pass
+            elif exact_phrase:
+                title_norm = re.sub(r"[^a-z0-9]+", " ", title_l).strip()
+                phrase_norm = re.sub(r"[^a-z0-9]+", " ", exact_phrase).strip()
+                if phrase_norm and phrase_norm not in title_norm:
+                    # Exact-name queries must not silently drift to sibling products.
+                    continue
+            elif anchors:
                 for a in anchors:
                     variants = {a}
                     if a.endswith("s") and len(a) > 3:
@@ -5448,7 +5465,7 @@ def _deterministic_product_catalog_answer(q: str, kb_context: str, max_items: in
                             anchor_hits += 1
                             exact_anchor_hit = True
                             break
-                if anchor_hits <= 0 and max_price is None:
+                if anchor_hits <= 0 and max_price is None and not rank_mode:
                     continue
             prices = []
             for raw in re.findall(r"Rs\.?\s*([\d,]+(?:\.\d{1,2})?)", doc, re.I):
@@ -5470,7 +5487,10 @@ def _deterministic_product_catalog_answer(q: str, kb_context: str, max_items: in
             if desc:
                 note = re.sub(r"\s+", " ", desc.group(1)).strip()
             score = 0.0
-            if anchors:
+            if rank_mode:
+                # Lower prices win for "cheapest", higher prices win for "most expensive".
+                score += (100000.0 - price) if rank_mode == "asc" else price
+            elif anchors:
                 score += anchor_hits * 5.0
                 if exact_anchor_hit:
                     score += 4.0
@@ -5486,7 +5506,10 @@ def _deterministic_product_catalog_answer(q: str, kb_context: str, max_items: in
             candidates.append((score, title, price, availability, note))
         if not candidates:
             return None
-        candidates.sort(key=lambda x: (x[0], -x[2]), reverse=True)
+        if rank_mode:
+            candidates.sort(key=lambda x: x[2], reverse=(rank_mode == "desc"))
+        else:
+            candidates.sort(key=lambda x: (x[0], -x[2]), reverse=True)
         items = candidates[:max_items]
         lines = ["Here are matching products from the catalog:"]
         for idx, (_, title, price, availability, note) in enumerate(items, 1):
