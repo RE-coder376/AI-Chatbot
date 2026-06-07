@@ -199,17 +199,29 @@ def _extract_product_summary(text: str, url: str, title_hint: str = "") -> dict:
             return True
         return False
 
+    def _dedupe_repeated_phrase(text: str) -> str:
+        toks = [t for t in re.split(r"\s+", (text or "").strip()) if t]
+        if len(toks) >= 4 and len(toks) % 2 == 0:
+            half = len(toks) // 2
+            if toks[:half] == toks[half:]:
+                return " ".join(toks[:half]).strip(" -:|")
+        return (text or "").strip(" -:|")
+
     def _score_title(candidate: str) -> tuple[int, int, int]:
         cand = _canonicalize_title(candidate)
         if not cand:
-            return (0, 0, -10)
+            return (0, 0, 0, -10)
         words = re.findall(r"[A-Za-z0-9]+", cand)
+        generic = 1 if _is_generic_title(cand) else 0
+        has_modelish_token = 1 if re.search(r"(?:\d|[A-Z]{2,}\d|\d+[A-Za-z][A-Za-z0-9\-]*)", cand) else 0
         penalty = 0
-        if _is_generic_title(cand):
+        if generic:
             penalty += 3
         if len(words) < 2:
             penalty += 1
-        return (len(words), len(cand), -penalty)
+        # Prefer non-generic product names first; among those, prefer titles
+        # with model-like tokens and then the richer titles.
+        return (1 - generic, has_modelish_token, len(words), len(cand), -penalty)
 
     title_candidates: list[str] = []
 
@@ -227,14 +239,6 @@ def _extract_product_summary(text: str, url: str, title_hint: str = "") -> dict:
         if not raw:
             return ""
         raw = re.sub(r'(?i)^(?:product|name|title|model)\s*:\s*', "", raw).strip(" -:|")
-        def _dedupe_repeated_phrase(text: str) -> str:
-            toks = [t for t in re.split(r"\s+", (text or "").strip()) if t]
-            if len(toks) >= 4 and len(toks) % 2 == 0:
-                half = len(toks) // 2
-                if toks[:half] == toks[half:]:
-                    return " ".join(toks[:half]).strip(" -:|")
-            return (text or "").strip(" -:|")
-
         # Prefer the model-like phrase immediately after a price marker.
         for pm in re.finditer(r'(?i)(?:\$|rs\.?|pkr)\s*[\d,]+(?:\.\d{1,2})?\s+(.{4,120})', raw):
             tail = pm.group(1).strip(" -:|")
@@ -246,13 +250,17 @@ def _extract_product_summary(text: str, url: str, title_hint: str = "") -> dict:
             )[0].strip(" -:|")
             tail = tail.split(",")[0].strip(" -:|")
             tail = _dedupe_repeated_phrase(tail)
+            tail_candidates = []
+            if tail:
+                tail_candidates.append(_canonicalize_title(tail))
             tail_spans = re.findall(
                 r'([A-Z][A-Za-z0-9&\'"()\-]+(?:\s+[A-Z0-9][A-Za-z0-9&\'"()\-]+){1,8})',
                 tail,
             )
-            tail_spans = [s.strip(" -:|") for s in tail_spans if s and len(s.strip()) <= 90]
-            tail_spans = [s for s in tail_spans if not _is_generic_title(s)]
-            cand = max(tail_spans, key=_score_title) if tail_spans else _canonicalize_title(tail)
+            tail_candidates.extend(s.strip(" -:|") for s in tail_spans if s and len(s.strip()) <= 90)
+            tail_candidates = [s for s in tail_candidates if s and len(s) <= 120]
+            tail_candidates = [s for s in tail_candidates if not _is_generic_title(s)]
+            cand = max(tail_candidates, key=_score_title) if tail_candidates else _canonicalize_title(tail)
             if cand and not _is_generic_title(cand):
                 return cand
 
@@ -275,7 +283,41 @@ def _extract_product_summary(text: str, url: str, title_hint: str = "") -> dict:
             return max(spans, key=_score_title)
         return _canonicalize_title(raw).strip(" -:|")
 
+    def _price_tail_title(text: str) -> str:
+        raw = re.sub(r"\s+", " ", (text or "")).strip(" -:|")
+        if not raw:
+            return ""
+        raw = re.sub(r'(?i)^(?:product|name|title|model)\s*:\s*', "", raw).strip(" -:|")
+        for pm in re.finditer(r'(?i)(?:\$|rs\.?|pkr)\s*[\d,]+(?:\.\d{1,2})?\s+(.{4,120})', raw):
+            tail = pm.group(1).strip(" -:|")
+            tail = re.split(
+                r'(?i)\s+(?:hdd:|ssd:|ram:|processor:|display:|os:|availability:|reviews?|'
+                r'add to cart|wishlist|toggle navigation|cloud scraper|pricing|marketplace|'
+                r'learn documentation|video tutorials|test sites|forum|contact us|copyright|description:)\b',
+                tail,
+            )[0].strip(" -:|")
+            tail = tail.split(",")[0].strip(" -:|")
+            tail = _dedupe_repeated_phrase(tail)
+            tail_candidates = []
+            if tail:
+                tail_candidates.append(_canonicalize_title(tail))
+            tail_spans = re.findall(
+                r'([A-Z][A-Za-z0-9&\'"()\-]+(?:\s+[A-Z0-9][A-Za-z0-9&\'"()\-]+){1,8})',
+                tail,
+            )
+            tail_candidates.extend(s.strip(" -:|") for s in tail_spans if s and len(s.strip()) <= 90)
+            tail_candidates = [s for s in tail_candidates if s and len(s) <= 120]
+            tail_candidates = [s for s in tail_candidates if not _is_generic_title(s)]
+            if tail_candidates:
+                cand = max(tail_candidates, key=_score_title)
+                if cand and not _is_generic_title(cand):
+                    return cand
+        return ""
+
     # Prefer a body-derived title when the page title is generic or boilerplate.
+    price_title = _price_tail_title(body)
+    if price_title:
+        _push_title(price_title, "price_title")
     body_lines = [re.sub(r"\s+", " ", ln).strip(" -:|") for ln in re.split(r"[\r\n]+", body) if len(ln.strip()) >= 4]
     for ln in body_lines[:180]:
         cand = _title_from_body_line(ln)
@@ -337,6 +379,8 @@ def _extract_product_summary(text: str, url: str, title_hint: str = "") -> dict:
                 title = max(title_candidates, key=_score_title)
     else:
         title = ""
+    if price_title and not _is_generic_title(price_title):
+        title = price_title
 
     price_label = ""
     price_num = None
