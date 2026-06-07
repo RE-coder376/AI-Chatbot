@@ -379,6 +379,8 @@ def _extract_product_summary(text: str, url: str, title_hint: str = "") -> dict:
                 title = max(title_candidates, key=_score_title)
     else:
         title = ""
+    # On storefront pages, a valid price-tail title is the strongest signal and
+    # should win over generic site chrome or breadcrumb noise.
     if price_title and not _is_generic_title(price_title):
         title = price_title
 
