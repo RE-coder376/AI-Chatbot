@@ -2670,6 +2670,7 @@ async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansio
     # Universal behavior for ecommerce-like DBs.
     if (_has_product_meta or _is_product_db) and top:
         _q_l = (q or "").lower()
+        _is_price_rank_q, _price_desc = _is_price_ranking_query(q or "")
         _product_intent = bool(re.search(
             r"\b(price|cost|how much|buy|available|availability|in stock|stock|show|list|best|top|affordable|under\s+\d+|pen|pencil|notebook|book|stroller|diaper|product|products)\b",
             _q_l,
@@ -2761,7 +2762,6 @@ async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansio
                 _dedup_seen.add(_pk)
                 _deduped.append(r)
         top = _deduped
-        _is_price_rank_q, _price_desc = _is_price_ranking_query(q or "")
         if _is_price_rank_q:
             _priced, _unpriced = [], []
             for r in top:
