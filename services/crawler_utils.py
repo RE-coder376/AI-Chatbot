@@ -56,6 +56,17 @@ def _canonical_source_url(url: str) -> str:
         return (url or "").strip()
 
 
+def _looks_like_docs_page(url: str, body: str = "") -> bool:
+    """Heuristic for docs/tutorial/chapter pages that should not be forced into product shaping."""
+    u = (url or "").lower()
+    if any(seg in u for seg in ("/docs/", "/guide/", "/tutorial", "/chapter-", "/lesson-", "/lessons/")):
+        return True
+    if any(seg in u for seg in ("/roman/", "/arabic/", "/spanish/", "/hindi/", "/chinese/")):
+        return True
+    b = (body or "").lower()
+    return bool(re.search(r"(?i)\b(?:learning outcomes|learning goals|by completing|by the end of|chapter|lesson|exercise|quiz)\b", b))
+
+
 def _looks_generic_title(title: str) -> bool:
     cand = _canonical_product_title(title or "").strip(" -:|")
     if not cand:
@@ -551,8 +562,9 @@ def _page_classifier_confidence(
 
 def _prepare_crawl_page(text: str, url: str, title_hint: str = "") -> tuple[str, dict]:
     raw = _clean_text(text or "")
-    catalog_like = _looks_like_catalog_page(url, raw)
-    product_like = False if catalog_like else _looks_like_product_page(url, raw)
+    docs_like = _looks_like_docs_page(url, raw)
+    catalog_like = False if docs_like else _looks_like_catalog_page(url, raw)
+    product_like = False if docs_like or catalog_like else _looks_like_product_page(url, raw)
     cleaned = _strip_storefront_boilerplate(raw) if product_like else _dedupe_repeated_lines(raw)
     cleaned = _clean_text(cleaned)
     had_boilerplate = cleaned != raw and bool(_BOILERPLATE_SIGNAL_RE.search(raw))
@@ -563,6 +575,7 @@ def _prepare_crawl_page(text: str, url: str, title_hint: str = "") -> tuple[str,
     meta = {
         "structural": structural,
         "page_type": page_type,
+        "docs_like": docs_like,
         "contaminated": False,
         "used_structured_fields": [],
         "body_fallback_used": False,
@@ -573,7 +586,11 @@ def _prepare_crawl_page(text: str, url: str, title_hint: str = "") -> tuple[str,
         "source_status": "live",
         "content_hash": content_hash,
     }
-    meta["page_title"] = _derive_page_title(title_hint, cleaned)
+    meta["page_title"] = (
+        _canonical_product_title(title_hint or "").strip(" -:|")
+        if docs_like and title_hint
+        else _derive_page_title(title_hint, cleaned)
+    ) or _derive_page_title(title_hint, cleaned)
     meta["catalog_listing"] = False
     if catalog_like:
         meta["catalog_listing"] = True
@@ -589,7 +606,7 @@ def _prepare_crawl_page(text: str, url: str, title_hint: str = "") -> tuple[str,
         if product.get("title") and (product.get("price_label") or product.get("description") or meta["used_structured_fields"]):
             meta["page_type"] = "product"
             meta["page_title"] = _derive_page_title(title_hint, cleaned, product)
-    elif meta["page_type"] in {"policy", "unknown", "category", "article"}:
+    elif not docs_like and meta["page_type"] in {"policy", "unknown", "category", "article"}:
         # Product/catalog pages often carry policy/footer boilerplate that can
         # overwhelm the classifier. If structured product signals are present,
         # promote them even when the URL path itself is generic.

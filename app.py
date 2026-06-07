@@ -10914,8 +10914,8 @@ async def crawl_site(data: dict, request: Request):
                         yield _send(f"🧭 Seed nav links: +{len(_seed_links)}")
                 except Exception:
                     pass
-                    raw_sitemap_count = len(sitemap_urls)
-                    yield _send(f"✅ BFS spider done: {len(sitemap_urls)} URLs discovered")
+                raw_sitemap_count = len(sitemap_urls)
+                yield _send(f"✅ BFS spider done: {len(sitemap_urls)} URLs discovered")
 
                 # Deduplicate (strip anchors, query params, locale prefixes)
                 seen_norm = set()
@@ -11728,12 +11728,22 @@ async def crawl_site(data: dict, request: Request):
                     completed += 1
 
                     import hashlib as _hashlib
-                    _min_save_len = 150
+                    _docs_like = (
+                        "/docs/" in (cur_url or "").lower()
+                        or "/guide" in (cur_url or "").lower()
+                        or "/roman/" in (cur_url or "").lower()
+                        or "/arabic/" in (cur_url or "").lower()
+                        or "/spanish/" in (cur_url or "").lower()
+                        or "/hindi/" in (cur_url or "").lower()
+                    )
+                    _min_save_len = 150 if not _docs_like else 60
                     _page_type = str((page_meta or {}).get("page_type") or "")
                     if _page_type in {"structural", "category", "faq", "article"}:
                         _min_save_len = 60
                     elif _page_type == "product":
                         _min_save_len = 100
+                    if _docs_like and _page_type not in {"product", "catalog"}:
+                        _min_save_len = min(_min_save_len, 45)
 
                     if len(text) > _min_save_len:
                         # Content-level dedup: hash full text so pages sharing a sidebar TOC but having
