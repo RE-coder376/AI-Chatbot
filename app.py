@@ -11450,9 +11450,10 @@ async def crawl_site(data: dict, request: Request):
                     await stealth(pg)
                     try:
                         async def _run_attempts():
-                            for attempt in range(5):
+                            _max_attempts = 2
+                            for attempt in range(_max_attempts):
                                 try:
-                                    _pw_attempt_msg = f"[{worker_label}] [playwright-attempt] {attempt + 1}/5 {cur_url[:70]}"
+                                    _pw_attempt_msg = f"[{worker_label}] [playwright-attempt] {attempt + 1}/{_max_attempts} {cur_url[:70]}"
                                     logger.info(f"[CRAWL] {_pw_attempt_msg}")
                                     await log_queue.put(_pw_attempt_msg)
                                     await pg.goto(cur_url, wait_until="domcontentloaded", timeout=15000)
@@ -11594,6 +11595,8 @@ async def crawl_site(data: dict, request: Request):
                                     page_meta["source_canonical"] = _canonical_source_url(cur_url)
                                     text = re.sub(r'[ \t]+', ' ', _clean_text(text or ""))
                                     text = re.sub(r'\n{3,}', '\n\n', text).strip()
+                                    if not text.strip():
+                                        text = " ".join(p for p in [title, meta_desc, sidebar_raw[:1200]] if p).strip()
                                     if len(text) < 200:
                                         text = f"{title}. {meta_desc}. {text}".strip()
                                     _ocr_start_msg = f"[{worker_label}] [ocr-start] {cur_url[:70]}"
@@ -11612,16 +11615,18 @@ async def crawl_site(data: dict, request: Request):
                                     page_meta["source_canonical"] = _canonical_source_url(cur_url)
                                     text = re.sub(r'[ \t]+', ' ', _clean_text(text or ""))
                                     text = re.sub(r'\n{3,}', '\n\n', text).strip()
+                                    if not text.strip():
+                                        text = " ".join(p for p in [title, meta_desc, sidebar_raw[:1200]] if p).strip()
                                     return text, title, page_meta, sidebar_raw
                                 except Exception as e:
-                                    if attempt < 4:
-                                        _pw_retry_msg = f"[{worker_label}] [playwright-retry] {attempt + 1}/5 failed for {cur_url[:70]}: {type(e).__name__}"
+                                    if attempt < _max_attempts - 1:
+                                        _pw_retry_msg = f"[{worker_label}] [playwright-retry] {attempt + 1}/{_max_attempts} failed for {cur_url[:70]}: {type(e).__name__}"
                                         logger.warning(f"[CRAWL] {_pw_retry_msg}")
                                         await log_queue.put(_pw_retry_msg)
                                         await asyncio.sleep(1 * (attempt + 1))
                                     else:
                                         raise
-                        return await asyncio.wait_for(_run_attempts(), timeout=45)
+                        return await asyncio.wait_for(_run_attempts(), timeout=28)
                     finally:
                         try:
                             await pg.close()
@@ -11698,7 +11703,14 @@ async def crawl_site(data: dict, request: Request):
                     completed += 1
 
                     import hashlib as _hashlib
-                    if len(text) > 150:
+                    _min_save_len = 150
+                    _page_type = str((page_meta or {}).get("page_type") or "")
+                    if _page_type in {"structural", "category", "faq", "article"}:
+                        _min_save_len = 60
+                    elif _page_type == "product":
+                        _min_save_len = 100
+
+                    if len(text) > _min_save_len:
                         # Content-level dedup: hash full text so pages sharing a sidebar TOC but having
                         # different main content are NOT incorrectly flagged as duplicates.
                         content_key = _hashlib.md5(re.sub(r'\s+', '', text).encode()).hexdigest()
