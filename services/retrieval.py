@@ -2717,6 +2717,39 @@ async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansio
                         top = _matched[:40]
                     else:
                         top = _matched[:34] + _rest[:6]
+                # Exact-product rescue: scan the full catalog so model-number lookups
+                # do not get trapped by the top-N retrieval window.
+                if db is not None and not _is_price_rank_q and len(_anchors) >= 2:
+                    try:
+                        from langchain_core.documents import Document
+                        total = min(int(db._collection.count() or 0), 2500)
+                        raw = db._collection.get(limit=total, include=["documents", "metadatas"])
+                        _rescued: list[tuple[int, Document]] = []
+                        for doc_text, meta in zip(raw.get("documents", []), raw.get("metadatas", [])):
+                            if not doc_text:
+                                continue
+                            _body = str(doc_text)
+                            _src = str((meta or {}).get("source") or "").lower()
+                            if not re.search(r"/(?:products?|items?)(?:/|$|#)", _src) and not (_has_product_meta or _is_product_db):
+                                continue
+                            _hits = 0
+                            for _a in _anchors:
+                                _a2 = _a[:-1] if _a.endswith("s") else _a
+                                if (_a in _src) or (_a2 and _a2 in _src) or (_a in _body.lower()) or (_a2 and _a2 in _body.lower()):
+                                    _hits += 1
+                            if _hits >= _req_hits:
+                                _rescued.append((_hits, Document(page_content=_body, metadata=meta or {})))
+                        if _rescued:
+                            _rescued.sort(
+                                key=lambda t: (
+                                    t[0],
+                                    _doc_price_value(t[1]) if _doc_price_value(t[1]) is not None else -1.0,
+                                ),
+                                reverse=True,
+                            )
+                            top = [r for _, r in _rescued[:40]] + top[:6]
+                    except Exception:
+                        pass
 
     # ── Product catalog: dedup + GPU ranking ─────────────────────────────────
     if _has_product_meta or _is_product_db:
