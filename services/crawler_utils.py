@@ -30,7 +30,6 @@ from services.safety import (
     _ARTICLE_URL_RE,
     _PRODUCT_PRICE_LINE_RE,
     _PRODUCT_PRICE_CAPTURE_RE,
-    _PROD_PRICE_CAPTURE_RE,
     _PRODUCT_AVAIL_RE,
 )
 
@@ -595,7 +594,7 @@ def _prepare_crawl_page(text: str, url: str, title_hint: str = "") -> tuple[str,
         # overwhelm the classifier. If structured product signals are present,
         # promote them even when the URL path itself is generic.
         product = _extract_product_summary(cleaned, url, title_hint=title_hint)
-        multiple_price_hits = len(_PROD_PRICE_CAPTURE_RE.findall(cleaned)) + len(_PRODUCT_PRICE_LINE_RE.findall(cleaned))
+        multiple_price_hits = len(_PRODUCT_PRICE_CAPTURE_RE.findall(cleaned)) + len(_PRODUCT_PRICE_LINE_RE.findall(cleaned))
         if product.get("title") and multiple_price_hits >= 2:
             meta["catalog_listing"] = True
             meta["catalog_item_count"] = multiple_price_hits
