@@ -16,6 +16,7 @@ from services.safety import (
     _clean_text,
     _looks_structural_page,
     _looks_like_product_page,
+    _looks_like_catalog_page,
     _strip_storefront_boilerplate,
     _dedupe_repeated_lines,
     _canonical_product_title,
@@ -326,6 +327,8 @@ def _classify_page_type(url: str, cleaned: str, product_like: bool, structural: 
     source = (url or "").lower()
     body = cleaned or ""
     metrics = _trusted_content_metrics(body)
+    if _looks_like_catalog_page(source, body):
+        return "catalog"
     if product_like:
         return "product"
     if structural:
@@ -431,7 +434,8 @@ def _page_classifier_confidence(
 
 def _prepare_crawl_page(text: str, url: str, title_hint: str = "") -> tuple[str, dict]:
     raw = _clean_text(text or "")
-    product_like = _looks_like_product_page(url, raw)
+    catalog_like = _looks_like_catalog_page(url, raw)
+    product_like = False if catalog_like else _looks_like_product_page(url, raw)
     cleaned = _strip_storefront_boilerplate(raw) if product_like else _dedupe_repeated_lines(raw)
     cleaned = _clean_text(cleaned)
     had_boilerplate = cleaned != raw and bool(_BOILERPLATE_SIGNAL_RE.search(raw))
@@ -454,6 +458,10 @@ def _prepare_crawl_page(text: str, url: str, title_hint: str = "") -> tuple[str,
     }
     meta["page_title"] = _derive_page_title(title_hint, cleaned)
     meta["catalog_listing"] = False
+    if catalog_like:
+        meta["catalog_listing"] = True
+        meta["page_type"] = "catalog"
+        meta["page_title"] = _derive_page_title(title_hint, cleaned)
     if product_like:
         product = _extract_product_summary(cleaned, url, title_hint=title_hint)
         meta["product"] = product

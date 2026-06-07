@@ -283,6 +283,20 @@ def _looks_like_product_page(url: str, text: str) -> bool:
     return False
 
 
+def _looks_like_catalog_page(url: str, text: str) -> bool:
+    """Return True for listing/category pages that contain multiple product cards."""
+    source = (url or "").lower()
+    body = text or ""
+    if re.search(r"(?i)(?:/|#)(?:catalog|category|categories|collection|collections|shop|store|listing|browse|products?)(?:/|$|#)", source):
+        return True
+    price_hits = len(_PRODUCT_PRICE_CAPTURE_RE.findall(body)) + len(_PRODUCT_PRICE_LINE_RE.findall(body))
+    if price_hits >= 2:
+        cardish = len(re.findall(r"(?is)\b(?:add to cart|reviews?|select color|full specs|product details)\b", body))
+        if cardish >= 2 or re.search(r"(?is)\b(?:\d+\s+items|\d+\s+products|top items being scraped|category)\b", body):
+            return True
+    return False
+
+
 def _is_urdu_script(text: str) -> bool:
     """Check if string contains Urdu/Arabic characters."""
     return any("\u0600" <= char <= "\u06FF" for char in text or "")
