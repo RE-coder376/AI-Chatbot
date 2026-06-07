@@ -10776,7 +10776,10 @@ async def crawl_site(data: dict, request: Request):
                     """
                     try:
                         _pg = await ctx.new_page()
-                        await stealth(_pg)
+                        try:
+                            await stealth(_pg)
+                        except Exception as _stealth_e:
+                            logger.warning(f"[BFS] stealth skipped {_seed_url}: {type(_stealth_e).__name__}: {_stealth_e}")
                         try:
                             await _pg.goto(_seed_url, wait_until="domcontentloaded", timeout=20000)
                             try:
@@ -10848,7 +10851,10 @@ async def crawl_site(data: dict, request: Request):
                         try:
                             async with _bfs_sem:
                                 _pg = await ctx.new_page()
-                                await stealth(_pg)
+                                try:
+                                    await stealth(_pg)
+                                except Exception as _stealth_e:
+                                    logger.warning(f"[BFS] stealth skipped {page_url}: {type(_stealth_e).__name__}: {_stealth_e}")
                                 try:
                                     await _pg.goto(page_url, wait_until="domcontentloaded", timeout=20000)
                                     # Wait for body text to appear (handles JS-rendered nav)
@@ -11447,7 +11453,10 @@ async def crawl_site(data: dict, request: Request):
                 async def _playwright_extract_with_budget(cur_url, worker_label):
                     pg = await ctx.new_page()
                     await pg.set_default_timeout(15000)  # Cap individual Playwright ops
-                    await stealth(pg)
+                    try:
+                        await stealth(pg)
+                    except Exception as _stealth_e:
+                        logger.warning(f"[CRAWL] [{worker_label}] [stealth-skip] {cur_url[:70]}: {type(_stealth_e).__name__}: {_stealth_e}")
                     try:
                         async def _run_attempts():
                             _max_attempts = 2
