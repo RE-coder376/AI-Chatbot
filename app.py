@@ -8832,7 +8832,7 @@ async def reload_active_db(request: Request, password: str = Form("")):
 
     global local_db, embeddings_model, _status
     local_db = None
-    _status = "loading"
+    _status = "reloading"
     _db_instance_cache.pop(active_name, None)
     threading.Thread(target=_load_db_now, daemon=True).start()
     return {"success": True, "message": f"Reloading active DB '{active_name}' in background — ready in ~30s."}
