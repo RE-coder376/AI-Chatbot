@@ -66,6 +66,17 @@ def _looks_generic_title(title: str) -> bool:
         return True
     if re.search(r"(?i)\b(web scraper test sites|all rights reserved|privacy policy|terms of service|home\s*\|\s*[^|]+)$", cand):
         return True
+    low = cand.lower()
+    if re.search(
+        r"\b(?:web scraper|cloud scraper)\b.*\b(?:extension|pricing|marketplace|learn|documentation|video tutorials|test sites|forum|install|login|company|about us|contact|privacy policy|media kit|resources|blog|screenshots|status)\b",
+        low,
+    ):
+        return True
+    if re.fullmatch(
+        r"(?:web scraper|cloud scraper|test sites|forum|documentation|video tutorials|pricing|marketplace|learn|install|login|about us|contact us)(?:\s*[-|]\s*.*)?",
+        low,
+    ):
+        return True
     if re.fullmatch(r"[\W_]+", cand):
         return True
     words = re.findall(r"[A-Za-z0-9]+", cand)
