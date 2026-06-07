@@ -30,6 +30,7 @@ from services.safety import (
     _ARTICLE_URL_RE,
     _PRODUCT_PRICE_LINE_RE,
     _PRODUCT_PRICE_CAPTURE_RE,
+    _PROD_PRICE_CAPTURE_RE,
     _PRODUCT_AVAIL_RE,
 )
 
