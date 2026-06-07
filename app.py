@@ -11706,7 +11706,7 @@ async def crawl_site(data: dict, request: Request):
                                         })
                         except Exception as e:
                             logger.warning(f"[CRAWL] [{worker_label}] [playwright-skip] {cur_url[:70]}: {type(e).__name__}: {e}")
-                            await log_queue.put(f"[{completed}/{len(to_crawl)}] ⏭️  {cur_url[:70]} (fallback timeout/fail: {type(e).__name__})")
+                            await log_queue.put(f"[{completed}/{len(to_crawl)}] ⏭️  {cur_url[:70]} (fallback timeout/fail: {type(e).__name__}: {e})")
                     completed += 1
 
                     import hashlib as _hashlib
