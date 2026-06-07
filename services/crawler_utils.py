@@ -246,7 +246,13 @@ def _extract_product_summary(text: str, url: str, title_hint: str = "") -> dict:
             )[0].strip(" -:|")
             tail = tail.split(",")[0].strip(" -:|")
             tail = _dedupe_repeated_phrase(tail)
-            cand = _canonicalize_title(tail)
+            tail_spans = re.findall(
+                r'([A-Z][A-Za-z0-9&\'"()\-]+(?:\s+[A-Z0-9][A-Za-z0-9&\'"()\-]+){1,8})',
+                tail,
+            )
+            tail_spans = [s.strip(" -:|") for s in tail_spans if s and len(s.strip()) <= 90]
+            tail_spans = [s for s in tail_spans if not _is_generic_title(s)]
+            cand = max(tail_spans, key=_score_title) if tail_spans else _canonicalize_title(tail)
             if cand and not _is_generic_title(cand):
                 return cand
 
