@@ -10704,7 +10704,7 @@ async def crawl_site(data: dict, request: Request):
             _crawling_dbs.add(db_name)
             _crawl_start_times[db_name] = time.time()
             # Local copy avoids Python treating max_pages as a nested assignment target.
-            max_pages_eff = max_pages
+            max_pages_eff = int(max_pages or 0)
             from playwright.async_api import async_playwright
             from playwright_stealth import Stealth as _Stealth
             async def stealth(pg):
@@ -10955,6 +10955,8 @@ async def crawl_site(data: dict, request: Request):
                             if path == prefix or path.startswith(prefix + '/'):
                                 return True
                         return False
+                    if max_pages_eff <= 0:
+                        max_pages_eff = len(deduped)
                     to_crawl = [u for u in deduped if _matches_smart(u)][:max_pages_eff]
                     yield _send(f"🎯 Smart filter: {len(to_crawl)} URLs match selected groups")
                     if not to_crawl:
@@ -10965,6 +10967,8 @@ async def crawl_site(data: dict, request: Request):
                     # If operator requested a full reset (clear_before_crawl),
                     # avoid silently truncating the crawl to a low max_pages.
                     # Expand to the full discovered URL set (within the hard cap).
+                    if max_pages_eff <= 0:
+                        max_pages_eff = len(deduped)
                     if clear_first and max_pages_eff and max_pages_eff < len(deduped):
                         max_pages_eff = min(5000, len(deduped))
                         yield _send(f"🧹 Clear-before-crawl: expanding max_pages to {max_pages_eff} (full reset)")
