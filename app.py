@@ -112,6 +112,7 @@ from services.safety import (
     _trusted_content_metrics,
     _looks_structural_page,
     _looks_like_product_page,
+    _PRICE_QUERY_RE,
     _deterministic_price_answer,
     _strip_source_leaks,
     expand_query,
