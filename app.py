@@ -1690,7 +1690,7 @@ async def _auto_crawl_db(db_name: str, url: str, max_pages: int = 0) -> int:
                             _pg = await _coro
                             if _pg is None:
                                 raise RuntimeError("browser dead: awaited page is None")
-                            await _pg.set_default_timeout(15000)
+                            _pg.set_default_timeout(15000)
                             await _pg.goto(page_url, wait_until="domcontentloaded", timeout=15000)
                             await _pg.wait_for_timeout(1500)
                             html = await _pg.content()
@@ -11452,7 +11452,7 @@ async def crawl_site(data: dict, request: Request):
 
                 async def _playwright_extract_with_budget(cur_url, worker_label):
                     pg = await ctx.new_page()
-                    await pg.set_default_timeout(15000)  # Cap individual Playwright ops
+                    pg.set_default_timeout(15000)  # Cap individual Playwright ops
                     try:
                         await stealth(pg)
                     except Exception as _stealth_e:
