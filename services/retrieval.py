@@ -2699,15 +2699,17 @@ async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansio
             if _anchors:
                 _matched = []
                 _rest = []
+                _modelish_anchor = any(re.search(r"\d|[-/]", a) for a in _anchors)
                 for _r in top:
                     _src = str((getattr(_r, "metadata", None) or {}).get("source") or "").lower()
                     _txt = str(getattr(_r, "page_content", "") or "").lower()[:1400]
-                    _ok = False
+                    _hits = 0
                     for _a in _anchors:
                         _a2 = _a[:-1] if _a.endswith("s") else _a
                         if (_a in _src) or (_a2 and _a2 in _src) or (_a in _txt) or (_a2 and _a2 in _txt):
-                            _ok = True
-                            break
+                            _hits += 1
+                    _req_hits = 2 if len(_anchors) <= 2 else (len(_anchors) if _modelish_anchor else max(2, len(_anchors) - 1))
+                    _ok = _hits >= _req_hits
                     (_matched if _ok else _rest).append(_r)
                 if _matched:
                     # For exact product lookups, keep the matched docs front-and-center.
