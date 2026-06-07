@@ -287,7 +287,7 @@ def _looks_like_catalog_page(url: str, text: str) -> bool:
     """Return True for listing/category pages that contain multiple product cards."""
     source = (url or "").lower()
     body = text or ""
-    if re.search(r"(?i)(?:/|#)(?:catalog|category|categories|collection|collections|shop|store|listing|browse|products?)(?:/|$|#)", source):
+    if re.search(r"(?i)(?:/|#)(?:catalog|category|categories|collection|collections|shop|store|listing|browse|products)(?:/|$|#)", source):
         return True
     price_hits = len(_PRODUCT_PRICE_CAPTURE_RE.findall(body)) + len(_PRODUCT_PRICE_LINE_RE.findall(body))
     if price_hits >= 2:
