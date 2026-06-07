@@ -8806,6 +8806,37 @@ async def set_active_db(request: Request, password: str = Form(...), name: str =
     threading.Thread(target=_load_db_now, daemon=True).start()
     return {"success": True, "message": f"Switching to {name} — loading in background, ready in ~30s."}
 
+@app.post("/admin/databases/reload-active")
+async def reload_active_db(request: Request, password: str = Form("")):
+    """
+    Reload the current active DB into memory without changing tenant selection.
+    This is a safe recovery path for stale or missing in-memory Chroma handles after recrawl.
+    """
+    password = _extract_password(request, password)
+    root_pw = _get_root_password()
+    if root_pw:
+        try:
+            require_owner_auth(password)
+        except HTTPException:
+            return JSONResponse({"detail": "Unauthorized — only the super-admin may reload active DB"}, status_code=401)
+    else:
+        active_name = ACTIVE_DB_FILE.read_text(encoding="utf-8").strip() if ACTIVE_DB_FILE.exists() else ""
+        if not active_name:
+            return JSONResponse({"detail": "No active DB"}, status_code=400)
+        if not _client_password_matches_db(password, get_config(active_name)):
+            return JSONResponse({"detail": "Unauthorized"}, status_code=401)
+
+    active_name = ACTIVE_DB_FILE.read_text(encoding="utf-8").strip() if ACTIVE_DB_FILE.exists() else ""
+    if not active_name:
+        return JSONResponse({"detail": "No active DB"}, status_code=400)
+
+    global local_db, embeddings_model, _status
+    local_db = None
+    _status = "loading"
+    _db_instance_cache.pop(active_name, None)
+    threading.Thread(target=_load_db_now, daemon=True).start()
+    return {"success": True, "message": f"Reloading active DB '{active_name}' in background — ready in ~30s."}
+
 @app.post("/admin/create-db")
 async def create_db(request: Request, password: str = Form(...), name: str = Form(...), db_password: str = Form("")):
     password = _extract_password(request, password)
