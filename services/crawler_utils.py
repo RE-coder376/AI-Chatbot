@@ -625,11 +625,10 @@ def _prepare_crawl_page(text: str, url: str, title_hint: str = "") -> tuple[str,
         "source_status": "live",
         "content_hash": content_hash,
     }
-    meta["page_title"] = (
-        _canonical_product_title(title_hint or "").strip(" -:|")
-        if docs_like and title_hint
-        else _derive_page_title(title_hint, cleaned, prefer_title_hint=docs_like)
-    ) or _derive_page_title(title_hint, cleaned, prefer_title_hint=docs_like)
+    # Docs pages should derive their title from the actual page text first.
+    # Generic site chrome titles are a common failure mode on docs-heavy sites,
+    # so only treat the title hint as a fallback signal here.
+    meta["page_title"] = _derive_page_title(title_hint, cleaned, prefer_title_hint=False)
     meta["catalog_listing"] = False
     if catalog_like:
         meta["catalog_listing"] = True
@@ -689,8 +688,15 @@ def _prepare_crawl_page(text: str, url: str, title_hint: str = "") -> tuple[str,
     retrieve_eligible = True
     if meta["page_type"] in {"structural", "category"}:
         # Large structural/category pages are often the canonical overview pages
-        # for doc sets. Keep them searchable when they have real body content.
-        if len(cleaned.split()) > 150:
+        # for doc sets. Keep docs-like overviews searchable even when they are
+        # compact, because many chapter/outcomes pages are short but meaningful.
+        _wc = len(cleaned.split())
+        _heading_hits = len(re.findall(r"(?m)^\s*(?:##|###)\s+", cleaned))
+        _min_docs_words = 40 if docs_like else 150
+        if docs_like and (_wc >= 25 or _heading_hits >= 1 or len(_GENERIC_SECTION_SPLIT_RE.split(cleaned)) >= 2):
+            retrieve_eligible = True
+            quarantine_reason = ""
+        elif _wc > _min_docs_words:
             retrieve_eligible = True
             quarantine_reason = ""
         else:
