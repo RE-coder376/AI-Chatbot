@@ -12082,13 +12082,17 @@ async def crawl_site(data: dict, request: Request):
                 # This lets the bot answer "what topics do you cover" / "what pages exist"
                 # for ANY website without any hardcoding.
                 if page_index:
-                    lines = [f"- {t} : {u}" for u, t in page_index if t]
-                    site_index_text = f"SITE PAGE INDEX ({len(page_index)} pages crawled):\n" + "\n".join(lines)
+                    def _is_index_noise(_u: str) -> bool:
+                        _p = urllib.parse.urlparse(_u or "").path.lower().rstrip("/")
+                        return bool(re.search(r'(?i)(?:/rss(?:\.xml)?$|/atom(?:\.xml)?$|/feed(?:\.xml)?$|/sitemap(?:_index)?\.xml$|#site-index$)', _u or "")) or _p.endswith((".xml", ".txt", ".csv"))
+                    page_index_useful = [(u, t) for u, t in page_index if t and not _is_index_noise(u)]
+                    lines = [f"- {t} : {u}" for u, t in page_index_useful]
+                    site_index_text = f"SITE PAGE INDEX ({len(page_index_useful)} pages crawled):\n" + "\n".join(lines)
                     index_doc = Document(page_content=site_index_text[:10000],
                                          metadata={"source": f"{base}#site-index"})
                     await _chroma_run(_add_documents_deterministic, chroma_db, [index_doc])
                     total_chunks += 1
-                    yield _send(f"📋 Site index stored ({len(page_index)} pages)")
+                    yield _send(f"📋 Site index stored ({len(page_index_useful)} pages)")
 
                 await browser.close()
 
