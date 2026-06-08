@@ -10862,13 +10862,20 @@ async def crawl_site(data: dict, request: Request):
                                 if not _strip_www(u).startswith(_crawl_prefix):
                                     return
                                 _path = urllib.parse.urlparse(u).path.lower().rstrip("/")
+                                _parts = [p for p in _path.split("/") if p]
+                                _leaf = _parts[-1] if _parts else ""
                                 if _path.endswith((
                                     ".css", ".js", ".mjs", ".map", ".json", ".png", ".jpg", ".jpeg",
                                     ".gif", ".webp", ".svg", ".ico", ".woff", ".woff2", ".ttf", ".eot",
-                                    ".mp4", ".webm", ".zip", ".tar", ".gz"
+                                    ".mp4", ".webm", ".zip", ".tar", ".gz", ".xml", ".txt", ".csv"
                                 )):
                                     return
                                 if any(seg in _path for seg in ("/_next/", "/assets/", "/static/", "/images/", "/img/", "/fonts/")):
+                                    return
+                                if _leaf in {
+                                    "rss", "atom", "feed", "symbol", "script", "header", "button", "circle",
+                                    "ellipse", "section", "strong", "footer", "nav", "main", "article", "span", "div"
+                                }:
                                     return
                                 nu = _normalize_url(u)
                                 if nu in seen_local:
@@ -10909,7 +10916,7 @@ async def crawl_site(data: dict, request: Request):
                         if len(out) < _limit:
                             # Extract route-like strings hidden in hydration blobs / script tags.
                             _route_pat = re.compile(
-                                r'(?i)(?:https?://[^"\s<>]+|/(?:docs|guide|tutorials?|lesson(?:s)?|chapter(?:s)?|part(?:s)?|learn|blog|article(?:s)?|posts?|products?|items?|categories?|collections?|pages?|topics?|resources?)/[A-Za-z0-9/_\-.%]+|/[A-Za-z0-9][A-Za-z0-9/_\-.%]{5,})'
+                                r'(?i)(?:https?://[^"\s<>]+|/(?:docs|guide|tutorials?|lesson(?:s)?|chapter(?:s)?|part(?:s)?|learn|blog|article(?:s)?|posts?|products?|items?|categories?|collections?|pages?|topics?|resources?)/[A-Za-z0-9/_\-.%]+)'
                             )
                             for _raw in _route_pat.findall(html or ""):
                                 _push_candidate(_raw)
@@ -10933,6 +10940,9 @@ async def crawl_site(data: dict, request: Request):
                             if _nu in seen:
                                 continue
                             _p = urllib.parse.urlparse(_u).path.rstrip("/")
+                            _leaf = _p.split("/")[-1].lower() if _p else ""
+                            if _leaf in {"rss", "atom", "feed", "sitemap", "site-index"}:
+                                continue
                             _parts_raw = [p for p in _p.split("/") if p]
                             _parts = list(_parts_raw)
                             if _parts and re.fullmatch(r"[a-z]{2}(?:-[a-z]{2,4})?", _parts[0].lower()):
@@ -10964,6 +10974,10 @@ async def crawl_site(data: dict, request: Request):
                     ranked.sort(key=lambda t: (t[0], len(t[1])), reverse=True)
                     for _, _u, _nu in ranked:
                         if _nu in seen:
+                            continue
+                        _pp = urllib.parse.urlparse(_u).path.rstrip("/").lower()
+                        _leaf = _pp.split("/")[-1] if _pp else ""
+                        if _leaf in {"rss", "atom", "feed", "sitemap", "site-index"}:
                             continue
                         out.append(_u)
                         seen.add(_nu)
@@ -11018,6 +11032,7 @@ async def crawl_site(data: dict, request: Request):
                     sitemap_urls = [u for u in sitemap_urls if not u.startswith("__SITEMAP_ERR__")]
                     if sitemap_urls:
                         break
+                sitemap_urls = [u for u in sitemap_urls if not re.search(r'(?i)(?:/rss(?:\.xml)?$|/atom(?:\.xml)?$|/feed(?:\.xml)?$|/sitemap(?:_index)?\.xml$|#site-index$)', u)]
                 # Always pull nav/sidebar links from the seed URL, even if sitemap is large.
                 # This catches section/index pages that many sitemaps omit.
                 try:
