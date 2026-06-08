@@ -1574,9 +1574,240 @@ async def _auto_crawl_db(db_name: str, url: str, max_pages: int = 0) -> int:
     domain = urlparse(base).netloc
     crawl_urls, added, deleted = [], 0, 0
     newly_seen: list = []
+    discovery_rendered_added = 0
     def _domain_match(u_netloc: str, ref: str) -> bool:
         """True if netloc matches ref, ignoring www. prefix."""
         return u_netloc.lstrip("www.") == ref.lstrip("www.")
+
+    async def _rendered_discovery(_urls: list[str], _limit: int = 1200) -> list[str]:
+        """Expand crawl discovery by rendering representative pages and mining sidebars/hydration."""
+        try:
+            from playwright.async_api import async_playwright
+            from playwright_stealth import Stealth as _Stealth
+        except Exception as _imp_e:
+            logger.warning(f"[AUTO-CRAWL] rendered discovery imports failed for {db_name}: {_imp_e}")
+            return []
+
+        def _stealth(pg):
+            _stealth_result = _Stealth().apply_stealth_async(pg)
+            if inspect.isawaitable(_stealth_result):
+                return _stealth_result
+            return None
+
+        try:
+            _pw = await async_playwright().start()
+            _browser = await _pw.chromium.launch(headless=True, args=["--no-sandbox", "--disable-dev-shm-usage"])
+            _ctx = await _browser.new_context(
+                user_agent=random.choice(user_agents),
+                locale="en-US",
+                viewport={"width": 1280, "height": 900},
+                extra_http_headers={"Accept-Language": "en-US,en;q=0.9"},
+            )
+        except Exception as _start_e:
+            logger.warning(f"[AUTO-CRAWL] rendered discovery browser unavailable for {db_name}: {_start_e}")
+            return []
+
+        async def _extract_rendered_links(_seed_url: str, _limit: int = 800) -> list[str]:
+            try:
+                _pg = await _ctx.new_page()
+                try:
+                    try:
+                        _stealth_res = _stealth(_pg)
+                        if inspect.isawaitable(_stealth_res):
+                            await _stealth_res
+                    except Exception as _stealth_e:
+                        logger.warning(f"[AUTO-CRAWL][DISCOVERY] stealth skipped {_seed_url}: {type(_stealth_e).__name__}: {_stealth_e}")
+                    try:
+                        await _pg.goto(_seed_url, wait_until="networkidle", timeout=25000)
+                        try:
+                            await _pg.wait_for_function(
+                                "document.body && document.body.innerText.trim().length > 100",
+                                timeout=4000,
+                            )
+                        except Exception:
+                            pass
+                        try:
+                            await _pg.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                            await _pg.wait_for_timeout(700)
+                        except Exception:
+                            pass
+                        html = await _pg.content()
+                    finally:
+                        await _pg.close()
+                except Exception as _pg_e:
+                    logger.warning(f"[AUTO-CRAWL][DISCOVERY] render failed {_seed_url}: {_pg_e}")
+                    return []
+                out: list[str] = []
+                seen_local: set[str] = set()
+
+                def _push_candidate(raw: str) -> None:
+                    try:
+                        u = str(raw or "").strip()
+                        if not u:
+                            return
+                        if not u.startswith(("http://", "https://")):
+                            u = urllib.parse.urljoin(_seed_url, u)
+                        u = u.split("#")[0].split("?")[0].rstrip("/")
+                        if not u:
+                            return
+                        if not _strip_www(u).startswith(_crawl_prefix):
+                            return
+                        _path = urllib.parse.urlparse(u).path.lower().rstrip("/")
+                        _parts = [p for p in _path.split("/") if p]
+                        _leaf = _parts[-1] if _parts else ""
+                        if _path.endswith((
+                            ".css", ".js", ".mjs", ".map", ".json", ".png", ".jpg", ".jpeg",
+                            ".gif", ".webp", ".svg", ".ico", ".woff", ".woff2", ".ttf", ".eot",
+                            ".mp4", ".webm", ".zip", ".tar", ".gz", ".xml", ".txt", ".csv"
+                        )):
+                            return
+                        if any(seg in _path for seg in ("/_next/", "/assets/", "/static/", "/images/", "/img/", "/fonts/")):
+                            return
+                        if _leaf in {
+                            "rss", "atom", "feed", "symbol", "script", "header", "button", "circle",
+                            "ellipse", "section", "strong", "footer", "nav", "main", "article", "span", "div"
+                        }:
+                            return
+                        nu = _normalize_url(u)
+                        if nu in seen_local:
+                            return
+                        seen_local.add(nu)
+                        out.append(u)
+                    except Exception:
+                        return
+
+                try:
+                    _hrefs = await asyncio.wait_for(
+                        _pg.evaluate(
+                            """() => Array.from(document.querySelectorAll(
+                                    'a[href], [data-href], [data-url], [data-route], [data-path], [data-link], link[href], meta[property="og:url"], meta[name="twitter:url"], meta[http-equiv="refresh"], script[src]'
+                                ))
+                                .map(el => {
+                                    const tag = (el.tagName || '').toLowerCase();
+                                    if (tag === 'meta') {
+                                        return el.getAttribute('content') || el.content || '';
+                                    }
+                                    if (tag === 'script') {
+                                        return el.src || el.getAttribute('src') || '';
+                                    }
+                                    return el.href || el.getAttribute('data-href') || el.getAttribute('data-url') || el.getAttribute('data-route') || el.getAttribute('data-path') || el.getAttribute('data-link') || el.getAttribute('href') || '';
+                                })
+                                .filter(Boolean)"""
+                        ),
+                        timeout=5000,
+                    )
+                except Exception:
+                    _hrefs = []
+                for _h in (_hrefs or []):
+                    _push_candidate(_h)
+                    if len(out) >= _limit:
+                        break
+                if len(out) < _limit:
+                    _route_pat = re.compile(
+                        r'(?i)(?:https?://[^"\s<>]+|/(?:docs|guide|tutorials?|lesson(?:s)?|chapter(?:s)?|part(?:s)?|learn|blog|article(?:s)?|posts?|products?|items?|categories?|collections?|pages?|topics?|resources?)/[A-Za-z0-9/_\-.%]+)'
+                    )
+                    for _raw in _route_pat.findall(html or ""):
+                        _push_candidate(_raw)
+                        if len(out) >= _limit:
+                            break
+                return out
+            except Exception as _disc_e:
+                logger.warning(f"[AUTO-CRAWL][DISCOVERY] rendered link extract failed {_seed_url}: {_disc_e}")
+                return []
+
+        def _pick_rendered_seed_urls(_urls: list[str], _limit: int = 18) -> list[str]:
+            out = [url]
+            seen = {_normalize_url(url)}
+            family_best: dict[str, tuple[int, str, str]] = {}
+            ranked = []
+            for _u in _urls or []:
+                try:
+                    _nu = _normalize_url(_u)
+                    if _nu in seen:
+                        continue
+                    _p = urllib.parse.urlparse(_u).path.rstrip("/")
+                    _leaf = _p.split("/")[-1].lower() if _p else ""
+                    if _leaf in {"rss", "atom", "feed", "sitemap", "site-index"}:
+                        continue
+                    _parts_raw = [p for p in _p.split("/") if p]
+                    _parts = list(_parts_raw)
+                    if _parts and re.fullmatch(r"[a-z]{2}(?:-[a-z]{2,4})?", _parts[0].lower()):
+                        _parts = _parts[1:]
+                    _depth = len(_parts)
+                    _score = 0
+                    if _depth <= 1:
+                        _score += 40
+                    elif _depth <= 2:
+                        _score += 30
+                    if "/docs/" in _p.lower():
+                        _score += 25
+                    if any(seg in _p.lower() for seg in ("/guide", "/chapter", "/lesson", "/tutorial", "/learn", "/about", "/whats-new")):
+                        _score += 15
+                    if any(re.fullmatch(r"[a-z]{2}(?:-[a-z]{2,4})?", part.lower()) for part in _parts_raw[:1]):
+                        _score += 10
+                    _score += max(0, 12 - _depth)
+                    if _parts:
+                        _family = "/" + "/".join(_parts[:2])
+                    else:
+                        _family = "/"
+                    current = family_best.get(_family)
+                    if current is None or _score > current[0]:
+                        family_best[_family] = (_score, _u, _nu)
+                    ranked.append((_score, _u, _nu))
+                except Exception:
+                    continue
+            ranked = list(family_best.values()) + ranked
+            ranked.sort(key=lambda t: (t[0], len(t[1])), reverse=True)
+            for _, _u, _nu in ranked:
+                if _nu in seen:
+                    continue
+                _pp = urllib.parse.urlparse(_u).path.rstrip("/").lower()
+                _leaf = _pp.split("/")[-1] if _pp else ""
+                if _leaf in {"rss", "atom", "feed", "sitemap", "site-index"}:
+                    continue
+                out.append(_u)
+                seen.add(_nu)
+                if len(out) >= _limit:
+                    break
+            return out[:_limit]
+
+        try:
+            frontier = _pick_rendered_seed_urls(_urls, _limit=18)
+            seen = {_normalize_url(u) for u in frontier}
+            discovered_new: list[str] = []
+            rounds = 0
+            while frontier and len(seen) < _limit and rounds < 2:
+                rounds += 1
+                sem = asyncio.Semaphore(4)
+                async def _one(seed_url: str) -> list[str]:
+                    async with sem:
+                        return await _extract_rendered_links(seed_url, _limit=1200)
+                results = await asyncio.gather(*[_one(seed) for seed in frontier[:18]])
+                new_urls = []
+                for batch in results:
+                    for u in batch or []:
+                        nu = _normalize_url(u)
+                        if nu not in seen:
+                            seen.add(nu)
+                            new_urls.append(u)
+                            discovered_new.append(u)
+                            if len(seen) >= _limit:
+                                break
+                    if len(seen) >= _limit:
+                        break
+                if not new_urls:
+                    break
+                frontier = _pick_rendered_seed_urls(list(_urls) + new_urls, _limit=18)
+            return discovered_new
+        finally:
+            try:
+                await _browser.close()
+            except Exception:
+                pass
+            try:
+                await _pw.stop()
+            except Exception:
+                pass
 
     try:
         # Step 1: discover URLs via sitemap — crawl ALL (not just new) for content refresh
@@ -1624,6 +1855,15 @@ async def _auto_crawl_db(db_name: str, url: str, max_pages: int = 0) -> int:
                         logger.info(f"[AUTO-CRAWL] '{db_name}': BFS found {len(crawl_urls)} URLs from homepage")
             except Exception as _bfs_e:
                 logger.warning(f"[AUTO-CRAWL] BFS fallback failed for {db_name}: {_bfs_e}")
+        # Hidden-page discovery: rendered sidebars / hydration / route hints omitted from sitemap.
+        try:
+            _rendered_links = await _rendered_discovery(crawl_urls or [url])
+            if _rendered_links:
+                crawl_urls = list(dict.fromkeys((crawl_urls or []) + _rendered_links))
+                discovery_rendered_added = len(_rendered_links)
+                logger.info(f"[AUTO-CRAWL] '{db_name}': rendered discovery added {discovery_rendered_added} URLs")
+        except Exception as _rd_e:
+            logger.warning(f"[AUTO-CRAWL] rendered discovery failed for {db_name}: {_rd_e}")
         if not crawl_urls:
             logger.info(f"[AUTO-CRAWL] '{db_name}': no URLs found — skipping")
             raise RuntimeError(f"No URLs found for auto-crawl from {url}")
@@ -1838,6 +2078,7 @@ async def _auto_crawl_db(db_name: str, url: str, max_pages: int = 0) -> int:
             "skipped": int(_skipped or 0),
             "chunks_processed_added": int(added or 0),
             "chunks_processed_deleted_est": int(deleted or 0),
+            "rendered_discovery_added": int(discovery_rendered_added or 0),
             "chunks_net_new": int(max(0, _end_total - _start_total)),
             "failures": _failures,
             "ts": datetime.now().isoformat(),
