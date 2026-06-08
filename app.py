@@ -10816,6 +10816,201 @@ async def crawl_site(data: dict, request: Request):
                     except Exception as _seed_e:
                         logger.warning(f"[BFS] seed link extract failed {_seed_url}: {_seed_e}")
                         return []
+
+                async def _extract_rendered_links(_seed_url: str, _limit: int = 800) -> list:
+                    """Render a page and extract same-origin links plus route-like URL hints.
+
+                    This is the universal fallback that catches URLs omitted from the sitemap
+                    but present in sidebars, menus, hydration data, or route manifests.
+                    """
+                    try:
+                        _pg = await ctx.new_page()
+                        try:
+                            await stealth(_pg)
+                        except Exception as _stealth_e:
+                            logger.warning(f"[DISCOVERY] stealth skipped {_seed_url}: {type(_stealth_e).__name__}: {_stealth_e}")
+                        try:
+                            await _pg.goto(_seed_url, wait_until="networkidle", timeout=25000)
+                            try:
+                                await _pg.wait_for_function(
+                                    "document.body && document.body.innerText.trim().length > 100",
+                                    timeout=4000,
+                                )
+                            except Exception:
+                                pass
+                            try:
+                                await _pg.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                                await _pg.wait_for_timeout(700)
+                            except Exception:
+                                pass
+                            html = await _pg.content()
+                        finally:
+                            await _pg.close()
+                        out: list[str] = []
+                        seen_local: set[str] = set()
+
+                        def _push_candidate(raw: str) -> None:
+                            try:
+                                u = str(raw or "").strip()
+                                if not u:
+                                    return
+                                if not u.startswith(("http://", "https://")):
+                                    u = urllib.parse.urljoin(_seed_url, u)
+                                u = u.split("#")[0].split("?")[0].rstrip("/")
+                                if not u:
+                                    return
+                                if not _strip_www(u).startswith(_crawl_prefix):
+                                    return
+                                _path = urllib.parse.urlparse(u).path.lower().rstrip("/")
+                                if _path.endswith((
+                                    ".css", ".js", ".mjs", ".map", ".json", ".png", ".jpg", ".jpeg",
+                                    ".gif", ".webp", ".svg", ".ico", ".woff", ".woff2", ".ttf", ".eot",
+                                    ".mp4", ".webm", ".zip", ".tar", ".gz"
+                                )):
+                                    return
+                                if any(seg in _path for seg in ("/_next/", "/assets/", "/static/", "/images/", "/img/", "/fonts/")):
+                                    return
+                                nu = _normalize_url(u)
+                                if nu in seen_local:
+                                    return
+                                seen_local.add(nu)
+                                out.append(u)
+                            except Exception:
+                                return
+
+                        # Anchor/data-href extraction from the rendered DOM.
+                        try:
+                            _hrefs = await asyncio.wait_for(
+                                _pg.evaluate(
+                                    """() => Array.from(document.querySelectorAll(
+                                            'a[href], [data-href], [data-url], [data-route], [data-path], [data-link], link[href], meta[property="og:url"], meta[name="twitter:url"], meta[http-equiv="refresh"], script[src]'
+                                        ))
+                                        .map(el => {
+                                            const tag = (el.tagName || '').toLowerCase();
+                                            if (tag === 'meta') {
+                                                return el.getAttribute('content') || el.content || '';
+                                            }
+                                            if (tag === 'script') {
+                                                return el.src || el.getAttribute('src') || '';
+                                            }
+                                            return el.href || el.getAttribute('data-href') || el.getAttribute('data-url') || el.getAttribute('data-route') || el.getAttribute('data-path') || el.getAttribute('data-link') || el.getAttribute('href') || '';
+                                        })
+                                        .filter(Boolean)"""
+                                ),
+                                timeout=5000,
+                            )
+                        except Exception:
+                            _hrefs = []
+                        for _h in (_hrefs or []):
+                            _push_candidate(_h)
+                            if len(out) >= _limit:
+                                break
+
+                        if len(out) < _limit:
+                            # Extract route-like strings hidden in hydration blobs / script tags.
+                            _route_pat = re.compile(
+                                r'(?i)(?:https?://[^"\s<>]+|/(?:docs|guide|tutorials?|lesson(?:s)?|chapter(?:s)?|part(?:s)?|learn|blog|article(?:s)?|posts?|products?|items?|categories?|collections?|pages?|topics?|resources?)/[A-Za-z0-9/_\-.%]+|/[A-Za-z0-9][A-Za-z0-9/_\-.%]{5,})'
+                            )
+                            for _raw in _route_pat.findall(html or ""):
+                                _push_candidate(_raw)
+                                if len(out) >= _limit:
+                                    break
+                        return out
+                    except Exception as _disc_e:
+                        logger.warning(f"[DISCOVERY] rendered link extract failed {_seed_url}: {_disc_e}")
+                        return []
+
+                def _pick_rendered_seed_urls(_urls: list[str], _limit: int = 18) -> list[str]:
+                    """Choose a small, diverse seed set for rendered discovery."""
+                    out = [url]
+                    seen = {_normalize_url(url)}
+                    # Prefer shallow routes, docs roots, and locale roots.
+                    family_best: dict[str, tuple[int, str, str]] = {}
+                    ranked = []
+                    for _u in _urls or []:
+                        try:
+                            _nu = _normalize_url(_u)
+                            if _nu in seen:
+                                continue
+                            _p = urllib.parse.urlparse(_u).path.rstrip("/")
+                            _parts_raw = [p for p in _p.split("/") if p]
+                            _parts = list(_parts_raw)
+                            if _parts and re.fullmatch(r"[a-z]{2}(?:-[a-z]{2,4})?", _parts[0].lower()):
+                                _parts = _parts[1:]
+                            _depth = len(_parts)
+                            _score = 0
+                            if _depth <= 1:
+                                _score += 40
+                            elif _depth <= 2:
+                                _score += 30
+                            if "/docs/" in _p.lower():
+                                _score += 25
+                            if any(seg in _p.lower() for seg in ("/guide", "/chapter", "/lesson", "/tutorial", "/learn", "/about", "/whats-new")):
+                                _score += 15
+                            if any(re.fullmatch(r"[a-z]{2}(?:-[a-z]{2,4})?", part.lower()) for part in _parts_raw[:1]):
+                                _score += 10
+                            _score += max(0, 12 - _depth)
+                            if _parts:
+                                _family = "/" + "/".join(_parts[:2])
+                            else:
+                                _family = "/"
+                            current = family_best.get(_family)
+                            if current is None or _score > current[0]:
+                                family_best[_family] = (_score, _u, _nu)
+                            ranked.append((_score, _u, _nu))
+                        except Exception:
+                            continue
+                    ranked = list(family_best.values()) + ranked
+                    ranked.sort(key=lambda t: (t[0], len(t[1])), reverse=True)
+                    for _, _u, _nu in ranked:
+                        if _nu in seen:
+                            continue
+                        out.append(_u)
+                        seen.add(_nu)
+                        if len(out) >= _limit:
+                            break
+                    return out[:_limit]
+
+                async def _rendered_discovery(_urls: list[str], _limit: int = 1200) -> list[str]:
+                    """Expand crawl discovery by rendering a small set of representative pages.
+
+                    Run a second, bounded wave so pages discovered in the first wave can become
+                    seeds for the next wave. This catches hidden docs branches and sidebar-only
+                    pages without turning discovery into a full render of the whole site.
+                    """
+                    seen_rendered: set[str] = set()
+                    out: list[str] = []
+                    frontier = _pick_rendered_seed_urls(_urls, _limit=18)
+                    if len(frontier) <= 1:
+                        return []
+                    _sem = asyncio.Semaphore(4)
+
+                    async def _one(seed_url: str):
+                        async with _sem:
+                            return await _extract_rendered_links(seed_url, _limit=1200)
+
+                    for _round in range(2):
+                        if not frontier:
+                            break
+                        results = await asyncio.gather(*[_one(_s) for _s in frontier], return_exceptions=True)
+                        new_urls: list[str] = []
+                        for _res in results:
+                            if isinstance(_res, Exception):
+                                continue
+                            for _u in _res or []:
+                                try:
+                                    _nu = _normalize_url(_u)
+                                    if _nu in seen_rendered:
+                                        continue
+                                    seen_rendered.add(_nu)
+                                    out.append(_u)
+                                    new_urls.append(_u)
+                                    if len(out) >= _limit:
+                                        return out
+                                except Exception:
+                                    continue
+                        frontier = _pick_rendered_seed_urls(list(_urls) + new_urls, _limit=18)
+                    return out
                 for sitemap_url_try in sitemap_candidates[:5]:
                     yield _send(f"🔍 Fetching sitemap: {sitemap_url_try.split('/')[-1]} ...")
                     sitemap_urls = await _fetch_sitemap(ctx, sitemap_url_try, _crawl_prefix)
@@ -10832,6 +11027,16 @@ async def crawl_site(data: dict, request: Request):
                         yield _send(f"🧭 Seed nav links: +{len(_seed_links)}")
                 except Exception:
                     pass
+
+                # Universal discovery pass: render a small set of representative pages
+                # and mine their sidebars / hydration data for URLs omitted from sitemap.
+                try:
+                    _rendered_links = await _rendered_discovery(sitemap_urls)
+                    if _rendered_links:
+                        sitemap_urls.extend(_rendered_links)
+                        yield _send(f"🧭 Rendered discovery: +{len(_rendered_links)}")
+                except Exception as _rd_e:
+                    logger.warning(f"[DISCOVERY] rendered expansion failed: {_rd_e}")
 
                 raw_sitemap_count = len(sitemap_urls)
                 # If sitemap has few/no URLs → BFS link-following spider
