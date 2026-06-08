@@ -96,24 +96,38 @@ def _looks_generic_title(title: str) -> bool:
     return False
 
 
-def _derive_page_title(title_hint: str, cleaned: str, product: dict | None = None) -> str:
+def _derive_page_title(title_hint: str, cleaned: str, product: dict | None = None, *, prefer_title_hint: bool = False) -> str:
     candidates: list[str] = []
     body = cleaned or ""
-    for pat in (
-        r"(?m)^\s*(?:##|###)\s+(.+?)\s*$",
-        r"(?i)\b(?:name|title|product)\s*:\s*([^\n\.]{4,180})",
-        r"(?m)^(?!https?://)([A-Z][^\n]{4,120})$",
-    ):
-        for mm in re.finditer(pat, body):
-            cand = _canonical_product_title((mm.group(1) or "").strip())
-            if cand and cand not in candidates:
-                candidates.append(cand)
-                break
+    ordered_candidates = [title_hint or "", (product or {}).get("title") or "", (product or {}).get("canonical_title") or ""]
+    if not prefer_title_hint:
+        for pat in (
+            r"(?m)^\s*(?:##|###)\s+(.+?)\s*$",
+            r"(?i)\b(?:name|title|product)\s*:\s*([^\n\.]{4,180})",
+            r"(?m)^(?!https?://)([A-Z][^\n]{4,120})$",
+        ):
+            for mm in re.finditer(pat, body):
+                cand = _canonical_product_title((mm.group(1) or "").strip())
+                if cand and cand not in candidates:
+                    candidates.append(cand)
+                    break
 
-    for cand in [title_hint or "", (product or {}).get("title") or "", (product or {}).get("canonical_title") or ""]:
+    for cand in ordered_candidates:
         cand = _canonical_product_title(str(cand or "")).strip(" -:|")
         if cand and cand not in candidates:
             candidates.append(cand)
+
+    if prefer_title_hint:
+        for pat in (
+            r"(?m)^\s*(?:##|###)\s+(.+?)\s*$",
+            r"(?i)\b(?:name|title|product)\s*:\s*([^\n\.]{4,180})",
+            r"(?m)^(?!https?://)([A-Z][^\n]{4,120})$",
+        ):
+            for mm in re.finditer(pat, body):
+                cand = _canonical_product_title((mm.group(1) or "").strip())
+                if cand and cand not in candidates:
+                    candidates.append(cand)
+                    break
 
     non_generic = [c for c in candidates if not _looks_generic_title(c)]
     if non_generic:
@@ -451,10 +465,18 @@ def _extract_product_summary(text: str, url: str, title_hint: str = "") -> dict:
     }
 
 
-def _classify_page_type(url: str, cleaned: str, product_like: bool, structural: bool) -> str:
+def _classify_page_type(url: str, cleaned: str, product_like: bool, structural: bool, docs_like: bool = False) -> str:
     source = (url or "").lower()
     body = cleaned or ""
     metrics = _trusted_content_metrics(body)
+    if docs_like:
+        if structural:
+            return "structural"
+        if re.search(r"(?i)\b(by completing|by the end of this (?:chapter|lesson)|you will be able to|learning outcomes|objectives|goals)\b", body):
+            return "article"
+        if metrics["prose_chars"] >= 160 or metrics["sentence_count"] >= 2:
+            return "article"
+        return "structural" if metrics["nav_hits"] >= 6 else "article"
     if _looks_like_catalog_page(source, body):
         return "catalog"
     if product_like:
@@ -491,6 +513,7 @@ def _quality_score(
     structural: bool = False,
     contaminated: bool = False,
     had_boilerplate: bool = False,
+    docs_like: bool = False,
 ) -> float:
     score = 0.0
     used_structured_fields = used_structured_fields or []
@@ -507,6 +530,14 @@ def _quality_score(
         score -= 0.1
     if structural or contaminated:
         score = min(score, 0.2)
+    if docs_like and page_type in {"article", "structural"}:
+        score = max(score, 0.35)
+        if metrics["prose_chars"] > 120:
+            score += 0.15
+        if metrics["sentence_count"] >= 2:
+            score += 0.1
+        if not had_boilerplate:
+            score += 0.05
     if page_type == "unknown":
         score = min(score, 0.49)
     return round(max(0.0, min(1.0, score)), 2)
@@ -520,6 +551,7 @@ def _page_classifier_confidence(
     structural: bool = False,
     used_structured_fields: list[str] | None = None,
     body_fallback_used: bool = False,
+    docs_like: bool = False,
 ) -> float:
     used_structured_fields = used_structured_fields or []
     metrics = _trusted_content_metrics(cleaned)
@@ -557,6 +589,13 @@ def _page_classifier_confidence(
         if metrics["sentence_count"] >= 3:
             conf += 0.1
         return round(max(0.2, min(0.98, conf)), 2)
+    if docs_like:
+        conf = 0.72
+        if metrics["prose_chars"] > 200:
+            conf += 0.08
+        if metrics["sentence_count"] >= 2:
+            conf += 0.05
+        return round(max(0.2, min(0.98, conf)), 2)
     return 0.35
 
 
@@ -569,7 +608,7 @@ def _prepare_crawl_page(text: str, url: str, title_hint: str = "") -> tuple[str,
     cleaned = _clean_text(cleaned)
     had_boilerplate = cleaned != raw and bool(_BOILERPLATE_SIGNAL_RE.search(raw))
     structural = _looks_structural_page(url, cleaned)
-    page_type = _classify_page_type(url, cleaned, product_like, structural)
+    page_type = _classify_page_type(url, cleaned, product_like, structural, docs_like=docs_like)
     now_iso = datetime.now(timezone.utc).isoformat()
     content_hash = hashlib.sha256(cleaned.encode("utf-8", errors="ignore")).hexdigest() if cleaned else ""
     meta = {
@@ -589,13 +628,13 @@ def _prepare_crawl_page(text: str, url: str, title_hint: str = "") -> tuple[str,
     meta["page_title"] = (
         _canonical_product_title(title_hint or "").strip(" -:|")
         if docs_like and title_hint
-        else _derive_page_title(title_hint, cleaned)
-    ) or _derive_page_title(title_hint, cleaned)
+        else _derive_page_title(title_hint, cleaned, prefer_title_hint=docs_like)
+    ) or _derive_page_title(title_hint, cleaned, prefer_title_hint=docs_like)
     meta["catalog_listing"] = False
     if catalog_like:
         meta["catalog_listing"] = True
         meta["page_type"] = "catalog"
-        meta["page_title"] = _derive_page_title(title_hint, cleaned)
+        meta["page_title"] = _derive_page_title(title_hint, cleaned, prefer_title_hint=docs_like)
     if product_like:
         product = _extract_product_summary(cleaned, url, title_hint=title_hint)
         meta["product"] = product
@@ -605,7 +644,7 @@ def _prepare_crawl_page(text: str, url: str, title_hint: str = "") -> tuple[str,
         meta["extraction_mode"] = "structured_product" if meta["used_structured_fields"] else "body_text"
         if product.get("title") and (product.get("price_label") or product.get("description") or meta["used_structured_fields"]):
             meta["page_type"] = "product"
-            meta["page_title"] = _derive_page_title(title_hint, cleaned, product)
+            meta["page_title"] = _derive_page_title(title_hint, cleaned, product, prefer_title_hint=docs_like)
     elif not docs_like and meta["page_type"] in {"policy", "unknown", "category", "article"}:
         # Product/catalog pages often carry policy/footer boilerplate that can
         # overwhelm the classifier. If structured product signals are present,
@@ -624,9 +663,9 @@ def _prepare_crawl_page(text: str, url: str, title_hint: str = "") -> tuple[str,
             meta["used_structured_fields"] = list(product.get("used_structured_fields") or [])
             meta["body_fallback_used"] = bool(product.get("body_fallback_used"))
             meta["extraction_mode"] = "structured_product" if meta["used_structured_fields"] else "body_text"
-            meta["page_title"] = _derive_page_title(title_hint, cleaned, product)
+            meta["page_title"] = _derive_page_title(title_hint, cleaned, product, prefer_title_hint=docs_like)
         else:
-            meta["page_title"] = _derive_page_title(title_hint, cleaned)
+            meta["page_title"] = _derive_page_title(title_hint, cleaned, prefer_title_hint=docs_like)
     meta["quality_score"] = _quality_score(
         cleaned,
         page_type=meta["page_type"],
@@ -635,6 +674,7 @@ def _prepare_crawl_page(text: str, url: str, title_hint: str = "") -> tuple[str,
         structural=bool(meta.get("structural")),
         contaminated=bool(meta.get("contaminated")),
         had_boilerplate=bool(meta.get("had_boilerplate")),
+        docs_like=docs_like,
     )
     meta["page_classifier_confidence"] = _page_classifier_confidence(
         cleaned,
@@ -643,6 +683,7 @@ def _prepare_crawl_page(text: str, url: str, title_hint: str = "") -> tuple[str,
         structural=bool(meta.get("structural")),
         used_structured_fields=meta.get("used_structured_fields") or [],
         body_fallback_used=bool(meta.get("body_fallback_used")),
+        docs_like=docs_like,
     )
     quarantine_reason = ""
     retrieve_eligible = True

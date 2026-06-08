@@ -11304,6 +11304,14 @@ async def crawl_site(data: dict, request: Request):
                         # Extract title
                         title_m = re.search(r'<title[^>]*>(.*?)</title>', html, re.DOTALL | re.I)
                         title_text = re.sub(r'<[^>]+>', '', title_m.group(1)).strip() if title_m else ''
+                        _docs_like = (
+                            "/docs/" in (page_url or "").lower()
+                            or "/guide" in (page_url or "").lower()
+                            or "/roman/" in (page_url or "").lower()
+                            or "/arabic/" in (page_url or "").lower()
+                            or "/spanish/" in (page_url or "").lower()
+                            or "/hindi/" in (page_url or "").lower()
+                        )
                         # Preserve tables / lists / code blocks before the broad tag strip.
                         try:
                             from bs4 import BeautifulSoup as _BS_html
@@ -11344,6 +11352,19 @@ async def crawl_site(data: dict, request: Request):
                                         _items.append(_li_txt)
                                 if _items:
                                     _ul.replace_with("\n\n" + "\n".join(f"- {it}" for it in _items) + "\n\n")
+                            if _docs_like:
+                                for _sel in (
+                                    ".theme-doc-markdown",
+                                    ".markdown",
+                                    ".theme-doc-content",
+                                    "[class*='docMainContainer'] article",
+                                    "main article",
+                                    "article",
+                                ):
+                                    _doc_main = _soup.select_one(_sel)
+                                    if _doc_main and _doc_main.get_text(" ", strip=True):
+                                        _soup = _doc_main
+                                        break
                             html = str(_soup)
                         except Exception:
                             pass
@@ -11375,6 +11396,10 @@ async def crawl_site(data: dict, request: Request):
                         page_meta["source_canonical"] = _canonical_source_url(page_url)
                         combined = re.sub(r'[ \t]+', ' ', _clean_text(combined))
                         combined = re.sub(r'\n{3,}', '\n\n', combined).strip()
+                        if _docs_like:
+                            # Docs pages often have short but meaningful bodies; keep them if title/body are real.
+                            if len(combined) > 60 or (title_text and len(title_text) > 8):
+                                return {"text": combined, "title": title_text, "page_meta": page_meta}
                         if len(combined) > 100:
                             return {"text": combined, "title": title_text, "page_meta": page_meta}
                         return None
@@ -11567,14 +11592,22 @@ async def crawl_site(data: dict, request: Request):
                                             }
                                         }
                                         let bodyText = '';
-                                        const mainEl = document.querySelector('main') ||
-                                                        document.querySelector('article') ||
-                                                        document.querySelector('.content') ||
-                                                        document.querySelector('#content') ||
-                                                        document.querySelector('.post-content') ||
-                                                        document.querySelector('.entry-content') ||
-                                                        document.querySelector('.page-content');
-                                        if (mainEl && mainEl.innerText.trim().length > 100) {
+                                        const docsMain = document.querySelector('.theme-doc-markdown') ||
+                                                         document.querySelector('.markdown') ||
+                                                         document.querySelector('.theme-doc-content') ||
+                                                         document.querySelector('[class*="docMainContainer"] article') ||
+                                                         document.querySelector('main article') ||
+                                                         document.querySelector('article');
+                                        const mainEl = docsMain ||
+                                                       document.querySelector('main') ||
+                                                       document.querySelector('.content') ||
+                                                       document.querySelector('#content') ||
+                                                       document.querySelector('.post-content') ||
+                                                       document.querySelector('.entry-content') ||
+                                                       document.querySelector('.page-content');
+                                        if (docsMain && docsMain.innerText.trim().length > 40) {
+                                            bodyText = docsMain.innerText;
+                                        } else if (mainEl && mainEl.innerText.trim().length > 100) {
                                             bodyText = mainEl.innerText;
                                         } else if (document.body) {
                                             const clone = document.body.cloneNode(true);
@@ -11584,6 +11617,7 @@ async def crawl_site(data: dict, request: Request):
                                                 '.nav', '.navigation', '.sidebar', '.side_categories',
                                                 '.nav-list', '.breadcrumb', '.breadcrumbs',
                                                 '.pagination', '.social-links', '.cookie-notice',
+                                                '.theme-doc-sidebar-container', '.theme-doc-toc-mobile', '.table-of-contents',
                                                 'script', 'style', 'noscript', 'iframe', 'svg'
                                             ].forEach(sel => {
                                                 clone.querySelectorAll(sel).forEach(el => el.remove());
@@ -11639,6 +11673,12 @@ async def crawl_site(data: dict, request: Request):
                                         _ocr_skip_msg = f"[{worker_label}] [ocr-skip] {cur_url[:70]} ({'docs-like' if _docs_like else 'non-docs'})"
                                         logger.info(f"[CRAWL] {_ocr_skip_msg}")
                                         await log_queue.put(_ocr_skip_msg)
+                                    if _docs_like:
+                                        # For docs pages, prefer the doc container's heading/body over generic page chrome.
+                                        if not title or len(title.strip()) < 4:
+                                            title = title or (page_meta.get("page_title") or "")
+                                        if title and text and not text.lstrip().startswith(title):
+                                            text = f"{title}\n\n{text}".strip()
                                     text, page_meta = _prepare_crawl_page(text or "", cur_url, title_hint=title)
                                     page_meta = dict(page_meta or {})
                                     page_meta["source_canonical"] = _canonical_source_url(cur_url)
