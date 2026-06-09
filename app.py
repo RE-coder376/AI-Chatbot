@@ -2059,8 +2059,8 @@ async def _auto_crawl_db(db_name: str, url: str, max_pages: int = 0) -> int:
                             _sr = _Stealth().apply_stealth_async(_pg)
                             if inspect.isawaitable(_sr): await _sr
                         except Exception: pass
-                        await _pg.goto(_seed, wait_until="networkidle", timeout=22000)
-                        await _pg.wait_for_timeout(2000)
+                        await _pg.goto(_seed, wait_until="domcontentloaded", timeout=15000)
+                        await _pg.wait_for_timeout(900)
                         hrefs = await _pg.evaluate(
                             "() => Array.from(document.querySelectorAll('a[href]')).map(a=>(a.href||'').trim()).filter(Boolean)"
                         )
