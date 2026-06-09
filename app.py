@@ -2970,7 +2970,7 @@ def _extract_product_name_phrase(q: str) -> str:
                 return phrase[:120]
         # Fallback: if the query is basically a title or contains a quoted title,
         # preserve the exact wording instead of forcing it through generic patterns.
-        quoted = re.search(r"[\"“”']([^\"“”']{4,140})[\"“”']", qq)
+        quoted = re.search(r'["\']([^"\']{4,140})["\']', qq)
         if quoted:
             phrase = quoted.group(1).strip()
             phrase = re.sub(r"\s{2,}", " ", phrase).strip(" -:|")
@@ -3015,7 +3015,7 @@ def _extract_doc_title_phrase(q: str) -> str:
             phrase = re.sub(r"^(?:the|a|an)\s+", "", phrase, flags=re.I).strip()
             if len(re.findall(r"[A-Za-z0-9]{3,}", phrase)) >= 2:
                 return phrase[:120]
-        quoted = re.search(r"[\"“”']([^\"“”']{4,140})[\"“”']", qq)
+        quoted = re.search(r'["\']([^"\']{4,140})["\']', qq)
         if quoted:
             phrase = quoted.group(1).strip()
             phrase = re.sub(r"\s{2,}", " ", phrase).strip(" -:|")
