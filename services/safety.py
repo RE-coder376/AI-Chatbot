@@ -257,6 +257,9 @@ def _trusted_content_metrics(text: str) -> dict:
 def _looks_structural_page(url: str, text: str) -> bool:
     source = (url or "").lower()
     body = _clean_text(text or "")
+    # /docs/ pages always contain real educational content — never structural
+    if re.search(r'/docs/', source):
+        return False
     if _STRUCTURAL_URL_RE.search(source):
         return True
     metrics = _trusted_content_metrics(body)

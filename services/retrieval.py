@@ -1634,7 +1634,8 @@ def _keyword_rescue(q: str, db, seen: set, k: int = 5) -> list:
     technical = []
     for w in words:
         ww = w.strip("?.,!\"'")
-        if not ww or len(ww) < 4:
+        # Keep 2-3 char all-uppercase acronyms/brands (HP, LG, 3M) even though < 4 chars.
+        if not ww or (len(ww) < 4 and not (ww.isupper() and len(ww) >= 2)):
             continue
         lw = ww.lower()
         if lw in _RESCUE_STOPWORDS:
@@ -1651,7 +1652,9 @@ def _keyword_rescue(q: str, db, seen: set, k: int = 5) -> list:
     from langchain_core.documents import Document
     for term in technical[:3]:
         try:
-            raw = db._collection.get(where_document={"$contains": term.lower()}, limit=k * 2)
+            # Use original case (not term.lower()) — ChromaDB $contains is case-sensitive;
+            # lowercasing "HP" to "hp" would miss chunks that store the brand as "HP".
+            raw = db._collection.get(where_document={"$contains": term}, limit=k * 2)
             for doc_text, meta in zip(raw.get("documents", []), raw.get("metadatas", [])):
                 key = doc_text[:100]
                 if key not in seen and term.lower() in (doc_text or "").lower():
@@ -1765,6 +1768,8 @@ async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansio
     """Multilingual Retrieval: Handles English and Urdu in the same vector space.
     Returns (context_text, doc_count, sources) so callers can cite sources.
     fast=True skips the LLM expansion step (used for sub-queries in multi-part decomposition)."""
+    _cnt = 0
+    _small_db_full_retrieval = False
     try:
         _cnt = db._collection.count() if db else 0
         logger.info(f"[RETRIEVE] db={'set' if db else 'None'}, chunks={_cnt}, q={q[:60]}")
@@ -1773,6 +1778,7 @@ async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansio
         # 500 products × ~200 chars = ~100K chars max — capped by context budget downstream.
         if _cnt > 0 and _cnt <= 500:
             k = _cnt
+            _small_db_full_retrieval = True
     except Exception as _le:
         logger.warning(f"[RETRIEVE] db count failed: {_le}")
     # If this DB has live API sources, skip LLM expansion — the API data is the freshness source
@@ -1801,7 +1807,10 @@ async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansio
         _strict_scope_q = True
     if _strict_scope_q:
         fast = True
-        k = min(k, 18)
+        # Don't cap k for small-DB full-retrieval: queries like "available in Black?"
+        # or "ship to Lahore?" trigger Pattern 4 but need the full catalog, not 18 chunks.
+        if not _small_db_full_retrieval:
+            k = min(k, 18)
 
     # 1. Start with hardcoded concept expansion (fast)
     search_queries = expand_query(q)
@@ -2071,9 +2080,10 @@ async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansio
         except Exception:
             _max_price = None
     try:
-        _sample = db._collection.get(limit=1, include=["metadatas"]) if db else None
-        if _sample and _sample.get("metadatas") and _sample["metadatas"][0].get("price") is not None:
-            _has_product_meta = True
+        _sample = db._collection.get(limit=5, include=["metadatas"]) if db else None
+        if _sample and _sample.get("metadatas"):
+            if any(m.get("price") is not None for m in _sample["metadatas"] if m):
+                _has_product_meta = True
     except Exception as _pfe:
         logger.warning(f"[META-FILTER] Sample check failed: {_pfe}")
 
@@ -2129,7 +2139,8 @@ async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansio
                 body = str(doc_text)
                 bl = body.lower()
                 src = str((meta or {}).get("source") or "").lower()
-                if not re.search(r"/(?:products?|items?)(?:/|$|#)", src) and not ("add to cart" in bl or "shopping cart" in bl):
+                _chunk_ctype = str((meta or {}).get("content_type") or "")
+                if not re.search(r"/(?:products?|items?)(?:/|$|#)", src) and _chunk_ctype != "product" and not ("add to cart" in bl or "shopping cart" in bl):
                     continue
                 prices = []
                 for raw_price in re.findall(r"Rs\.?\s*([\d,]+(?:\.\d{1,2})?)", body, re.I):
@@ -2186,8 +2197,9 @@ async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansio
                 pass
         # For outcomes/goals questions, BM25 is often the only reliable way to land on
         # the exact "Goals ..." chunk (vector search drifts to part overviews).
-        # Prewarm on-demand with a bounded budget.
-        if _is_outcomes_intent and _bm25_db_name and (_bm25_db_name not in _bm25_cache):
+        # Also prewarm for product DBs: BM25 handles exact brand/model name lookup that
+        # vector search misses on first query before background prewarm completes.
+        if (_is_outcomes_intent or _is_product_db) and _bm25_db_name and (_bm25_db_name not in _bm25_cache):
             try:
                 await asyncio.wait_for(
                     loop.run_in_executor(None, lambda: _get_bm25_index(db, _bm25_db_name)),
@@ -2661,10 +2673,14 @@ async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansio
                 if _pval is not None and _pval > _max_price:
                     continue
             _post_filtered.append(r)
-        top = _post_filtered[:40]
+        # Small DBs: let the 24000-char context budget do the truncation naturally.
+        # The hard :40 cap was designed for large corpora and drops valid products in pos 41–148.
+        _top_cap = (min(_cnt, 100) if _small_db_full_retrieval else 40)
+        top = _post_filtered[:_top_cap]
         logger.info(f"[META-FILTER] post-filter: {len(top)} chunks remain")
     else:
-        top = _combined_before_cap[:40]
+        _top_cap = (min(_cnt, 100) if _small_db_full_retrieval else 40)
+        top = _combined_before_cap[:_top_cap]
 
     # Product-intent guard: favor actual catalog pages over blogs/about pages.
     # Universal behavior for ecommerce-like DBs.
@@ -2780,7 +2796,10 @@ async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansio
     # Previously only fired for price/size queries — extended to ALL product queries so
     # name-only lookups like "Pop Up Animals Toy" also land on the exact product page.
     _has_productish_sources = any(
-        re.search(r"/(?:products?|items?)(?:/|$|#)", str(((getattr(r, "metadata", None) or {}).get("source")) or "").lower())
+        (
+            re.search(r"/(?:products?|items?)(?:/|$|#)", str(((getattr(r, "metadata", None) or {}).get("source")) or "").lower())
+            or (getattr(r, "metadata", None) or {}).get("content_type") == "product"
+        )
         for r in top[:20]
     )
     if _has_productish_sources and not _is_price_ranking_query(q or "")[0]:

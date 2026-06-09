@@ -1578,54 +1578,174 @@ async def _auto_crawl_db(db_name: str, url: str, max_pages: int = 0) -> int:
         return u_netloc.lstrip("www.") == ref.lstrip("www.")
 
     try:
-        # Step 1: discover URLs via sitemap — crawl ALL (not just new) for content refresh
-        async with _hx.AsyncClient(timeout=15, headers={"User-Agent": "Mozilla/5.0"}, follow_redirects=True) as client:
-            for sm_path in ["/sitemap.xml", "/sitemap_index.xml", "/sitemap/"]:
-                try:
-                    r = await client.get(f"{base}{sm_path}")
-                    if r.status_code == 200 and "<loc>" in r.text:
-                        found = re.findall(r'<loc>([^<]+)</loc>', r.text)
-                        candidate = [u.strip() for u in found if _domain_match(urlparse(u.strip()).netloc, domain)]
-                        # If all locs are XML files, it's a sitemap index — expand sub-sitemaps
-                        # Use urlparse to strip query strings before checking .xml extension (Shopify adds ?from=&to=)
-                        def _is_xml(u): return urlparse(u).path.endswith(".xml")
-                        if candidate and all(_is_xml(u) for u in candidate):
-                            expanded = []
-                            for sub_url in candidate[:10]:
-                                try:
-                                    sr = await client.get(sub_url)
-                                    if sr.status_code == 200 and "<loc>" in sr.text:
-                                        sub_found = re.findall(r'<loc>([^<]+)</loc>', sr.text)
-                                        expanded += [u.strip() for u in sub_found if _domain_match(urlparse(u.strip()).netloc, domain) and not _is_xml(u.strip())]
-                                except Exception: pass
-                            candidate = expanded if expanded else candidate
-                        sitemap_urls = candidate
-                        crawl_urls = sitemap_urls if max_pages == 0 else sitemap_urls[:max_pages]
-                        new_count = len([u for u in crawl_urls if u not in already_seen])
-                        logger.info(f"[AUTO-CRAWL] '{db_name}': {len(sitemap_urls)} sitemap URLs — refreshing {len(crawl_urls)} ({new_count} new)")
-                        break
-                except Exception as e:
-                    logger.warning(f"[AUTO-CRAWL] Sitemap '{sm_path}' failed for {db_name}: {e}")
-        # Fallback: no sitemap — BFS from homepage (1 level deep)
-        if not crawl_urls:
-            logger.info(f"[AUTO-CRAWL] '{db_name}': no sitemap — falling back to BFS from {url}")
+        # Step 1: discover URLs via sitemap (+ robots.txt) — crawl ALL for content refresh
+        def _is_xml(u): return urlparse(u).path.endswith(".xml")
+
+        async def _expand_sitemap(client, sm_url: str) -> list[str]:
+            """Fetch one sitemap/index and return all same-domain page URLs."""
             try:
+                r = await client.get(sm_url)
+                if r.status_code != 200 or "<loc>" not in r.text:
+                    return []
+                found = re.findall(r'<loc>([^<]+)</loc>', r.text)
+                candidate = [u.strip() for u in found if _domain_match(urlparse(u.strip()).netloc, domain)]
+                if candidate and all(_is_xml(u) for u in candidate):
+                    # sitemap index — expand sub-sitemaps (up to 20)
+                    expanded = []
+                    for sub in candidate[:20]:
+                        try:
+                            sr = await client.get(sub)
+                            if sr.status_code == 200 and "<loc>" in sr.text:
+                                sub_found = re.findall(r'<loc>([^<]+)</loc>', sr.text)
+                                expanded += [u.strip() for u in sub_found
+                                             if _domain_match(urlparse(u.strip()).netloc, domain) and not _is_xml(u.strip())]
+                        except Exception: pass
+                    return expanded if expanded else candidate
+                return [u for u in candidate if not _is_xml(u)]
+            except Exception:
+                return []
+
+        async with _hx.AsyncClient(timeout=15, headers={"User-Agent": "Mozilla/5.0"}, follow_redirects=True) as client:
+            # 1a. Standard sitemap paths
+            for sm_path in ["/sitemap.xml", "/sitemap_index.xml", "/sitemap/"]:
+                sitemap_urls = await _expand_sitemap(client, f"{base}{sm_path}")
+                if sitemap_urls:
+                    break
+            # 1b. robots.txt may declare additional/alternate sitemap locations
+            if not sitemap_urls:
+                try:
+                    rb = await client.get(f"{base}/robots.txt")
+                    if rb.status_code == 200:
+                        for sm_line in re.findall(r'(?i)^Sitemap:\s*(\S+)', rb.text, re.M):
+                            sitemap_urls = await _expand_sitemap(client, sm_line.strip())
+                            if sitemap_urls:
+                                break
+                except Exception: pass
+            if sitemap_urls:
+                crawl_urls = sitemap_urls if max_pages == 0 else sitemap_urls[:max_pages]
+                new_count = len([u for u in crawl_urls if u not in already_seen])
+                logger.info(f"[AUTO-CRAWL] '{db_name}': {len(sitemap_urls)} sitemap URLs — refreshing {len(crawl_urls)} ({new_count} new)")
+
+        # Fallback: no sitemap — multi-level BFS from homepage
+        if not crawl_urls:
+            logger.info(f"[AUTO-CRAWL] '{db_name}': no sitemap — falling back to multi-level BFS from {url}")
+            try:
+                _bfs_limit = min(max_pages, 500) if max_pages else 500
+                _bfs_seen: set = {url}
+                _bfs_queue: list = [url]
+                _bfs_result: list = [url]
+                _bfs_depth = 0
                 async with _hx.AsyncClient(timeout=15, headers={"User-Agent": "Mozilla/5.0"}, follow_redirects=True) as client:
-                    r = await client.get(url)
-                    if r.status_code == 200:
-                        soup = BeautifulSoup(r.text, "html.parser")
-                        bfs_urls = [url]  # always include homepage
-                        for a in soup.find_all("a", href=True):
-                            href = urljoin(url, a["href"]).split("#")[0].rstrip("/")
-                            if _domain_match(urlparse(href).netloc, domain) and href not in bfs_urls:
-                                bfs_urls.append(href)
-                        crawl_urls = bfs_urls if max_pages == 0 else bfs_urls[:max_pages]
-                        logger.info(f"[AUTO-CRAWL] '{db_name}': BFS found {len(crawl_urls)} URLs from homepage")
+                    while _bfs_queue and len(_bfs_result) < _bfs_limit and _bfs_depth < 4:
+                        _next_queue: list = []
+                        for _bfs_url in _bfs_queue:
+                            if len(_bfs_result) >= _bfs_limit:
+                                break
+                            try:
+                                r = await client.get(_bfs_url)
+                                if r.status_code != 200:
+                                    continue
+                                soup = BeautifulSoup(r.text, "html.parser")
+                                for a in soup.find_all("a", href=True):
+                                    href = urljoin(_bfs_url, a["href"]).split("#")[0].rstrip("/")
+                                    if (href not in _bfs_seen and
+                                            _domain_match(urlparse(href).netloc, domain) and
+                                            href.startswith("http")):
+                                        _bfs_seen.add(href)
+                                        _bfs_result.append(href)
+                                        _next_queue.append(href)
+                                        if len(_bfs_result) >= _bfs_limit:
+                                            break
+                            except Exception: pass
+                        _bfs_queue = _next_queue
+                        _bfs_depth += 1
+                crawl_urls = _bfs_result
+                logger.info(f"[AUTO-CRAWL] '{db_name}': BFS depth={_bfs_depth} found {len(crawl_urls)} URLs")
             except Exception as _bfs_e:
                 logger.warning(f"[AUTO-CRAWL] BFS fallback failed for {db_name}: {_bfs_e}")
         if not crawl_urls:
             logger.info(f"[AUTO-CRAWL] '{db_name}': no URLs found — skipping")
             raise RuntimeError(f"No URLs found for auto-crawl from {url}")
+
+        # Step 1c: rendered nav discovery — finds pages only accessible via JS sidebar/hydration.
+        # Runs AFTER sitemap/BFS so we only spend Playwright time on genuinely missing URLs.
+        async def _discover_nav_entrypoints(_limit: int = 300) -> list[str]:
+            """Render homepage + /docs entry pages and extract JS-rendered nav links."""
+            try:
+                from playwright.async_api import async_playwright as _apw
+                from playwright_stealth import Stealth as _Stealth
+            except Exception:
+                return []
+            _ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+            try:
+                _pw2 = await _apw().start()
+                _nb = await _pw2.chromium.launch(headless=True, args=["--no-sandbox", "--disable-dev-shm-usage"])
+                _nctx = await _nb.new_context(user_agent=_ua, locale="en-US", viewport={"width": 1440, "height": 2200})
+            except Exception as _se:
+                logger.warning(f"[AUTO-CRAWL] nav-discovery browser failed for {db_name}: {_se}")
+                return []
+
+            async def _links_from(_seed: str) -> list[str]:
+                try:
+                    _pg = await _nctx.new_page()
+                    try:
+                        try:
+                            _sr = _Stealth().apply_stealth_async(_pg)
+                            if inspect.isawaitable(_sr): await _sr
+                        except Exception: pass
+                        await _pg.goto(_seed, wait_until="networkidle", timeout=22000)
+                        await _pg.wait_for_timeout(2000)
+                        hrefs = await _pg.evaluate(
+                            "() => Array.from(document.querySelectorAll('a[href]')).map(a=>(a.href||'').trim()).filter(Boolean)"
+                        )
+                    finally:
+                        try: await _pg.close()
+                        except Exception: pass
+                except Exception as _le:
+                    logger.warning(f"[AUTO-CRAWL] nav-seed failed {_seed}: {_le}")
+                    return []
+                out, _ls = [], set()
+                for raw in hrefs or []:
+                    try:
+                        u = str(raw or "").strip()
+                        if not u.startswith(("http://","https://")):
+                            u = urljoin(_seed, u)
+                        u = u.split("#")[0].split("?")[0].rstrip("/")
+                        if not u or not _domain_match(urlparse(u).netloc, domain): continue
+                        path = urlparse(u).path.lower().rstrip("/")
+                        if path.endswith((".css",".js",".json",".png",".jpg",".svg",".ico",".woff",".xml",".txt")): continue
+                        if any(s in path for s in ("/_next/","/assets/","/static/","/images/","/fonts/")): continue
+                        canon = _canonical_source_url(u)
+                        if canon in _ls: continue
+                        _ls.add(canon); out.append(u)
+                    except Exception: continue
+                return out
+
+            try:
+                seeds = list(dict.fromkeys([url, base, f"{base}/docs", f"{base}/docs/"]))
+                gathered, _sg = [], set(_canonical_source_url(u) for u in crawl_urls)
+                for seed in seeds:
+                    for candidate in await _links_from(seed):
+                        canon = _canonical_source_url(candidate)
+                        if canon not in _sg:
+                            _sg.add(canon); gathered.append(candidate)
+                            if len(gathered) >= _limit: break
+                    if len(gathered) >= _limit: break
+                return gathered
+            finally:
+                try: await _nb.close()
+                except Exception: pass
+                try: await _pw2.stop()
+                except Exception: pass
+
+        try:
+            _nav_extras = await _discover_nav_entrypoints()
+            if _nav_extras:
+                crawl_urls = list(dict.fromkeys(crawl_urls + _nav_extras))
+                logger.info(f"[AUTO-CRAWL] '{db_name}': nav-discovery added {len(_nav_extras)} URLs → {len(crawl_urls)} total")
+        except Exception as _nav_e:
+            logger.warning(f"[AUTO-CRAWL] nav-discovery failed for {db_name}: {_nav_e}")
+
         # Step 2: fetch and re-index all pages — Playwright for JS rendering, one browser for all
         _browser = None
         _pw_ctx = None
@@ -1641,6 +1761,7 @@ async def _auto_crawl_db(db_name: str, url: str, max_pages: int = 0) -> int:
         _crawl_start = time.time()
         _last_progress_log = _crawl_start
         _skipped = 0
+        _quarantined = 0
         _page_idx = 0
         _total_pages = len(crawl_urls)
         _MAX_CRAWL_SECONDS = 4 * 3600  # 4hr hard limit — kills truly stuck crawls
@@ -1677,6 +1798,7 @@ async def _auto_crawl_db(db_name: str, url: str, max_pages: int = 0) -> int:
                 _last_progress_log = _now_t
             try:
                 text = ""
+                _page_title = ""
                 _pw_ok = False
                 if _browser:
                     for _attempt in range(3):
@@ -1695,9 +1817,14 @@ async def _auto_crawl_db(db_name: str, url: str, max_pages: int = 0) -> int:
                             html = await _pg.content()
                             await _pg.close()
                             soup = BeautifulSoup(html, "html.parser")
-                            for tag in soup(["script","style"]): tag.decompose()
+                            for tag in soup(["script","style","nav","header","footer"]): tag.decompose()
                             for tag in soup.find_all(style=lambda s: s and "display:none" in s.replace(" ","")): tag.decompose()
-                            text = soup.get_text(separator="\n", strip=True)
+                            _content = (soup.find("article") or soup.find("main") or
+                                        soup.find(class_=re.compile(r"markdown|doc-content|theme-doc-markdown", re.I)) or
+                                        soup.body)
+                            _h1 = soup.find("h1")
+                            _page_title = _h1.get_text(strip=True) if _h1 else ""
+                            text = (_content or soup).get_text(separator="\n", strip=True)
                             _pw_ok = True
                             break
                         except (RuntimeError, TypeError) as _pe:
@@ -1723,9 +1850,14 @@ async def _auto_crawl_db(db_name: str, url: str, max_pages: int = 0) -> int:
                         r = await _hx_client.get(page_url)
                         if r.status_code == 200:
                             soup = BeautifulSoup(r.text, "html.parser")
-                            for tag in soup(["script","style"]): tag.decompose()
+                            for tag in soup(["script","style","nav","header","footer"]): tag.decompose()
                             for tag in soup.find_all(style=lambda s: s and "display:none" in s.replace(" ","")): tag.decompose()
-                            text = soup.get_text(separator="\n", strip=True)
+                            _content = (soup.find("article") or soup.find("main") or
+                                        soup.find(class_=re.compile(r"markdown|doc-content|theme-doc-markdown", re.I)) or
+                                        soup.body)
+                            _h1 = soup.find("h1")
+                            _page_title = _h1.get_text(strip=True) if _h1 else ""
+                            text = (_content or soup).get_text(separator="\n", strip=True)
                     except Exception as _hx_e:
                         logger.warning(f"[AUTO-CRAWL] '{db_name}' httpx also failed {page_url[:70]}: {_hx_e}")
                 # Only count as skipped if BOTH Playwright and httpx failed
@@ -1750,9 +1882,13 @@ async def _auto_crawl_db(db_name: str, url: str, max_pages: int = 0) -> int:
                             await asyncio.to_thread(lambda u=_canon_url: db.delete(where={"source": u}))
                     except Exception as _del_e:
                         logger.debug(f"[AUTO-CRAWL] Could not delete old chunks for {page_url}: {_del_e}")
-                    text, page_meta = _prepare_crawl_page(text, page_url)
+                    text, page_meta = _prepare_crawl_page(text, page_url, title_hint=_page_title)
                     page_meta = dict(page_meta or {})
                     page_meta["source_canonical"] = _canon_url
+                    if _page_title:
+                        page_meta["page_title"] = _page_title
+                    if not page_meta.get("retrieve_eligible", True):
+                        _quarantined += 1
                     _new_docs = _smart_chunk_page(text, page_url, page_meta=page_meta)
                     _pending_docs.extend(_new_docs)
                     added += len(_new_docs)
@@ -1773,7 +1909,20 @@ async def _auto_crawl_db(db_name: str, url: str, max_pages: int = 0) -> int:
         await _hx_client.aclose()
         _total_elapsed = int(time.time() - _crawl_start)
         net = added - deleted
-        logger.info(f"[AUTO-CRAWL] '{db_name}' finished: {_page_idx}/{_total_pages} pages, +{added} chunks, -{deleted} deleted, net {net}, {_skipped} skipped, {_total_elapsed}s total")
+        logger.info(f"[AUTO-CRAWL] '{db_name}' finished: {_page_idx}/{_total_pages} pages, +{added} chunks, -{deleted} deleted, net {net}, {_skipped} skipped, {_quarantined} quarantined, {_total_elapsed}s total")
+        try:
+            _audit = {
+                "db": db_name, "crawled_at": datetime.now(timezone.utc).isoformat(),
+                "discovered": len(crawl_urls), "fetched": len(crawl_urls) - _skipped,
+                "skipped": _skipped, "quarantined": _quarantined,
+                "chunks_added": added, "chunks_deleted": deleted, "net_chunks": added - deleted,
+                "failures": _failures,
+            }
+            _audit_path = DATABASES_DIR / db_name / "_crawl_audit.json"
+            (_audit_path.parent).mkdir(parents=True, exist_ok=True)
+            _audit_path.write_text(json.dumps(_audit, indent=2), encoding="utf-8")
+        except Exception as _aud_e:
+            logger.warning(f"[AUTO-CRAWL] Could not write audit log for {db_name}: {_aud_e}")
 
         # Final batch write for remaining docs
         if _pending_docs:
@@ -1788,6 +1937,16 @@ async def _auto_crawl_db(db_name: str, url: str, max_pages: int = 0) -> int:
         if _pw_ctx:
             try: await _pw_ctx.stop()
             except Exception: pass
+
+        # Reconcile removed sources: pages in DB but absent from this crawl's URL set
+        # are marked source_status="removed" so retrieval skips them.
+        if crawl_urls and db:
+            try:
+                _live = [_canonical_source_url(u) for u in crawl_urls if str(u).startswith(("http://", "https://"))]
+                await asyncio.to_thread(_reconcile_missing_sources, db, _live, url)
+                logger.info(f"[AUTO-CRAWL] '{db_name}': reconciled removed sources against {len(_live)} live URLs")
+            except Exception as _rec_e:
+                logger.warning(f"[AUTO-CRAWL] '{db_name}': reconcile failed: {_rec_e}")
     finally:
         try: await _hx_client.aclose()
         except Exception: pass
@@ -3843,7 +4002,8 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
                      "cannot find", "can't find", "not sure about", "no specific", "not in my"]
         _cl_lower = cleaned.lower()
         _idk_pos = next((i for s in _idk_sigs if (i := _cl_lower.find(s)) >= 0), -1)
-        is_idk = _idk_pos >= 0 and (_idk_pos < 80 or len(cleaned) < 150)
+        _has_price = bool(re.search(r'Rs\.?\s*[\d,]+', cleaned))
+        is_idk = _idk_pos >= 0 and not _has_price and (_idk_pos < 80 or len(cleaned) < 150)
         if is_idk: _run_in_bg(log_knowledge_gap, q, db_name)
         # Suppress sources for conversational/memory queries — answered from history, not KB
         _conv_sigs = ["what is my name", "what's my name", "my name is", "you called me",
@@ -10675,7 +10835,10 @@ async def crawl_site(data: dict, request: Request):
             max_pages_eff = max_pages
             from playwright.async_api import async_playwright
             from playwright_stealth import Stealth as _Stealth
-            async def stealth(pg): await _Stealth().apply_stealth_async(pg)
+            async def stealth(pg):
+                _stealth_result = _Stealth().apply_stealth_async(pg)
+                if inspect.isawaitable(_stealth_result):
+                    await _stealth_result
             yield _send("🔧 Playwright loaded — launching browser...")
             parsed     = urllib.parse.urlparse(url)
             base       = f"{parsed.scheme}://{parsed.netloc}"

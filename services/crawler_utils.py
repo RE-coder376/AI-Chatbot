@@ -128,6 +128,9 @@ def _check_is_product_db(db, db_name: str = "") -> bool:
                 if m.get("price") is not None or m.get("ram_gb") is not None or m.get("gpu_vram_gb") is not None:
                     result = True
                     break
+                if m.get("content_type") == "product":
+                    result = True
+                    break
                 if re.search(r"/(?:products?|items?)(?:/|$|#)", source) or "/collections/" in source:
                     result = True
                     break
@@ -137,7 +140,8 @@ def _check_is_product_db(db, db_name: str = "") -> bool:
                     break
         except Exception:
             pass
-    if db_name:
+    # Only cache True: a False result may be stale (DB was empty or pre-crawl when sampled).
+    if db_name and result:
         _product_db_cache[db_name] = result
     return result
 
