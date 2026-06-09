@@ -11119,7 +11119,7 @@ async def crawl_site(data: dict, request: Request):
 
     url             = data.get("url", "").strip().rstrip("/")
     db_name         = data.get("db_name", "").strip()
-    max_pages       = min(int(data.get("max_pages", 2000)), 5000)  # hard cap at 5000
+    max_pages       = min(int(data.get("max_pages") or 0), 5000)  # 0 = unlimited; hard cap at 5000
     clear_first     = bool(data.get("clear_before_crawl", False))
     url_patterns    = data.get("url_patterns", [])
     embedding_model = data.get("embedding_model", "bge")
