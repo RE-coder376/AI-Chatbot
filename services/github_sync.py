@@ -16,6 +16,7 @@ logger = logging.getLogger(__name__)
 
 KEYS_FILE = Path("keys.json")
 RESTORE_ALLOWLIST_FILE = Path("restore_allowlist.txt")
+DELETED_DBS_FILE = Path("databases") / "deleted_dbs.txt"
 
 _GITHUB_USERNAME = os.getenv("GITHUB_USERNAME", "RE-coder376")
 _GITHUB_REPO     = os.getenv("GITHUB_REPO", "databases")
@@ -39,6 +40,34 @@ def _load_restore_allowlist() -> set[str]:
     except Exception as e:
         logger.warning(f"[GH-SYNC] Could not read restore allowlist: {e}")
     return allowed
+
+
+def _load_deleted_db_names() -> set[str]:
+    """Return DB names that must never be restored after deletion."""
+    deleted: set[str] = set()
+    try:
+        if DELETED_DBS_FILE.exists():
+            deleted.update({
+                line.strip()
+                for line in DELETED_DBS_FILE.read_text(encoding="utf-8-sig").splitlines()
+                if line.strip()
+            })
+    except Exception as e:
+        logger.warning(f"[GH-SYNC] Could not read deleted_dbs.txt locally: {e}")
+    try:
+        pat = os.environ.get("GITHUB_PAT", "").strip()
+        if not pat:
+            return deleted
+        import base64 as _b64, requests as _req
+        api_hdr = {"Authorization": f"token {pat}", "User-Agent": "chatbot-sync"}
+        url = f"https://api.github.com/repos/{_GITHUB_USERNAME}/{_GITHUB_REPO}/contents/deleted_dbs.txt"
+        r = _req.get(url, headers=api_hdr, timeout=10)
+        if r.status_code == 200:
+            raw = _b64.b64decode(r.json().get("content", "").replace("\n", "")).decode("utf-8-sig")
+            deleted.update({line.strip() for line in raw.splitlines() if line.strip()})
+    except Exception as e:
+        logger.warning(f"[GH-SYNC] Could not read deleted_dbs.txt from GitHub: {e}")
+    return deleted
 
 
 def _save_restore_allowlist(names: set[str]) -> None:
@@ -171,9 +200,23 @@ def _github_sync_download(load_db_callback=None):
             logger.warning("[GH-SYNC] No zip assets found in release")
             return
         allowed = _load_restore_allowlist()
+        deleted = _load_deleted_db_names()
+        if deleted:
+            import shutil
+            for db_name in sorted(deleted):
+                db_extract_dir = DATABASES_DIR / db_name
+                if db_extract_dir.exists():
+                    try:
+                        shutil.rmtree(db_extract_dir)
+                        logger.info(f"[GH-SYNC] Removed deleted DB '{db_name}' from local disk")
+                    except Exception as _re:
+                        logger.warning(f"[GH-SYNC] Could not remove deleted DB '{db_name}' locally: {_re}")
 
         def _download_zip(asset):
             db_name = asset["name"][:-4]
+            if db_name in deleted:
+                logger.info(f"[GH-SYNC] Skipping restore for {db_name} — marked deleted")
+                return
             if allowed and db_name not in allowed:
                 logger.info(f"[GH-SYNC] Skipping restore for {db_name} — not in restore allowlist")
                 return
@@ -235,8 +278,8 @@ def _github_sync_download(load_db_callback=None):
 
         # Download active DB first, then small DBs (<5MB), then large ones in background
         env_db = os.environ.get("ACTIVE_DB", "").strip()
-        active_asset = next((a for a in zip_assets if a["name"][:-4] == env_db), None)
-        other_assets = [a for a in zip_assets if a != active_asset]
+        active_asset = next((a for a in zip_assets if a["name"][:-4] == env_db and a["name"][:-4] not in deleted), None)
+        other_assets = [a for a in zip_assets if a != active_asset and a["name"][:-4] not in deleted]
         # Split: small DBs download immediately after active, large ones go to background
         small_assets = [a for a in other_assets if a.get("size", 0) < 5 * 1024 * 1024]
         large_assets  = [a for a in other_assets if a.get("size", 0) >= 5 * 1024 * 1024]
@@ -342,6 +385,9 @@ def _github_sync_download_one(db_name: str) -> bool:
         asset = next((a for a in resp.json().get("assets", []) if a.get("name") == f"{db_name}.zip"), None)
         if not asset:
             logger.warning("[GH-SYNC] Single restore missing asset: %s.zip", db_name)
+            return False
+        if db_name in _load_deleted_db_names():
+            logger.warning("[GH-SYNC] Single restore skipped for %s — marked deleted", db_name)
             return False
         if db_name not in _load_restore_allowlist():
             logger.warning("[GH-SYNC] Single restore skipped for %s — not in restore allowlist", db_name)
