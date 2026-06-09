@@ -1619,17 +1619,17 @@ async def _auto_crawl_db(db_name: str, url: str, max_pages: int = 0) -> int:
                     except Exception as _stealth_e:
                         logger.warning(f"[AUTO-CRAWL][DISCOVERY] stealth skipped {_seed_url}: {type(_stealth_e).__name__}: {_stealth_e}")
                     try:
-                        await _pg.goto(_seed_url, wait_until="networkidle", timeout=25000)
+                        await _pg.goto(_seed_url, wait_until="domcontentloaded", timeout=15000)
                         try:
                             await _pg.wait_for_function(
                                 "document.body && document.body.innerText.trim().length > 100",
-                                timeout=4000,
+                                timeout=2500,
                             )
                         except Exception:
                             pass
                         try:
                             await _pg.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-                            await _pg.wait_for_timeout(700)
+                            await _pg.wait_for_timeout(450)
                         except Exception:
                             pass
                         html = await _pg.content()
@@ -1779,6 +1779,7 @@ async def _auto_crawl_db(db_name: str, url: str, max_pages: int = 0) -> int:
             rounds = 0
             while frontier and len(seen) < _limit and rounds < 3:
                 rounds += 1
+                logger.info(f"[AUTO-CRAWL][DISCOVERY] round {rounds}/3 probing {len(frontier[:18])} seed pages for '{db_name}'")
                 sem = asyncio.Semaphore(4)
                 async def _one(seed_url: str) -> list[str]:
                     async with sem:
@@ -11383,17 +11384,17 @@ async def crawl_site(data: dict, request: Request):
                         except Exception as _stealth_e:
                             logger.warning(f"[DISCOVERY] stealth skipped {_seed_url}: {type(_stealth_e).__name__}: {_stealth_e}")
                         try:
-                            await _pg.goto(_seed_url, wait_until="networkidle", timeout=25000)
+                            await _pg.goto(_seed_url, wait_until="domcontentloaded", timeout=15000)
                             try:
                                 await _pg.wait_for_function(
                                     "document.body && document.body.innerText.trim().length > 100",
-                                    timeout=4000,
+                                    timeout=2500,
                                 )
                             except Exception:
                                 pass
                             try:
                                 await _pg.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-                                await _pg.wait_for_timeout(700)
+                                await _pg.wait_for_timeout(450)
                             except Exception:
                                 pass
                             html = await _pg.content()
@@ -11601,6 +11602,7 @@ async def crawl_site(data: dict, request: Request):
                 # Universal discovery pass: render a small set of representative pages
                 # and mine their sidebars / hydration data for URLs omitted from sitemap.
                 try:
+                    yield _send("🔎 Rendered discovery: probing seed pages...")
                     _rendered_links = await _rendered_discovery(sitemap_urls)
                     if _rendered_links:
                         sitemap_urls.extend(_rendered_links)
