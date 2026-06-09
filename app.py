@@ -1776,7 +1776,7 @@ async def _auto_crawl_db(db_name: str, url: str, max_pages: int = 0) -> int:
             seen = {_normalize_url(u) for u in frontier}
             discovered_new: list[str] = []
             rounds = 0
-            while frontier and len(seen) < _limit and rounds < 2:
+            while frontier and len(seen) < _limit and rounds < 3:
                 rounds += 1
                 sem = asyncio.Semaphore(4)
                 async def _one(seed_url: str) -> list[str]:
@@ -1799,6 +1799,110 @@ async def _auto_crawl_db(db_name: str, url: str, max_pages: int = 0) -> int:
                     break
                 frontier = _pick_rendered_seed_urls(list(_urls) + new_urls, _limit=18)
             return discovered_new
+        finally:
+            try:
+                await _browser.close()
+            except Exception:
+                pass
+            try:
+                await _pw.stop()
+            except Exception:
+                pass
+
+    async def _discover_nav_entrypoints(_limit: int = 20) -> list[str]:
+        """Find a few docs/nav entrypoints from rendered home/docs pages.
+
+        This is intentionally lightweight so it can help AgentFactory-style
+        docs sites without changing the core crawl behavior.
+        """
+        try:
+            from playwright.async_api import async_playwright
+            from playwright_stealth import Stealth as _Stealth
+        except Exception as _imp_e:
+            logger.warning(f"[AUTO-CRAWL] nav entrypoint discovery imports failed for {db_name}: {_imp_e}")
+            return []
+
+        try:
+            _pw = await async_playwright().start()
+            _browser = await _pw.chromium.launch(headless=True, args=["--no-sandbox", "--disable-dev-shm-usage"])
+            _ctx = await _browser.new_context(
+                user_agent=random.choice(user_agents),
+                locale="en-US",
+                viewport={"width": 1440, "height": 2200},
+                extra_http_headers={"Accept-Language": "en-US,en;q=0.9"},
+            )
+        except Exception as _start_e:
+            logger.warning(f"[AUTO-CRAWL] nav entrypoint browser unavailable for {db_name}: {_start_e}")
+            return []
+
+        async def _collect_from_page(_seed_url: str) -> list[str]:
+            try:
+                _pg = await _ctx.new_page()
+                try:
+                    _stealth_result = _Stealth().apply_stealth_async(_pg)
+                    if inspect.isawaitable(_stealth_result):
+                        await _stealth_result
+                    await _pg.goto(_seed_url, wait_until="networkidle", timeout=22000)
+                    await _pg.wait_for_timeout(2500)
+                    hrefs = await _pg.evaluate(
+                        """() => Array.from(document.querySelectorAll('a[href]'))
+                            .map(a => (a.href || a.getAttribute('href') || '').trim())
+                            .filter(Boolean)"""
+                    )
+                finally:
+                    try:
+                        await _pg.close()
+                    except Exception:
+                        pass
+            except Exception as _pg_e:
+                logger.warning(f"[AUTO-CRAWL] nav seed failed {_seed_url}: {_pg_e}")
+                return []
+
+            out: list[str] = []
+            seen_local: set[str] = set()
+            for raw in hrefs or []:
+                try:
+                    u = str(raw or "").strip()
+                    if not u:
+                        continue
+                    if not u.startswith(("http://", "https://")):
+                        u = urllib.parse.urljoin(_seed_url, u)
+                    u = u.split("#")[0].split("?")[0].rstrip("/")
+                    if not u or not _strip_www(u).startswith(_crawl_prefix):
+                        continue
+                    path = urllib.parse.urlparse(u).path.lower().rstrip("/")
+                    leaf = path.split("/")[-1] if path else ""
+                    if path.endswith((".css", ".js", ".mjs", ".map", ".json", ".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".ico", ".woff", ".woff2", ".ttf", ".eot", ".mp4", ".webm", ".zip", ".tar", ".gz", ".xml", ".txt", ".csv")):
+                        continue
+                    if any(seg in path for seg in ("/_next/", "/assets/", "/static/", "/images/", "/img/", "/fonts/")):
+                        continue
+                    if leaf in {"rss", "atom", "feed", "symbol", "script", "header", "button", "circle", "ellipse", "section", "strong", "footer", "nav", "main", "article", "span", "div"}:
+                        continue
+                    nu = _normalize_url(u)
+                    if nu in seen_local:
+                        continue
+                    seen_local.add(nu)
+                    out.append(u)
+                except Exception:
+                    continue
+            return out[:_limit]
+
+        try:
+            seeds = [url, base, f"{base}/docs", f"{base}/docs/"]
+            gathered: list[str] = []
+            seen: set[str] = {_normalize_url(url)}
+            for seed in seeds:
+                for candidate in await _collect_from_page(seed):
+                    nu = _normalize_url(candidate)
+                    if nu in seen:
+                        continue
+                    seen.add(nu)
+                    gathered.append(candidate)
+                    if len(gathered) >= _limit:
+                        break
+                if len(gathered) >= _limit:
+                    break
+            return gathered
         finally:
             try:
                 await _browser.close()
@@ -1855,6 +1959,14 @@ async def _auto_crawl_db(db_name: str, url: str, max_pages: int = 0) -> int:
                         logger.info(f"[AUTO-CRAWL] '{db_name}': BFS found {len(crawl_urls)} URLs from homepage")
             except Exception as _bfs_e:
                 logger.warning(f"[AUTO-CRAWL] BFS fallback failed for {db_name}: {_bfs_e}")
+        # Lightweight docs-nav expansion from rendered home/docs pages.
+        try:
+            _nav_links = await _discover_nav_entrypoints()
+            if _nav_links:
+                crawl_urls = list(dict.fromkeys((crawl_urls or []) + _nav_links))
+                logger.info(f"[AUTO-CRAWL] '{db_name}': nav discovery added {len(_nav_links)} URLs")
+        except Exception as _nav_e:
+            logger.warning(f"[AUTO-CRAWL] nav discovery failed for {db_name}: {_nav_e}")
         # Hidden-page discovery: rendered sidebars / hydration / route hints omitted from sitemap.
         try:
             _rendered_links = await _rendered_discovery(crawl_urls or [url])
