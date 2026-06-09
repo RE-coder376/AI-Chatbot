@@ -66,11 +66,15 @@ def _looks_like_docs_page(url: str, body: str = "") -> bool:
     if any(seg in u for seg in ("/roman/", "/arabic/", "/spanish/", "/hindi/", "/chinese/")):
         return True
     b = (body or "").lower()
-    if "```" in b or re.search(r"(?m)^(?:parameters|returns|example):", b):
+    _has_labels = bool(re.search(r"(?m)^(?:parameters|returns|example|usage|response|request):", b))
+    _has_func_sig = bool(re.search(r"def \w+\(|\w+\(\) ->", b))
+    _has_learning = bool(re.search(r"(?i)\b(?:learning outcomes|learning goals|by completing|by the end of|chapter|lesson|exercise|quiz)\b", b))
+    if _has_labels or _has_func_sig or _has_learning:
         return True
-    if re.search(r"def \w+\(|\w+\(\) ->", b):
-        return True
-    return bool(re.search(r"(?i)\b(?:learning outcomes|learning goals|by completing|by the end of|chapter|lesson|exercise|quiz)\b", b))
+    # Code fences alone: only when no strong e-commerce signal is present
+    if "```" in b:
+        return not bool(re.search(r"\$[\d,.]+|\b(?:add to cart|buy now|in stock|out of stock)\b", b))
+    return False
 
 
 def _looks_generic_title(title: str) -> bool:

@@ -2124,6 +2124,10 @@ async def _auto_crawl_db(db_name: str, url: str, max_pages: int = 0) -> int:
         _skipped_fetch_failed = 0
         _skipped_malformed = 0
         _quarantined = 0
+        _new_pages = 0
+        _refreshed_pages = 0
+        _fetch_failed_urls: list = []
+        _malformed_urls: list = []
         _page_idx = 0
         _total_pages = len(crawl_urls)
         _MAX_CRAWL_SECONDS = 4 * 3600  # 4hr hard limit — kills truly stuck crawls
@@ -2224,9 +2228,17 @@ async def _auto_crawl_db(db_name: str, url: str, max_pages: int = 0) -> int:
                         logger.warning(f"[AUTO-CRAWL] '{db_name}' httpx also failed {page_url[:70]}: {_hx_e}")
                 if not text:
                     _skipped_fetch_failed += 1
+                    if len(_fetch_failed_urls) < 25:
+                        _fetch_failed_urls.append(page_url)
                 elif len(text) <= 100:
                     _skipped_malformed += 1
+                    if len(_malformed_urls) < 25:
+                        _malformed_urls.append(page_url)
                 if len(text) > 100:
+                    if page_url not in already_seen:
+                        _new_pages += 1
+                    else:
+                        _refreshed_pages += 1
                     _canon_url = _canonical_source_url(page_url)
                     try:
                         # Refresh crawls delete old chunks for a URL before re-adding updated ones.
@@ -2278,8 +2290,10 @@ async def _auto_crawl_db(db_name: str, url: str, max_pages: int = 0) -> int:
                 "db": db_name, "crawled_at": datetime.now(timezone.utc).isoformat(),
                 "discovered": len(crawl_urls), "fetched": len(crawl_urls) - _skipped_fetch_failed - _skipped_malformed,
                 "fetch_failed": _skipped_fetch_failed, "malformed": _skipped_malformed, "quarantined": _quarantined,
+                "new_pages": _new_pages, "refreshed_pages": _refreshed_pages,
                 "chunks_added": added, "chunks_deleted": deleted, "net_chunks": added - deleted,
                 "discovery_sources": {"sitemap": _disc_sitemap, "bfs": _disc_bfs, "nav": _disc_nav, "rendered": discovery_rendered_added},
+                "fetch_failed_urls": _fetch_failed_urls, "malformed_urls": _malformed_urls,
                 "failures": _failures,
             }
             _audit_path = DATABASES_DIR / db_name / "_crawl_audit.json"
