@@ -4392,7 +4392,7 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
         _cl_lower = cleaned.lower()
         _idk_pos = next((i for s in _idk_sigs if (i := _cl_lower.find(s)) >= 0), -1)
         _has_price = bool(re.search(r'Rs\.?\s*[\d,]+', cleaned))
-        is_idk = _idk_pos >= 0 and not _has_price and (_idk_pos < 80 or len(cleaned) < 150)
+        is_idk = _idk_pos >= 0 and not _has_price and (_idk_pos < 120 or len(cleaned) < 150)
         if is_idk: _run_in_bg(log_knowledge_gap, q, db_name)
         # Suppress sources for conversational/memory queries — answered from history, not KB
         _conv_sigs = ["what is my name", "what's my name", "my name is", "you called me",
@@ -5970,7 +5970,8 @@ def _deterministic_product_catalog_answer(q: str, kb_context: str, max_items: in
             dl = doc.lower()
             if not ("rs." in dl or "rs " in dl):
                 continue
-            if not ("add to cart" in dl or "shopping cart" in dl or "sale price" in dl or "regular price" in dl):
+            if not ("add to cart" in dl or "shopping cart" in dl or "sale price" in dl or "regular price" in dl
+                    or "price:" in dl or ("product:" in dl and "rs." in dl)):
                 continue
             if any(b in dl[:180] for b in nav_bad) and "add to cart" not in dl:
                 continue
@@ -5984,6 +5985,10 @@ def _deterministic_product_catalog_answer(q: str, kb_context: str, max_items: in
                     title = m.group(1).strip()
             if not title:
                 m = re.search(r"([A-Z][A-Za-z0-9 '&/().-]{4,90}?)\s+Rs\.?\s*[\d,]+", doc)
+                if m:
+                    title = m.group(1).strip()
+            if not title:
+                m = re.search(r"(?i)^product:\s*([^\n]{4,90})", doc, re.M)
                 if m:
                     title = m.group(1).strip()
             title = re.sub(r"\s+", " ", title).strip(" -:|")
@@ -6030,7 +6035,7 @@ def _deterministic_product_catalog_answer(q: str, kb_context: str, max_items: in
             price = min(prices)
             if max_price is not None and price > max_price:
                 continue
-            availability = "sold out" if re.search(r"(?i)\b(sold out|currently unavailable)\b", doc) else "available"
+            availability = "sold out" if re.search(r"(?i)\b(sold out|currently unavailable|out of stock)\b", doc) else "available"
             note = ""
             desc = re.search(r"Description\s+(.{40,180})", doc, re.I | re.S)
             if desc:

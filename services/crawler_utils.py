@@ -447,6 +447,8 @@ def _extract_product_summary(text: str, url: str, title_hint: str = "") -> dict:
         used_structured_fields.append("availability")
     desc = ""
     dm = re.search(r'(?i)\bdescription:\s*([^\n]{20,600})', body)
+    if not dm:
+        dm = re.search(r'(?m)(?i)^description\s*$\n([^\n]{20,600})', body)
     if dm:
         desc = dm.group(1).strip()
         used_structured_fields.append("description")
