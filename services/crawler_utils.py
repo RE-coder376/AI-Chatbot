@@ -925,7 +925,7 @@ def _smart_chunk_page(text: str, url: str, chunk_size: int = 400, chunk_step: in
         return _finalize_docs(_merge_variant_docs(docs))
 
     # Mode 1b: catalog/listing page – split repeated product cards into per-item chunks.
-    if not _docs_guard and (page_meta.get(“catalog_listing”) or len(_PROD_PRICE_RE.findall(clean)) >= 2):
+    if not _docs_guard and (page_meta.get("catalog_listing") or len(_PROD_PRICE_RE.findall(clean)) >= 2):
         products = []
         for m in _PROD_SPLIT_RE.finditer(clean):
             price_str = m.group(1).replace(',', '')
