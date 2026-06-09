@@ -137,6 +137,7 @@ from services.crawler_utils import (
     _extract_product_metadata,
     _enrich_docs_metadata,
     _canonical_source_url,
+    _classify_and_chunk,
 )
 
 from services.llm_keys import (
@@ -1917,6 +1918,7 @@ async def _auto_crawl_db(db_name: str, url: str, max_pages: int = 0) -> int:
     _disc_bfs = 0
     _disc_nav = 0
     discovery_rendered_added = 0
+    _url_layer: dict[str, list[str]] = {}
 
     try:
         # Step 1: discover URLs via sitemap (+ robots.txt) — crawl ALL for content refresh
@@ -1965,6 +1967,7 @@ async def _auto_crawl_db(db_name: str, url: str, max_pages: int = 0) -> int:
             if sitemap_urls:
                 crawl_urls = sitemap_urls if max_pages == 0 else sitemap_urls[:max_pages]
                 _disc_sitemap = len(crawl_urls)
+                for u in crawl_urls: _url_layer.setdefault(u, []).append("sitemap")
                 new_count = len([u for u in crawl_urls if u not in already_seen])
                 logger.info(f"[AUTO-CRAWL] '{db_name}': {len(sitemap_urls)} sitemap URLs — refreshing {len(crawl_urls)} ({new_count} new)")
 
@@ -2003,6 +2006,7 @@ async def _auto_crawl_db(db_name: str, url: str, max_pages: int = 0) -> int:
                         _bfs_depth += 1
                 crawl_urls = _bfs_result
                 _disc_bfs = len(crawl_urls)
+                for u in crawl_urls: _url_layer.setdefault(u, []).append("bfs")
                 logger.info(f"[AUTO-CRAWL] '{db_name}': BFS depth={_bfs_depth} found {len(crawl_urls)} URLs")
             except Exception as _bfs_e:
                 logger.warning(f"[AUTO-CRAWL] BFS fallback failed for {db_name}: {_bfs_e}")
@@ -2020,6 +2024,7 @@ async def _auto_crawl_db(db_name: str, url: str, max_pages: int = 0) -> int:
             if _rendered_links:
                 crawl_urls = list(dict.fromkeys((crawl_urls or []) + _rendered_links))
                 discovery_rendered_added = len(_rendered_links)
+                for u in _rendered_links: _url_layer.setdefault(u, []).append("rendered")
                 logger.info(f"[AUTO-CRAWL] '{db_name}': rendered discovery added {discovery_rendered_added} URLs")
         except Exception as _rd_e:
             logger.warning(f"[AUTO-CRAWL] rendered discovery failed for {db_name}: {_rd_e}")
@@ -2103,6 +2108,7 @@ async def _auto_crawl_db(db_name: str, url: str, max_pages: int = 0) -> int:
             if _nav_extras:
                 crawl_urls = list(dict.fromkeys(crawl_urls + _nav_extras))
                 _disc_nav = len(_nav_extras)
+                for u in _nav_extras: _url_layer.setdefault(u, []).append("nav")
                 logger.info(f"[AUTO-CRAWL] '{db_name}': nav-discovery added {len(_nav_extras)} URLs → {len(crawl_urls)} total")
         except Exception as _nav_e:
             logger.warning(f"[AUTO-CRAWL] nav-discovery failed for {db_name}: {_nav_e}")
@@ -2226,15 +2232,17 @@ async def _auto_crawl_db(db_name: str, url: str, max_pages: int = 0) -> int:
                             text = (_content or soup).get_text(separator="\n", strip=True)
                     except Exception as _hx_e:
                         logger.warning(f"[AUTO-CRAWL] '{db_name}' httpx also failed {page_url[:70]}: {_hx_e}")
+                _is_docs_url = any(s in page_url.lower() for s in ("/docs/", "/guide", "/roman/", "/arabic/", "/spanish/", "/hindi/"))
+                _min_keep = 40 if _is_docs_url else 100
                 if not text:
                     _skipped_fetch_failed += 1
                     if len(_fetch_failed_urls) < 25:
                         _fetch_failed_urls.append(page_url)
-                elif len(text) <= 100:
+                elif len(text) <= _min_keep:
                     _skipped_malformed += 1
                     if len(_malformed_urls) < 25:
                         _malformed_urls.append(page_url)
-                if len(text) > 100:
+                if text and len(text) > _min_keep:
                     if page_url not in already_seen:
                         _new_pages += 1
                     else:
@@ -2257,14 +2265,12 @@ async def _auto_crawl_db(db_name: str, url: str, max_pages: int = 0) -> int:
                             await asyncio.to_thread(lambda u=_canon_url: db.delete(where={"source": u}))
                     except Exception as _del_e:
                         logger.debug(f"[AUTO-CRAWL] Could not delete old chunks for {page_url}: {_del_e}")
-                    text, page_meta = _prepare_crawl_page(text, page_url, title_hint=_page_title)
-                    page_meta = dict(page_meta or {})
-                    page_meta["source_canonical"] = _canon_url
-                    if _page_title:
-                        page_meta["page_title"] = _page_title
+                    text, page_meta, _new_docs = _classify_and_chunk(
+                        text, page_url, title_hint=_page_title,
+                        discovery_layer=(_url_layer.get(page_url) or [""])[0]
+                    )
                     if not page_meta.get("retrieve_eligible", True):
                         _quarantined += 1
-                    _new_docs = _smart_chunk_page(text, page_url, page_meta=page_meta)
                     _pending_docs.extend(_new_docs)
                     added += len(_new_docs)
                     # Batch write every 100 docs — prevents unbounded RAM + avoids single huge write at end
@@ -2293,6 +2299,10 @@ async def _auto_crawl_db(db_name: str, url: str, max_pages: int = 0) -> int:
                 "new_pages": _new_pages, "refreshed_pages": _refreshed_pages,
                 "chunks_added": added, "chunks_deleted": deleted, "net_chunks": added - deleted,
                 "discovery_sources": {"sitemap": _disc_sitemap, "bfs": _disc_bfs, "nav": _disc_nav, "rendered": discovery_rendered_added},
+                "url_provenance": {
+                    layer: [u for u, layers in _url_layer.items() if layer in layers]
+                    for layer in ("sitemap", "bfs", "nav", "rendered")
+                },
                 "fetch_failed_urls": _fetch_failed_urls, "malformed_urls": _malformed_urls,
                 "failures": _failures,
             }
@@ -11563,6 +11573,7 @@ async def crawl_site(data: dict, request: Request):
                                     continue
                         frontier = _pick_rendered_seed_urls(list(_urls) + new_urls, _limit=18)
                     return out
+                _url_layer_m: dict[str, list[str]] = {}
                 for sitemap_url_try in sitemap_candidates[:5]:
                     yield _send(f"🔍 Fetching sitemap: {sitemap_url_try.split('/')[-1]} ...")
                     sitemap_urls = await _fetch_sitemap(ctx, sitemap_url_try, _crawl_prefix)
@@ -11571,6 +11582,7 @@ async def crawl_site(data: dict, request: Request):
                     if sitemap_urls:
                         break
                 sitemap_urls = [u for u in sitemap_urls if not re.search(r'(?i)(?:/rss(?:\.xml)?$|/atom(?:\.xml)?$|/feed(?:\.xml)?$|/sitemap(?:_index)?\.xml$|#site-index$)', u)]
+                for u in sitemap_urls: _url_layer_m.setdefault(u, []).append("sitemap")
                 # Always pull nav/sidebar links from the seed URL, even if sitemap is large.
                 # This catches section/index pages that many sitemaps omit.
                 try:
@@ -11587,6 +11599,7 @@ async def crawl_site(data: dict, request: Request):
                     _rendered_links = await _rendered_discovery(sitemap_urls)
                     if _rendered_links:
                         sitemap_urls.extend(_rendered_links)
+                        for u in _rendered_links: _url_layer_m.setdefault(u, []).append("rendered")
                         yield _send(f"🧭 Rendered discovery: +{len(_rendered_links)}")
                 except Exception as _rd_e:
                     logger.warning(f"[DISCOVERY] rendered expansion failed: {_rd_e}")
@@ -11663,6 +11676,7 @@ async def crawl_site(data: dict, request: Request):
                         yield _send(f"🕷️  Found {len(_spider_urls)} URLs (frontier: {len(_frontier)})...")
 
                     sitemap_urls = _spider_urls
+                    for u in _spider_urls: _url_layer_m.setdefault(u, []).append("bfs")
                 # Always pull nav/sidebar links from the seed URL, even if sitemap is large.
                 # This catches section/index pages that many sitemaps omit.
                 try:
@@ -12561,6 +12575,9 @@ async def crawl_site(data: dict, request: Request):
                                     if isinstance(page_meta, dict) and title:
                                         page_meta = dict(page_meta)
                                         page_meta["page_title"] = str(title)[:200]
+                                    _dl = (_url_layer_m.get(cur_url) or [""])[0]
+                                    if _dl and isinstance(page_meta, dict):
+                                        page_meta["discovery_layer"] = _dl
                                 except Exception:
                                     pass
                                 pending_pages.append({"url": cur_url, "text": text, "page_meta": page_meta})
@@ -12739,6 +12756,10 @@ async def crawl_site(data: dict, request: Request):
                     "db": db_name, "crawled_at": datetime.now(timezone.utc).isoformat(),
                     "crawl_type": "manual", "discovered": len(to_crawl),
                     "discovery_sources": {"sitemap": max(0, _rsc_n - _rl_n), "rendered": _rl_n, "bfs": 0},
+                    "url_provenance": {
+                        layer: [u for u, layers in _url_layer_m.items() if layer in layers]
+                        for layer in ("sitemap", "bfs", "nav", "rendered")
+                    },
                     "chunks_added": total_chunks,
                 }
                 _audit_path_m = DATABASES_DIR / db_name / "_crawl_audit.json"

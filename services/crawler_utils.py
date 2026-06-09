@@ -642,7 +642,7 @@ def _prepare_crawl_page(text: str, url: str, title_hint: str = "") -> tuple[str,
     # Docs pages should derive their title from the actual page text first.
     # Generic site chrome titles are a common failure mode on docs-heavy sites,
     # so only treat the title hint as a fallback signal here.
-    meta["page_title"] = _derive_page_title(title_hint, cleaned, prefer_title_hint=False)
+    meta["page_title"] = _derive_page_title(title_hint, cleaned, prefer_title_hint=docs_like)
     meta["catalog_listing"] = False
     if catalog_like:
         meta["catalog_listing"] = True
@@ -731,6 +731,19 @@ def _prepare_crawl_page(text: str, url: str, title_hint: str = "") -> tuple[str,
     meta["retrieve_eligible"] = retrieve_eligible
     meta["quarantine_reason"] = quarantine_reason
     return cleaned.strip(), meta
+
+
+def _classify_and_chunk(
+    text: str, url: str, *, title_hint: str = "", discovery_layer: str = ""
+) -> tuple[str, dict, list]:
+    """Classify, prep, and chunk a fetched page. Single call site for both crawl paths."""
+    cleaned, page_meta = _prepare_crawl_page(text, url, title_hint=title_hint)
+    page_meta = dict(page_meta or {})
+    page_meta["source_canonical"] = _canonical_source_url(url)
+    if discovery_layer:
+        page_meta["discovery_layer"] = discovery_layer
+    docs = _smart_chunk_page(cleaned, url, page_meta=page_meta)
+    return cleaned, page_meta, docs
 
 
 def _chroma_safe_metadata(metadata: dict | None) -> dict:
