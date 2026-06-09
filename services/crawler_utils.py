@@ -59,11 +59,17 @@ def _canonical_source_url(url: str) -> str:
 def _looks_like_docs_page(url: str, body: str = "") -> bool:
     """Heuristic for docs/tutorial/chapter pages that should not be forced into product shaping."""
     u = (url or "").lower()
-    if any(seg in u for seg in ("/docs/", "/guide/", "/tutorial", "/chapter-", "/lesson-", "/lessons/")):
+    if any(seg in u for seg in ("/docs/", "/guide/", "/tutorial", "/chapter-", "/lesson-", "/lessons/",
+                                "/api/", "/reference/", "/concepts/", "/overview", "/getting-started",
+                                "/quickstart", "/changelog/", "/releases/")):
         return True
     if any(seg in u for seg in ("/roman/", "/arabic/", "/spanish/", "/hindi/", "/chinese/")):
         return True
     b = (body or "").lower()
+    if "```" in b or re.search(r"(?m)^(?:parameters|returns|example):", b):
+        return True
+    if re.search(r"def \w+\(|\w+\(\) ->", b):
+        return True
     return bool(re.search(r"(?i)\b(?:learning outcomes|learning goals|by completing|by the end of|chapter|lesson|exercise|quiz)\b", b))
 
 
@@ -837,6 +843,8 @@ def _smart_chunk_page(text: str, url: str, chunk_size: int = 400, chunk_step: in
         _base_meta["quarantine_reason"] = page_meta.get("quarantine_reason")
     if page_meta.get("extraction_mode"):
         _base_meta["extraction_mode"] = page_meta.get("extraction_mode")
+    if page_meta.get("docs_like"):
+        _base_meta["docs_like"] = True
     _base_meta["dedup_applied"] = False
 
     def _finalize_docs(out_docs: list) -> list:
@@ -869,8 +877,9 @@ def _smart_chunk_page(text: str, url: str, chunk_size: int = 400, chunk_step: in
             _doc.metadata = _m
         return out_docs
 
+    _docs_guard = bool(page_meta.get("docs_like"))
     product_meta = page_meta.get("product") or {}
-    if page_meta.get("page_type") == "product" and product_meta.get("title") and (product_meta.get("price_label") or product_meta.get("description")):
+    if not _docs_guard and page_meta.get("page_type") == "product" and product_meta.get("title") and (product_meta.get("price_label") or product_meta.get("description")):
         lines = [f"Product: {product_meta['title']}"]
         if product_meta.get("price_label"):
             lines.append(f"Price: {product_meta['price_label']}")
@@ -896,8 +905,8 @@ def _smart_chunk_page(text: str, url: str, chunk_size: int = 400, chunk_step: in
         docs.append(Document(page_content=_prod_text, metadata=_prod_meta))
         return _finalize_docs(_merge_variant_docs(docs))
 
-    # Mode 1b: catalog/listing page â€” split repeated product cards into per-item chunks.
-    if page_meta.get("catalog_listing") or len(_PROD_PRICE_RE.findall(clean)) >= 2:
+    # Mode 1b: catalog/listing page – split repeated product cards into per-item chunks.
+    if not _docs_guard and (page_meta.get(“catalog_listing”) or len(_PROD_PRICE_RE.findall(clean)) >= 2):
         products = []
         for m in _PROD_SPLIT_RE.finditer(clean):
             price_str = m.group(1).replace(',', '')

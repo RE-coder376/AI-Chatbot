@@ -1913,6 +1913,11 @@ async def _auto_crawl_db(db_name: str, url: str, max_pages: int = 0) -> int:
             except Exception:
                 pass
 
+    _disc_sitemap = 0
+    _disc_bfs = 0
+    _disc_nav = 0
+    discovery_rendered_added = 0
+
     try:
         # Step 1: discover URLs via sitemap (+ robots.txt) — crawl ALL for content refresh
         def _is_xml(u): return urlparse(u).path.endswith(".xml")
@@ -1959,6 +1964,7 @@ async def _auto_crawl_db(db_name: str, url: str, max_pages: int = 0) -> int:
                 except Exception: pass
             if sitemap_urls:
                 crawl_urls = sitemap_urls if max_pages == 0 else sitemap_urls[:max_pages]
+                _disc_sitemap = len(crawl_urls)
                 new_count = len([u for u in crawl_urls if u not in already_seen])
                 logger.info(f"[AUTO-CRAWL] '{db_name}': {len(sitemap_urls)} sitemap URLs — refreshing {len(crawl_urls)} ({new_count} new)")
 
@@ -1996,6 +2002,7 @@ async def _auto_crawl_db(db_name: str, url: str, max_pages: int = 0) -> int:
                         _bfs_queue = _next_queue
                         _bfs_depth += 1
                 crawl_urls = _bfs_result
+                _disc_bfs = len(crawl_urls)
                 logger.info(f"[AUTO-CRAWL] '{db_name}': BFS depth={_bfs_depth} found {len(crawl_urls)} URLs")
             except Exception as _bfs_e:
                 logger.warning(f"[AUTO-CRAWL] BFS fallback failed for {db_name}: {_bfs_e}")
@@ -2095,6 +2102,7 @@ async def _auto_crawl_db(db_name: str, url: str, max_pages: int = 0) -> int:
             _nav_extras = await _discover_nav_entrypoints()
             if _nav_extras:
                 crawl_urls = list(dict.fromkeys(crawl_urls + _nav_extras))
+                _disc_nav = len(_nav_extras)
                 logger.info(f"[AUTO-CRAWL] '{db_name}': nav-discovery added {len(_nav_extras)} URLs → {len(crawl_urls)} total")
         except Exception as _nav_e:
             logger.warning(f"[AUTO-CRAWL] nav-discovery failed for {db_name}: {_nav_e}")
@@ -2113,7 +2121,8 @@ async def _auto_crawl_db(db_name: str, url: str, max_pages: int = 0) -> int:
 
         _crawl_start = time.time()
         _last_progress_log = _crawl_start
-        _skipped = 0
+        _skipped_fetch_failed = 0
+        _skipped_malformed = 0
         _quarantined = 0
         _page_idx = 0
         _total_pages = len(crawl_urls)
@@ -2147,7 +2156,7 @@ async def _auto_crawl_db(db_name: str, url: str, max_pages: int = 0) -> int:
             if _now_t - _last_progress_log >= 60:
                 _elapsed = int(_now_t - _crawl_start)
                 net = added - deleted
-                logger.info(f"[AUTO-CRAWL] '{db_name}' progress: {_page_idx}/{_total_pages} pages, +{added} chunks, -{deleted} deleted, net {net}, {_skipped} skipped, {_elapsed}s elapsed")
+                logger.info(f"[AUTO-CRAWL] '{db_name}' progress: {_page_idx}/{_total_pages} pages, +{added} chunks, -{deleted} deleted, net {net}, {_skipped_fetch_failed} fetch_failed, {_skipped_malformed} malformed, {_elapsed}s elapsed")
                 _last_progress_log = _now_t
             try:
                 text = ""
@@ -2213,9 +2222,10 @@ async def _auto_crawl_db(db_name: str, url: str, max_pages: int = 0) -> int:
                             text = (_content or soup).get_text(separator="\n", strip=True)
                     except Exception as _hx_e:
                         logger.warning(f"[AUTO-CRAWL] '{db_name}' httpx also failed {page_url[:70]}: {_hx_e}")
-                # Only count as skipped if BOTH Playwright and httpx failed
-                if not text or len(text) <= 100:
-                    _skipped += 1
+                if not text:
+                    _skipped_fetch_failed += 1
+                elif len(text) <= 100:
+                    _skipped_malformed += 1
                 if len(text) > 100:
                     _canon_url = _canonical_source_url(page_url)
                     try:
@@ -2262,13 +2272,14 @@ async def _auto_crawl_db(db_name: str, url: str, max_pages: int = 0) -> int:
         await _hx_client.aclose()
         _total_elapsed = int(time.time() - _crawl_start)
         net = added - deleted
-        logger.info(f"[AUTO-CRAWL] '{db_name}' finished: {_page_idx}/{_total_pages} pages, +{added} chunks, -{deleted} deleted, net {net}, {_skipped} skipped, {_quarantined} quarantined, {_total_elapsed}s total")
+        logger.info(f"[AUTO-CRAWL] '{db_name}' finished: {_page_idx}/{_total_pages} pages, +{added} chunks, -{deleted} deleted, net {net}, {_skipped_fetch_failed} fetch_failed, {_skipped_malformed} malformed, {_quarantined} quarantined, {_total_elapsed}s total")
         try:
             _audit = {
                 "db": db_name, "crawled_at": datetime.now(timezone.utc).isoformat(),
-                "discovered": len(crawl_urls), "fetched": len(crawl_urls) - _skipped,
-                "skipped": _skipped, "quarantined": _quarantined,
+                "discovered": len(crawl_urls), "fetched": len(crawl_urls) - _skipped_fetch_failed - _skipped_malformed,
+                "fetch_failed": _skipped_fetch_failed, "malformed": _skipped_malformed, "quarantined": _quarantined,
                 "chunks_added": added, "chunks_deleted": deleted, "net_chunks": added - deleted,
+                "discovery_sources": {"sitemap": _disc_sitemap, "bfs": _disc_bfs, "nav": _disc_nav, "rendered": discovery_rendered_added},
                 "failures": _failures,
             }
             _audit_path = DATABASES_DIR / db_name / "_crawl_audit.json"
@@ -12707,6 +12718,20 @@ async def crawl_site(data: dict, request: Request):
             yield _send(f"✅ Done! {total_chunks} chunks ingested into '{db_name}'.")
             _write_crawl_status(db_name, "success")
             asyncio.get_running_loop().run_in_executor(None, _github_sync_upload, db_name)
+            try:
+                _rl_n = len(_rendered_links)
+                _rsc_n = raw_sitemap_count
+                _manual_audit = {
+                    "db": db_name, "crawled_at": datetime.now(timezone.utc).isoformat(),
+                    "crawl_type": "manual", "discovered": len(to_crawl),
+                    "discovery_sources": {"sitemap": max(0, _rsc_n - _rl_n), "rendered": _rl_n, "bfs": 0},
+                    "chunks_added": total_chunks,
+                }
+                _audit_path_m = DATABASES_DIR / db_name / "_crawl_audit.json"
+                _audit_path_m.parent.mkdir(parents=True, exist_ok=True)
+                _audit_path_m.write_text(json.dumps(_manual_audit, indent=2), encoding="utf-8")
+            except Exception:
+                pass
             yield "data: {\"done\": true}\n\n"
         except Exception as e:
             import traceback
