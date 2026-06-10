@@ -11651,6 +11651,7 @@ async def crawl_site(data: dict, request: Request):
                     if sitemap_urls:
                         break
                 sitemap_urls = [u for u in sitemap_urls if not re.search(r'(?i)(?:/rss(?:\.xml)?$|/atom(?:\.xml)?$|/feed(?:\.xml)?$|/sitemap(?:_index)?\.xml$|#site-index$)', u)]
+                _had_xml_sitemap = len(sitemap_urls) >= 10  # a real sitemap, not scraps
                 for u in sitemap_urls: _url_layer_m.setdefault(u, []).append("sitemap")
                 # Always pull nav/sidebar links from the seed URL, even if sitemap is large.
                 # This catches section/index pages that many sitemaps omit.
@@ -11675,10 +11676,13 @@ async def crawl_site(data: dict, request: Request):
                     logger.warning(f"[DISCOVERY] rendered expansion failed: {_rd_e}")
 
                 raw_sitemap_count = len(sitemap_urls)
-                # If sitemap has few/no URLs → BFS link-following spider
+                # BFS link-following spider when the discovered set is shallow.
+                # Without a real XML sitemap, nav/rendered links are LEVEL-1 only —
+                # deeper pages (e.g. product pages linked from category pages) need
+                # BFS regardless of how many level-1 links the homepage nav yields.
                 spider_threshold = 50
-                if len(sitemap_urls) < spider_threshold:
-                    yield _send(f"🕷️ Sitemap has {len(sitemap_urls)} URL(s) — running BFS link spider...")
+                if (not _had_xml_sitemap) or len(sitemap_urls) < spider_threshold:
+                    yield _send(f"🕷️ {'No XML sitemap' if not _had_xml_sitemap else f'Sitemap has {len(sitemap_urls)} URL(s)'} — running BFS link spider...")
                     from bs4 import BeautifulSoup as _BS_spider
                     seeds = sitemap_urls if sitemap_urls else [url]
                     _visited_norm = set(_normalize_url(u) for u in seeds)
