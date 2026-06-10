@@ -1480,9 +1480,13 @@ def _startup_sync():
                 def _rebuild_shell_db(n=db_name, u=crawl_url):
                     try:
                         chunks = asyncio.run(_auto_crawl_db(n, u, max_pages=0))
-                        if chunks > 0:
+                        db_dir2 = DATABASES_DIR / n
+                        chroma_path2 = db_dir2 / "chroma.sqlite3"
+                        if chroma_path2.exists() and chroma_path2.stat().st_size > 0:
                             logger.warning(f"[STARTUP] DB '{n}' rebuilt with {chunks} chunks — uploading refreshed DB to GitHub")
                             _github_sync_upload(n)
+                        else:
+                            logger.warning(f"[STARTUP] DB '{n}' rebuild finished but chroma.sqlite3 is still missing/empty; skipping upload")
                     except Exception as _rebuild_e:
                         logger.warning(f"[STARTUP] shell DB rebuild failed for '{n}': {_rebuild_e}")
                 threading.Thread(target=_rebuild_shell_db, daemon=True).start()
