@@ -7,8 +7,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import re
 import urllib.parse
+
+logger = logging.getLogger(__name__)
 from datetime import datetime, timezone
 from typing import Any
 
@@ -869,6 +872,7 @@ def _smart_chunk_page(text: str, url: str, chunk_size: int = 400, chunk_step: in
     clean = _clean_text(raw_text)
     docs = []
     page_meta = page_meta or {}
+    logger.info(f"[CHUNK-IN] {str(url)[:70]} text={len(text or '')} clean={len(clean)} pt={page_meta.get('page_type')}")
     _canon_source = _canonical_source_url(str((page_meta or {}).get("source_canonical") or url or ""))
     _base_meta = {"source": (_canon_source or url), "source_canonical": (_canon_source or str(url or ""))}
     for _k in ("crawled_at", "last_verified_at", "source_status", "content_hash"):
@@ -902,6 +906,7 @@ def _smart_chunk_page(text: str, url: str, chunk_size: int = 400, chunk_step: in
     _base_meta["dedup_applied"] = False
 
     def _finalize_docs(out_docs: list) -> list:
+        logger.info(f"[CHUNK] {str(url)[:70]} -> {len(out_docs or [])} docs (clean={len(clean)} pt={page_meta.get('page_type')} cl={page_meta.get('catalog_listing')})")
         for _idx, _doc in enumerate(out_docs or []):
             _m = dict(getattr(_doc, "metadata", None) or {})
             _m["chunk_index"] = int(_idx)

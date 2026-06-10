@@ -12057,9 +12057,13 @@ async def crawl_site(data: dict, request: Request):
                             if any(_low_binary(s) for s in _txt_samples if s):
                                 continue
                         _page_meta = p.get("page_meta") or {}
-                        chunks.extend(
-                            _smart_chunk_page(p["text"], p["url"], chunk_size, chunk_step, page_meta=_page_meta)
-                        )
+                        try:
+                            _page_chunks = _smart_chunk_page(p["text"], p["url"], chunk_size, chunk_step, page_meta=_page_meta)
+                            chunks.extend(_page_chunks or [])
+                            if not _page_chunks:
+                                logger.warning(f"[CRAWL] [{worker_label}] chunker returned 0 docs for {str(p.get('url') or '')[:90]}")
+                        except Exception as _ch_e:
+                            logger.error(f"[CRAWL] [{worker_label}] chunker FAILED {str(p.get('url') or '')[:90]}: {type(_ch_e).__name__}: {_ch_e}")
                     if not chunks:
                         return
                     _flush_msg = f"[{worker_label}] [chroma-flush] writing batch of {len(chunks)} chunks from {len(batch)} pages"
