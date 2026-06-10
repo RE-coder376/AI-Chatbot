@@ -2826,7 +2826,10 @@ async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansio
                                 _pr_anchored.append((_pv, _pd))
                     # Category-anchored subset when it exists ("cheapest tablet" → tablet
                     # chunks); otherwise whole catalog so the LLM can still pick.
-                    _pr_cands = _pr_anchored or _pr_all
+                    # Threshold of 3: category words ("laptop") often appear only in a
+                    # listing-page URL, and a single matching catalog chunk would hijack
+                    # the ranking with its own arbitrary first price.
+                    _pr_cands = _pr_anchored if len(_pr_anchored) >= 3 else _pr_all
                     if _pr_cands:
                         _pr_cands.sort(key=lambda t: t[0], reverse=_price_desc)
                         _pr_seen, _pr_docs = set(), []
