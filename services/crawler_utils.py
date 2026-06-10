@@ -56,6 +56,17 @@ def _canonical_source_url(url: str) -> str:
         return (url or "").strip()
 
 
+# Per-DB docs-path hints (e.g. ["/roman/", "/arabic/"]) loaded from
+# databases/<name>/config.json "docs_path_hints" by app.py at crawl start.
+# Module-level is safe: only one crawl runs at a time (manual guard + auto-crawl sem=1).
+_DOCS_PATH_HINTS: list = []
+
+
+def set_docs_path_hints(hints) -> None:
+    global _DOCS_PATH_HINTS
+    _DOCS_PATH_HINTS = [str(h).lower() for h in (hints or []) if str(h).strip()]
+
+
 def _looks_like_docs_page(url: str, body: str = "") -> bool:
     """Heuristic for docs/tutorial/chapter pages that should not be forced into product shaping."""
     u = (url or "").lower()
@@ -63,7 +74,7 @@ def _looks_like_docs_page(url: str, body: str = "") -> bool:
                                 "/api/", "/reference/", "/concepts/", "/overview", "/getting-started",
                                 "/quickstart", "/changelog/", "/releases/")):
         return True
-    if any(seg in u for seg in ("/roman/", "/arabic/", "/spanish/", "/hindi/", "/chinese/")):
+    if _DOCS_PATH_HINTS and any(seg in u for seg in _DOCS_PATH_HINTS):
         return True
     b = (body or "").lower()
     _has_labels = bool(re.search(r"(?m)^(?:parameters|returns|example|usage|response|request):", b))
@@ -925,7 +936,7 @@ def _smart_chunk_page(text: str, url: str, chunk_size: int = 400, chunk_step: in
         return _finalize_docs(_merge_variant_docs(docs))
 
     # Mode 1b: catalog/listing page – split repeated product cards into per-item chunks.
-    if not _docs_guard and (page_meta.get(“catalog_listing”) or len(_PROD_PRICE_RE.findall(clean)) >= 2):
+    if not _docs_guard and (page_meta.get("catalog_listing") or len(_PROD_PRICE_RE.findall(clean)) >= 2):
         products = []
         for m in _PROD_SPLIT_RE.finditer(clean):
             price_str = m.group(1).replace(',', '')

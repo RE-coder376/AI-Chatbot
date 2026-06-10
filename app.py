@@ -121,6 +121,7 @@ from services.safety import (
 )
 
 from services.crawler_utils import (
+    set_docs_path_hints,
     _product_db_cache,
     _check_is_product_db,
     _PRODUCT_QUERY_STOP,
@@ -1545,6 +1546,11 @@ async def _auto_crawl_db(db_name: str, url: str, max_pages: int = 0) -> int:
     if not db or not url:
         return 0
 
+    # Per-DB docs path hints — same config-driven detection as the manual crawler.
+    _ac_docs_hints = [str(h).lower() for h in ((get_config(db_name) or {}).get("docs_path_hints") or []) if str(h).strip()]
+    set_docs_path_hints(_ac_docs_hints)
+    _ac_docs_hints_all = ["/docs/", "/guide"] + _ac_docs_hints
+
     # Admin UI wants "new chunks" as net growth, not "chunks processed".
     # Some Chroma versions don't support count(where=...), so track net via total count.
     _start_total = 0
@@ -2232,7 +2238,7 @@ async def _auto_crawl_db(db_name: str, url: str, max_pages: int = 0) -> int:
                             text = (_content or soup).get_text(separator="\n", strip=True)
                     except Exception as _hx_e:
                         logger.warning(f"[AUTO-CRAWL] '{db_name}' httpx also failed {page_url[:70]}: {_hx_e}")
-                _is_docs_url = any(s in page_url.lower() for s in ("/docs/", "/guide", "/roman/", "/arabic/", "/spanish/", "/hindi/"))
+                _is_docs_url = any(s in page_url.lower() for s in _ac_docs_hints_all)
                 _min_keep = 40 if _is_docs_url else 100
                 if not text:
                     _skipped_fetch_failed += 1
@@ -11187,6 +11193,17 @@ async def crawl_site(data: dict, request: Request):
         def _send(msg):
             return f"data: {json.dumps({'msg': msg})}\n\n"
 
+        # Docs-path detection: universal prefixes + per-DB hints from config
+        # (databases/<name>/config.json "docs_path_hints") — replaces hardcoded
+        # site-specific language paths (/roman/, /arabic/, ...) in crawl logic.
+        _db_docs_hints = [str(h).lower() for h in ((get_config(db_name) or {}).get("docs_path_hints") or []) if str(h).strip()]
+        set_docs_path_hints(_db_docs_hints)
+        _docs_hints_all = ["/docs/", "/guide"] + _db_docs_hints
+
+        def _is_docs_like(u: str) -> bool:
+            _ul = (u or "").lower()
+            return any(h in _ul for h in _docs_hints_all)
+
         def _normalize_url(u):
             """Strip anchors, query params, and locale prefix for dedup."""
             p = urllib.parse.urlparse(u)
@@ -11307,6 +11324,7 @@ async def crawl_site(data: dict, request: Request):
 
                 # Find sitemap — check robots.txt first (same logic as inspect)
                 sitemap_candidates = [f"{base}/sitemap.xml", f"{base}/sitemap_index.xml"]
+                _robots_rules = None  # honor Disallow rules for User-agent: *
                 try:
                     robots_r = await asyncio.to_thread(
                         _req.get, f"{base}/robots.txt", timeout=8,
@@ -11317,6 +11335,12 @@ async def crawl_site(data: dict, request: Request):
                         if found:
                             sitemap_candidates = found + sitemap_candidates
                             yield _send(f"🤖 robots.txt: {len(found)} sitemap(s) found")
+                        try:
+                            from urllib import robotparser as _rp
+                            _robots_rules = _rp.RobotFileParser()
+                            _robots_rules.parse(robots_r.text.splitlines())
+                        except Exception:
+                            _robots_rules = None
                 except Exception:
                     pass
 
@@ -11705,6 +11729,18 @@ async def crawl_site(data: dict, request: Request):
                 removed = raw_sitemap_count - len(deduped)
                 yield _send(f"✅ Sitemap: {raw_sitemap_count} URLs → {len(deduped)} after dedup ({removed} locale/duplicate URLs removed)")
 
+                # robots.txt Disallow compliance. Exception: a blanket Disallow:/ would zero
+                # the crawl — clients crawl their OWN sites, so treat that as misconfiguration
+                # and proceed with a warning instead of crawling nothing.
+                if _robots_rules is not None and deduped:
+                    _rb_allowed = [u for u in deduped if _robots_rules.can_fetch("*", u)]
+                    _rb_blocked = len(deduped) - len(_rb_allowed)
+                    if _rb_blocked and not _rb_allowed:
+                        yield _send(f"🤖 robots.txt disallows ALL {_rb_blocked} URLs — assuming site-owner crawl, proceeding anyway")
+                    elif _rb_blocked:
+                        deduped = _rb_allowed
+                        yield _send(f"🤖 robots.txt: {_rb_blocked} disallowed URLs skipped")
+
                 if url_patterns:
                     _pat_set = set(url_patterns)
                     # Wildcard patterns like /resources/* → match by prefix
@@ -11902,6 +11938,8 @@ async def crawl_site(data: dict, request: Request):
                 pending_pages = []
                 seen_content_hashes: set = set()
                 seen_sidebar_hashes: set = set()  # store each unique sidebar nav ONCE as standalone doc
+                _retry_pending: set = set()   # transient failures (timeout/429/render error) — requeued up to 2 rounds
+                _rl_state = {"until": 0.0}    # after a 429, ALL workers pause until this timestamp
                 page_index: list = []  # [(url, title)] — for auto site-index doc
 
                 async def _flush_pages(batch, worker_label="crawl"):
@@ -12034,6 +12072,8 @@ async def crawl_site(data: dict, request: Request):
                         )
                         if r.status_code in (404, 410, 403, 401):
                             return {"status": r.status_code, "text": ""}  # skip marker — don't try Playwright
+                        if r.status_code == 429:
+                            return {"status": 429, "text": "", "rate_limited": True}  # retry marker — back off, requeue
                         if r.status_code not in (200, 301, 302):
                             return None
                         ctype = (r.headers.get("Content-Type") or "").lower()
@@ -12081,14 +12121,7 @@ async def crawl_site(data: dict, request: Request):
                         # Extract title
                         title_m = re.search(r'<title[^>]*>(.*?)</title>', html, re.DOTALL | re.I)
                         title_text = re.sub(r'<[^>]+>', '', title_m.group(1)).strip() if title_m else ''
-                        _docs_like = (
-                            "/docs/" in (page_url or "").lower()
-                            or "/guide" in (page_url or "").lower()
-                            or "/roman/" in (page_url or "").lower()
-                            or "/arabic/" in (page_url or "").lower()
-                            or "/spanish/" in (page_url or "").lower()
-                            or "/hindi/" in (page_url or "").lower()
-                        )
+                        _docs_like = _is_docs_like(page_url)
                         # Preserve tables / lists / code blocks before the broad tag strip.
                         try:
                             from bs4 import BeautifulSoup as _BS_html
@@ -12424,15 +12457,7 @@ async def crawl_site(data: dict, request: Request):
                                     if len(text) < 200:
                                         text = f"{title}. {meta_desc}. {text}".strip()
                                     _url_l = cur_url.lower()
-                                    _docs_like = (
-                                        "/docs/" in _url_l
-                                        or "/guide" in _url_l
-                                        or "/roman/" in _url_l
-                                        or "/arabic/" in _url_l
-                                        or "/chinese/" in _url_l
-                                        or "/spanish/" in _url_l
-                                        or "/hindi/" in _url_l
-                                    )
+                                    _docs_like = _is_docs_like(_url_l)
                                     _ocr_allowed = (not _docs_like) and len(text) < 1200
                                     if _ocr_allowed:
                                         _ocr_start_msg = f"[{worker_label}] [ocr-start] {cur_url[:70]}"
@@ -12507,9 +12532,18 @@ async def crawl_site(data: dict, request: Request):
                     page_meta = {}
                     # Fast path: try httpx first (Shopify/WordPress server-render fine without browser).
                     # Falls through to Playwright only if httpx returns < 300 chars.
+                    _rl_wait = _rl_state["until"] - time.time()
+                    if _rl_wait > 0:
+                        await asyncio.sleep(min(_rl_wait, 60))  # site rate-limited us — all workers pause
                     await asyncio.sleep(random.uniform(0.3, 0.8))  # Polite delay — avoids CDN rate-limit
                     try:
                         _fast = await _requests_extract(cur_url)
+                        if _fast and _fast.get("rate_limited"):
+                            _rl_state["until"] = max(_rl_state["until"], time.time() + 30)
+                            _retry_pending.add(cur_url)
+                            completed += 1
+                            await log_queue.put(f"[{completed}/{len(to_crawl)}] 🚦 {cur_url[:70]} (HTTP 429 — 30s backoff, queued for retry)")
+                            return
                         # Skip marker: HTTP returned 404/403/401/410 — don't waste Playwright on it
                         if _fast and _fast.get("status") and not _fast.get("text"):
                             completed += 1
@@ -12544,19 +12578,13 @@ async def crawl_site(data: dict, request: Request):
                                             "page_meta": {"structural": True, "page_type": "site_navigation"},
                                         })
                         except Exception as e:
+                            _retry_pending.add(cur_url)
                             logger.warning(f"[CRAWL] [{worker_label}] [playwright-skip] {cur_url[:70]}: {type(e).__name__}: {e}")
-                            await log_queue.put(f"[{completed}/{len(to_crawl)}] ⏭️  {cur_url[:70]} (fallback timeout/fail: {type(e).__name__}: {e})")
+                            await log_queue.put(f"[{completed}/{len(to_crawl)}] ⏭️  {cur_url[:70]} (render failed — queued for retry: {type(e).__name__})")
                     completed += 1
 
                     import hashlib as _hashlib
-                    _docs_like = (
-                        "/docs/" in (cur_url or "").lower()
-                        or "/guide" in (cur_url or "").lower()
-                        or "/roman/" in (cur_url or "").lower()
-                        or "/arabic/" in (cur_url or "").lower()
-                        or "/spanish/" in (cur_url or "").lower()
-                        or "/hindi/" in (cur_url or "").lower()
-                    )
+                    _docs_like = _is_docs_like(cur_url)
                     _min_save_len = 150 if not _docs_like else 60
                     _page_type = str((page_meta or {}).get("page_type") or "")
                     if _page_type in {"structural", "category", "faq", "article"}:
@@ -12574,6 +12602,7 @@ async def crawl_site(data: dict, request: Request):
                             await log_queue.put(f"[{completed}/{len(to_crawl)}] ♻️  {cur_url[:70]} (duplicate content — skipped)")
                         else:
                             seen_content_hashes.add(content_key)
+                            _retry_pending.discard(cur_url)  # partial render still saved — don't re-crawl
                             batch_to_flush = None
                             async with flush_lock:
                                 try:
@@ -12607,8 +12636,9 @@ async def crawl_site(data: dict, request: Request):
                         except asyncio.TimeoutError:
                             nonlocal completed
                             completed += 1
-                            logger.warning(f"[CRAWL] [pw-page-timeout] {u[:70]} exceeded 35s — skipping")
-                            await log_queue.put(f"[{completed}/{len(to_crawl)}] ⏱️  {u[:70]} (35s timeout — skipped)")
+                            _retry_pending.add(u)
+                            logger.warning(f"[CRAWL] [pw-page-timeout] {u[:70]} exceeded 35s — queued for retry")
+                            await log_queue.put(f"[{completed}/{len(to_crawl)}] ⏱️  {u[:70]} (35s timeout — queued for retry)")
 
                 # Launch all tasks, stream log messages as they arrive
                 tasks = [asyncio.create_task(_crawl_one_with_timeout(u, i)) for i, u in enumerate(to_crawl)]
@@ -12631,6 +12661,35 @@ async def crawl_site(data: dict, request: Request):
                 # Drain remaining log messages
                 while not log_queue.empty():
                     yield _send(log_queue.get_nowait())
+
+                # Retry transient failures (timeouts / 429s / render errors): up to 2 rounds
+                # with exponential backoff (5s, 15s). Permanent skips (404, too-short) excluded.
+                _retry_round = 0
+                while _retry_pending and _retry_round < 2:
+                    _retry_round += 1
+                    _retry_batch = sorted(_retry_pending)
+                    _retry_pending.clear()
+                    _backoff_s = 5 * (3 ** (_retry_round - 1))
+                    yield _send(f"🔁 Retry round {_retry_round}/2: {len(_retry_batch)} failed URLs (backoff {_backoff_s}s)...")
+                    await asyncio.sleep(_backoff_s)
+                    _retry_tasks = [asyncio.create_task(_crawl_one_with_timeout(u, i)) for i, u in enumerate(_retry_batch)]
+                    _retry_done = 0
+                    while _retry_done < len(_retry_tasks):
+                        try:
+                            msg = await asyncio.wait_for(log_queue.get(), timeout=1.0)
+                            if _crawl_log_fh:
+                                try:
+                                    _crawl_log_fh.write(f"{msg}\n")
+                                except Exception:
+                                    pass
+                            yield _send(msg)
+                        except asyncio.TimeoutError:
+                            _retry_done = sum(1 for t in _retry_tasks if t.done())
+                    await asyncio.gather(*_retry_tasks, return_exceptions=True)
+                    while not log_queue.empty():
+                        yield _send(log_queue.get_nowait())
+                if _retry_pending:
+                    yield _send(f"⚠️ {len(_retry_pending)} URLs still failing after 2 retry rounds — skipped")
 
                 # Final flush
                 async with flush_lock:
