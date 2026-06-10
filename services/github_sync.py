@@ -172,6 +172,12 @@ def _github_sync_publish_missing_allowed_dbs():
         if not (db_dir / "config.json").exists():
             continue
         if db_name not in release_names:
+            # Husk guard: a tombstoned-then-revived DB can have a local dir holding only
+            # config.json. Publishing that would replace the release backup with an empty zip.
+            _sq = db_dir / "chroma.sqlite3"
+            if not _sq.exists() or _sq.stat().st_size < 16384:
+                logger.warning(f"[GH-SYNC] NOT publishing '{db_name}' — no real chroma data locally (would overwrite backup with empty zip)")
+                continue
             logger.info(f"[GH-SYNC] Publishing missing allowed DB '{db_name}' to GitHub releases")
             _github_sync_upload(db_name)
 
