@@ -961,14 +961,29 @@ def _smart_chunk_page(text: str, url: str, chunk_size: int = 400, chunk_step: in
         # title in body text ("$24.99 Nokia 123" / "Nokia 123 ... Rs. 2,499").
         # Without this the chunk gets no "Price:" line and no price metadata,
         # which disables price-ranking retrieval for the whole DB.
+        # The title can recur inside the description next to prose amounts
+        # ("...an $80,000 vase..."), so score EVERY title occurrence by distance
+        # to the nearest price and keep the tightest pairing — the page header's
+        # title+price sit a few chars apart; prose mentions are looser.
         _t_esc = re.escape(str(product_meta["title"])[:30])
-        _pm_fb = (re.search(r'(?i)(\$|£|€|\brs\.?\s*|\bpkr\s*)([\d,]+\.?\d*)\s{0,3}' + _t_esc, clean)
-                  or re.search(r'(?i)' + _t_esc + r'[^$£€]{0,80}?(\$|£|€|\brs\.?\s*|\bpkr\s*)([\d,]+\.?\d*)', clean))
-        if _pm_fb:
+        _fb_best = None  # (distance, symbol, number)
+        for _tm in re.finditer(_t_esc, clean, re.I):
+            _pre = clean[max(0, _tm.start() - 14):_tm.start()]
+            _pm_pre = re.search(r'(?i)(\$|£|€|\brs\.?\s*|\bpkr\s*)([\d,]+\.?\d*)\s{0,3}$', _pre)
+            if _pm_pre:
+                _cand = (0, _pm_pre.group(1).strip(), _pm_pre.group(2))
+                if _fb_best is None or _cand[0] < _fb_best[0]:
+                    _fb_best = _cand
+                continue
+            _tail = clean[_tm.end():_tm.end() + 90]
+            _pm_post = re.search(r'(?i)(\$|£|€|\brs\.?\s*|\bpkr\s*)([\d,]+\.?\d*)', _tail)
+            if _pm_post and (_fb_best is None or _pm_post.start() < _fb_best[0]):
+                _fb_best = (_pm_post.start(), _pm_post.group(1).strip(), _pm_post.group(2))
+        if _fb_best:
             product_meta = dict(product_meta)
-            product_meta["price_label"] = f"{_pm_fb.group(1).strip()}{_pm_fb.group(2)}"
+            product_meta["price_label"] = f"{_fb_best[1]}{_fb_best[2]}"
             try:
-                product_meta["price_num"] = float(_pm_fb.group(2).replace(",", ""))
+                product_meta["price_num"] = float(_fb_best[2].replace(",", ""))
             except Exception:
                 pass
     if not _docs_guard and page_meta.get("page_type") == "product" and product_meta.get("title") and (product_meta.get("price_label") or product_meta.get("description")):
