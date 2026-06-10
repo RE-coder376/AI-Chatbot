@@ -1,0 +1,7 @@
+agentfactory
+belony
+book
+mal
+stationery_studio
+store
+tsc_pk
