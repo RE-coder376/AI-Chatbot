@@ -1265,7 +1265,10 @@ def _doc_price_value(doc):
             except Exception:
                 pass
         body = str(getattr(doc, "page_content", "") or "")
-        m = re.search(r"(?:\$|rs\.?|pkr)\s*([\d,]+(?:\.\d{1,2})?)", body, re.I)
+        # Prefer the labeled "Price:" line — the first bare $ in a chunk can be a
+        # sidebar/related-products price, not this product's.
+        m = (re.search(r"Price:\s*(?:\$|rs\.?|pkr)?\s*([\d,]+(?:\.\d{1,2})?)", body, re.I)
+             or re.search(r"(?:\$|rs\.?|pkr)\s*([\d,]+(?:\.\d{1,2})?)", body, re.I))
         if m:
             return float(m.group(1).replace(",", ""))
     except Exception:
@@ -2783,6 +2786,63 @@ async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansio
                 _deduped.append(r)
         top = _deduped
         if _is_price_rank_q:
+            # Full-catalog price scan: the min/max-priced item is rarely in the
+            # similarity top-N window ("cheapest tablet" has no lexical overlap with
+            # the cheapest tablet's chunk). Rank over ALL product chunks instead.
+            if db is not None:
+                try:
+                    from langchain_core.documents import Document as _PriceDoc
+                    _pr_total = min(int(db._collection.count() or 0), 2500)
+                    _pr_raw = db._collection.get(limit=_pr_total, include=["documents", "metadatas"])
+                    _pr_stop = {
+                        "cheapest", "lowest", "least", "expensive", "most", "highest", "priciest",
+                        "costliest", "costly", "price", "priced", "prices", "affordable", "budget",
+                        "what", "which", "your", "store", "site", "sell", "have", "entire",
+                        "overall", "product", "products", "item", "items", "whats",
+                    }
+                    _pr_anchors = [w for w in re.findall(r"[a-zA-Z]{4,}", (q or "").lower()) if w not in _pr_stop][:4]
+                    _pr_all, _pr_anchored = [], []
+                    for _pd_text, _pd_meta in zip(_pr_raw.get("documents", []), _pr_raw.get("metadatas", [])):
+                        if not _pd_text:
+                            continue
+                        _pd_meta = _pd_meta or {}
+                        _src_l = str(_pd_meta.get("source") or "").lower()
+                        _is_prod_chunk = (
+                            _pd_meta.get("price") is not None
+                            or _pd_meta.get("chunk_kind") == "product"
+                            or _pd_meta.get("content_type") == "product"
+                            or re.search(r"/(?:products?|items?)(?:/|$|#)", _src_l)
+                        )
+                        if not _is_prod_chunk:
+                            continue
+                        _pd = _PriceDoc(page_content=str(_pd_text), metadata=_pd_meta)
+                        _pv = _doc_price_value(_pd)
+                        if _pv is None:
+                            continue
+                        _pr_all.append((_pv, _pd))
+                        if _pr_anchors:
+                            _bl = str(_pd_text).lower()
+                            if any((a in _bl) or (a.rstrip("s") in _bl) or (a in _src_l) for a in _pr_anchors):
+                                _pr_anchored.append((_pv, _pd))
+                    # Category-anchored subset when it exists ("cheapest tablet" → tablet
+                    # chunks); otherwise whole catalog so the LLM can still pick.
+                    _pr_cands = _pr_anchored or _pr_all
+                    if _pr_cands:
+                        _pr_cands.sort(key=lambda t: t[0], reverse=_price_desc)
+                        _pr_seen, _pr_docs = set(), []
+                        for _pv, _pd in _pr_cands:
+                            _tt = str((_pd.metadata or {}).get("canonical_product_title")
+                                      or (_pd.metadata or {}).get("product_title")
+                                      or _pd.page_content[:60])
+                            if _tt in _pr_seen:
+                                continue
+                            _pr_seen.add(_tt)
+                            _pr_docs.append(_pd)
+                            if len(_pr_docs) >= 30:
+                                break
+                        top = _pr_docs + top[:6]
+                except Exception as _pr_e:
+                    logger.warning(f"[PRICE-RANK] full-catalog scan failed: {_pr_e}")
             _priced, _unpriced = [], []
             for r in top:
                 _pv = _doc_price_value(r)

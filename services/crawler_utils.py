@@ -909,6 +909,21 @@ def _smart_chunk_page(text: str, url: str, chunk_size: int = 400, chunk_step: in
 
     _docs_guard = bool(page_meta.get("docs_like"))
     product_meta = page_meta.get("product") or {}
+    if not _docs_guard and page_meta.get("page_type") == "product" and product_meta.get("title") and not product_meta.get("price_label"):
+        # Universal fallback: many product pages print the price adjacent to the
+        # title in body text ("$24.99 Nokia 123" / "Nokia 123 ... Rs. 2,499").
+        # Without this the chunk gets no "Price:" line and no price metadata,
+        # which disables price-ranking retrieval for the whole DB.
+        _t_esc = re.escape(str(product_meta["title"])[:30])
+        _pm_fb = (re.search(r'(?i)(\$|rs\.?\s*|pkr\s*)([\d,]+\.?\d*)\s{0,3}' + _t_esc, clean)
+                  or re.search(r'(?i)' + _t_esc + r'[^$\n]{0,80}?(\$|rs\.?\s*|pkr\s*)([\d,]+\.?\d*)', clean))
+        if _pm_fb:
+            product_meta = dict(product_meta)
+            product_meta["price_label"] = f"{_pm_fb.group(1).strip()}{_pm_fb.group(2)}"
+            try:
+                product_meta["price_num"] = float(_pm_fb.group(2).replace(",", ""))
+            except Exception:
+                pass
     if not _docs_guard and page_meta.get("page_type") == "product" and product_meta.get("title") and (product_meta.get("price_label") or product_meta.get("description")):
         lines = [f"Product: {product_meta['title']}"]
         if product_meta.get("price_label"):

@@ -12158,8 +12158,23 @@ async def crawl_site(data: dict, request: Request):
                         try:
                             from bs4 import BeautifulSoup as _BS_html
                             _soup = _BS_html(html, "html.parser")
-                            for _tag in _soup(["script", "style", "noscript"]):
+                            # Strip chrome — same element list the Playwright path removes.
+                            # Without this every httpx-extracted chunk carries the site nav,
+                            # which pollutes embeddings and breaks product price extraction.
+                            for _tag in _soup(["script", "style", "noscript", "nav", "header", "footer", "aside", "iframe", "svg"]):
                                 _tag.decompose()
+                            for _chrome_sel in (
+                                '[role="navigation"]', '[role="banner"]', '[role="contentinfo"]',
+                                '.nav', '.navigation', '.sidebar', '.side_categories', '.nav-list',
+                                '.breadcrumb', '.breadcrumbs', '.pagination', '.social-links',
+                                '.cookie-notice', '.theme-doc-sidebar-container',
+                                '.theme-doc-toc-mobile', '.table-of-contents',
+                            ):
+                                try:
+                                    for _el in _soup.select(_chrome_sel):
+                                        _el.decompose()
+                                except Exception:
+                                    continue
                             for _table in _soup.find_all("table"):
                                 _rows = []
                                 for _tr in _table.find_all("tr"):
