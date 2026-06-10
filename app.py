@@ -1463,6 +1463,26 @@ def _startup_sync():
     """Background: sync from GitHub then load the active DB."""
     _github_sync_publish_missing_allowed_dbs()
     _github_sync_download(load_db_callback=_load_db_now)
+    try:
+        for db_name in sorted(_load_restore_allowlist()):
+            db_dir = DATABASES_DIR / db_name
+            cfg_path = db_dir / "config.json"
+            chroma_path = db_dir / "chroma.sqlite3"
+            if not cfg_path.exists() or chroma_path.exists():
+                continue
+            try:
+                cfg = get_config(db_name)
+            except Exception:
+                cfg = {}
+            crawl_url = (cfg.get("crawl_url") or "").strip()
+            if crawl_url and db_name not in _crawling_dbs:
+                logger.warning(f"[STARTUP] DB '{db_name}' restored as shell only — triggering crawl rebuild")
+                threading.Thread(
+                    target=lambda n=db_name, u=crawl_url: asyncio.run(_auto_crawl_db(n, u, max_pages=0)),
+                    daemon=True,
+                ).start()
+    except Exception as _rehydrate_e:
+        logger.warning(f"[STARTUP] shell DB recovery scan failed: {_rehydrate_e}")
     _init_crawl_timestamps()  # must run AFTER DBs are downloaded
 
 def _cleanup_old_data(retention_days: int = 90):
