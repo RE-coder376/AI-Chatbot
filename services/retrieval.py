@@ -1267,8 +1267,8 @@ def _doc_price_value(doc):
         body = str(getattr(doc, "page_content", "") or "")
         # Prefer the labeled "Price:" line — the first bare $ in a chunk can be a
         # sidebar/related-products price, not this product's.
-        m = (re.search(r"Price:\s*(?:\$|rs\.?|pkr)?\s*([\d,]+(?:\.\d{1,2})?)", body, re.I)
-             or re.search(r"(?:\$|rs\.?|pkr)\s*([\d,]+(?:\.\d{1,2})?)", body, re.I))
+        m = (re.search(r"Price:\s*(?:\$|£|€|rs\.?|pkr)?\s*([\d,]+(?:\.\d{1,2})?)", body, re.I)
+             or re.search(r"(?:\$|£|€|rs\.?|pkr)\s*([\d,]+(?:\.\d{1,2})?)", body, re.I))
         if m:
             return float(m.group(1).replace(",", ""))
     except Exception:
@@ -2076,7 +2076,7 @@ async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansio
         _is_product_db = bool(_check_is_product_db(db, _db_name_guess)) if db is not None else False
     except Exception:
         _is_product_db = False
-    _pm = re.search(r'(?:under|below|less\s+than|max(?:imum)?|budget\s+of|within)\s+(?:rs\.?\s*)?\$?([\d,]+)', q, re.I)
+    _pm = re.search(r'(?:under|below|less\s+than|max(?:imum)?|budget\s+of|within)\s+(?:rs\.?\s*)?[\$£€]?([\d,]+)', q, re.I)
     if _pm:
         try:
             _max_price = float(_pm.group(1).replace(',', ''))

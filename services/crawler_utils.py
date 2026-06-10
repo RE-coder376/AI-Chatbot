@@ -181,7 +181,7 @@ def _check_is_product_db(db, db_name: str = "") -> bool:
                     result = True
                     break
                 tl = text.lower()
-                if ("rs." in tl or "pkr" in tl or "$" in tl) and ("add to cart" in tl or "shopping cart" in tl):
+                if ("rs." in tl or "pkr" in tl or "$" in tl or "£" in tl or "€" in tl) and ("add to cart" in tl or "shopping cart" in tl):
                     result = True
                     break
         except Exception:
@@ -221,7 +221,7 @@ def _product_query_rerank_score(question: str, doc) -> float:
     score = overlap + (slug_overlap * 3.0) + (head_overlap * 1.25) + (numbers_hit * 2.0)
     if normalized_q and normalized_q in normalized_doc:
         score += 8.0
-    if re.search(r"\b(price|pricing|cost)\b", question or "", re.I) and re.search(r"(?i)\b(?:rs\.?|pkr|\$)\s*[\d,]+", text[:500]):
+    if re.search(r"\b(price|pricing|cost)\b", question or "", re.I) and re.search(r"(?i)\b(?:rs\.?|pkr|\$|£|€)\s*[\d,]+", text[:500]):
         score += 1.0
     return score
 
@@ -241,6 +241,9 @@ def _extract_product_summary(text: str, url: str, title_hint: str = "") -> dict:
         if len(cand) < 4:
             return True
         if "|" in cand or "web scraper test sites" in cand.lower():
+            return True
+        # Spec-table rows are never product names ("Price (incl. tax) £51.77 Tax £0.00 ...")
+        if re.search(r'(?i)\bprice\s*\(|[\$£€]\s*\d|\b(?:incl|excl)\.\s*tax\b|\bavailability\b|\bin\s+stock\b|\bnumber\s+of\s+reviews?\b', cand):
             return True
         if re.fullmatch(r"[\W_]+", cand):
             return True
@@ -290,7 +293,7 @@ def _extract_product_summary(text: str, url: str, title_hint: str = "") -> dict:
             return ""
         raw = re.sub(r'(?i)^(?:product|name|title|model)\s*:\s*', "", raw).strip(" -:|")
         # Prefer the model-like phrase immediately after a price marker.
-        for pm in re.finditer(r'(?i)(?:\$|rs\.?|pkr)\s*[\d,]+(?:\.\d{1,2})?\s+(.{4,120})', raw):
+        for pm in re.finditer(r'(?i)(?:\$|£|€|rs\.?|pkr)\s*[\d,]+(?:\.\d{1,2})?\s+(.{4,120})', raw):
             tail = pm.group(1).strip(" -:|")
             tail = re.split(
                 r'(?i)\s+(?:hdd:|ssd:|ram:|processor:|display:|os:|availability:|reviews?|'
@@ -298,6 +301,9 @@ def _extract_product_summary(text: str, url: str, title_hint: str = "") -> dict:
                 r'learn documentation|video tutorials|test sites|forum|contact us|copyright|description:)\b',
                 tail,
             )[0].strip(" -:|")
+            # Spec-table tail, not a product name ("£51.77 In stock (22 available)...")
+            if re.match(r'(?i)^(?:in\s+stock|out\s+of\s+stock|tax\b|availability|number\s+of|qty|quantity|customer|reviews?)\b', tail):
+                continue
             tail = tail.split(",")[0].strip(" -:|")
             tail = _dedupe_repeated_phrase(tail)
             tail_candidates = []
@@ -338,7 +344,7 @@ def _extract_product_summary(text: str, url: str, title_hint: str = "") -> dict:
         if not raw:
             return ""
         raw = re.sub(r'(?i)^(?:product|name|title|model)\s*:\s*', "", raw).strip(" -:|")
-        for pm in re.finditer(r'(?i)(?:\$|rs\.?|pkr)\s*[\d,]+(?:\.\d{1,2})?\s+(.{4,120})', raw):
+        for pm in re.finditer(r'(?i)(?:\$|£|€|rs\.?|pkr)\s*[\d,]+(?:\.\d{1,2})?\s+(.{4,120})', raw):
             tail = pm.group(1).strip(" -:|")
             tail = re.split(
                 r'(?i)\s+(?:hdd:|ssd:|ram:|processor:|display:|os:|availability:|reviews?|'
@@ -346,6 +352,9 @@ def _extract_product_summary(text: str, url: str, title_hint: str = "") -> dict:
                 r'learn documentation|video tutorials|test sites|forum|contact us|copyright|description:)\b',
                 tail,
             )[0].strip(" -:|")
+            # Spec-table tail, not a product name ("£51.77 In stock (22 available)...")
+            if re.match(r'(?i)^(?:in\s+stock|out\s+of\s+stock|tax\b|availability|number\s+of|qty|quantity|customer|reviews?)\b', tail):
+                continue
             tail = tail.split(",")[0].strip(" -:|")
             tail = _dedupe_repeated_phrase(tail)
             tail_candidates = []
@@ -377,7 +386,7 @@ def _extract_product_summary(text: str, url: str, title_hint: str = "") -> dict:
             continue
         if re.search(r'(?i)\b(?:add to cart|wishlist|reviews?|toggle navigation|cloud scraper|pricing|marketplace|learn documentation|video tutorials|test sites|forum|privacy policy|terms of service|all rights reserved)\b', cand):
             continue
-        if re.search(r'(?i)^\s*(?:rs\.?|pkr|\$)\s*[\d,]+', cand):
+        if re.search(r'(?i)^\s*(?:rs\.?|pkr|\$|£|€)\s*[\d,]+', cand):
             continue
         _push_title(cand, "body_title")
         break
@@ -387,6 +396,12 @@ def _extract_product_summary(text: str, url: str, title_hint: str = "") -> dict:
         _push_title(title_match.group(1), "name")
     if title_hint:
         _push_title(title_hint, "title_hint")
+        # "<Product Name> | <Site Name>" is the dominant title-tag convention —
+        # the bare hint dies on the generic-title "|" rule, so also push the
+        # first segment ("A Light in the Attic | Books to Scrape" → product name).
+        _hint_head = re.split(r'\s*[|–—]\s*| - ', title_hint, maxsplit=1)[0].strip()
+        if _hint_head and _hint_head.lower() != title_hint.strip().lower():
+            _push_title(_hint_head, "title_hint_head")
     slug = (url or "").rstrip("/").split("/")[-1]
     _push_title(re.sub(r'[-_]+', ' ', slug).strip().title(), "slug")
 
@@ -394,6 +409,15 @@ def _extract_product_summary(text: str, url: str, title_hint: str = "") -> dict:
     # early body lines before falling back to the weak variant.
     if title_candidates:
         title = max(title_candidates, key=_score_title)
+        # The page's own <title> head is authoritative: if the scored winner is just
+        # the hint head with extra LEADING junk ("Sandbox Sharp Objects" vs
+        # "Sharp Objects"), prefer the clean hint head.
+        if title_hint:
+            _hh = _canonicalize_title(re.split(r'\s*[|–—]\s*| - ', title_hint, maxsplit=1)[0].strip())
+            if (_hh and not _is_generic_title(_hh)
+                    and title.lower() != _hh.lower()
+                    and title.lower().endswith(" " + _hh.lower())):
+                title = _hh
         if _is_generic_title(title):
             body_candidates: list[str] = []
             for pat in (
@@ -410,7 +434,7 @@ def _extract_product_summary(text: str, url: str, title_hint: str = "") -> dict:
                     continue
                 if re.search(r'(?i)\b(?:price|availability|add to cart|wishlist|reviews?)\b', cand):
                     continue
-                if re.search(r'(?i)\b(?:rs\.?|pkr|\$)\s*[\d,]+', cand):
+                if re.search(r'(?i)\b(?:rs\.?|pkr|\$|£|€)\s*[\d,]+', cand):
                     continue
                 body_candidates.append(cand)
             for ln in body_lines[:220]:
@@ -821,9 +845,9 @@ def _merge_variant_docs(docs: list) -> list:
 
 
 # â”€â”€ Product spec extraction regexes (used by smart chunker) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-_PROD_PRICE_RE = re.compile(r'(?i)(?:\$|rs\.?\s*|pkr\s*)(\d[\d,]*\.?\d*)')
+_PROD_PRICE_RE = re.compile(r'(?i)(?:\$|£|€|rs\.?\s*|pkr\s*)(\d[\d,]*\.?\d*)')
 _PROD_SPEC_RE = re.compile(r'\b(?:processor|cpu|ram|memory|storage|ssd|hdd|gpu|graphics|display|battery|os|android|windows|linux|screen)\b', re.I)
-_PROD_SPLIT_RE = re.compile(r'(?i)(?:\$|rs\.?\s*|pkr\s*)(\d[\d,]*\.?\d*)\s+([A-Z][A-Za-z0-9 \(\)\-\.]+?(?:,[^\$]{10,400}?))(?=\s*(?:\$|rs\.?\s*|pkr\s*)|\s*\Z)', re.S)
+_PROD_SPLIT_RE = re.compile(r'(?i)(?:\$|£|€|rs\.?\s*|pkr\s*)(\d[\d,]*\.?\d*)\s+([A-Z][A-Za-z0-9 \(\)\-\.]+?(?:,[^\$]{10,400}?))(?=\s*(?:\$|£|€|rs\.?\s*|pkr\s*)|\s*\Z)', re.S)
 _FAQ_SPLIT_RE = re.compile(r'(?m)^(?=(?:Q:|Question:|How |What |Why |When |Where |Who |Can |Do |Is |Are |Does |Should ))', re.I)
 
 
@@ -911,15 +935,18 @@ def _smart_chunk_page(text: str, url: str, chunk_size: int = 400, chunk_step: in
     product_meta = page_meta.get("product") or {}
     # Catalog-misclassification guard: a category/listing page can slip through as
     # page_type=product (its title heuristic grabs the first product card). A real
-    # product page repeats ONE name across variants; ≥3 DISTINCT price+name pairs
-    # means this is a catalog — route it to Mode 1b so each item gets its own
-    # correctly-paired price chunk instead of one poisoned pseudo-product chunk.
-    _distinct_card_names = {
-        (m.group(1) or "")[:20].strip().lower()
-        for m in re.finditer(r'(?:\$|rs\.?\s*|pkr\s*)\d[\d,]*\.?\d*\s+([A-Z][A-Za-z0-9][^$\n]{2,40})', clean)
-        if (m.group(1) or "").strip()
-    }
-    if len(_distinct_card_names) >= 3 and page_meta.get("page_type") == "product":
+    # product page repeats ONE name across variants and ONE price in its spec table;
+    # a listing has MANY distinct names AND MANY distinct price values. Require both
+    # so variant tables ("£51.77 ... Tax £0.00") and spec rows don't false-positive.
+    _CARD_NAME_STOP = re.compile(r'(?i)^(?:in\s+stock|out\s+of\s+stock|tax|availability|number|qty|quantity|shipping|delivery|add\s+to|reviews?|incl|excl)\b')
+    _card_prices, _card_names = set(), set()
+    for m in re.finditer(r'(?:\$|£|€|rs\.?\s*|pkr\s*)(\d[\d,]*\.?\d*)\s+([A-Z][A-Za-z0-9][^$£€\n]{2,40})', clean):
+        _nm = (m.group(2) or "")[:20].strip()
+        if not _nm or _CARD_NAME_STOP.match(_nm):
+            continue
+        _card_names.add(_nm.lower())
+        _card_prices.add(m.group(1))
+    if len(_card_names) >= 3 and len(_card_prices) >= 3 and page_meta.get("page_type") == "product":
         page_meta = dict(page_meta)
         page_meta["page_type"] = "catalog"
         page_meta["catalog_listing"] = True
@@ -930,8 +957,8 @@ def _smart_chunk_page(text: str, url: str, chunk_size: int = 400, chunk_step: in
         # Without this the chunk gets no "Price:" line and no price metadata,
         # which disables price-ranking retrieval for the whole DB.
         _t_esc = re.escape(str(product_meta["title"])[:30])
-        _pm_fb = (re.search(r'(?i)(\$|rs\.?\s*|pkr\s*)([\d,]+\.?\d*)\s{0,3}' + _t_esc, clean)
-                  or re.search(r'(?i)' + _t_esc + r'[^$\n]{0,80}?(\$|rs\.?\s*|pkr\s*)([\d,]+\.?\d*)', clean))
+        _pm_fb = (re.search(r'(?i)(\$|£|€|rs\.?\s*|pkr\s*)([\d,]+\.?\d*)\s{0,3}' + _t_esc, clean)
+                  or re.search(r'(?i)' + _t_esc + r'[^$£€]{0,80}?(\$|£|€|rs\.?\s*|pkr\s*)([\d,]+\.?\d*)', clean))
         if _pm_fb:
             product_meta = dict(product_meta)
             product_meta["price_label"] = f"{_pm_fb.group(1).strip()}{_pm_fb.group(2)}"
@@ -1378,7 +1405,7 @@ def _smart_chunk_page(text: str, url: str, chunk_size: int = 400, chunk_step: in
 def _extract_product_metadata(text: str) -> dict:
     """Parse product-catalog chunk text into structured ChromaDB metadata fields."""
     meta = {}
-    pm = re.search(r'Price:\s*(?:\$|rs\.?\s*|pkr\s*)?([\d,]+\.?\d*)', text, re.I)
+    pm = re.search(r'Price:\s*(?:\$|£|€|rs\.?\s*|pkr\s*)?([\d,]+\.?\d*)', text, re.I)
     if pm:
         try:
             meta['price'] = float(pm.group(1).replace(',', ''))
