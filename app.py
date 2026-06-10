@@ -493,7 +493,7 @@ from services.github_sync import (
     _github_sync_download, _github_sync_download_one, _github_backup_crawled_urls,
     _github_backup_crawl_times, _github_upload_active_db,
     _github_sync_upload, _github_sync_delete, _github_clear_db_data,
-    _github_update_restore_allowlist,
+    _github_update_restore_allowlist, _github_sync_publish_missing_allowed_dbs,
 )
 
 def _write_crawl_status(db_name: str, status: str):
@@ -1461,6 +1461,7 @@ def init_systems():
 
 def _startup_sync():
     """Background: sync from GitHub then load the active DB."""
+    _github_sync_publish_missing_allowed_dbs()
     _github_sync_download(load_db_callback=_load_db_now)
     _init_crawl_timestamps()  # must run AFTER DBs are downloaded
 
@@ -1625,17 +1626,17 @@ async def _auto_crawl_db(db_name: str, url: str, max_pages: int = 0) -> int:
                     except Exception as _stealth_e:
                         logger.warning(f"[AUTO-CRAWL][DISCOVERY] stealth skipped {_seed_url}: {type(_stealth_e).__name__}: {_stealth_e}")
                     try:
-                        await _pg.goto(_seed_url, wait_until="networkidle", timeout=25000)
+                        await _pg.goto(_seed_url, wait_until="domcontentloaded", timeout=15000)
                         try:
                             await _pg.wait_for_function(
                                 "document.body && document.body.innerText.trim().length > 100",
-                                timeout=4000,
+                                timeout=2500,
                             )
                         except Exception:
                             pass
                         try:
                             await _pg.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-                            await _pg.wait_for_timeout(700)
+                            await _pg.wait_for_timeout(450)
                         except Exception:
                             pass
                         html = await _pg.content()
@@ -1785,6 +1786,7 @@ async def _auto_crawl_db(db_name: str, url: str, max_pages: int = 0) -> int:
             rounds = 0
             while frontier and len(seen) < _limit and rounds < 3:
                 rounds += 1
+                logger.info(f"[AUTO-CRAWL][DISCOVERY] round {rounds}/3 probing {len(frontier[:18])} seed pages for '{db_name}'")
                 sem = asyncio.Semaphore(4)
                 async def _one(seed_url: str) -> list[str]:
                     async with sem:
@@ -2064,8 +2066,8 @@ async def _auto_crawl_db(db_name: str, url: str, max_pages: int = 0) -> int:
                             _sr = _Stealth().apply_stealth_async(_pg)
                             if inspect.isawaitable(_sr): await _sr
                         except Exception: pass
-                        await _pg.goto(_seed, wait_until="networkidle", timeout=22000)
-                        await _pg.wait_for_timeout(2000)
+                        await _pg.goto(_seed, wait_until="domcontentloaded", timeout=15000)
+                        await _pg.wait_for_timeout(900)
                         hrefs = await _pg.evaluate(
                             "() => Array.from(document.querySelectorAll('a[href]')).map(a=>(a.href||'').trim()).filter(Boolean)"
                         )
@@ -2976,7 +2978,7 @@ def _extract_product_name_phrase(q: str) -> str:
                 return phrase[:120]
         # Fallback: if the query is basically a title or contains a quoted title,
         # preserve the exact wording instead of forcing it through generic patterns.
-        quoted = re.search(r"[\"“”']([^\"“”']{4,140})[\"“”']", qq)
+        quoted = re.search(r'["\']([^"\']{4,140})["\']', qq)
         if quoted:
             phrase = quoted.group(1).strip()
             phrase = re.sub(r"\s{2,}", " ", phrase).strip(" -:|")
@@ -3021,7 +3023,7 @@ def _extract_doc_title_phrase(q: str) -> str:
             phrase = re.sub(r"^(?:the|a|an)\s+", "", phrase, flags=re.I).strip()
             if len(re.findall(r"[A-Za-z0-9]{3,}", phrase)) >= 2:
                 return phrase[:120]
-        quoted = re.search(r"[\"“”']([^\"“”']{4,140})[\"“”']", qq)
+        quoted = re.search(r'["\']([^"\']{4,140})["\']', qq)
         if quoted:
             phrase = quoted.group(1).strip()
             phrase = re.sub(r"\s{2,}", " ", phrase).strip(" -:|")
@@ -11407,17 +11409,17 @@ async def crawl_site(data: dict, request: Request):
                         except Exception as _stealth_e:
                             logger.warning(f"[DISCOVERY] stealth skipped {_seed_url}: {type(_stealth_e).__name__}: {_stealth_e}")
                         try:
-                            await _pg.goto(_seed_url, wait_until="networkidle", timeout=25000)
+                            await _pg.goto(_seed_url, wait_until="domcontentloaded", timeout=15000)
                             try:
                                 await _pg.wait_for_function(
                                     "document.body && document.body.innerText.trim().length > 100",
-                                    timeout=4000,
+                                    timeout=2500,
                                 )
                             except Exception:
                                 pass
                             try:
                                 await _pg.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-                                await _pg.wait_for_timeout(700)
+                                await _pg.wait_for_timeout(450)
                             except Exception:
                                 pass
                             html = await _pg.content()
@@ -11625,6 +11627,7 @@ async def crawl_site(data: dict, request: Request):
                 # Universal discovery pass: render a small set of representative pages
                 # and mine their sidebars / hydration data for URLs omitted from sitemap.
                 try:
+                    yield _send("🔎 Rendered discovery: probing seed pages...")
                     _rendered_links = await _rendered_discovery(sitemap_urls)
                     if _rendered_links:
                         sitemap_urls.extend(_rendered_links)
