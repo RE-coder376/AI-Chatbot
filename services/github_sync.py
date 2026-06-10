@@ -117,6 +117,28 @@ def _github_repo_url() -> str:
     return f"https://{pat}@github.com/{_GITHUB_USERNAME}/{_GITHUB_REPO}.git"
 
 
+def _github_release_zip_asset_names() -> set[str]:
+    """Return zip asset base names currently present in the latest release."""
+    import requests as _req
+    pat = os.environ.get("GITHUB_PAT", "").strip()
+    if not pat:
+        return set()
+    try:
+        api_hdr = {"Authorization": f"token {pat}", "User-Agent": "chatbot-sync"}
+        release_url = f"https://api.github.com/repos/{_GITHUB_USERNAME}/{_GITHUB_REPO}/releases/tags/databases-latest"
+        resp = _req.get(release_url, headers=api_hdr, timeout=30)
+        if resp.status_code != 200:
+            return set()
+        return {
+            a.get("name", "")[:-4]
+            for a in resp.json().get("assets", [])
+            if a.get("name", "").endswith(".zip")
+        }
+    except Exception as e:
+        logger.warning(f"[GH-SYNC] Could not read release asset names: {e}")
+        return set()
+
+
 def _git(args: list, cwd=None) -> bool:
     try:
         r = subprocess.run(args, cwd=str(cwd or _GITHUB_CLONE_DIR),
@@ -127,6 +149,31 @@ def _git(args: list, cwd=None) -> bool:
     except Exception as e:
         logger.error(f"[GH-SYNC] git error: {e}")
         return False
+
+
+def _github_sync_publish_missing_allowed_dbs():
+    """Upload any local, allowed DBs that are not present as release zip assets."""
+    pat = os.environ.get("GITHUB_PAT", "").strip()
+    if not pat:
+        return
+    allow = _load_restore_allowlist()
+    if not allow:
+        return
+    deleted = _load_deleted_db_names()
+    release_names = _github_release_zip_asset_names()
+    for db_dir in sorted(DATABASES_DIR.iterdir()):
+        if not db_dir.is_dir():
+            continue
+        db_name = db_dir.name
+        if db_name in deleted or db_name == "buffer":
+            continue
+        if db_name not in allow:
+            continue
+        if not (db_dir / "config.json").exists():
+            continue
+        if db_name not in release_names:
+            logger.info(f"[GH-SYNC] Publishing missing allowed DB '{db_name}' to GitHub releases")
+            _github_sync_upload(db_name)
 
 
 def _github_sync_download(load_db_callback=None):

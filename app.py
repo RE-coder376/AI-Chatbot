@@ -492,7 +492,7 @@ from services.github_sync import (
     _github_sync_download, _github_sync_download_one, _github_backup_crawled_urls,
     _github_backup_crawl_times, _github_upload_active_db,
     _github_sync_upload, _github_sync_delete, _github_clear_db_data,
-    _github_update_restore_allowlist,
+    _github_update_restore_allowlist, _github_sync_publish_missing_allowed_dbs,
 )
 
 def _write_crawl_status(db_name: str, status: str):
@@ -1460,6 +1460,7 @@ def init_systems():
 
 def _startup_sync():
     """Background: sync from GitHub then load the active DB."""
+    _github_sync_publish_missing_allowed_dbs()
     _github_sync_download(load_db_callback=_load_db_now)
     _init_crawl_timestamps()  # must run AFTER DBs are downloaded
 
