@@ -12107,7 +12107,9 @@ async def crawl_site(data: dict, request: Request):
                                 "User-Agent": ua,
                                 "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
                                 "Accept-Language": "en-US,en;q=0.9",
-                                "Accept-Encoding": "gzip, deflate, br",
+                                # NO manual Accept-Encoding: advertising "br" without the brotli
+                                # package makes r.text compressed binary garbage (books.toscrape
+                                # CDN serves brotli) — let urllib3 advertise what it can decode.
                                 "Connection": "keep-alive",
                                 "Upgrade-Insecure-Requests": "1",
                                 "Sec-Fetch-Dest": "document",
@@ -12124,6 +12126,10 @@ async def crawl_site(data: dict, request: Request):
                         ctype = (r.headers.get("Content-Type") or "").lower()
                         if not any(t in ctype for t in ("text/html", "application/xhtml+xml")):
                             return None
+                        # No charset in headers → requests defaults to ISO-8859-1 and UTF-8
+                        # pages mojibake (£ → Â£). Modern web default is UTF-8.
+                        if "charset" not in ctype:
+                            r.encoding = "utf-8"
                         # Follow redirect manually if needed
                         if r.status_code in (301, 302) and r.headers.get("Location"):
                             r = await asyncio.to_thread(
