@@ -2908,7 +2908,7 @@ def _context_addresses_query(context: str, q: str) -> bool:
     # price-sorted catalog whose chunks rarely repeat the category noun —
     # priced product context IS the answer, don't demand keyword overlap.
     from services.retrieval import _is_price_ranking_query as _ctx_price_rank_q
-    if _ctx_price_rank_q(q)[0] and re.search(r"(?i)price:\s*(?:\$|£|€|rs\.?|pkr)?\s*[\d,]+", context_lower):
+    if _ctx_price_rank_q(q)[0] and re.search(r"(?i)price:\s*(?:\$|£|€|\brs\.?|\bpkr)?\s*[\d,]+", context_lower):
         return True
 
     # 1. Literal Keyword check

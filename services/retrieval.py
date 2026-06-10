@@ -1267,8 +1267,8 @@ def _doc_price_value(doc):
         body = str(getattr(doc, "page_content", "") or "")
         # Prefer the labeled "Price:" line — the first bare $ in a chunk can be a
         # sidebar/related-products price, not this product's.
-        m = (re.search(r"Price:\s*(?:\$|£|€|rs\.?|pkr)?\s*([\d,]+(?:\.\d{1,2})?)", body, re.I)
-             or re.search(r"(?:\$|£|€|rs\.?|pkr)\s*([\d,]+(?:\.\d{1,2})?)", body, re.I))
+        m = (re.search(r"Price:\s*(?:\$|£|€|\brs\.?|\bpkr)?\s*([\d,]+(?:\.\d{1,2})?)", body, re.I)
+             or re.search(r"(?:\$|£|€|\brs\.?|\bpkr)\s*([\d,]+(?:\.\d{1,2})?)", body, re.I))
         if m:
             return float(m.group(1).replace(",", ""))
     except Exception:

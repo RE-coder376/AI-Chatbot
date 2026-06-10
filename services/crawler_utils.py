@@ -224,7 +224,7 @@ def _product_query_rerank_score(question: str, doc) -> float:
     score = overlap + (slug_overlap * 3.0) + (head_overlap * 1.25) + (numbers_hit * 2.0)
     if normalized_q and normalized_q in normalized_doc:
         score += 8.0
-    if re.search(r"\b(price|pricing|cost)\b", question or "", re.I) and re.search(r"(?i)\b(?:rs\.?|pkr|\$|£|€)\s*[\d,]+", text[:500]):
+    if re.search(r"\b(price|pricing|cost)\b", question or "", re.I) and re.search(r"(?i)\b(?:\brs\.?|\bpkr|\$|£|€)\s*[\d,]+", text[:500]):
         score += 1.0
     return score
 
@@ -296,7 +296,7 @@ def _extract_product_summary(text: str, url: str, title_hint: str = "") -> dict:
             return ""
         raw = re.sub(r'(?i)^(?:product|name|title|model)\s*:\s*', "", raw).strip(" -:|")
         # Prefer the model-like phrase immediately after a price marker.
-        for pm in re.finditer(r'(?i)(?:\$|£|€|rs\.?|pkr)\s*[\d,]+(?:\.\d{1,2})?\s+(.{4,120})', raw):
+        for pm in re.finditer(r'(?i)(?:\$|£|€|\brs\.?|\bpkr)\s*[\d,]+(?:\.\d{1,2})?\s+(.{4,120})', raw):
             tail = pm.group(1).strip(" -:|")
             tail = re.split(
                 r'(?i)\s+(?:hdd:|ssd:|ram:|processor:|display:|os:|availability:|reviews?|'
@@ -347,7 +347,7 @@ def _extract_product_summary(text: str, url: str, title_hint: str = "") -> dict:
         if not raw:
             return ""
         raw = re.sub(r'(?i)^(?:product|name|title|model)\s*:\s*', "", raw).strip(" -:|")
-        for pm in re.finditer(r'(?i)(?:\$|£|€|rs\.?|pkr)\s*[\d,]+(?:\.\d{1,2})?\s+(.{4,120})', raw):
+        for pm in re.finditer(r'(?i)(?:\$|£|€|\brs\.?|\bpkr)\s*[\d,]+(?:\.\d{1,2})?\s+(.{4,120})', raw):
             tail = pm.group(1).strip(" -:|")
             tail = re.split(
                 r'(?i)\s+(?:hdd:|ssd:|ram:|processor:|display:|os:|availability:|reviews?|'
@@ -389,7 +389,7 @@ def _extract_product_summary(text: str, url: str, title_hint: str = "") -> dict:
             continue
         if re.search(r'(?i)\b(?:add to cart|wishlist|reviews?|toggle navigation|cloud scraper|pricing|marketplace|learn documentation|video tutorials|test sites|forum|privacy policy|terms of service|all rights reserved)\b', cand):
             continue
-        if re.search(r'(?i)^\s*(?:rs\.?|pkr|\$|£|€)\s*[\d,]+', cand):
+        if re.search(r'(?i)^\s*(?:\brs\.?|\bpkr|\$|£|€)\s*[\d,]+', cand):
             continue
         _push_title(cand, "body_title")
         break
@@ -437,7 +437,7 @@ def _extract_product_summary(text: str, url: str, title_hint: str = "") -> dict:
                     continue
                 if re.search(r'(?i)\b(?:price|availability|add to cart|wishlist|reviews?)\b', cand):
                     continue
-                if re.search(r'(?i)\b(?:rs\.?|pkr|\$|£|€)\s*[\d,]+', cand):
+                if re.search(r'(?i)\b(?:\brs\.?|\bpkr|\$|£|€)\s*[\d,]+', cand):
                     continue
                 body_candidates.append(cand)
             for ln in body_lines[:220]:
@@ -848,9 +848,9 @@ def _merge_variant_docs(docs: list) -> list:
 
 
 # â”€â”€ Product spec extraction regexes (used by smart chunker) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-_PROD_PRICE_RE = re.compile(r'(?i)(?:\$|£|€|rs\.?\s*|pkr\s*)(\d[\d,]*\.?\d*)')
+_PROD_PRICE_RE = re.compile(r'(?i)(?:\$|£|€|\brs\.?\s*|\bpkr\s*)(\d[\d,]*\.?\d*)')
 _PROD_SPEC_RE = re.compile(r'\b(?:processor|cpu|ram|memory|storage|ssd|hdd|gpu|graphics|display|battery|os|android|windows|linux|screen)\b', re.I)
-_PROD_SPLIT_RE = re.compile(r'(?i)(?:\$|£|€|rs\.?\s*|pkr\s*)(\d[\d,]*\.?\d*)\s+([A-Z][A-Za-z0-9 \(\)\-\.]+?(?:,[^\$]{10,400}?))(?=\s*(?:\$|£|€|rs\.?\s*|pkr\s*)|\s*\Z)', re.S)
+_PROD_SPLIT_RE = re.compile(r'(?i)(?:\$|£|€|\brs\.?\s*|\bpkr\s*)(\d[\d,]*\.?\d*)\s+([A-Z][A-Za-z0-9 \(\)\-\.]+?(?:,[^\$]{10,400}?))(?=\s*(?:\$|£|€|\brs\.?\s*|\bpkr\s*)|\s*\Z)', re.S)
 _FAQ_SPLIT_RE = re.compile(r'(?m)^(?=(?:Q:|Question:|How |What |Why |When |Where |Who |Can |Do |Is |Are |Does |Should ))', re.I)
 
 
@@ -945,7 +945,7 @@ def _smart_chunk_page(text: str, url: str, chunk_size: int = 400, chunk_step: in
     # so variant tables ("£51.77 ... Tax £0.00") and spec rows don't false-positive.
     _CARD_NAME_STOP = re.compile(r'(?i)^(?:in\s+stock|out\s+of\s+stock|tax|availability|number|qty|quantity|shipping|delivery|add\s+to|reviews?|incl|excl)\b')
     _card_prices, _card_names = set(), set()
-    for m in re.finditer(r'(?:\$|£|€|rs\.?\s*|pkr\s*)(\d[\d,]*\.?\d*)\s+([A-Z][A-Za-z0-9][^$£€\n]{2,40})', clean):
+    for m in re.finditer(r'(?:\$|£|€|\brs\.?\s*|\bpkr\s*)(\d[\d,]*\.?\d*)\s+([A-Z][A-Za-z0-9][^$£€\n]{2,40})', clean):
         _nm = (m.group(2) or "")[:20].strip()
         if not _nm or _CARD_NAME_STOP.match(_nm):
             continue
@@ -962,8 +962,8 @@ def _smart_chunk_page(text: str, url: str, chunk_size: int = 400, chunk_step: in
         # Without this the chunk gets no "Price:" line and no price metadata,
         # which disables price-ranking retrieval for the whole DB.
         _t_esc = re.escape(str(product_meta["title"])[:30])
-        _pm_fb = (re.search(r'(?i)(\$|£|€|rs\.?\s*|pkr\s*)([\d,]+\.?\d*)\s{0,3}' + _t_esc, clean)
-                  or re.search(r'(?i)' + _t_esc + r'[^$£€]{0,80}?(\$|£|€|rs\.?\s*|pkr\s*)([\d,]+\.?\d*)', clean))
+        _pm_fb = (re.search(r'(?i)(\$|£|€|\brs\.?\s*|\bpkr\s*)([\d,]+\.?\d*)\s{0,3}' + _t_esc, clean)
+                  or re.search(r'(?i)' + _t_esc + r'[^$£€]{0,80}?(\$|£|€|\brs\.?\s*|\bpkr\s*)([\d,]+\.?\d*)', clean))
         if _pm_fb:
             product_meta = dict(product_meta)
             product_meta["price_label"] = f"{_pm_fb.group(1).strip()}{_pm_fb.group(2)}"
@@ -1410,7 +1410,7 @@ def _smart_chunk_page(text: str, url: str, chunk_size: int = 400, chunk_step: in
 def _extract_product_metadata(text: str) -> dict:
     """Parse product-catalog chunk text into structured ChromaDB metadata fields."""
     meta = {}
-    pm = re.search(r'Price:\s*(?:\$|£|€|rs\.?\s*|pkr\s*)?([\d,]+\.?\d*)', text, re.I)
+    pm = re.search(r'Price:\s*(?:\$|£|€|\brs\.?\s*|\bpkr\s*)?([\d,]+\.?\d*)', text, re.I)
     if pm:
         try:
             meta['price'] = float(pm.group(1).replace(',', ''))
