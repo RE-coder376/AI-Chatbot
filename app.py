@@ -1477,10 +1477,15 @@ def _startup_sync():
             crawl_url = (cfg.get("crawl_url") or "").strip()
             if crawl_url and db_name not in _crawling_dbs:
                 logger.warning(f"[STARTUP] DB '{db_name}' restored as shell only — triggering crawl rebuild")
-                threading.Thread(
-                    target=lambda n=db_name, u=crawl_url: asyncio.run(_auto_crawl_db(n, u, max_pages=0)),
-                    daemon=True,
-                ).start()
+                def _rebuild_shell_db(n=db_name, u=crawl_url):
+                    try:
+                        chunks = asyncio.run(_auto_crawl_db(n, u, max_pages=0))
+                        if chunks > 0:
+                            logger.warning(f"[STARTUP] DB '{n}' rebuilt with {chunks} chunks — uploading refreshed DB to GitHub")
+                            _github_sync_upload(n)
+                    except Exception as _rebuild_e:
+                        logger.warning(f"[STARTUP] shell DB rebuild failed for '{n}': {_rebuild_e}")
+                threading.Thread(target=_rebuild_shell_db, daemon=True).start()
     except Exception as _rehydrate_e:
         logger.warning(f"[STARTUP] shell DB recovery scan failed: {_rehydrate_e}")
     _init_crawl_timestamps()  # must run AFTER DBs are downloaded
