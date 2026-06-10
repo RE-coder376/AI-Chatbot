@@ -909,6 +909,21 @@ def _smart_chunk_page(text: str, url: str, chunk_size: int = 400, chunk_step: in
 
     _docs_guard = bool(page_meta.get("docs_like"))
     product_meta = page_meta.get("product") or {}
+    # Catalog-misclassification guard: a category/listing page can slip through as
+    # page_type=product (its title heuristic grabs the first product card). A real
+    # product page repeats ONE name across variants; ≥3 DISTINCT price+name pairs
+    # means this is a catalog — route it to Mode 1b so each item gets its own
+    # correctly-paired price chunk instead of one poisoned pseudo-product chunk.
+    _distinct_card_names = {
+        (m.group(1) or "")[:20].strip().lower()
+        for m in re.finditer(r'(?:\$|rs\.?\s*|pkr\s*)\d[\d,]*\.?\d*\s+([A-Z][A-Za-z0-9][^$\n]{2,40})', clean)
+        if (m.group(1) or "").strip()
+    }
+    if len(_distinct_card_names) >= 3 and page_meta.get("page_type") == "product":
+        page_meta = dict(page_meta)
+        page_meta["page_type"] = "catalog"
+        page_meta["catalog_listing"] = True
+        product_meta = {}
     if not _docs_guard and page_meta.get("page_type") == "product" and product_meta.get("title") and not product_meta.get("price_label"):
         # Universal fallback: many product pages print the price adjacent to the
         # title in body text ("$24.99 Nokia 123" / "Nokia 123 ... Rs. 2,499").
