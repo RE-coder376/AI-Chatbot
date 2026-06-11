@@ -522,6 +522,22 @@ def _extract_product_summary(text: str, url: str, title_hint: str = "") -> dict:
                 break
         desc = " ".join(useful[:3]).strip()
     contaminated = bool(_CONTAMINATION_HINTS_RE.search(body))
+    # Final authority: a title-tag head matching the URL slug IS the product name.
+    # Descriptions naming OTHER priced products ("The $100 Startup") can otherwise
+    # hijack both the title and its paired price_label.
+    try:
+        _hh_fin = _canonicalize_title(re.split(r'\s*[|–—]\s*| - ', title_hint or '', maxsplit=1)[0].strip())
+        _path_fin = re.sub(r'(?i)/index\.html?$', '', urllib.parse.urlparse(str(url)).path.rstrip('/'))
+        _slug_fin = re.sub(r'[\s\-_]*\d+$', '', re.sub(r'[^a-z0-9]+', ' ', re.sub(r'\.html?$', '', _path_fin.rsplit('/', 1)[-1]).lower()).strip()).strip()
+        _hh_fin_n = re.sub(r'[^a-z0-9]+', ' ', _hh_fin.lower()).strip()
+        if (len(_slug_fin) >= 6 and _hh_fin_n and title
+                and title.strip().lower() != _hh_fin.lower()
+                and (_hh_fin_n.startswith(_slug_fin) or _slug_fin.startswith(_hh_fin_n))):
+            title = _hh_fin
+            price_label = ""   # stale pair from hijacked title — chunker fallback re-derives
+            price_num = None
+    except Exception:
+        pass
     canonical_title = _canonicalize_title(title)
     return {
         "title": title.strip(),
