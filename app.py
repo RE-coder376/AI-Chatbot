@@ -6078,7 +6078,11 @@ def _deterministic_product_catalog_answer(q: str, kb_context: str, max_items: in
                             anchor_hits += 1
                             exact_anchor_hit = True
                             break
-                if anchor_hits <= 0 and max_price is None and not rank_mode:
+                # Category anchors must hold even WITH a price cap — "RC products
+                # under Rs.5000" previously kept every sub-5000 item, crowding the
+                # actual RC products out of the top-5. No anchors → branch unused;
+                # zero matches → function returns None → normal LLM path answers.
+                if anchor_hits <= 0 and not rank_mode:
                     continue
             prices = []
             for raw in re.findall(r"Rs\.?\s*([\d,]+(?:\.\d{1,2})?)", doc, re.I):
