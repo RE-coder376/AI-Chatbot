@@ -3117,6 +3117,13 @@ async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansio
         chunk = _compress_doc(raw_text, anchors)
         if not chunk:
             continue
+        _r_cats = str((getattr(r, "metadata", None) or {}).get("categories") or "").strip()
+        if _r_cats:
+            # Crawl-graph categories made visible in context TEXT: product bodies
+            # never contain their own category word ("laptop"), and the sparse-KB
+            # guard, the LLM, and the deterministic parser all read text — without
+            # this line a perfectly-anchored bounds answer still exits as IDK.
+            chunk = f"Category: {_r_cats}\n{chunk}"
         if _strict_scope_q or _is_outcomes_intent:
             src = str((getattr(r, "metadata", None) or {}).get("source") or "").strip()
             if src:
