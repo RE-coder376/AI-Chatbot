@@ -296,7 +296,7 @@ def _extract_product_summary(text: str, url: str, title_hint: str = "") -> dict:
             return ""
         raw = re.sub(r'(?i)^(?:product|name|title|model)\s*:\s*', "", raw).strip(" -:|")
         # Prefer the model-like phrase immediately after a price marker.
-        for pm in re.finditer(r'(?i)(?:\$|£|€|\brs\.?|\bpkr)\s*[\d,]+(?:\.\d{1,2})?\s+(.{4,120})', raw):
+        for pm in re.finditer(r'(?i)(?:\$|£|€|\brs\.?|\bpkr)\s*[\d,]+(?:\.\d{1,2})?\s+((?-i:[A-Z0-9]).{3,119})', raw):
             tail = pm.group(1).strip(" -:|")
             tail = re.split(
                 r'(?i)\s+(?:hdd:|ssd:|ram:|processor:|display:|os:|availability:|reviews?|'
@@ -306,6 +306,10 @@ def _extract_product_summary(text: str, url: str, title_hint: str = "") -> dict:
             )[0].strip(" -:|")
             # Spec-table tail, not a product name ("£51.77 In stock (22 available)...")
             if re.match(r'(?i)^(?:in\s+stock|out\s+of\s+stock|tax\b|availability|number\s+of|qty|quantity|customer|reviews?)\b', tail):
+                continue
+            # Sentence boundary inside the tail → prose fragment from a description
+            # ("$500 million were stolen from the Museum. It remains..."), not a title.
+            if ". " in tail[:90]:
                 continue
             tail = tail.split(",")[0].strip(" -:|")
             tail = _dedupe_repeated_phrase(tail)
@@ -347,7 +351,7 @@ def _extract_product_summary(text: str, url: str, title_hint: str = "") -> dict:
         if not raw:
             return ""
         raw = re.sub(r'(?i)^(?:product|name|title|model)\s*:\s*', "", raw).strip(" -:|")
-        for pm in re.finditer(r'(?i)(?:\$|£|€|\brs\.?|\bpkr)\s*[\d,]+(?:\.\d{1,2})?\s+(.{4,120})', raw):
+        for pm in re.finditer(r'(?i)(?:\$|£|€|\brs\.?|\bpkr)\s*[\d,]+(?:\.\d{1,2})?\s+((?-i:[A-Z0-9]).{3,119})', raw):
             tail = pm.group(1).strip(" -:|")
             tail = re.split(
                 r'(?i)\s+(?:hdd:|ssd:|ram:|processor:|display:|os:|availability:|reviews?|'
@@ -357,6 +361,10 @@ def _extract_product_summary(text: str, url: str, title_hint: str = "") -> dict:
             )[0].strip(" -:|")
             # Spec-table tail, not a product name ("£51.77 In stock (22 available)...")
             if re.match(r'(?i)^(?:in\s+stock|out\s+of\s+stock|tax\b|availability|number\s+of|qty|quantity|customer|reviews?)\b', tail):
+                continue
+            # Sentence boundary inside the tail → prose fragment from a description
+            # ("$500 million were stolen from the Museum. It remains..."), not a title.
+            if ". " in tail[:90]:
                 continue
             tail = tail.split(",")[0].strip(" -:|")
             tail = _dedupe_repeated_phrase(tail)
@@ -421,6 +429,15 @@ def _extract_product_summary(text: str, url: str, title_hint: str = "") -> dict:
                     and title.lower() != _hh.lower()
                     and title.lower().endswith(" " + _hh.lower())):
                 title = _hh
+            # URL-slug agreement: when the hint head matches the page's own slug
+            # ("into-the-wild" ≈ "Into the Wild") it IS the product name — prefer it
+            # over breadcrumb-mangled winners ("Sandbox Home Books Nonfiction Into").
+            if _hh and not _is_generic_title(_hh) and title.lower() != _hh.lower():
+                _slug_seg = re.sub(r'\.html?$', '', re.sub(r'(?i)/index\.html?$', '', urllib.parse.urlparse(str(url)).path.rstrip('/')).rsplit('/', 1)[-1])
+                _slug_norm = re.sub(r'[\s\-_]*\d+$', '', re.sub(r'[^a-z0-9]+', ' ', _slug_seg.lower()).strip()).strip()
+                _hh_norm = re.sub(r'[^a-z0-9]+', ' ', _hh.lower()).strip()
+                if len(_slug_norm) >= 6 and _hh_norm and (_hh_norm.startswith(_slug_norm) or _slug_norm.startswith(_hh_norm)):
+                    title = _hh
         if _is_generic_title(title):
             body_candidates: list[str] = []
             for pat in (
@@ -951,7 +968,18 @@ def _smart_chunk_page(text: str, url: str, chunk_size: int = 400, chunk_step: in
             continue
         _card_names.add(_nm.lower())
         _card_prices.add(m.group(1))
-    if len(_card_names) >= 3 and len(_card_prices) >= 3 and page_meta.get("page_type") == "product":
+    # Detail-page exemption: product pages commonly carry a related-items carousel
+    # (≥3 other names+prices) — when the URL slug names THIS product, it's a detail
+    # page, not a listing, regardless of how many recommendations it shows.
+    _is_detailish = False
+    _pm_title = str((product_meta or {}).get("title") or "")
+    if _pm_title:
+        _slug_seg = re.sub(r'\.html?$', '', re.sub(r'(?i)/index\.html?$', '', urllib.parse.urlparse(str(url)).path.rstrip('/')).rsplit('/', 1)[-1])
+        _slug_n = re.sub(r'[\s\-_]*\d+$', '', re.sub(r'[^a-z0-9]+', ' ', _slug_seg.lower()).strip()).strip()
+        _pm_t_n = re.sub(r'[^a-z0-9]+', ' ', _pm_title.lower()).strip()
+        if len(_slug_n) >= 6 and _pm_t_n and (_pm_t_n.startswith(_slug_n) or _slug_n.startswith(_pm_t_n) or _slug_n in _pm_t_n):
+            _is_detailish = True
+    if len(_card_names) >= 3 and len(_card_prices) >= 3 and page_meta.get("page_type") == "product" and not _is_detailish:
         page_meta = dict(page_meta)
         page_meta["page_type"] = "catalog"
         page_meta["catalog_listing"] = True
@@ -1013,7 +1041,11 @@ def _smart_chunk_page(text: str, url: str, chunk_size: int = 400, chunk_step: in
         return _finalize_docs(_merge_variant_docs(docs))
 
     # Mode 1b: catalog/listing page – split repeated product cards into per-item chunks.
-    if not _docs_guard and (page_meta.get("catalog_listing") or len(_PROD_PRICE_RE.findall(clean)) >= 2):
+    # Gate on REAL card signals (≥3 distinct names+prices, computed above), not raw
+    # price-hit count: a product detail page has 2+ price hits from its spec table
+    # (price + £0.00 tax) plus prose amounts ("gave $25,000 to charity, ...") which
+    # the card splitter then mints into garbage products.
+    if not _docs_guard and (page_meta.get("catalog_listing") or (len(_card_names) >= 3 and len(_card_prices) >= 3)):
         products = []
         for m in _PROD_SPLIT_RE.finditer(clean):
             price_str = m.group(1).replace(',', '')
