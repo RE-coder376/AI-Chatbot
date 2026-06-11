@@ -256,6 +256,20 @@ def _extract_product_summary(text: str, url: str, title_hint: str = "") -> dict:
         # Spec-table rows are never product names ("Price (incl. tax) £51.77 Tax £0.00 ...")
         if re.search(r'(?i)\bprice\s*\(|[\$£€]\s*\d|\b(?:incl|excl)\.\s*tax\b|\bavailability\b|\bin\s+stock\b|\bnumber\s+of\s+reviews?\b', cand):
             return True
+        # Variant-swatch / price-fragment shapes are never product names:
+        # "PKR Pink - Rs.1", "PKR Red - Sold Out", "Diecast Model Ducati Diavel Rs.4".
+        # A standalone currency CODE as the first word is swatch text (a real title
+        # like "The $100 Startup" has the symbol glued to digits, not "PKR <word>").
+        if re.match(r'(?i)^(?:rs\.?|pkr|usd|eur|gbp|aed)\s', cand):
+            return True
+        if re.search(r'(?i)\bsold\s*out\b', cand):
+            return True
+        # Trailing currency fragment ("… Rs.4", "… - Rs.1,2") = truncated price tail.
+        if re.search(r'(?i)[\s\-–](?:rs\.?|pkr|\$|£|€)\s*[\d.,]*$', cand):
+            return True
+        # Truncated card text from the source site itself ("Teach children...").
+        if cand.endswith("...") or re.search(r'(?i)\bloading\.{0,3}$|\btranslation\s+missing\b', cand):
+            return True
         if re.fullmatch(r"[\W_]+", cand):
             return True
         words = re.findall(r"[A-Za-z0-9]+", cand)
@@ -525,6 +539,17 @@ def _extract_product_summary(text: str, url: str, title_hint: str = "") -> dict:
             if len(s) < 25:
                 continue
             if re.search(r'(?i)\b(add to cart|wishlist|recently viewed|you may also like|customers also bought|checkout|subtotal)\b', s):
+                continue
+            # A price inside a description sentence is related-product carousel
+            # leakage ("Number Book: Teach children... Rs.1,050.00 PKR"), not prose —
+            # the product's own price already lives in price_label. Same for
+            # truncated card text ("...") and loading/i18n widget artifacts.
+            if re.search(r'(?i)(?:\brs\.?|\bpkr\b|\$|£|€)\s*[\d,]+|\d[\d,]*\s*(?:pkr|rs\.?|usd|eur|gbp)\b', s):
+                continue
+            if "..." in s or re.search(r'(?i)\bloading\b|\btranslation\s+missing\b', s):
+                continue
+            # Shipping/delivery chrome repeats on every product page — never prose.
+            if re.search(r'(?i)\b(?:free (?:delivery|shipping)|delivery summary|order placed|dispatched|estimated delivery|cash on delivery)\b', s):
                 continue
             useful.append(s)
             if len(" ".join(useful)) >= 420:

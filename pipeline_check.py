@@ -28,7 +28,11 @@ BATTERY = [
     dict(url="https://babyfy.pk/products/educational-drawing-robot-toy", kind="product", price=(14000, 14500), site="shopify"),
     dict(url="https://babyfy.pk/products/2-in-1-doll-catcher-atm-claw-machine", kind="product", price=(12000, 12700), site="shopify"),
     dict(url="https://babyfy.pk/collections/all", kind=("category", "catalog"), price=None, site="shopify"),
-    dict(url="https://babyfy.pk/", kind="any", price=None, site="shopify"),
+    # Homepage and static info pages must NEVER emit product chunks — site-wide
+    # chrome ("Free Shipping over 5000PKR") + carousels made them pseudo-products
+    # ("Your Trust Matters" Rs.2,430) before the URL-class gate.
+    dict(url="https://babyfy.pk/", kind="any", not_kind="product", price=None, site="shopify"),
+    dict(url="https://babyfy.pk/pages/about-us", kind="any", not_kind="product", price=None, site="shopify"),
     # ── Shopify store #2 (belony.pk) ─────────────────────────────────────────
     # belony.pk DNS dead as of 2026-06-11 — optional until the domain returns
     dict(url="https://belony.pk/", kind="any", price=None, site="shopify2", optional=True),
@@ -61,7 +65,14 @@ TITLE_BAD = [
     (re.compile(r'[–—|-]\s*(?:babyfy|books to scrape|web scraper)\s*$', re.I), "site-suffix title"),
     (re.compile(r'(?i)\b(?:in stock|tax|availability|subtotal|add to cart)\b'), "spec-word title"),
     (re.compile(r'(?i)^(?:home|index|sandbox)\b.{0,12}$'), "nav-word title"),
+    (re.compile(r'(?i)^(?:rs\.?|pkr|usd|eur|gbp|aed)\s'), "currency-led swatch title"),
+    (re.compile(r'(?i)\bsold\s*out\b'), "sold-out title"),
+    (re.compile(r'(?i)[\s\-–](?:rs\.?|pkr|\$|£|€)\s*[\d.,]*$'), "trailing-price title"),
+    (re.compile(r'(?i)\.\.\.$|\bloading\b|\btranslation\s+missing\b'), "truncated/widget title"),
 ]
+# Description line of a product chunk must not carry prices ("Number Book:
+# Teach children... Rs.1,050") — that is related-product carousel leakage.
+DESC_PRICE_RE = re.compile(r'(?im)^description:.*(?:\brs\.?|\bpkr\b|\$|£|€)\s*[\d,]+')
 
 
 def _docs_like(url, hints):
@@ -113,6 +124,11 @@ def check_page(case) -> list[str]:
     # universal chunk invariants
     for d in docs:
         body = d.page_content
+        _kind = str(d.metadata.get("chunk_kind") or "")
+        if case.get("not_kind") and _kind == case["not_kind"]:
+            errors.append(f"forbidden chunk_kind={_kind!r} on this URL (title={str(d.metadata.get('product_title') or '')[:40]!r})")
+        if _kind == "product" and DESC_PRICE_RE.search(body):
+            errors.append(f"price inside Description line: {DESC_PRICE_RE.search(body).group(0)[:60]!r}")
         for pat, label in JUNK_PATTERNS:
             if pat.search(body):
                 errors.append(f"{label} in chunk: {pat.search(body).group(0)[:40]!r}")

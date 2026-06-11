@@ -7,6 +7,7 @@ No shared mutable app state. Safe to import from anywhere.
 from __future__ import annotations
 
 import re
+import urllib.parse
 from collections import Counter
 
 
@@ -280,16 +281,40 @@ def _looks_structural_page(url: str, text: str) -> bool:
     return False
 
 
+_NEVER_PRODUCT_SEGMENT_RE = re.compile(
+    r"(?:/|^)(?:checkout|cart|basket|account|login|register|sign-?in|sign-?up|wishlist|search|"
+    r"blogs?|news|pages?|policies|privacy(?:-policy)?|terms(?:-and-conditions)?|contact(?:-us)?|"
+    r"about(?:-us)?|faqs?|help|support|track(?:ing)?|order-status)(?:/|$|[?#])", re.I)
+
+
 def _looks_like_product_page(url: str, text: str) -> bool:
     source = (url or "").lower()
     body = text or ""
+    # Explicit product-detail URL segment is the strongest signal and wins first.
+    if re.search(r"/(?:products?|items?)(?:/|$|#)", source):
+        return True
+    # Structural disqualifiers — universal across storefronts, checked BEFORE any
+    # content heuristic. Site-wide chrome ("Free Shipping over 5000PKR" + the word
+    # "product") makes the content test pass on every page of a store, so pages
+    # that structurally cannot be a product DETAIL page must never reach it:
+    # the homepage/root, checkout/cart/account flows, blogs, static info pages,
+    # and machine files (.md/.txt/.xml/.json).
+    try:
+        _path = urllib.parse.urlparse(source).path or ""
+    except Exception:
+        _path = source
+    if _path.rstrip("/") == "":  # site root is a storefront, never a single product
+        return False
+    if re.search(r"\.(?:md|txt|xml|json)$", _path):
+        return False
+    if _NEVER_PRODUCT_SEGMENT_RE.search(_path):
+        return False
     # A listing URL (/collections/, /category/) without a product segment is a
     # catalog page no matter how product-ish its body looks (Shopify listings
     # contain prices + the word "product" on every card).
-    if (re.search(r"(?:/|#)(?:collections?|categor(?:y|ies)|shop|browse|listing)(?:/|$|#)", source)
-            and not re.search(r"/(?:products?|items?)(?:/|$|#)", source)):
+    if re.search(r"(?:/|#)(?:collections?|categor(?:y|ies)|shop|browse|listing)(?:/|$|#)", source):
         return False
-    if re.search(r"/(?:products?|items?)(?:/|$|#)", source) or re.search(r"(?i)\b@type\b.*\bproduct\b", body):
+    if re.search(r"(?i)\b@type\b.*\bproduct\b", body):
         return True
     if _PRODUCT_PRICE_CAPTURE_RE.search(body) and re.search(r"(?i)\b(add to cart|sku|availability|brand|product|variant)\b", body):
         return True
