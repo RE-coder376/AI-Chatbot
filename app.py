@@ -5444,6 +5444,33 @@ async def chat(request: Request):
 
         _is_product_db_local = _check_is_product_db(tenant_db_instance, tenant_db_name) or ("smart_search" in set(cfg.get("features", [])))
         _prod_det = _deterministic_product_catalog_answer(q, context or "")
+        if (not _prod_det) and _is_product_db_local and tenant_db_instance:
+            try:
+                _ctx_prod2, _dc_prod2, _src_prod2 = await retrieve_context(q, tenant_db_instance, k=60, fast=True, history=hist)
+                _prod_det2 = _deterministic_product_catalog_answer(q, _ctx_prod2 or "")
+                _ctx_prod2_hit = _context_addresses_query(_ctx_prod2 or "", q)
+                if _prod_det2 or _ctx_prod2_hit:
+                    context, doc_count, sources = _ctx_prod2, _dc_prod2, _src_prod2
+                    _prod_det = _prod_det2
+                    workflow_debug["guard_decisions"]["product_retry_used"] = True
+                    if debug_effective and context:
+                        workflow_debug["answer_artifacts"]["product_retry_context_preview"] = (context or "")[:2500]
+            except Exception:
+                pass
+        if _is_product_db_local and not _prod_det and str(cfg.get("crawl_url") or "").strip():
+            try:
+                _prod_resc_ctx, _prod_resc_src = await _live_site_query_rescue_context(q, cfg, max_urls=12, max_chars=18000)
+                if _prod_resc_ctx:
+                    context = _prod_resc_ctx
+                    doc_count = max(int(doc_count or 0), 1)
+                    if _prod_resc_src:
+                        sources = list(dict.fromkeys((sources or []) + _prod_resc_src))[:8]
+                    _prod_det = _deterministic_product_catalog_answer(q, context or "")
+                    workflow_debug["guard_decisions"]["live_rescue_used"] = True
+                    if debug_effective:
+                        workflow_debug["answer_artifacts"]["product_live_rescue_context_preview"] = (context or "")[:2500]
+            except Exception:
+                pass
         if _is_product_db_local and _prod_det:
             payload = {"answer": _prod_det, "sources": _preferred_sources_for_product_answer(q, (sources or []), 5)}
             if debug_effective:
@@ -6015,7 +6042,8 @@ def _deterministic_product_catalog_answer(q: str, kb_context: str, max_items: in
         stop = {
             "show", "list", "which", "what", "price", "prices", "cost", "available", "availability",
             "stock", "under", "below", "sell", "products", "product", "toys", "have", "with",
-            "best", "top", "affordable", "currently", "school", "baby", "kids"
+            "best", "top", "affordable", "currently", "school", "baby", "kids", "toy", "cars",
+            "are", "rs", "pkr", "than", "less", "within", "maximum", "max", "rupees"
         }
         rank_stop = stop | {"cheapest", "lowest", "least", "expensive", "highest", "priced", "priciest", "costliest", "most", "among", "listed", "laptops", "laptop"}
         _prod_phrase = _extract_product_name_phrase(q or "")
@@ -6084,7 +6112,7 @@ def _deterministic_product_catalog_answer(q: str, kb_context: str, max_items: in
                             anchor_hits += 1
                             exact_anchor_hit = True
                             break
-                if anchor_hits <= 0 and max_price is None and not rank_mode:
+                if anchor_hits <= 0:
                     continue
             prices = []
             for raw in re.findall(r"Rs\.?\s*([\d,]+(?:\.\d{1,2})?)", doc, re.I):
