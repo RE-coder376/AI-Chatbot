@@ -2859,6 +2859,29 @@ async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansio
                         "popular", "customer", "customers", "best", "from", "with", "does",
                     }
                     _pr_anchors = [w for w in re.findall(r"[a-zA-Z]{4,}", (q or "").lower()) if w not in _pr_stop][:4]
+                    # Short category tokens ("RC", "LED", "USB") are real anchors but the
+                    # {4,} regex drops them. Match them word-bounded — substring matching
+                    # on 2-char tokens hits random words ("rc" in "march").
+                    _pr_short_stop = {
+                        "rs", "pkr", "usd", "the", "and", "for", "you", "are", "can", "get",
+                        "buy", "our", "has", "had", "was", "not", "but", "its", "any", "all",
+                        "how", "who", "why", "per", "via", "etc", "new", "or", "do", "of",
+                        "in", "on", "at", "to", "is", "we", "us", "my", "no", "so", "if",
+                        "it", "an", "as", "be", "by", "up", "me",
+                    }
+                    _pr_anchors_short = [
+                        w for w in re.findall(r"\b[a-zA-Z]{2,3}\b", (q or "").lower())
+                        if w not in _pr_short_stop and w not in _pr_stop
+                    ][:3]
+
+                    def _pr_anchor_match(_bl: str, _src_l: str) -> bool:
+                        for _a in _pr_anchors:
+                            if (_a in _bl) or (_a.rstrip("s") in _bl) or (_a in _src_l):
+                                return True
+                        for _a in _pr_anchors_short:
+                            if re.search(rf"\b{re.escape(_a)}\b", _bl) or re.search(rf"\b{re.escape(_a)}\b", _src_l):
+                                return True
+                        return False
                     _pr_all, _pr_anchored, _rv_all = [], [], []
                     for _pd_text, _pd_meta in zip(_pr_raw.get("documents", []), _pr_raw.get("metadatas", [])):
                         if not _pd_text:
@@ -2886,9 +2909,8 @@ async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansio
                             if (_lo is not None and _pv < _lo) or (_hi is not None and _pv > _hi):
                                 continue  # outside the requested range
                         _pr_all.append((_pv, _pd))
-                        if _pr_anchors:
-                            _bl = str(_pd_text).lower()
-                            if any((a in _bl) or (a.rstrip("s") in _bl) or (a in _src_l) for a in _pr_anchors):
+                        if _pr_anchors or _pr_anchors_short:
+                            if _pr_anchor_match(str(_pd_text).lower(), _src_l):
                                 _pr_anchored.append((_pv, _pd))
 
                     def _dedup_by_title(_pairs, _cap):
@@ -2910,11 +2932,15 @@ async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansio
                         _rv_all.sort(key=lambda t: t[0], reverse=True)
                         top = _dedup_by_title(_rv_all, 20) + top[:6]
                     elif _price_bounds:
-                        # Range filter: ONLY in-range items, ascending. Anchored
-                        # subset when meaningful ("tablets between …"). No similarity
+                        # Range filter: ONLY in-range items, ascending. No similarity
                         # tail — it reintroduces out-of-range items the LLM then lists.
-                        _pr_cands = _pr_anchored if len(_pr_anchored) >= 3 else _pr_all
-                        _pr_cands.sort(key=lambda t: t[0])
+                        # Anchored items go FIRST regardless of count: with a category
+                        # word ("RC … under Rs.5000") the matching items can sit past
+                        # the 30-cap in a cheap-heavy catalog and vanish from context.
+                        _pr_all.sort(key=lambda t: t[0])
+                        _pr_anchored.sort(key=lambda t: t[0])
+                        _anch_ids = {id(_pd) for _pv, _pd in _pr_anchored}
+                        _pr_cands = _pr_anchored + [t for t in _pr_all if id(t[1]) not in _anch_ids]
                         if _pr_cands:
                             top = _dedup_by_title(_pr_cands, 30)
                     elif _is_price_rank_q:
