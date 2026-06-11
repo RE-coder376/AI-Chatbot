@@ -602,6 +602,17 @@ def _github_sync_upload(db_name: str):
         release_data = rel_resp.json()
         release_id = release_data["id"]
         assets_map = {a["name"]: a for a in release_data.get("assets", [])}
+        # Husk guard: a catastrophically failed crawl can produce a near-empty DB
+        # which would overwrite a healthy multi-MB backup (book.zip died this way).
+        _old_asset = assets_map.get(f"{db_name}.zip")
+        if _old_asset and _old_asset.get("size", 0) > 1_000_000 and file_size < _old_asset["size"] * 0.10:
+            logger.error(
+                f"[GH-SYNC] REFUSING upload for {db_name}: new zip {file_size/1024/1024:.1f}MB is <10% of "
+                f"existing backup {_old_asset['size']/1024/1024:.1f}MB — looks like a failed crawl. "
+                f"Delete the asset manually to force."
+            )
+            _github_sync_result["upload_error"] = f"{db_name}: refused (husk guard)"
+            return
         # Step 1: upload under temp name first — old asset stays intact until upload confirmed
         temp_name = f"{db_name}_uploading.zip"
         # Clean up any stale temp asset from a previous failed upload
@@ -630,14 +641,17 @@ def _github_sync_upload(db_name: str):
                 f"https://uploads.github.com/repos/{_GITHUB_USERNAME}/{_GITHUB_REPO}/releases/{release_id}/assets?name={db_name}.zip",
                 data=fz, headers={**api_hdr, "Content-Type": "application/zip", "Content-Length": str(file_size)},
                 timeout=600)
-        # Clean up temp asset regardless of final result
-        _req.delete(f"https://api.github.com/repos/{_GITHUB_USERNAME}/{_GITHUB_REPO}/releases/assets/{new_asset_id}", headers=api_hdr, timeout=30)
         if final_up.status_code in (200, 201):
+            # Success — temp copy no longer needed
+            _req.delete(f"https://api.github.com/repos/{_GITHUB_USERNAME}/{_GITHUB_REPO}/releases/assets/{new_asset_id}", headers=api_hdr, timeout=30)
             logger.info(f"[GH-SYNC] ✅ {db_name} uploaded ({file_size/1024/1024:.1f}MB)")
             _github_sync_result["last_upload"] = f"{db_name} ok"
         else:
-            msg = f"{db_name} upload failed {final_up.status_code}"
-            logger.error(f"[GH-SYNC] Final rename-upload failed {final_up.status_code}: {final_up.text[:200]}")
+            # Final upload failed AFTER the old asset was deleted: the temp asset
+            # ({db}_uploading.zip) is now the ONLY copy in the release — keep it.
+            # (store.zip vanished entirely under the old delete-temp-always flow.)
+            msg = f"{db_name} upload failed {final_up.status_code} — data preserved as {temp_name}"
+            logger.error(f"[GH-SYNC] Final rename-upload failed {final_up.status_code}: {final_up.text[:200]} — keeping {temp_name} as recovery copy")
             _github_sync_result["upload_error"] = msg
     except Exception as e:
         logger.error(f"[GH-SYNC] Upload error: {e}")

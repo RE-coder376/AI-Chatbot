@@ -2517,7 +2517,7 @@ async def _auto_scheduler():
                                         _cd["last_crawl_time"] = _done_iso
                                         _cd["last_crawl_chunks"] = chunks
                                         _cd["last_crawl_completed"] = _done_iso
-                                        _cp.write_text(json.dumps(_cd, indent=2), encoding="utf-8")
+                                        _atomic_write_json(_cp, _cd)
                                         threading.Thread(target=_github_backup_crawl_times, args=(_name,), daemon=True).start()
                                     except Exception as _ce:
                                         logger.warning(f"[SCHEDULER] Could not update crawl timestamps: {_ce}")
@@ -9274,7 +9274,7 @@ async def set_embedding_model(request: Request, data: dict = None):
             try: existing = json.loads(db_cfg_file.read_text(encoding="utf-8-sig"))
             except: pass
         existing["embedding_model"] = model
-        db_cfg_file.write_text(json.dumps(existing, indent=2), encoding="utf-8")
+        _atomic_write_json(db_cfg_file, existing)
     else:
         save_db_config({"embedding_model": model})
     return {"success": True, "embedding_model": model}
@@ -9453,12 +9453,12 @@ async def create_db(request: Request, password: str = Form(...), name: str = For
     # Write public per-DB config and store the client password in untracked secrets.
     db_cfg_path = db_path / "config.json"
     if not db_cfg_path.exists():
-        db_cfg_path.write_text(json.dumps({}, indent=2), encoding="utf-8")
+        _atomic_write_json(db_cfg_path, {})
         _save_db_secrets(db_name, {"admin_password": db_password})
     elif db_password:
         try:
             existing = json.loads(db_cfg_path.read_text(encoding="utf-8"))
-            db_cfg_path.write_text(json.dumps(existing, indent=2), encoding="utf-8")
+            _atomic_write_json(db_cfg_path, existing)
             _save_db_secrets(db_name, {"admin_password": db_password})
         except Exception: pass
     threading.Thread(target=_github_sync_upload, args=(db_name,), daemon=True).start()

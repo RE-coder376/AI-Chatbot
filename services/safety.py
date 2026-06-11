@@ -169,7 +169,11 @@ _NAV_CONTROL_RE = re.compile(
 def _canonical_product_title(text: str) -> str:
     text = re.sub(r'(?i)^product:\s*', "", text or "").strip()
     text = re.sub(r"\s+", " ", text)
-    text = re.sub(r'(?i)\b(?:size|color|colour|variant|pack of|pcs?|pieces?)\b.*$', "", text).strip(" -,:")
+    # Strip variant tails ("Shirt - Color Red") but only past the title head:
+    # "A Piece of Sky" must not be truncated to "A" because 'piece' ~ 'pieces?'.
+    _m = re.search(r'(?i)\b(?:size|color|colour|variant|pack of|pcs?|pieces?)\b.*$', text)
+    if _m and _m.start() >= 12 and len(text[:_m.start()].strip(" -,:")) >= 4:
+        text = text[:_m.start()].strip(" -,:")
     return text
 
 
