@@ -1294,9 +1294,11 @@ def _heuristic_rerank_score(doc, q: str, title_phrase: str) -> float:
 
         score = 0.0
 
-        # Penalize navigation / index heavy chunks.
+        # Penalize navigation / index heavy chunks — EXCEPT for structure questions
+        # ("what categories/topics/pages do you have"), where they ARE the answer.
+        _structure_q = bool(re.search(r'(?i)\b(?:categor(?:y|ies)|types?\s+of|kinds?\s+of|topics|sections|what\s+pages|site\s*map|overview\s+of\s+(?:the\s+)?(?:site|store|catalog))\b', q or ''))
         if any(h in sl for h in ('#site-index', '#site-navigation')):
-            score -= 8.0
+            score += 6.0 if _structure_q else -8.0
         if any(h in bl for h in _NAV_HINTS):
             score -= 4.0
         if (bl.count('http://') + bl.count('https://')) >= 3:
@@ -2732,7 +2734,9 @@ async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansio
                         _a2 = _a[:-1] if _a.endswith("s") else _a
                         if (_a in _src) or (_a2 and _a2 in _src) or (_a in _txt) or (_a2 and _a2 in _txt):
                             _hits += 1
-                    _req_hits = 2 if len(_anchors) <= 2 else (len(_anchors) if _modelish_anchor else max(2, len(_anchors) - 1))
+                    # 1 anchor must require 1 hit — requiring 2 made short-titled
+                    # products ("Into the Wild" → only anchor "wild") unmatchable.
+                    _req_hits = min(len(_anchors), 2) if len(_anchors) <= 2 else (len(_anchors) if _modelish_anchor else max(2, len(_anchors) - 1))
                     _ok = _hits >= _req_hits
                     (_matched if _ok else _rest).append(_r)
                 if _matched:
@@ -2743,7 +2747,7 @@ async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansio
                         top = _matched[:34] + _rest[:6]
                 # Exact-product rescue: scan the full catalog so model-number lookups
                 # do not get trapped by the top-N retrieval window.
-                if db is not None and not _is_price_rank_q and len(_anchors) >= 2:
+                if db is not None and not _is_price_rank_q and len(_anchors) >= 1:
                     try:
                         from langchain_core.documents import Document
                         total = min(int(db._collection.count() or 0), 2500)
