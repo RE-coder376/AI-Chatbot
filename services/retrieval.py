@@ -2839,6 +2839,14 @@ async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansio
                     # listing-page URL, and a single matching catalog chunk would hijack
                     # the ranking with its own arbitrary first price.
                     _pr_cands = _pr_anchored if len(_pr_anchored) >= 3 else _pr_all
+                    # Anchor words match free text incidentally — the catalog's true
+                    # max/min item may not mention its own category ("ROG Strix SCAR"
+                    # never says "laptop"). Always merge the global extremes in the
+                    # requested direction; the LLM filters category from the blend.
+                    if _pr_cands is _pr_anchored and _pr_all:
+                        _pr_all.sort(key=lambda t: t[0], reverse=_price_desc)
+                        _anchored_ids = {id(_pd) for _pv, _pd in _pr_anchored}
+                        _pr_cands = list(_pr_anchored) + [t for t in _pr_all[:5] if id(t[1]) not in _anchored_ids]
                     if _pr_cands:
                         _pr_cands.sort(key=lambda t: t[0], reverse=_price_desc)
                         _pr_seen, _pr_docs = set(), []
