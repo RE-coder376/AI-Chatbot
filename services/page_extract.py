@@ -82,6 +82,20 @@ def extract_page_text(html: str, page_url: str, docs_like: bool = False):
         ld_text = _jsonld_text(html)
         title_m = re.search(r'<title[^>]*>(.*?)</title>', html, re.DOTALL | re.I)
         title_text = re.sub(r'<[^>]+>', '', title_m.group(1)).strip() if title_m else ''
+        # og:price:amount is the storefront's own declaration of the CURRENT
+        # selling price. Body text orders compare-at first ("Rs.2,000 Rs.1,200")
+        # and regex-first extraction picks the crossed-out price — the og meta
+        # is authoritative, so surface it as the first "Price:" line, which
+        # _PRODUCT_PRICE_LINE_RE matches before any body price.
+        og_price_line = ''
+        og_amt = re.search(r'<meta[^>]+(?:property|name)=["\']og:price:amount["\'][^>]+content=["\']([\d.,]+)["\']', html, re.I) \
+            or re.search(r'<meta[^>]+content=["\']([\d.,]+)["\'][^>]+(?:property|name)=["\']og:price:amount["\']', html, re.I)
+        if og_amt:
+            og_cur = re.search(r'<meta[^>]+(?:property|name)=["\']og:price:currency["\'][^>]+content=["\']([A-Za-z]{3})["\']', html, re.I) \
+                or re.search(r'<meta[^>]+content=["\']([A-Za-z]{3})["\'][^>]+(?:property|name)=["\']og:price:currency["\']', html, re.I)
+            _cur_code = (og_cur.group(1).upper() if og_cur else "")
+            _cur_prefix = {"PKR": "Rs.", "USD": "$", "GBP": "£", "EUR": "€"}.get(_cur_code, (_cur_code + " ") if _cur_code else "Rs.")
+            og_price_line = f"Price: {_cur_prefix}{og_amt.group(1)}\n"
         # Preserve tables / lists / code blocks before the broad tag strip.
         try:
             from bs4 import BeautifulSoup as _BS
@@ -145,7 +159,7 @@ def extract_page_text(html: str, page_url: str, docs_like: bool = False):
         clean = re.sub(r'<[^>]+>', ' ', clean)
         clean = re.sub(r'[ \t]+', ' ', clean)
         clean = re.sub(r'\n{3,}', '\n\n', clean).strip()
-        combined = f"{title_text}. {ld_text} {clean}".strip()
+        combined = f"{title_text}. {og_price_line}{ld_text} {clean}".strip()
         # Decode HTML entities AFTER tag-strip and concat — titles and JSON-LD
         # descriptions carry &ndash;/&amp;/&#39; too, not just the body.
         import html as _html_mod

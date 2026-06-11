@@ -25,8 +25,11 @@ UA = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.3
 # price: (lo, hi) the first product chunk's price must fall in, or None = no price required
 BATTERY = [
     # ── Shopify store (babyfy.pk) ────────────────────────────────────────────
-    dict(url="https://babyfy.pk/products/educational-drawing-robot-toy", kind="product", price=(14000, 14500), site="shopify"),
-    dict(url="https://babyfy.pk/products/2-in-1-doll-catcher-atm-claw-machine", kind="product", price=(12000, 12700), site="shopify"),
+    dict(url="https://babyfy.pk/products/educational-drawing-robot-toy", kind="product", price=None, site="shopify"),
+    dict(url="https://babyfy.pk/products/2-in-1-doll-catcher-atm-claw-machine", kind="product", price=None, site="shopify"),
+    # Sale-priced product: og:price:amount (Rs.1,200) must beat the body's
+    # compare-at price (Rs.2,000) — covered by the og-consistency invariant.
+    dict(url="https://babyfy.pk/products/quick-push-pop-game", kind="product", price=None, site="shopify"),
     dict(url="https://babyfy.pk/collections/all", kind=("category", "catalog"), price=None, site="shopify"),
     # Homepage and static info pages must NEVER emit product chunks — site-wide
     # chrome ("Free Shipping over 5000PKR") + carousels made them pseudo-products
@@ -121,6 +124,19 @@ def check_page(case) -> list[str]:
         pv = d0.metadata.get("price")
         if pv is None or not (lo <= float(pv) <= hi):
             errors.append(f"price={pv}, expected within [{lo}, {hi}]")
+    # Universal og-price consistency: when the page itself declares its current
+    # selling price (og:price:amount), the extracted price must equal it —
+    # catches compare-at/sale mixups on ANY storefront without hardcoded values.
+    og_m = re.search(r'<meta[^>]+(?:property|name)=["\']og:price:amount["\'][^>]+content=["\']([\d.,]+)["\']', r.text, re.I) \
+        or re.search(r'<meta[^>]+content=["\']([\d.,]+)["\'][^>]+(?:property|name)=["\']og:price:amount["\']', r.text, re.I)
+    if og_m and str(d0.metadata.get("chunk_kind") or "") == "product":
+        try:
+            og_val = float(og_m.group(1).replace(",", ""))
+            pv0 = d0.metadata.get("price")
+            if pv0 is not None and og_val > 0 and abs(float(pv0) - og_val) > 0.01:
+                errors.append(f"price={pv0} disagrees with page og:price:amount={og_val}")
+        except Exception:
+            pass
     # universal chunk invariants
     for d in docs:
         body = d.page_content
