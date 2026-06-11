@@ -1096,6 +1096,10 @@ def _smart_chunk_page(text: str, url: str, chunk_size: int = 400, chunk_step: in
             specs = raw[comma_idx + 1:].strip() if comma_idx > 0 else ''
             name = re.sub(r'^[^\s]+(?:\s+[^\s]+){0,3}\.{2,}\s+', '', name).strip()
             name = re.sub(r'\s+reviews?\s*$', '', name, flags=re.I).strip()
+            # Compare-at/sale price pairs ("Rs.3,299.00 Rs.2,999.00") make the
+            # splitter capture a price fragment as the card name — never a title.
+            if re.match(r'(?i)^(?:rs\.?|pkr|[\$£€])\s*[\d.,]*$', name):
+                continue
             if not name or len(name) < 3:
                 continue
             products.append((price_num, f"${price_str}", name, specs))
@@ -1173,6 +1177,10 @@ def _smart_chunk_page(text: str, url: str, chunk_size: int = 400, chunk_step: in
             # Strip breadcrumb prefix "Dell Inspiron... Dell Inspiron 15"
             name = re.sub(r'^[^\s]+(?:\s+[^\s]+){0,3}\.{2,}\s+', '', name).strip()
             name = re.sub(r'\s+reviews?\s*$', '', name, flags=re.I).strip()
+            # Compare-at/sale price pairs ("Rs.3,299.00 Rs.2,999.00") make the
+            # splitter capture a price fragment as the card name — never a title.
+            if re.match(r'(?i)^(?:rs\.?|pkr|[\$£€])\s*[\d.,]*$', name):
+                continue
             if not name or len(name) < 3:
                 continue
             products.append((price_num, f"${price_str}", name, specs))

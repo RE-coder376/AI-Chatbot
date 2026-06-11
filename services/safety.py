@@ -283,6 +283,12 @@ def _looks_structural_page(url: str, text: str) -> bool:
 def _looks_like_product_page(url: str, text: str) -> bool:
     source = (url or "").lower()
     body = text or ""
+    # A listing URL (/collections/, /category/) without a product segment is a
+    # catalog page no matter how product-ish its body looks (Shopify listings
+    # contain prices + the word "product" on every card).
+    if (re.search(r"(?:/|#)(?:collections?|categor(?:y|ies)|shop|browse|listing)(?:/|$|#)", source)
+            and not re.search(r"/(?:products?|items?)(?:/|$|#)", source)):
+        return False
     if re.search(r"/(?:products?|items?)(?:/|$|#)", source) or re.search(r"(?i)\b@type\b.*\bproduct\b", body):
         return True
     if _PRODUCT_PRICE_CAPTURE_RE.search(body) and re.search(r"(?i)\b(add to cart|sku|availability|brand|product|variant)\b", body):
