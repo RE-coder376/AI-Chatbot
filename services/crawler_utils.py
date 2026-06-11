@@ -230,18 +230,26 @@ def _product_query_rerank_score(question: str, doc) -> float:
 
 
 def _extract_product_summary(text: str, url: str, title_hint: str = "") -> dict:
+    import html as _html_mod
+    title_hint = _html_mod.unescape(title_hint or "")  # "Toy &ndash; Babyfy" → "Toy – Babyfy"
     body = _strip_storefront_boilerplate(text or "")
     used_structured_fields: list[str] = []
     body_fallback_used = False
 
     def _canonicalize_title(candidate: str) -> str:
-        return _canonical_product_title(candidate or "").strip(" -:|")
+        import html as _html
+        # Shopify <title> tags arrive entity-encoded ("Toy &ndash; Babyfy") — unescape
+        # first so the "– Site" suffix splitter and dedup actually see the dash.
+        return _canonical_product_title(_html.unescape(candidate or "")).strip(" -:|")
 
     def _is_generic_title(candidate: str) -> bool:
         cand = _canonicalize_title(candidate)
         if not cand:
             return True
         if len(cand) < 4:
+            return True
+        # A price is not a product name ("Rs.1", "$24", "£51.77")
+        if re.fullmatch(r'(?i)(?:rs\.?|pkr|\$|£|€)\s*[\d.,]*\s*', cand):
             return True
         if "|" in cand or "web scraper test sites" in cand.lower():
             return True
