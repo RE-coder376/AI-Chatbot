@@ -1296,9 +1296,13 @@ def _heuristic_rerank_score(doc, q: str, title_phrase: str) -> float:
 
         # Penalize navigation / index heavy chunks — EXCEPT for structure questions
         # ("what categories/topics/pages do you have"), where they ARE the answer.
-        _structure_q = bool(re.search(r'(?i)\b(?:categor(?:y|ies)|types?\s+of|kinds?\s+of|topics|sections|what\s+pages|site\s*map|overview\s+of\s+(?:the\s+)?(?:site|store|catalog))\b', q or ''))
+        _structure_q = bool(re.search(r'(?i)\b(?:categor(?:y|ies)|types?\s+of|kinds?\s+of|topics|sections|what\s+pages|site\s*map|how\s+many|overview\s+of\s+(?:the\s+)?(?:site|store|catalog))\b', q or ''))
         if any(h in sl for h in ('#site-index', '#site-navigation')):
             score += 6.0 if _structure_q else -8.0
+        # Category/catalog pages state their own item counts ("21 items",
+        # "1000 results") — for count/structure questions they are authoritative.
+        if _structure_q and str(meta.get('content_type') or '') in ('category', 'catalog'):
+            score += 4.0
         if any(h in bl for h in _NAV_HINTS):
             score -= 4.0
         if (bl.count('http://') + bl.count('https://')) >= 3:
