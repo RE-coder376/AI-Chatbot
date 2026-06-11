@@ -2719,7 +2719,12 @@ async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansio
             _stop = {
                 "show", "list", "best", "top", "affordable", "price", "prices", "cost", "available",
                 "availability", "stock", "under", "with", "for", "products", "product", "have", "give",
-                "school", "use"
+                "school", "use",
+                # Question/filler words are not product anchors — they inflate the
+                # required hit count and make short-titled product lookups fail.
+                "what", "when", "where", "which", "does", "much", "many", "this", "that",
+                "your", "sell", "sells", "selling", "store", "shop", "site", "item", "items",
+                "tell", "about", "know", "want", "need", "looking", "there", "they", "will",
             }
             _anchors = [w.lower() for w in re.findall(r"[a-zA-Z]{4,}", _q_l) if w.lower() not in _stop][:8]
             if _anchors:
