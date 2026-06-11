@@ -6020,6 +6020,12 @@ def _deterministic_product_catalog_answer(q: str, kb_context: str, max_items: in
         rank_stop = stop | {"cheapest", "lowest", "least", "expensive", "highest", "priced", "priciest", "costliest", "most", "among", "listed", "laptops", "laptop"}
         _prod_phrase = _extract_product_name_phrase(q or "")
         anchors = [w for w in re.findall(r"[a-zA-Z]{2,}", (_prod_phrase or ql)) if w not in (rank_stop if rank_mode else stop)][:10]
+        # Combined intent (category word + price cap, e.g. "RC products under
+        # Rs.5000"): this parser's context may lack the category's items entirely
+        # (proven: RC chunks absent). Step aside — the LLM path reads the
+        # retrieval bounds-scan docs and answers these correctly (verified on N7).
+        if max_price is not None and anchors and not rank_mode:
+            return None
         exact_phrase = re.sub(r"\s{2,}", " ", (_prod_phrase or "").strip(" -:|")).lower()
         exact_tokens = [w for w in re.findall(r"[a-zA-Z0-9]{3,}", exact_phrase) if w not in stop]
         docs = [d.strip() for d in re.split(r"\n\s*\n", kb_context or "") if d.strip()]
