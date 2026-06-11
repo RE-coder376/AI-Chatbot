@@ -2777,12 +2777,16 @@ async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansio
                 _rest = []
                 _modelish_anchor = any(re.search(r"\d|[-/]", a) for a in _anchors)
                 for _r in top:
-                    _src = str((getattr(_r, "metadata", None) or {}).get("source") or "").lower()
+                    _rmd = getattr(_r, "metadata", None) or {}
+                    _src = str(_rmd.get("source") or "").lower()
+                    # Crawl-graph category names — product bodies rarely contain their
+                    # own category word ("laptop"), the categories meta does.
+                    _cat = str(_rmd.get("categories") or "").lower()
                     _txt = str(getattr(_r, "page_content", "") or "").lower()[:1400]
                     _hits = 0
                     for _a in _anchors:
                         _a2 = _a[:-1] if _a.endswith("s") else _a
-                        if (_a in _src) or (_a2 and _a2 in _src) or (_a in _txt) or (_a2 and _a2 in _txt):
+                        if (_a in _src) or (_a2 and _a2 in _src) or (_a in _txt) or (_a2 and _a2 in _txt) or (_cat and (_a in _cat or (_a2 and _a2 in _cat))):
                             _hits += 1
                     # 1 anchor must require 1 hit — requiring 2 made short-titled
                     # products ("Into the Wild" → only anchor "wild") unmatchable.
@@ -2808,12 +2812,13 @@ async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansio
                                 continue
                             _body = str(doc_text)
                             _src = str((meta or {}).get("source") or "").lower()
+                            _cat = str((meta or {}).get("categories") or "").lower()
                             if not re.search(r"/(?:products?|items?)(?:/|$|#)", _src) and not (_has_product_meta or _is_product_db):
                                 continue
                             _hits = 0
                             for _a in _anchors:
                                 _a2 = _a[:-1] if _a.endswith("s") else _a
-                                if (_a in _src) or (_a2 and _a2 in _src) or (_a in _body.lower()) or (_a2 and _a2 in _body.lower()):
+                                if (_a in _src) or (_a2 and _a2 in _src) or (_a in _body.lower()) or (_a2 and _a2 in _body.lower()) or (_cat and (_a in _cat or (_a2 and _a2 in _cat))):
                                     _hits += 1
                             if _hits >= _req_hits:
                                 _rescued.append((_hits, Document(page_content=_body, metadata=meta or {})))
@@ -2874,12 +2879,16 @@ async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansio
                         if w not in _pr_short_stop and w not in _pr_stop
                     ][:3]
 
-                    def _pr_anchor_match(_bl: str, _src_l: str) -> bool:
+                    def _pr_anchor_match(_bl: str, _src_l: str, _cat_l: str = "") -> bool:
                         for _a in _pr_anchors:
                             if (_a in _bl) or (_a.rstrip("s") in _bl) or (_a in _src_l):
                                 return True
+                            if _cat_l and ((_a in _cat_l) or (_a.rstrip("s") in _cat_l)):
+                                return True
                         for _a in _pr_anchors_short:
                             if re.search(rf"\b{re.escape(_a)}\b", _bl) or re.search(rf"\b{re.escape(_a)}\b", _src_l):
+                                return True
+                            if _cat_l and re.search(rf"\b{re.escape(_a)}\b", _cat_l):
                                 return True
                         return False
                     _pr_all, _pr_anchored, _rv_all = [], [], []
@@ -2910,7 +2919,8 @@ async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansio
                                 continue  # outside the requested range
                         _pr_all.append((_pv, _pd))
                         if _pr_anchors or _pr_anchors_short:
-                            if _pr_anchor_match(str(_pd_text).lower(), _src_l):
+                            _cat_l = str(_pd_meta.get("categories") or "").lower()
+                            if _pr_anchor_match(str(_pd_text).lower(), _src_l, _cat_l):
                                 _pr_anchored.append((_pv, _pd))
 
                     def _dedup_by_title(_pairs, _cap):

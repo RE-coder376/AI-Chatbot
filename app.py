@@ -139,6 +139,8 @@ from services.crawler_utils import (
     _enrich_docs_metadata,
     _canonical_source_url,
     _classify_and_chunk,
+    categories_for_page,
+    listing_slug_from_url,
 )
 
 from services.llm_keys import (
@@ -11691,6 +11693,10 @@ async def crawl_site(data: dict, request: Request):
                         frontier = _pick_rendered_seed_urls(list(_urls) + new_urls, _limit=18)
                     return out
                 _url_layer_m: dict[str, list[str]] = {}
+                # Crawl graph: normalized child URL → parent page URLs that link to it.
+                # Feeds category propagation (products tagged with the listing pages
+                # they were discovered from). Populated by the BFS spider only.
+                _link_parents: dict[str, set] = {}
                 for sitemap_url_try in sitemap_candidates[:5]:
                     yield _send(f"🔍 Fetching sitemap: {sitemap_url_try.split('/')[-1]} ...")
                     sitemap_urls = await _fetch_sitemap(ctx, sitemap_url_try, _crawl_prefix)
@@ -11785,9 +11791,12 @@ async def crawl_site(data: dict, request: Request):
                         _frontier = _frontier[_batch:]
                         _results = await asyncio.gather(*[_extract_links_fast(u) for u in _chunk])
                         _new = 0
-                        for _lnks in _results:
+                        for _purl, _lnks in zip(_chunk, _results):
+                            _pn = _normalize_url(_purl)
                             for _lnk in _lnks:
                                 _n = _normalize_url(_lnk)
+                                if _n != _pn:
+                                    _link_parents.setdefault(_n, set()).add(_purl)
                                 if _n not in _visited_norm:
                                     _visited_norm.add(_n)
                                     _spider_urls.append(_lnk)
@@ -12597,6 +12606,13 @@ async def crawl_site(data: dict, request: Request):
                                     _dl = (_url_layer_m.get(cur_url) or [""])[0]
                                     if _dl and isinstance(page_meta, dict):
                                         page_meta["discovery_layer"] = _dl
+                                    # Marker-based categories (URL paths like /collections/<cat>);
+                                    # graph-based listing categories are backfilled post-crawl.
+                                    _cats = categories_for_page(
+                                        cur_url, sorted(_link_parents.get(_normalize_url(cur_url)) or ())
+                                    )
+                                    if _cats and isinstance(page_meta, dict):
+                                        page_meta["categories"] = ", ".join(_cats)
                                 except Exception:
                                     pass
                                 pending_pages.append({"url": cur_url, "text": text, "page_meta": page_meta})
@@ -12681,6 +12697,70 @@ async def crawl_site(data: dict, request: Request):
                     if pending_pages:
                         yield _send(f"💾 Saving final batch ({len(pending_pages)} pages)...")
                         await _flush_pages(pending_pages, worker_label="final")
+
+                # Category propagation backfill: tag product chunks with the category
+                # names of the LISTING pages (pages that produced catalog/category
+                # chunks) that linked to them in the crawl graph. Marker-based URL
+                # tags happened at save time; this covers sites whose category URLs
+                # have no marker segment (webscraper.io /computers/laptops → "laptops").
+                try:
+                    if _link_parents and chroma_db is not None:
+                        _bf_raw = await _chroma_run(chroma_db._collection.get, include=["metadatas"])
+                        _bf_ids = _bf_raw.get("ids") or []
+                        _bf_metas = _bf_raw.get("metadatas") or []
+                        _seed_norm = _normalize_url(url)
+                        _slug_by_norm: dict[str, str] = {}
+                        for _md in _bf_metas:
+                            _md = _md or {}
+                            if (_md.get("chunk_kind") in ("catalog", "category")) or (_md.get("content_type") in ("catalog", "category")):
+                                _sc = str(_md.get("source_canonical") or _md.get("source") or "")
+                                if not _sc:
+                                    continue
+                                _sn = _normalize_url(_sc)
+                                if _sn == _seed_norm or _sn in _slug_by_norm:
+                                    continue
+                                _ls = listing_slug_from_url(_sc)
+                                if _ls:
+                                    _slug_by_norm[_sn] = _ls
+                        _bf_upd_ids, _bf_upd_md = [], []
+                        if _slug_by_norm:
+                            for _id, _md in zip(_bf_ids, _bf_metas):
+                                _md = dict(_md or {})
+                                _is_prod = (
+                                    _md.get("chunk_kind") == "product"
+                                    or _md.get("content_type") == "product"
+                                    or _md.get("price") is not None
+                                )
+                                if not _is_prod:
+                                    continue
+                                _sc = str(_md.get("source_canonical") or _md.get("source") or "")
+                                if not _sc:
+                                    continue
+                                _slugs = []
+                                for _p in sorted(_link_parents.get(_normalize_url(_sc)) or ()):
+                                    _ps = _slug_by_norm.get(_normalize_url(_p))
+                                    if _ps:
+                                        _slugs.append(_ps)
+                                if not _slugs:
+                                    continue
+                                _existing = [c.strip() for c in str(_md.get("categories") or "").split(",") if c.strip()]
+                                _merged, _seen_c = [], set()
+                                for _c in _existing + _slugs:
+                                    if _c not in _seen_c:
+                                        _seen_c.add(_c)
+                                        _merged.append(_c)
+                                _merged = _merged[:6]
+                                if _merged != _existing:
+                                    _md["categories"] = ", ".join(_merged)
+                                    _bf_upd_ids.append(_id)
+                                    _bf_upd_md.append(_md)
+                        if _bf_upd_ids:
+                            await _chroma_run(chroma_db._collection.update, ids=_bf_upd_ids, metadatas=_bf_upd_md)
+                            yield _send(f"🏷️ Category propagation: tagged {len(_bf_upd_ids)} product chunks from {len(_slug_by_norm)} listing pages")
+                        else:
+                            yield _send(f"🏷️ Category propagation: no graph-derived tags ({len(_slug_by_norm)} listing pages found)")
+                except Exception as _bf_e:
+                    logger.warning(f"[CRAWL] category backfill failed: {type(_bf_e).__name__}: {_bf_e}")
 
                 # Auto site-index: one document listing every crawled page + title.
                 # This lets the bot answer "what topics do you cover" / "what pages exist"

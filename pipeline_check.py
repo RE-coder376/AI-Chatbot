@@ -163,6 +163,31 @@ def check_page(case) -> list[str]:
     return errors
 
 
+def check_category_helpers() -> list[str]:
+    """Offline (no fetch): category-propagation URL helpers — these feed the
+    'categories' chunk metadata that retrieval anchors on for category queries."""
+    from services.crawler_utils import category_slugs_from_url, listing_slug_from_url, categories_for_page
+    errors = []
+    cases = [
+        # (fn, input(s), expected)
+        ("marker books", category_slugs_from_url("https://books.toscrape.com/catalogue/category/books/travel_2/index.html"), ["books", "travel"]),
+        ("marker shopify scoped", category_slugs_from_url("https://babyfy.pk/collections/rc-toys/products/rc-suzuki"), ["rc toys"]),
+        ("marker generic rejected", category_slugs_from_url("https://x.com/collections/all"), []),
+        ("listing webscraper", listing_slug_from_url("https://webscraper.io/test-sites/e-commerce/allinone/computers/laptops"), "laptops"),
+        ("listing pagination walk-back", listing_slug_from_url("https://books.toscrape.com/catalogue/category/books/travel_2/page-2.html"), "travel"),
+        ("listing root none", listing_slug_from_url("https://books.toscrape.com/"), None),
+        ("listing site-pagination none", listing_slug_from_url("https://books.toscrape.com/catalogue/page-2.html"), None),
+        ("listing product-url none", listing_slug_from_url("https://webscraper.io/test-sites/e-commerce/allinone/product/545"), None),
+        ("page with listing parent", categories_for_page(
+            "https://books.toscrape.com/catalogue/its-only-the-himalayas_981/index.html",
+            ["https://books.toscrape.com/catalogue/category/books/travel_2/index.html"]), ["books", "travel"]),
+    ]
+    for name, got, want in cases:
+        if got != want:
+            errors.append(f"{name}: got {got!r}, want {want!r}")
+    return errors
+
+
 def main():
     if len(sys.argv) > 1:
         case = dict(url=sys.argv[1], kind="any", price=None, site="manual")
@@ -172,6 +197,12 @@ def main():
             print("  -", e)
         return
     failed = 0
+    _cat_errs = check_category_helpers()
+    print(f"{'PASS' if not _cat_errs else 'FAIL'} {'category-helpers':15s} (offline URL-to-category unit checks)")
+    for e in _cat_errs[:6]:
+        print(f"     - {e}")
+    if _cat_errs:
+        failed += 1
     for case in BATTERY:
         errs = check_page(case)
         if errs and case.get("optional"):

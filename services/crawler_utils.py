@@ -59,6 +59,104 @@ def _canonical_source_url(url: str) -> str:
         return (url or "").strip()
 
 
+# ── Category propagation from crawl graph ───────────────────────────────────
+# Product pages rarely contain their own category word ("ROG Strix SCAR" never
+# says "laptop"). The crawl graph knows it structurally: products are discovered
+# FROM category-listing pages. These helpers turn listing URLs into category
+# names so chunks can carry a "categories" metadata string retrieval anchors on.
+
+# Path segments that introduce a category section (high-precision, marker-based).
+_CAT_MARKER_SEGS = {
+    "collections", "collection", "category", "categories",
+    "product-category", "product-categories", "shop-category", "c",
+}
+# Segments that end a category run inside a URL (/collections/toys/products/x).
+_CAT_STOP_SEGS = {"products", "product", "items", "item", "p", "page", "pages"}
+# Structural slugs that are never a real category name.
+_CAT_GENERIC_WORDS = {
+    "all", "index", "home", "default", "frontpage", "main", "page", "pages",
+    "shop", "store", "catalog", "catalogue", "products", "product", "items",
+    "item", "collections", "collection", "category", "categories", "new",
+    "sale", "search", "cart", "checkout", "account", "login", "wishlist",
+}
+
+
+def _humanize_category_slug(seg: str):
+    """'travel_2' → 'travel', 'rc-toys' → 'rc toys'; None for structural/junk."""
+    s = (seg or "").strip().lower()
+    if not s or "." in s or len(s) > 60:
+        return None
+    s = re.sub(r"[_-]\d+$", "", s)  # pagination/id counters: travel_2, page-3
+    s = re.sub(r"[-_]+", " ", s).strip()
+    if len(s) < 2 or len(s) > 40 or not re.search(r"[a-z]", s):
+        return None
+    if s in _CAT_GENERIC_WORDS:
+        return None
+    return s
+
+
+def category_slugs_from_url(url: str) -> list:
+    """Marker-based category names from a URL path (/collections/rc-toys/...,
+    /catalogue/category/books/travel_2/...). Empty list when no marker."""
+    try:
+        path = urllib.parse.urlparse(str(url or "")).path.lower()
+    except Exception:
+        return []
+    segs = [s for s in path.split("/") if s]
+    out, i = [], 0
+    while i < len(segs):
+        if segs[i] in _CAT_MARKER_SEGS:
+            j = i + 1
+            while j < len(segs) and segs[j] not in _CAT_MARKER_SEGS and segs[j] not in _CAT_STOP_SEGS:
+                h = _humanize_category_slug(segs[j])
+                if h:
+                    out.append(h)
+                j += 1
+            i = j
+        else:
+            i += 1
+    seen, res = set(), []
+    for c in out:
+        if c not in seen:
+            seen.add(c)
+            res.append(c)
+    return res[:6]
+
+
+def listing_slug_from_url(url: str):
+    """Category name for a page KNOWN to be a listing (classified catalog/category).
+    Marker-based when possible; else last meaningful path segment, walking back
+    over pagination/index segments (…/travel_2/page-2.html → 'travel')."""
+    marker = category_slugs_from_url(url)
+    if marker:
+        return marker[-1]
+    try:
+        path = urllib.parse.urlparse(str(url or "")).path.lower()
+    except Exception:
+        return None
+    for seg in reversed([s for s in path.split("/") if s]):
+        if seg in _CAT_STOP_SEGS:
+            return None  # …/product/545 is a detail page, not a listing
+        h = _humanize_category_slug(seg)
+        if h:
+            return h
+    return None
+
+
+def categories_for_page(url: str, parent_urls=()) -> list:
+    """Save-time categories: marker-derived from the page URL itself plus any
+    crawl-graph parent URLs (collection-scoped hrefs, category sections)."""
+    cats = list(category_slugs_from_url(url))
+    for p in parent_urls or ():
+        cats.extend(category_slugs_from_url(p))
+    seen, out = set(), []
+    for c in cats:
+        if c not in seen:
+            seen.add(c)
+            out.append(c)
+    return out[:6]
+
+
 # Per-DB docs-path hints (e.g. ["/roman/", "/arabic/"]) loaded from
 # databases/<name>/config.json "docs_path_hints" by app.py at crawl start.
 # Module-level is safe: only one crawl runs at a time (manual guard + auto-crawl sem=1).
@@ -974,6 +1072,10 @@ def _smart_chunk_page(text: str, url: str, chunk_size: int = 400, chunk_step: in
         _base_meta["extraction_mode"] = page_meta.get("extraction_mode")
     if page_meta.get("docs_like"):
         _base_meta["docs_like"] = True
+    if page_meta.get("categories"):
+        # Crawl-graph category names — retrieval anchors match these so products
+        # answer category queries their body text never mentions ("laptop").
+        _base_meta["categories"] = str(page_meta.get("categories"))[:300]
     _base_meta["dedup_applied"] = False
 
     def _finalize_docs(out_docs: list) -> list:
