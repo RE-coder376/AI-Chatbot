@@ -2911,10 +2911,12 @@ async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansio
                         top = _dedup_by_title(_rv_all, 20) + top[:6]
                     elif _price_bounds:
                         # Range filter: ONLY in-range items, ascending. Anchored
-                        # subset when meaningful ("tablets between …").
+                        # subset when meaningful ("tablets between …"). No similarity
+                        # tail — it reintroduces out-of-range items the LLM then lists.
                         _pr_cands = _pr_anchored if len(_pr_anchored) >= 3 else _pr_all
                         _pr_cands.sort(key=lambda t: t[0])
-                        top = _dedup_by_title(_pr_cands, 30) + top[:4]
+                        if _pr_cands:
+                            top = _dedup_by_title(_pr_cands, 30)
                     elif _is_price_rank_q:
                         # Category-anchored subset when it exists ("cheapest tablet" → tablet
                         # chunks); otherwise whole catalog so the LLM can still pick.
