@@ -73,10 +73,16 @@ def check_page(case) -> list[str]:
     errors = []
     url = case["url"]
     set_docs_path_hints(case.get("docs_hints") or [])
-    try:
-        r = requests.get(url, timeout=25, headers=UA)
-    except Exception as e:
-        return [f"FETCH FAILED: {e}"]
+    r = None
+    for _attempt in range(3):
+        try:
+            r = requests.get(url, timeout=25, headers=UA)
+            break
+        except Exception as e:
+            if _attempt == 2:
+                return [f"FETCH FAILED: {e}"]
+            import time
+            time.sleep(4)
     if r.status_code != 200:
         return [f"HTTP {r.status_code}"]
     ctype = (r.headers.get("Content-Type") or "").lower()

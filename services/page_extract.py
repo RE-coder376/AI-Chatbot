@@ -150,6 +150,13 @@ def extract_page_text(html: str, page_url: str, docs_like: bool = False):
         # descriptions carry &ndash;/&amp;/&#39; too, not just the body.
         import html as _html_mod
         combined = _html_mod.unescape(combined)
+        # Storefront widget scrub BEFORE product extraction: cart drawers
+        # ("Subtotal: Rs.0.00"), live-viewer counters and Shopify's "Default
+        # Title" variant label poison titles/prices downstream.
+        combined = re.sub(r'(?is)(?:cart\s*[×x]?\s*)?your cart is currently empty\.?.{0,100}?(?:checkout|view cart)', ' ', combined)
+        combined = re.sub(r'(?i)subtotal:?\s*(?:rs\.?|pkr|\$|£|€)\s*0(?:\.00)?\b', ' ', combined)
+        combined = re.sub(r'(?i)\b\d+\s+people\s+are\s+viewing\s+this\s+right\s+now\.?', ' ', combined)
+        combined = re.sub(r'(?i)(?:[-–—]\s*)?\bdefault\s+title\b(?:\s*[-–—])?', ' ', combined)
         combined, page_meta = _prepare_crawl_page(combined, page_url, title_hint=title_text)
         page_meta = dict(page_meta or {})
         page_meta["source_canonical"] = _canonical_source_url(page_url)

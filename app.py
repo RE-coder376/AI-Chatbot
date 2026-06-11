@@ -838,23 +838,30 @@ async def _live_site_query_rescue_context(q: str, cfg: dict, max_urls: int = 3, 
                         txt = _to_text(html)
                         if len(txt) < 80:
                             continue
-                        title = ""
-                        mtitle = re.search(r'(?is)<meta[^>]+property=["\']og:title["\'][^>]+content=["\']([^"\']+)["\']', html)
-                        if mtitle:
-                            title = re.sub(r"\s+", " ", mtitle.group(1) or "").strip()
+                        # Use the SAME hardened extraction as the crawler — the old
+                        # raw-HTML min(prices) regex picked the cart widget's Rs.0.00
+                        # and og:title carried Shopify's "– Default Title" suffix.
+                        from services.page_extract import extract_page_text as _ept_resc
+                        _ext_resc = _ept_resc(html, u) or {}
+                        _pm_resc = ((_ext_resc.get("page_meta") or {}).get("product") or {})
+                        title = str(_pm_resc.get("title") or "").strip()
                         if not title:
-                            mtitle = re.search(r'(?is)<title>([^<]+)</title>', html)
+                            mtitle = re.search(r'(?is)<meta[^>]+property=["\']og:title["\'][^>]+content=["\']([^"\']+)["\']', html)
                             if mtitle:
                                 title = re.sub(r"\s+", " ", mtitle.group(1) or "").strip()
                         if not title:
                             title = re.sub(r"\s+", " ", (exact_name or slug)).strip()
-                        prices = []
-                        for raw in re.findall(r"Rs\.?\s*([\d,]+(?:\.\d{1,2})?)", html, re.I):
-                            try:
-                                prices.append(float(raw.replace(",", "")))
-                            except Exception:
-                                pass
-                        price = min(prices) if prices else None
+                        price = _pm_resc.get("price_num")
+                        if price is None:
+                            prices = []
+                            for raw in re.findall(r"(?:Rs\.?|PKR|[\$£€])\s*([\d,]+(?:\.\d{1,2})?)", str(_ext_resc.get("text") or ""), re.I):
+                                try:
+                                    _pv_r = float(raw.replace(",", ""))
+                                    if _pv_r > 0:
+                                        prices.append(_pv_r)
+                                except Exception:
+                                    pass
+                            price = min(prices) if prices else None
                         soldout = bool(re.search(r"(?i)\b(sold out|currently unavailable)\b", html))
                         summary_lines = [title]
                         if price is not None:
@@ -920,7 +927,11 @@ async def _live_site_query_rescue_context(q: str, cfg: dict, max_urls: int = 3, 
                     r = await client.get(u)
                     if r.status_code != 200:
                         continue
-                    txt = _to_text(r.text or "")
+                    # Prefer the hardened crawler extraction (chrome/cart/entity-clean,
+                    # product-shaped "Product:/Price:" lines); raw _to_text as fallback.
+                    from services.page_extract import extract_page_text as _ept_resc2
+                    _ext2 = _ept_resc2(r.text or "", u)
+                    txt = str((_ext2 or {}).get("text") or "") or _to_text(r.text or "")
                     if len(txt) < 180:
                         continue
                     # Extract token-matching evidence lines instead of taking the page prefix
