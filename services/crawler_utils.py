@@ -435,7 +435,8 @@ def _extract_product_summary(text: str, url: str, title_hint: str = "") -> dict:
             _hh = _canonicalize_title(re.split(r'\s*[|–—]\s*| - ', title_hint, maxsplit=1)[0].strip())
             if (_hh and not _is_generic_title(_hh)
                     and title.lower() != _hh.lower()
-                    and title.lower().endswith(" " + _hh.lower())):
+                    and (title.lower().endswith(" " + _hh.lower())
+                         or re.match(re.escape(_hh.lower()) + r'\s*[–—|-]', title.lower()))):
                 title = _hh
             # URL-slug agreement: when the hint head matches the page's own slug
             # ("into-the-wild" ≈ "Into the Wild") it IS the product name — prefer it
