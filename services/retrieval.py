@@ -2817,7 +2817,7 @@ async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansio
                             continue
                         _pd = _PriceDoc(page_content=str(_pd_text), metadata=_pd_meta)
                         _pv = _doc_price_value(_pd)
-                        if _pv is None:
+                        if _pv is None or _pv <= 0:  # £0.00 = extraction artifact, never a real price
                             continue
                         _pr_all.append((_pv, _pd))
                         if _pr_anchors:
@@ -2849,7 +2849,7 @@ async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansio
             _priced, _unpriced = [], []
             for r in top:
                 _pv = _doc_price_value(r)
-                if _pv is None:
+                if _pv is None or _pv <= 0:  # zero/absent price can't participate in ranking
                     _unpriced.append(r)
                 else:
                     _priced.append((_pv, r))

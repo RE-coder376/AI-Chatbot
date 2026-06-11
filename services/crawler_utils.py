@@ -1009,19 +1009,27 @@ def _smart_chunk_page(text: str, url: str, chunk_size: int = 400, chunk_step: in
         # ("...an $80,000 vase..."), so score EVERY title occurrence by distance
         # to the nearest price and keep the tightest pairing — the page header's
         # title+price sit a few chars apart; prose mentions are looser.
-        _t_esc = re.escape(str(product_meta["title"])[:30])
+        # Titles under 4 chars ("A") match inside ordinary words ("Availability"
+        # right after "Tax £0.00") — too ambiguous to anchor a price search.
+        _t_full = str(product_meta["title"]).strip()
+        _t_esc = re.escape(_t_full[:30]) if len(_t_full) >= 4 else None
+        def _fb_val_ok(_v: str) -> bool:
+            try:
+                return float(_v.replace(",", "")) > 0  # £0.00 tax rows are not prices
+            except Exception:
+                return False
         _fb_best = None  # (distance, symbol, number)
-        for _tm in re.finditer(_t_esc, clean, re.I):
+        for _tm in (re.finditer(_t_esc, clean, re.I) if _t_esc else ()):
             _pre = clean[max(0, _tm.start() - 14):_tm.start()]
             _pm_pre = re.search(r'(?i)(\$|£|€|\brs\.?\s*|\bpkr\s*)([\d,]+\.?\d*)\s{0,3}$', _pre)
-            if _pm_pre:
+            if _pm_pre and _fb_val_ok(_pm_pre.group(2)):
                 _cand = (0, _pm_pre.group(1).strip(), _pm_pre.group(2))
                 if _fb_best is None or _cand[0] < _fb_best[0]:
                     _fb_best = _cand
                 continue
             _tail = clean[_tm.end():_tm.end() + 90]
             _pm_post = re.search(r'(?i)(\$|£|€|\brs\.?\s*|\bpkr\s*)([\d,]+\.?\d*)', _tail)
-            if _pm_post and (_fb_best is None or _pm_post.start() < _fb_best[0]):
+            if _pm_post and _fb_val_ok(_pm_post.group(2)) and (_fb_best is None or _pm_post.start() < _fb_best[0]):
                 _fb_best = (_pm_post.start(), _pm_post.group(1).strip(), _pm_post.group(2))
         if _fb_best:
             product_meta = dict(product_meta)
