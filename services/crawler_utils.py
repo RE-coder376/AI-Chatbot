@@ -912,6 +912,10 @@ def _smart_chunk_page(text: str, url: str, chunk_size: int = 400, chunk_step: in
     raw_text = re.sub(r"[ \t]+", " ", raw_text)
     raw_text = re.sub(r"\n{3,}", "\n\n", raw_text)
     clean = _clean_text(raw_text)
+    # Cart-drawer widgets survive tag-stripping on many Shopify themes and inject
+    # "Subtotal: Rs.0.00" next to real products — scrub before chunking.
+    clean = re.sub(r'(?is)(?:cart\s*[×x]?\s*)?your cart is currently empty\.?.{0,100}?(?:checkout|view cart)', ' ', clean)
+    clean = re.sub(r'(?i)subtotal:?\s*(?:rs\.?|pkr|\$|£|€)\s*0(?:\.00)?\b', ' ', clean)
     docs = []
     page_meta = page_meta or {}
     logger.info(f"[CHUNK-IN] {str(url)[:70]} text={len(text or '')} clean={len(clean)} pt={page_meta.get('page_type')}")
@@ -1513,6 +1517,12 @@ def _extract_product_metadata(text: str) -> dict:
     meta['has_touch'] = 1 if re.search(r'Display:[^\n]*\bTouch\b', text) else 0
     meta['is_convertible'] = 1 if re.search(r'\bconvertible\b', text, re.I) else 0
     meta['has_ssd'] = 1 if re.search(r'\bSSD\b', text) else 0
+    rvm = re.search(r'(\d+)\s+(?:customer\s+)?reviews?\b', text, re.I)
+    if rvm:
+        try:
+            meta['review_count'] = int(rvm.group(1))
+        except Exception:
+            pass
     return meta
 
 

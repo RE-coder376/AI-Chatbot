@@ -1053,6 +1053,8 @@ PRODUCT CATALOG RULES — MANDATORY for every product response:
 11. PRICE ACCURACY RULE: Quote prices EXACTLY as they appear in the context — never round, approximate, or convert. If both a Sale price and Regular price are present, the Sale price IS the current price. State it as the price; mention Regular price only as the original/crossed-out price.
 12. EXACT NAME RULE: If the user asks about a specific product by name, verify that product name (or a very close match) actually appears in the retrieved context. If the exact product name is absent from context — even if similar products exist — say "I don't have information about [product name] in our catalog" and offer to show similar products. Never substitute a different product silently.
 13. CANONICAL PRICE RULE: Inside a product block, the labeled "Price:" line is that product's canonical price. Other dollar/Rs amounts in the same block are variant or related-item prices. When comparing products or ranking by price, use canonical prices; cite other amounts only as explicitly-labeled variants ("the 8GB variant costs ...").
+15. COMPARISON ARITHMETIC RULE: when stating which product is more/less expensive, first write both numbers, then verify: the LARGER number is the more expensive one. Double-check the direction of your conclusion against the numbers before answering.
+16. CART ARTIFACT RULE: "Subtotal", "Your cart", "Rs.0.00"/"$0.00" and similar checkout-widget text are NOT product prices. Never quote a zero amount as a product's price — if a product block shows no positive price, say the price is unavailable.
 14. CATEGORY LIST RULE: When asked what categories/types of products are sold, derive the answer ONLY from the retrieved context (category pages, site navigation, the product list itself). Never recite the assistant topics description — it is configuration text, not the live catalog."""
 
     # For API-only DBs: inject AFTER the Tier framework so it wins over "NEVER use world knowledge"
@@ -12192,6 +12194,8 @@ async def crawl_site(data: dict, request: Request):
                                 '.breadcrumb', '.breadcrumbs', '.pagination', '.social-links',
                                 '.cookie-notice', '.theme-doc-sidebar-container',
                                 '.theme-doc-toc-mobile', '.table-of-contents',
+                                '.cart-drawer', '#CartDrawer', '.mini-cart', '[class*="cart-drawer"]',
+                                '.cart-popup', '#cart-notification',
                             ):
                                 try:
                                     for _el in _soup.select(_chrome_sel):

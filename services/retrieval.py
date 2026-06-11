@@ -1284,6 +1284,45 @@ def _is_price_ranking_query(q: str) -> tuple[bool, bool]:
     return (asc or desc, desc)
 
 
+_CURRENCY_PREFIX = r'(?:rs\.?|pkr|\$|£|€|usd|gbp|eur)?\s*'
+
+
+def _parse_price_bounds(q: str):
+    """Parse range/budget intent → (lo, hi); either side may be None. None if no range."""
+    ql = (q or "").lower().replace(",", "")
+    m = re.search(r'\b(?:between|from)\s+' + _CURRENCY_PREFIX + r'(\d+(?:\.\d+)?)\s*(?:and|to|[-–])\s*' + _CURRENCY_PREFIX + r'(\d+(?:\.\d+)?)', ql)
+    if m:
+        return (float(m.group(1)), float(m.group(2)))
+    m = re.search(r'\b(?:under|below|less\s+than|up\s+to|within|at\s+most|max(?:imum)?(?:\s+of)?|cheaper\s+than|no\s+more\s+than)\s+' + _CURRENCY_PREFIX + r'(\d+(?:\.\d+)?)', ql)
+    if m:
+        return (None, float(m.group(1)))
+    m = re.search(r'\b(?:over|above|more\s+than|at\s+least|min(?:imum)?(?:\s+of)?|pricier\s+than)\s+' + _CURRENCY_PREFIX + r'(\d+(?:\.\d+)?)', ql)
+    if m:
+        return (float(m.group(1)), None)
+    return None
+
+
+def _is_review_ranking_query(q: str) -> bool:
+    return bool(re.search(
+        r'(?i)\b(?:most|highest|best|top)[\s-]+(?:customer\s+)?(?:reviews?|reviewed|rated|ratings?)\b'
+        r'|\bmost\s+popular\b|\bmost\s+reviews\b', q or ''))
+
+
+def _doc_review_count(doc):
+    """Review count from metadata or chunk text ('14 reviews')."""
+    try:
+        meta = getattr(doc, 'metadata', None) or {}
+        rv = meta.get('review_count')
+        if isinstance(rv, (int, float)):
+            return int(rv)
+        m = re.search(r'(\d+)\s+(?:customer\s+)?reviews?\b', str(getattr(doc, 'page_content', '') or ''), re.I)
+        if m:
+            return int(m.group(1))
+    except Exception:
+        pass
+    return None
+
+
 def _heuristic_rerank_score(doc, q: str, title_phrase: str) -> float:
     try:
         meta = (getattr(doc, 'metadata', None) or {})
@@ -2695,6 +2734,8 @@ async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansio
     # These must exist even when the product-intent block does not run,
     # otherwise downstream guards can raise UnboundLocalError on non-price queries.
     _is_price_rank_q, _price_desc = _is_price_ranking_query(q or "")
+    _price_bounds = _parse_price_bounds(q or "")
+    _is_review_rank_q = _is_review_ranking_query(q or "")
 
     # Product-intent guard: favor actual catalog pages over blogs/about pages.
     # Universal behavior for ecommerce-like DBs.
@@ -2798,10 +2839,11 @@ async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansio
                 _dedup_seen.add(_pk)
                 _deduped.append(r)
         top = _deduped
-        if _is_price_rank_q:
-            # Full-catalog price scan: the min/max-priced item is rarely in the
-            # similarity top-N window ("cheapest tablet" has no lexical overlap with
-            # the cheapest tablet's chunk). Rank over ALL product chunks instead.
+        if _is_price_rank_q or _price_bounds or _is_review_rank_q:
+            # Full-catalog deterministic scan: min/max, price-range ("between
+            # $100 and $200", "under Rs.5000") and review-rank ("most reviews")
+            # answers are rarely inside the similarity top-N window. Scan ALL
+            # product chunks and rank/filter numerically instead.
             if db is not None:
                 try:
                     from langchain_core.documents import Document as _PriceDoc
@@ -2812,9 +2854,12 @@ async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansio
                         "costliest", "costly", "price", "priced", "prices", "affordable", "budget",
                         "what", "which", "your", "store", "site", "sell", "have", "entire",
                         "overall", "product", "products", "item", "items", "whats",
+                        "under", "below", "between", "over", "above", "than", "less", "more",
+                        "cost", "costs", "review", "reviews", "reviewed", "rated", "rating",
+                        "popular", "customer", "customers", "best", "from", "with", "does",
                     }
                     _pr_anchors = [w for w in re.findall(r"[a-zA-Z]{4,}", (q or "").lower()) if w not in _pr_stop][:4]
-                    _pr_all, _pr_anchored = [], []
+                    _pr_all, _pr_anchored, _rv_all = [], [], []
                     for _pd_text, _pd_meta in zip(_pr_raw.get("documents", []), _pr_raw.get("metadatas", [])):
                         if not _pd_text:
                             continue
@@ -2829,54 +2874,111 @@ async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansio
                         if not _is_prod_chunk:
                             continue
                         _pd = _PriceDoc(page_content=str(_pd_text), metadata=_pd_meta)
+                        if _is_review_rank_q:
+                            _rv = _doc_review_count(_pd)
+                            if _rv is not None:
+                                _rv_all.append((_rv, _pd))
                         _pv = _doc_price_value(_pd)
                         if _pv is None or _pv <= 0:  # £0.00 = extraction artifact, never a real price
                             continue
+                        if _price_bounds:
+                            _lo, _hi = _price_bounds
+                            if (_lo is not None and _pv < _lo) or (_hi is not None and _pv > _hi):
+                                continue  # outside the requested range
                         _pr_all.append((_pv, _pd))
                         if _pr_anchors:
                             _bl = str(_pd_text).lower()
                             if any((a in _bl) or (a.rstrip("s") in _bl) or (a in _src_l) for a in _pr_anchors):
                                 _pr_anchored.append((_pv, _pd))
-                    # Category-anchored subset when it exists ("cheapest tablet" → tablet
-                    # chunks); otherwise whole catalog so the LLM can still pick.
-                    # Threshold of 3: category words ("laptop") often appear only in a
-                    # listing-page URL, and a single matching catalog chunk would hijack
-                    # the ranking with its own arbitrary first price.
-                    _pr_cands = _pr_anchored if len(_pr_anchored) >= 3 else _pr_all
-                    # Anchor words match free text incidentally — the catalog's true
-                    # max/min item may not mention its own category ("ROG Strix SCAR"
-                    # never says "laptop"). Always merge the global extremes in the
-                    # requested direction; the LLM filters category from the blend.
-                    if _pr_cands is _pr_anchored and _pr_all:
-                        _pr_all.sort(key=lambda t: t[0], reverse=_price_desc)
-                        _anchored_ids = {id(_pd) for _pv, _pd in _pr_anchored}
-                        _pr_cands = list(_pr_anchored) + [t for t in _pr_all[:5] if id(t[1]) not in _anchored_ids]
-                    if _pr_cands:
-                        _pr_cands.sort(key=lambda t: t[0], reverse=_price_desc)
-                        _pr_seen, _pr_docs = set(), []
-                        for _pv, _pd in _pr_cands:
+
+                    def _dedup_by_title(_pairs, _cap):
+                        _seen, _out = set(), []
+                        for _v, _pd in _pairs:
                             _tt = str((_pd.metadata or {}).get("canonical_product_title")
                                       or (_pd.metadata or {}).get("product_title")
                                       or _pd.page_content[:60])
-                            if _tt in _pr_seen:
+                            if _tt in _seen:
                                 continue
-                            _pr_seen.add(_tt)
-                            _pr_docs.append(_pd)
-                            if len(_pr_docs) >= 30:
+                            _seen.add(_tt)
+                            _out.append(_pd)
+                            if len(_out) >= _cap:
                                 break
-                        top = _pr_docs + top[:6]
+                        return _out
+
+                    if _is_review_rank_q and _rv_all:
+                        # Review ranking: deterministic, descending by count.
+                        _rv_all.sort(key=lambda t: t[0], reverse=True)
+                        top = _dedup_by_title(_rv_all, 20) + top[:6]
+                    elif _price_bounds:
+                        # Range filter: ONLY in-range items, ascending. Anchored
+                        # subset when meaningful ("tablets between …").
+                        _pr_cands = _pr_anchored if len(_pr_anchored) >= 3 else _pr_all
+                        _pr_cands.sort(key=lambda t: t[0])
+                        top = _dedup_by_title(_pr_cands, 30) + top[:4]
+                    elif _is_price_rank_q:
+                        # Category-anchored subset when it exists ("cheapest tablet" → tablet
+                        # chunks); otherwise whole catalog so the LLM can still pick.
+                        # Threshold of 3: category words ("laptop") often appear only in a
+                        # listing-page URL, and a single matching catalog chunk would hijack
+                        # the ranking with its own arbitrary first price.
+                        _pr_cands = _pr_anchored if len(_pr_anchored) >= 3 else _pr_all
+                        # Anchor words match free text incidentally — the catalog's true
+                        # max/min item may not mention its own category ("ROG Strix SCAR"
+                        # never says "laptop"). Always merge the global extremes in the
+                        # requested direction; the LLM filters category from the blend.
+                        if _pr_cands is _pr_anchored and _pr_all:
+                            _pr_all.sort(key=lambda t: t[0], reverse=_price_desc)
+                            _anchored_ids = {id(_pd) for _pv, _pd in _pr_anchored}
+                            _pr_cands = list(_pr_anchored) + [t for t in _pr_all[:5] if id(t[1]) not in _anchored_ids]
+                        if _pr_cands:
+                            _pr_cands.sort(key=lambda t: t[0], reverse=_price_desc)
+                            top = _dedup_by_title(_pr_cands, 30) + top[:6]
                 except Exception as _pr_e:
                     logger.warning(f"[PRICE-RANK] full-catalog scan failed: {_pr_e}")
-            _priced, _unpriced = [], []
-            for r in top:
-                _pv = _doc_price_value(r)
-                if _pv is None or _pv <= 0:  # zero/absent price can't participate in ranking
-                    _unpriced.append(r)
-                else:
-                    _priced.append((_pv, r))
-            if _priced:
-                _priced.sort(key=lambda t: t[0], reverse=_price_desc)
-                top = [r for _, r in _priced[:40]] + _unpriced[:6]
+            if not _is_review_rank_q:  # review order must not be re-sorted by price
+                _priced, _unpriced = [], []
+                for r in top:
+                    _pv = _doc_price_value(r)
+                    if _pv is None or _pv <= 0:  # zero/absent price can't participate in ranking
+                        _unpriced.append(r)
+                    else:
+                        _priced.append((_pv, r))
+                if _priced:
+                    _priced.sort(key=lambda t: t[0], reverse=_price_desc)
+                    top = [r for _, r in _priced[:40]] + _unpriced[:6]
+        # Count/category questions: category & site-index chunks carry authoritative
+        # numbers ("11 results", "21 items") — inject from the full catalog, since
+        # similarity rarely surfaces a category page for "how many X".
+        _cat_count_q = bool(re.search(r'(?i)\bhow\s+many\b|\bcategor(?:y|ies)\b|\btypes?\s+of\b|\bkinds?\s+of\b', q or ''))
+        if _cat_count_q and db is not None:
+            try:
+                from langchain_core.documents import Document as _CatDoc
+                _ct_total = min(int(db._collection.count() or 0), 2500)
+                _ct_raw = db._collection.get(limit=_ct_total, include=["documents", "metadatas"])
+                _ct_stop = {"many", "category", "categories", "books", "products", "items", "type",
+                            "types", "kind", "kinds", "have", "your", "sell", "what", "which",
+                            "total", "different", "store", "catalog", "does", "carry"}
+                _ct_anchors = [w for w in re.findall(r"[a-zA-Z]{4,}", (q or "").lower()) if w not in _ct_stop][:4]
+                _ct_hit, _ct_rest = [], []
+                for _cd_text, _cd_meta in zip(_ct_raw.get("documents", []), _ct_raw.get("metadatas", [])):
+                    if not _cd_text:
+                        continue
+                    _cd_meta = _cd_meta or {}
+                    _ctype = str(_cd_meta.get("content_type") or "")
+                    _csrc = str(_cd_meta.get("source") or "").lower()
+                    if _ctype not in ("category", "catalog") and "#site-index" not in _csrc and "#site-navigation" not in _csrc:
+                        continue
+                    _cdoc = _CatDoc(page_content=str(_cd_text), metadata=_cd_meta)
+                    _cl = str(_cd_text).lower()
+                    if _ct_anchors and any((a in _cl) or (a.rstrip("s") in _cl) or (a in _csrc) for a in _ct_anchors):
+                        _ct_hit.append(_cdoc)
+                    else:
+                        _ct_rest.append(_cdoc)
+                _ct_pick = (_ct_hit[:6] + _ct_rest[:2]) if _ct_hit else _ct_rest[:6]
+                if _ct_pick:
+                    top = _ct_pick + top[:10]
+            except Exception as _ct_e:
+                logger.warning(f"[CAT-COUNT] category injection failed: {_ct_e}")
         # For "best gaming / highest VRAM" queries: sort by GPU VRAM descending in Python
         if re.search(r'\bbest\b.*\bgaming\b|\bhighest\b.*\b(?:gpu|vram)\b|\bmost\s+powerful\b', q, re.I):
             top.sort(key=lambda r: r.metadata.get('gpu_vram_gb', 0) if r.metadata else 0, reverse=True)
