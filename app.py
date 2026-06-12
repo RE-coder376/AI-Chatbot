@@ -1556,6 +1556,10 @@ def _check_config_security():
 async def _auto_crawl_db(db_name: str, url: str, max_pages: int = 0) -> int:
     """Scheduled re-crawl — refreshes all sitemap pages (or BFS if no sitemap) for the DB.
     max_pages=0 means unlimited (crawl entire sitemap)."""
+    # Same guard as /admin/crawl: no crawling from a hosted Space.
+    if os.environ.get("SPACE_ID") and os.environ.get("ALLOW_SPACE_CRAWL") != "1":
+        logger.warning(f"[AUTO-CRAWL] skipped for '{db_name}' — crawling disabled on hosted Space")
+        return 0
     import httpx as _hx
     from bs4 import BeautifulSoup
     from urllib.parse import urlparse, urljoin
@@ -11291,6 +11295,13 @@ async def admin_chat_last_error(request: Request):
 
 @app.post("/admin/crawl")
 async def crawl_site(data: dict, request: Request):
+    # Crawling generates heavy outbound traffic — running it from a hosted
+    # free Space got the account flagged as abusive (2026-06-12). On HF
+    # (SPACE_ID env present) crawls are refused; index offline and upload
+    # the prepared database instead. ALLOW_SPACE_CRAWL=1 secret overrides
+    # (paid hardware / explicit decision only).
+    if os.environ.get("SPACE_ID") and os.environ.get("ALLOW_SPACE_CRAWL") != "1":
+        raise HTTPException(status_code=403, detail="Crawling is disabled on the hosted Space. Run the crawl offline and upload the database.")
     db_name_auth = _extract_admin_db(request, data.get("db_name", "").strip())
     cfg = get_config(db_name_auth) if db_name_auth else get_config()
     admin_auth(_extract_password(request, data.get("password", "")), cfg)
