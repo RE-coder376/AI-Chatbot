@@ -2501,6 +2501,7 @@
       `Diagnosis: ${row.diagnosis || 'pass'}`,
       row.judge?.exact_failure_step ? `Failure step: ${row.judge.exact_failure_step}` : '',
       row.judge?.likely_failure_source && row.judge?.likely_failure_source !== 'none' ? `Judge source: ${row.judge.likely_failure_source}` : '',
+      row.judge?.code_pointer ? `Code pointer: ${row.judge.code_pointer}` : '',
     ].filter(Boolean);
     diagEl.textContent = diagParts.join('\n') || 'No diagnosis available.';
 

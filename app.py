@@ -8697,6 +8697,33 @@ def _owner_eval_blocker(db_name: str) -> str:
     return ""
 
 
+def _eval_code_pointer(failure_source: str, failure_step: str, diagnosis: str = "") -> str:
+    """Map judge/deterministic failure evidence to the code that owns that
+    behavior — turns 'something failed' into 'open THIS file/function'."""
+    step = (failure_step or "").lower()
+    src = (failure_source or "").lower()
+    diag = (diagnosis or "").lower()
+    if "sparse_kb" in step or diag == "grounded_but_answered_idk":
+        return "app.py:_context_addresses_query (sparse-KB guard rejected usable context)"
+    if step.startswith("guard:llm_"):
+        return "services/llm_keys.py (key rotation / cooldown — no usable LLM key)"
+    if "outcomes" in step:
+        return "app.py outcomes-extractor branch (docs fast path)"
+    if "bounds" in step or "deterministic" in step:
+        return "app.py:_deterministic_product_bounds_answer / _deterministic_product_catalog_answer"
+    if step.startswith("retrieval") or src == "retrieval_incomplete" or diag in ("retrieval_incomplete", "weak_top_k"):
+        return "services/retrieval.py (hybrid vector+BM25 retrieve / rerank / context assembly)"
+    if step in ("answer_class_transition", "validator_rewrite", "postprocess:strip_source_leaks") or src == "answer_generation_drift" or diag == "answer_not_faithful":
+        return "app.py answer generation + post-processing (validators / rewrites after LLM)"
+    if src == "prompt_overconstraint" or diag == "grounded_but_refused":
+        return "app.py system prompt rules (Tier-3 IDK / PRODUCT CATALOG RULES / scope rules)"
+    if src == "scope_mismatch" or diag == "idk_mismatch":
+        return "app.py scope guard + databases/<db>/config.json topics"
+    if src == "question_bad":
+        return "evals/eval_v1.py question generation (_make_chunk_question / topic extraction)"
+    return ""
+
+
 def _append_oos_idk_probes(tests: list[dict], db_name: str, count: int) -> list[dict]:
     """Reserve up to 2 slots for out-of-scope IDK probes so every eval set
     exercises the scope guard — without them idk_total is 0 and that whole
@@ -9504,6 +9531,14 @@ async def admin_run_evals(request: Request):
             row["diagnosis"] = "idk_mismatch"
         row["overall_status"] = "FAIL" if any(v is False for v in row["checks"].values()) else ("PASS" if any(v is True for v in row["checks"].values()) else "")
         row["likely_cause"] = _eval_likely_cause(row)
+        if row["overall_status"] == "FAIL" and isinstance(row.get("judge"), dict):
+            _cp = _eval_code_pointer(
+                (row["judge"].get("likely_failure_source") or ""),
+                (row["judge"].get("exact_failure_step") or ""),
+                row.get("diagnosis") or "",
+            )
+            if _cp:
+                row["judge"]["code_pointer"] = _cp
 
         rows.append(row)
 
