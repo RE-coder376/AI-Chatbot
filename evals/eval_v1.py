@@ -783,8 +783,19 @@ def _chunk_reference_answer(topic: str, chunk_text: str) -> str:
     return " ".join(picked)[:500] if picked else _clean_chunk_text(chunk_text)[:500]
 
 
+def _collapse_repeated_prefix(text: str) -> str:
+    """'Asus VivoBook Max Asus VivoBook Max X541NA Black' → 'Asus VivoBook Max
+    X541NA Black'. Breadcrumb-duplicated titles leak from crawled chunks into
+    topics; questions built from them read as obvious nonsense."""
+    toks = [t for t in re.split(r"\s+", (text or "").strip()) if t]
+    for p in range(min(8, len(toks) // 2), 1, -1):
+        if [t.lower() for t in toks[:p]] == [t.lower() for t in toks[p:2 * p]]:
+            return " ".join(toks[p:])
+    return (text or "").strip()
+
+
 def _make_chunk_question(topic: str, chunk_text: str) -> str:
-    topic = _normalize_question(topic)
+    topic = _collapse_repeated_prefix(_normalize_question(topic))
     if not topic:
         return ""
     text = _clean_chunk_text(chunk_text).lower()
@@ -795,13 +806,23 @@ def _make_chunk_question(topic: str, chunk_text: str) -> str:
         return ""
     if re.search(r"\b(what you are learning|exercise \d+|prompt \d+|producer vs consumer)\b", text):
         return ""
-    # Product-catalog chunk detection (stationery, retail, etc.)
-    is_product_chunk = bool(re.search(r"rs\.?\s*[\d,]+|\bsku\b|\bsku:", text, re.I))
+    # Product-catalog chunk detection — any currency, or structured Price: line
+    _has_price = bool(re.search(r"(?:rs\.?|pkr|\$|£|€)\s*[\d,]+|(?:^|\n)\s*price:", text, re.I))
+    is_product_chunk = _has_price or bool(re.search(r"\bsku\b|\bsku:|(?:^|\n)\s*product:", text, re.I))
     if is_product_chunk:
-        if re.search(r"rs\.?\s*[\d,]+", text, re.I):
+        # Rotate templates by stable topic hash — an all-"What is the price"
+        # eval set only exercises one retrieval shape.
+        _variant_ok = bool(re.search(r"\b(color|colour|size|variant|available in)\b", text))
+        _has_avail = bool(re.search(r"\bavailability\b|\bin stock\b|\bout of stock\b", text))
+        _h = int(hashlib.sha1(low_topic.encode("utf-8")).hexdigest()[:8], 16) % 4
+        if _h == 0 and _has_price:
             question = f"What is the price of {topic}?"
-        elif re.search(r"\b(color|colour|size|variant|available in)\b", text):
+        elif _h == 1 and _variant_ok:
             question = f"What variants does {topic} come in?"
+        elif _h == 2 and _has_avail:
+            question = f"Is {topic} in stock?"
+        elif _has_price:
+            question = f"How much does {topic} cost and what does it offer?"
         else:
             question = f"What are the features of {topic}?"
         return question if _looks_like_good_question(question) else ""

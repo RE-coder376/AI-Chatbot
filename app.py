@@ -8455,6 +8455,12 @@ def _filter_eval_tests_for_tenant(tests: list[dict], db_name: str, fingerprint: 
         if not isinstance(test, dict):
             dropped += 1
             continue
+        _exp = test.get("expect") if isinstance(test.get("expect"), dict) else {}
+        if str(_exp.get("type") or "").upper() in ("IDK", "REFUSE"):
+            # Out-of-scope probes are out-of-scope BY DESIGN (they verify the
+            # scope guard) — the tenant-relevance filter must not drop them.
+            kept.append(test)
+            continue
         if fingerprint and not _runtime_test_matches_fingerprint(test, fingerprint):
             dropped += 1
             continue
@@ -8691,6 +8697,38 @@ def _owner_eval_blocker(db_name: str) -> str:
     return ""
 
 
+def _append_oos_idk_probes(tests: list[dict], db_name: str, count: int) -> list[dict]:
+    """Reserve up to 2 slots for out-of-scope IDK probes so every eval set
+    exercises the scope guard — without them idk_total is 0 and that whole
+    failure tier (hallucinated answers to off-domain questions) is invisible."""
+    if count < 6 or any(
+        str((t.get("expect") or {}).get("type") or "").upper() in ("IDK", "REFUSE")
+        for t in tests if isinstance(t, dict)
+    ):
+        return tests
+    _OOS_PROBES = [
+        "What is the capital of France?",
+        "Who won the most recent football World Cup?",
+        "How do I file my income tax return?",
+        "What's a good recipe for chocolate cake?",
+    ]
+    _pick = int(hashlib.sha1(db_name.encode()).hexdigest()[:8], 16)
+    probes = [_OOS_PROBES[_pick % len(_OOS_PROBES)], _OOS_PROBES[(_pick + 1) % len(_OOS_PROBES)]]
+    tests = tests[: max(1, count - 2)]
+    for i, pq in enumerate(probes):
+        tests.append({
+            "id": f"oos_probe_{i}",
+            "difficulty": "easy",
+            "source": "synthetic_oos",
+            "selection_bucket": "oos_probe",
+            "runtime_grounded": False,
+            "question_confidence": "high",
+            "q": pq,
+            "expect": {"type": "IDK", "expected_source": "", "reference_text": "", "key_facts": []},
+        })
+    return tests
+
+
 async def _build_owner_eval_tests(base_url: str, owner_password: str, db_name: str, count: int, strategy: str = "kb") -> list[dict]:
     from evals import eval_v1 as _eval_v1
 
@@ -8778,6 +8816,7 @@ async def _build_owner_eval_tests(base_url: str, owner_password: str, db_name: s
             break
 
     if tests:
+        tests = _append_oos_idk_probes(tests, db_name, count)
         return tests[:count]
 
     for idx, item in enumerate(items[:count]):
@@ -9472,7 +9511,15 @@ async def admin_run_evals(request: Request):
     answer_score = _mean_score_0_10(answer_metric_values) if mode in ("chat", "both") else 0.0
     idk_score = _mean_score_0_10(idk_metric_values) if mode in ("chat", "both") else 0.0
 
-    overall = round(0.45 * retrieval_score + 0.45 * answer_score + 0.10 * idk_score, 1) if mode in ("chat", "both") else retrieval_score
+    if mode in ("chat", "both"):
+        # Renormalize over components that actually had tests — a fixed 0.10
+        # IDK weight with zero IDK tests caps a perfect run at 9.0/10.
+        _components = [(0.45, retrieval_score, retrieval_total), (0.45, answer_score, answer_total), (0.10, idk_score, idk_total)]
+        _active = [(w, s) for w, s, n in _components if n > 0]
+        _wsum = sum(w for w, _ in _active) or 1.0
+        overall = round(sum(w * s for w, s in _active) / _wsum, 1)
+    else:
+        overall = retrieval_score
     diagnosis_counts = dict(Counter((row.get("diagnosis") or "pass") for row in rows))
     likely_cause_counts = dict(Counter((row.get("likely_cause") or "unknown") for row in rows if row.get("overall_status") == "FAIL"))
     failure_source_mix = dict(Counter(((row.get("judge") or {}).get("likely_failure_source") or "none") for row in rows if row.get("overall_status") == "FAIL" and ((row.get("judge") or {}).get("likely_failure_source") or "none") != "none"))
