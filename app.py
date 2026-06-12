@@ -4142,7 +4142,14 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
             return
 
     is_product_db = _check_is_product_db(_local_db, db_name) or ("smart_search" in set(cfg.get("features", [])))
-    _prod_det = _deterministic_product_catalog_answer(q, context or "")
+    _prod_det = None
+    if is_product_db:
+        _prod_det, _prod_bounds_src = _deterministic_product_bounds_answer(q, _local_db)
+        if _prod_bounds_src:
+            sources = list(dict.fromkeys(_prod_bounds_src + (sources or [])))[:8]
+            _trace_decision(workflow_debug, "product_bounds_scan_used", True)
+    if not _prod_det:
+        _prod_det = _deterministic_product_catalog_answer(q, context or "")
     if is_product_db and not _prod_det and str(cfg.get("crawl_url") or "").strip():
         try:
             _prod_resc_ctx, _prod_resc_src = await _live_site_query_rescue_context(q, cfg, max_urls=12, max_chars=18000)
@@ -4238,7 +4245,14 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
             yield "data: {\"type\": \"done\"}\n\n"
             return
 
-    _prod_det = _deterministic_product_catalog_answer(q, context or "")
+    _prod_det = None
+    if is_product_db:
+        _prod_det, _prod_bounds_src = _deterministic_product_bounds_answer(q, _local_db)
+        if _prod_bounds_src:
+            sources = list(dict.fromkeys(_prod_bounds_src + (sources or [])))[:8]
+            _trace_decision(workflow_debug, "product_bounds_scan_used", True)
+    if not _prod_det:
+        _prod_det = _deterministic_product_catalog_answer(q, context or "")
     if is_product_db and not _prod_det and str(cfg.get("crawl_url") or "").strip():
         try:
             _prod_resc_ctx, _prod_resc_src = await _live_site_query_rescue_context(q, cfg, max_urls=12, max_chars=18000)
@@ -5474,7 +5488,16 @@ async def chat(request: Request):
             return JSONResponse(payload)
 
         _is_product_db_local = _check_is_product_db(tenant_db_instance, tenant_db_name) or ("smart_search" in set(cfg.get("features", [])))
-        _prod_det = _deterministic_product_catalog_answer(q, context or "")
+        _prod_det = None
+        if _is_product_db_local and tenant_db_instance:
+            _prod_det, _prod_bounds_src = _deterministic_product_bounds_answer(q, tenant_db_instance)
+            if _prod_bounds_src:
+                sources = list(dict.fromkeys(_prod_bounds_src + (sources or [])))[:8]
+                workflow_debug["guard_decisions"]["product_bounds_scan_used"] = True
+                if debug_effective:
+                    workflow_debug["answer_artifacts"]["product_bounds_sources"] = _prod_bounds_src[:8]
+        if not _prod_det:
+            _prod_det = _deterministic_product_catalog_answer(q, context or "")
         if (not _prod_det) and _is_product_db_local and tenant_db_instance:
             try:
                 _ctx_prod2, _dc_prod2, _src_prod2 = await retrieve_context(q, tenant_db_instance, k=60, fast=True, history=hist)
@@ -5566,7 +5589,16 @@ async def chat(request: Request):
                 }
             return JSONResponse(payload)
 
-        _prod_det = _deterministic_product_catalog_answer(q, context or "")
+        _prod_det = None
+        if _is_product_db_local and tenant_db_instance:
+            _prod_det, _prod_bounds_src = _deterministic_product_bounds_answer(q, tenant_db_instance)
+            if _prod_bounds_src:
+                sources = list(dict.fromkeys(_prod_bounds_src + (sources or [])))[:8]
+                workflow_debug["guard_decisions"]["product_bounds_scan_used"] = True
+                if debug_effective:
+                    workflow_debug["answer_artifacts"]["product_bounds_sources"] = _prod_bounds_src[:8]
+        if not _prod_det:
+            _prod_det = _deterministic_product_catalog_answer(q, context or "")
         if _is_product_db_local and _prod_det:
             payload = {"answer": _prod_det, "sources": _preferred_sources_for_product_answer(q, (sources or []), 5)}
             if debug_effective:
@@ -6044,6 +6076,160 @@ def _deterministic_exact_title_factual_answer(q: str, kb_context: str, require_t
         return ans
     except Exception:
         return None
+
+
+def _deterministic_product_bounds_answer(q: str, db, max_items: int = 8) -> tuple[str | None, list[str]]:
+    """Answer product price-cap queries directly from Chroma metadata.
+
+    Retrieval already has a bounds scan, but widget-key tenant requests can still
+    reach the sparse-KB path without those docs becoming the final answer. This
+    deterministic pass makes "products under Rs.X" independent of LLM context
+    ordering and uses structured product metadata where available.
+    """
+    try:
+        if not q or db is None:
+            return None, []
+        ql = (q or "").lower()
+        pm = re.search(r"(?:under|below|less\s+than|max(?:imum)?|budget\s+of|within)\s+(?:rs\.?\s*|pkr\s*)?[\$£€]?([\d,]+)", ql, re.I)
+        if not pm:
+            return None, []
+        try:
+            max_price = float(pm.group(1).replace(",", ""))
+        except Exception:
+            return None, []
+        if max_price <= 0:
+            return None, []
+        if not re.search(r"\b(products?|items?|sell|have|available|availability|under|below|less\s+than|within|budget|price|prices|cost)\b", ql, re.I):
+            return None, []
+
+        stop = {
+            "show", "list", "which", "what", "price", "prices", "cost", "available", "availability",
+            "stock", "under", "below", "sell", "sells", "products", "product", "items", "item",
+            "have", "with", "best", "top", "affordable", "currently", "school", "baby", "kids",
+            "toy", "toys", "cars", "are", "rs", "pkr", "than", "less", "within", "maximum",
+            "max", "rupees", "do", "does", "you", "your", "we", "our", "in", "on", "at", "of",
+            "for", "and", "or", "the", "a", "an", "there", "store", "shop", "catalog", "catalogue",
+        }
+        phrase = _extract_product_name_phrase(q or "") or ql
+        anchors = [w for w in re.findall(r"[a-zA-Z]{2,}", phrase.lower()) if w not in stop][:8]
+
+        def _anchor_hits(hay: str) -> int:
+            if not anchors:
+                return 0
+            hits = 0
+            for a in anchors:
+                h = hay.lower()
+                if a == "rc":
+                    if re.search(r"\brc\b", h) or "remote control" in h or (re.search(r"\bremote\b", h) and re.search(r"\bcontrol(?:led)?\b", h)):
+                        hits += 1
+                    continue
+                variants = {a}
+                if a.endswith("s") and len(a) > 3:
+                    variants.add(a[:-1])
+                elif len(a) > 3:
+                    variants.add(a + "s")
+                if any(re.search(rf"\b{re.escape(v)}\b", h) for v in variants):
+                    hits += 1
+            return hits
+
+        def _first_price(doc: str, meta: dict) -> float | None:
+            try:
+                mv = meta.get("price")
+                if mv is not None and float(mv) > 0:
+                    return float(mv)
+            except Exception:
+                pass
+            m = re.search(r"(?im)^price:\s*(?:rs\.?|pkr|\$|£|€)?\s*([\d,]+(?:\.\d{1,2})?)", doc or "")
+            if m:
+                try:
+                    val = float(m.group(1).replace(",", ""))
+                    if val > 0:
+                        return val
+                except Exception:
+                    pass
+            # Do not scan arbitrary body text here: model names/descriptions such
+            # as "DJI RS 3" are exactly how sub-Rs.10 phantom products were born.
+            return None
+
+        def _title_from(doc: str, meta: dict) -> str:
+            for key in ("canonical_product_title", "product_title", "page_title"):
+                t = str(meta.get(key) or "").strip()
+                if t:
+                    return re.sub(r"\s+", " ", t).strip(" -:|")
+            m = re.search(r"(?im)^product:\s*([^\n]{3,120})", doc or "")
+            if m:
+                return re.sub(r"\s+", " ", m.group(1)).strip(" -:|")
+            return ""
+
+        try:
+            total = min(int(db._collection.count() or 0), 12000)
+            raw = db._collection.get(limit=total, include=["documents", "metadatas"])
+        except Exception:
+            return None, []
+
+        seen_titles: set[str] = set()
+        candidates: list[tuple[float, float, str, str, str]] = []
+        for doc, meta in zip(raw.get("documents", []) or [], raw.get("metadatas", []) or []):
+            meta = meta or {}
+            doc = str(doc or "")
+            if not doc:
+                continue
+            source = str(meta.get("source") or meta.get("source_canonical") or "")
+            src_l = source.lower()
+            kind = str(meta.get("chunk_kind") or "").lower()
+            ctype = str(meta.get("content_type") or "").lower()
+            title = _title_from(doc, meta)
+            title_l = title.lower()
+            if not title or title_l in {"fun", "home", "shop", "catalog", "catalogue", "products", "collection"}:
+                continue
+            if len(re.findall(r"[a-zA-Z0-9]+", title)) <= 1 and not re.search(r"\d", title):
+                continue
+            is_productish = (
+                bool(re.search(r"/(?:products?|items?)(?:/|$|#)", src_l))
+                or (kind == "product" and ctype == "product" and "/collections/" not in src_l)
+            )
+            if not is_productish:
+                continue
+            if "sitemap" in src_l and not re.search(r"/(?:products?|items?)(?:/|$|#)", src_l):
+                continue
+            price = _first_price(doc, meta)
+            if price is None or price <= 0 or price > max_price:
+                continue
+            hay = " ".join([title, source, str(meta.get("categories") or ""), doc[:1200]])
+            hits = _anchor_hits(hay)
+            if anchors and hits <= 0:
+                continue
+            key = re.sub(r"[^a-z0-9]+", " ", title_l).strip()
+            if not key or key in seen_titles:
+                continue
+            seen_titles.add(key)
+            score = (hits * 20.0) + (10.0 if kind == "product" else 4.0 if kind == "catalog" else 0.0)
+            # With category+cap queries, users usually want the strongest matching
+            # products near the cap; with pure cap queries, cheapest-first is clearer.
+            if anchors:
+                score += max(0.0, 8.0 - abs(price - max_price) / max(1.0, max_price / 4.0))
+            availability = str(meta.get("availability") or "").strip()
+            if not availability:
+                availability = "out of stock" if re.search(r"(?i)\b(out of stock|sold out|currently unavailable)\b", doc) else "available"
+            candidates.append((score, price, title, availability, source))
+
+        if not candidates:
+            return None, []
+        if anchors:
+            candidates.sort(key=lambda x: (x[0], x[1]), reverse=True)
+        else:
+            candidates.sort(key=lambda x: (x[1], x[2].lower()))
+        items = candidates[:max_items]
+        lines = ["Here are matching products from the catalog:"]
+        sources: list[str] = []
+        for idx, (_, price, title, availability, source) in enumerate(items, 1):
+            price_s = f"Rs.{price:,.0f}" if float(price).is_integer() else f"Rs.{price:,.2f}"
+            lines.append(f"{idx}. {title} - {price_s} - {availability}")
+            if source:
+                sources.append(source)
+        return "\n".join(lines), list(dict.fromkeys(sources))[:max_items]
+    except Exception:
+        return None, []
 
 
 def _deterministic_product_catalog_answer(q: str, kb_context: str, max_items: int = 5) -> str | None:

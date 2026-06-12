@@ -1053,7 +1053,7 @@ def _merge_variant_docs(docs: list) -> list:
 # â”€â”€ Product spec extraction regexes (used by smart chunker) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 _PROD_PRICE_RE = re.compile(r'(?i)(?:\$|£|€|\brs\.?\s*|\bpkr\s*)(\d[\d,]*\.?\d*)')
 _PROD_SPEC_RE = re.compile(r'\b(?:processor|cpu|ram|memory|storage|ssd|hdd|gpu|graphics|display|battery|os|android|windows|linux|screen)\b', re.I)
-_PROD_SPLIT_RE = re.compile(r'(?i)(?:\$|£|€|\brs\.?\s*|\bpkr\s*)(\d[\d,]*\.?\d*)\s+([A-Z][A-Za-z0-9 \(\)\-\.]+?(?:,[^\$]{10,400}?))(?=\s*(?:\$|£|€|\brs\.?\s*|\bpkr\s*)|\s*\Z)', re.S)
+_PROD_SPLIT_RE = re.compile(r'(?i)(\$|£|€|\brs\.?\s*|\bpkr\s*)(\d[\d,]*\.?\d*)\s+([A-Z][A-Za-z0-9 \(\)\-\.]+?(?:,[^\$£€]{10,400}?))(?=\s*(?:\$|£|€|\brs\.?\s*|\bpkr\s*)|\s*\Z)', re.S)
 _FAQ_SPLIT_RE = re.compile(r'(?m)^(?=(?:Q:|Question:|How |What |Why |When |Where |Who |Can |Do |Is |Are |Does |Should ))', re.I)
 
 
@@ -1252,12 +1252,13 @@ def _smart_chunk_page(text: str, url: str, chunk_size: int = 400, chunk_step: in
     if not _docs_guard and (page_meta.get("catalog_listing") or (len(_card_names) >= 3 and len(_card_prices) >= 3)):
         products = []
         for m in _PROD_SPLIT_RE.finditer(clean):
-            price_str = m.group(1).replace(',', '')
+            currency_raw = (m.group(1) or "").strip()
+            price_str = m.group(2).replace(',', '')
             try:
                 price_num = float(price_str)
             except Exception:
                 continue
-            raw = m.group(2).strip()
+            raw = m.group(3).strip()
             comma_idx = raw.find(',')
             name = raw[:comma_idx].strip() if comma_idx > 0 else raw
             specs = raw[comma_idx + 1:].strip() if comma_idx > 0 else ''
@@ -1269,7 +1270,8 @@ def _smart_chunk_page(text: str, url: str, chunk_size: int = 400, chunk_step: in
                 continue
             if not name or len(name) < 3:
                 continue
-            products.append((price_num, f"${price_str}", name, specs))
+            currency_label = "Rs." if re.match(r"(?i)^(?:rs\.?|pkr)$", currency_raw.replace(" ", "")) else (currency_raw or "Rs.")
+            products.append((price_num, f"{currency_label}{price_str}", name, specs))
 
         if products:
             for price_num, price_label, name, specs in products:
@@ -1332,12 +1334,13 @@ def _smart_chunk_page(text: str, url: str, chunk_size: int = 400, chunk_step: in
     if len(_PROD_PRICE_RE.findall(clean)) >= 1 and _PROD_SPEC_RE.search(clean):
         products = []
         for m in _PROD_SPLIT_RE.finditer(clean):
-            price_str = m.group(1).replace(',', '')
+            currency_raw = (m.group(1) or "").strip()
+            price_str = m.group(2).replace(',', '')
             try:
                 price_num = float(price_str)
             except:
                 continue
-            raw = m.group(2).strip()
+            raw = m.group(3).strip()
             comma_idx = raw.find(',')
             name = raw[:comma_idx].strip() if comma_idx > 0 else raw
             specs = raw[comma_idx + 1:].strip() if comma_idx > 0 else ''
@@ -1350,7 +1353,8 @@ def _smart_chunk_page(text: str, url: str, chunk_size: int = 400, chunk_step: in
                 continue
             if not name or len(name) < 3:
                 continue
-            products.append((price_num, f"${price_str}", name, specs))
+            currency_label = "Rs." if re.match(r"(?i)^(?:rs\.?|pkr)$", currency_raw.replace(" ", "")) else (currency_raw or "Rs.")
+            products.append((price_num, f"{currency_label}{price_str}", name, specs))
 
         if len(products) >= 1:
             for price_num, price_label, name, specs in products:
