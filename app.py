@@ -11917,11 +11917,13 @@ async def crawl_site(data: dict, request: Request):
                 # graph is empty and category propagation has no parents (Shopify
                 # canonical product URLs carry no collection segment). Fetch the
                 # marker-pattern listing pages (/collections/<cat>…) over plain HTTP
-                # and record their outbound product links. Page-1 links only —
-                # query-string pagination is stripped by URL normalization.
+                # and record their outbound product links. Shopify collections are
+                # read via /products.json (250 products/request, paginated — covers
+                # the whole collection); HTML page-1 links are the fallback for
+                # non-Shopify listing URLs.
                 if not _link_parents:
                     try:
-                        _lp_listings = [u for u in to_crawl if categories_for_page(u)][:80]
+                        _lp_listings = [u for u in to_crawl if categories_for_page(u)][:300]
                         if _lp_listings:
                             yield _send(f"🏷️ Listing-link pass: fetching {len(_lp_listings)} category pages for the crawl graph...")
                             from bs4 import BeautifulSoup as _BS_lp
@@ -11929,12 +11931,37 @@ async def crawl_site(data: dict, request: Request):
 
                             async def _lp_fetch(_lu):
                                 async with _lp_sem:
+                                    _ln_norm = _normalize_url(_lu)
+                                    _m_shop = re.match(r"^(https?://[^/]+)/collections/([A-Za-z0-9_\-]+)$", _lu.rstrip("/"))
+                                    if _m_shop:
+                                        try:
+                                            _added = 0
+                                            for _pg in range(1, 9):
+                                                r = await asyncio.to_thread(
+                                                    _req.get,
+                                                    f"{_m_shop.group(1)}/collections/{_m_shop.group(2)}/products.json?limit=250&page={_pg}",
+                                                    timeout=8, headers={"User-Agent": ua})
+                                                if r.status_code != 200:
+                                                    break
+                                                _prods = (r.json() or {}).get("products") or []
+                                                for _p in _prods:
+                                                    _hd = (_p.get("handle") or "").strip()
+                                                    if _hd:
+                                                        _hn = _normalize_url(f"{_m_shop.group(1)}/products/{_hd}")
+                                                        if _hn != _ln_norm:
+                                                            _link_parents.setdefault(_hn, set()).add(_lu)
+                                                            _added += 1
+                                                if len(_prods) < 250:
+                                                    break
+                                            if _added:
+                                                return
+                                        except Exception:
+                                            pass
                                     try:
                                         r = await asyncio.to_thread(_req.get, _lu, timeout=8, headers={"User-Agent": ua})
                                         if r.status_code != 200:
                                             return
                                         _ls = _BS_lp(r.text, "html.parser")
-                                        _ln_norm = _normalize_url(_lu)
                                         for _a_tag in _ls.find_all("a", href=True):
                                             _h = urllib.parse.urljoin(_lu, _a_tag["href"])
                                             _h = _h.split("#")[0].split("?")[0].rstrip("/")
