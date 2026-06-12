@@ -3030,7 +3030,11 @@ async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansio
         )
         for r in top[:20]
     )
-    if _has_productish_sources and not _is_price_ranking_query(q or "")[0]:
+    # Bounds queries ("laptops under $300") get the same exemption as ranking
+    # queries: the full-catalog scan ordered top deterministically (anchored
+    # in-range items first, ascending) — a title-similarity sort scrambles it
+    # and the cheap off-category head wins the context window.
+    if _has_productish_sources and not _is_price_ranking_query(q or "")[0] and not _parse_price_bounds(q or ""):
         top.sort(key=lambda r: _product_query_rerank_score(q, r), reverse=True)
 
     # Language-aware source preference:
