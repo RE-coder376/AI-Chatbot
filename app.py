@@ -6104,8 +6104,10 @@ def _deterministic_product_catalog_answer(q: str, kb_context: str, max_items: in
                 # text now carries crawl-graph "Category: …" lines, so match
                 # anchors against title + text; drop docs that miss every anchor.
                 if anchors:
-                    _rk_hit = False
-                    for a in anchors:
+                    # ALL anchors must hit: "cheapest gel pen" with any-match lets
+                    # every ballpoint through via the bare "pen" anchor.
+                    _rk_miss = False
+                    for a in anchors[:4]:
                         variants = {a}
                         if a.endswith("s") and len(a) > 3:
                             variants.add(a[:-1])
@@ -6113,13 +6115,10 @@ def _deterministic_product_catalog_answer(q: str, kb_context: str, max_items: in
                             variants.add(a + "s")
                         if a == "rc":
                             variants.update({"remote", "control"})
-                        for v in variants:
-                            if re.search(rf"\b{re.escape(v)}\b", title_l) or re.search(rf"\b{re.escape(v)}\b", dl):
-                                _rk_hit = True
-                                break
-                        if _rk_hit:
+                        if not any(re.search(rf"\b{re.escape(v)}\b", title_l) or re.search(rf"\b{re.escape(v)}\b", dl) for v in variants):
+                            _rk_miss = True
                             break
-                    if not _rk_hit:
+                    if _rk_miss:
                         continue
             elif exact_phrase:
                 title_norm = re.sub(r"[^a-z0-9]+", " ", title_l).strip()

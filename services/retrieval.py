@@ -2179,7 +2179,7 @@ async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansio
     if _is_product_db and _max_price is not None and db is not None:
         try:
             from langchain_core.documents import Document
-            total = min(int(db._collection.count() or 0), 2500)
+            total = min(int(db._collection.count() or 0), 8000)
             raw = db._collection.get(limit=total, include=["documents", "metadatas"])
             for doc_text, meta in zip(raw.get("documents", []), raw.get("metadatas", [])):
                 if not doc_text:
@@ -2804,7 +2804,7 @@ async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansio
                 if db is not None and not _is_price_rank_q and len(_anchors) >= 1:
                     try:
                         from langchain_core.documents import Document
-                        total = min(int(db._collection.count() or 0), 2500)
+                        total = min(int(db._collection.count() or 0), 8000)
                         raw = db._collection.get(limit=total, include=["documents", "metadatas"])
                         _rescued: list[tuple[int, Document]] = []
                         for doc_text, meta in zip(raw.get("documents", []), raw.get("metadatas", [])):
@@ -2852,7 +2852,7 @@ async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansio
             if db is not None:
                 try:
                     from langchain_core.documents import Document as _PriceDoc
-                    _pr_total = min(int(db._collection.count() or 0), 2500)
+                    _pr_total = min(int(db._collection.count() or 0), 8000)
                     _pr_raw = db._collection.get(limit=_pr_total, include=["documents", "metadatas"])
                     _pr_stop = {
                         "cheapest", "lowest", "least", "expensive", "most", "highest", "priciest",
@@ -2991,7 +2991,7 @@ async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansio
         if _cat_count_q and db is not None:
             try:
                 from langchain_core.documents import Document as _CatDoc
-                _ct_total = min(int(db._collection.count() or 0), 2500)
+                _ct_total = min(int(db._collection.count() or 0), 8000)
                 _ct_raw = db._collection.get(limit=_ct_total, include=["documents", "metadatas"])
                 _ct_stop = {"many", "category", "categories", "books", "products", "items", "type",
                             "types", "kind", "kinds", "have", "your", "sell", "what", "which",
