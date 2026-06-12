@@ -11455,6 +11455,31 @@ async def delete_api_source(request: Request, data: dict):
 _crawl_state: dict = {}
 # Format: {db_name: {"logs": [], "done": False, "running": False, "error": False}}
 
+def _push_crawl_status_log(db_name: str, msg: str = "", *, done: bool = False, running: bool | None = None, error: bool = False) -> None:
+    """Append a crawl log line to the in-process admin crawl-status buffer.
+
+    Manual crawls write here directly. Standalone Modal crawl jobs POST into the
+    endpoint below so their logs appear in the same admin UI even though they run
+    in a separate container.
+    """
+    if not db_name:
+        return
+    state = _crawl_state.setdefault(db_name, {"logs": [], "done": False, "running": False, "error": False})
+    if running is not None:
+        state["running"] = bool(running)
+    if done:
+        state["done"] = True
+        state["running"] = False
+    elif running is True:
+        state["done"] = False
+    if error:
+        state["error"] = True
+    if msg:
+        logs = state.setdefault("logs", [])
+        logs.append(str(msg))
+        if len(logs) > 1000:
+            state["logs"] = logs[-1000:]
+
 # Last /chat crash (admin-only visibility). Helps debug HF issues without exposing internals to end users.
 _last_chat_error: dict = {}
 
@@ -11482,6 +11507,28 @@ async def get_crawl_status(request: Request):
     return JSONResponse({"logs": logs[offset:], "done": state["done"],
                          "running": state.get("running", False),
                          "error": state.get("error", False), "total": len(logs)})
+
+@app.post("/admin/external-crawl-log")
+async def external_crawl_log(data: dict, request: Request):
+    """Receive crawl logs from Modal standalone crawl jobs.
+
+    The normal `/admin/crawl-status` endpoint is memory-backed. A standalone
+    Modal function has a different process, so it forwards progress here using
+    the owner/admin password and the admin UI can poll one place.
+    """
+    db_name = _extract_admin_db(request, str(data.get("db_name") or "").strip())
+    if not db_name:
+        return JSONResponse({"detail": "db_name required"}, status_code=400)
+    cfg = get_config(db_name)
+    admin_auth(_extract_password(request, str(data.get("password") or "")), cfg)
+    _push_crawl_status_log(
+        db_name,
+        str(data.get("msg") or ""),
+        done=bool(data.get("done", False)),
+        running=bool(data.get("running", True)) if "running" in data else None,
+        error=bool(data.get("error", False)),
+    )
+    return {"ok": True}
 
 @app.get("/admin/gate-report")
 async def get_gate_report(request: Request):

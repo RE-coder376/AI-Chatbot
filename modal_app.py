@@ -90,15 +90,77 @@ def crawl(db_name: str, url: str, max_pages: int = 0):
     """
     _enter_app_dir()
     import asyncio
+    import logging
     import app as chatbot
 
     chatbot.init_systems()
+
+    web_base = os.environ.get("MODAL_WEB_BASE_URL", "https://re-coder376--ai-chatbot-serve.modal.run").rstrip("/")
+    admin_password = os.environ.get("ADMIN_PASSWORD", "")
+
+    class _MainUiCrawlLogHandler(logging.Handler):
+        def __init__(self):
+            super().__init__(level=logging.INFO)
+            self._posted: set[str] = set()
+
+        def emit(self, record):
+            try:
+                msg = self.format(record)
+                if not any(token in msg for token in (
+                    "[AUTO-CRAWL]", "[MODAL-CRAWL]", "[GATE]", "[CRAWL-GATE]",
+                    "Verification gate", "finished:", "failed", "ERROR", "WARNING",
+                )):
+                    return
+                # De-dupe noisy repeated health/config lines without hiding progress.
+                key = msg[:240]
+                if key in self._posted and "progress:" not in msg:
+                    return
+                self._posted.add(key)
+                if len(self._posted) > 5000:
+                    self._posted = set(list(self._posted)[-2500:])
+                _post_main_ui_log(msg, running=True)
+            except Exception:
+                pass
+
+    def _post_main_ui_log(msg: str, *, running: bool = True, done: bool = False, error: bool = False):
+        if not admin_password:
+            return
+        try:
+            import requests
+            requests.post(
+                f"{web_base}/admin/external-crawl-log",
+                json={
+                    "db_name": db_name,
+                    "password": admin_password,
+                    "msg": msg,
+                    "running": running,
+                    "done": done,
+                    "error": error,
+                },
+                timeout=8,
+            )
+        except Exception:
+            pass
+
+    ui_handler = _MainUiCrawlLogHandler()
+    ui_handler.setFormatter(logging.Formatter("[SERVER] %(message)s"))
+    logging.getLogger().addHandler(ui_handler)
+    logging.getLogger("app").addHandler(ui_handler)
+    _post_main_ui_log(f"[MODAL-CRAWL] starting '{db_name}' from {url} (max_pages={max_pages})", running=True)
 
     async def _run():
         n = await chatbot._auto_crawl_db(db_name, url, max_pages=max_pages)
         vol.commit()  # persist the new chunks to the volume
         return n
 
-    n = asyncio.run(_run())
-    print(f"[MODAL-CRAWL] done: {n} pages/chunks for '{db_name}'")
-    return n
+    try:
+        n = asyncio.run(_run())
+        msg = f"[MODAL-CRAWL] done: {n} pages/chunks for '{db_name}'"
+        print(msg)
+        _post_main_ui_log(msg, running=False, done=True)
+        return n
+    except Exception as exc:
+        msg = f"[MODAL-CRAWL] failed for '{db_name}': {type(exc).__name__}: {exc}"
+        print(msg)
+        _post_main_ui_log(msg, running=False, done=True, error=True)
+        raise
