@@ -1091,7 +1091,10 @@
       loadCharts();
       updateHealthStatus();
       if (window._healthInterval) clearInterval(window._healthInterval);
-      window._healthInterval = setInterval(updateHealthStatus, 60000);
+      // Poll only while the tab is actually visible — on scale-to-zero
+      // hosting an idle background tab would keep the container billed.
+      window._healthInterval = setInterval(() => { if (!document.hidden) updateHealthStatus(); }, 300000);
+      document.addEventListener("visibilitychange", () => { if (!document.hidden) updateHealthStatus(); });
     }).catch(() => showStatus('auth', 'Failed.', 'error'));
   }
 

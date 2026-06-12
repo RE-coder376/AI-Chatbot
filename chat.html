@@ -337,7 +337,9 @@
   }
   document.addEventListener("visibilitychange", () => { if (!document.hidden) _checkBotChanged(); });
   window.addEventListener("focus", _checkBotChanged);
-  setInterval(_checkBotChanged, 3000);
+  // No idle polling: on scale-to-zero hosting every request keeps the
+  // container awake (= billed). Bot-change detection happens on tab
+  // focus/visibility and before each send instead.
 
   // Load branding config
   fetch(`${API_URL}/config`).then(r => r.json()).then(cfg => {
