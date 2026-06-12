@@ -30,10 +30,12 @@ _DOCS_MAIN_SELECTORS = (
 )
 
 
-def _jsonld_text(html: str) -> tuple[str, str]:
-    """Returns (flattened ld text, authoritative @type=Product name or '')."""
+def _jsonld_text(html: str) -> tuple[str, str, float]:
+    """Returns (flattened ld text, authoritative @type=Product name or '',
+    authoritative @type=Product offer price or 0.0)."""
     parts_out = []
     product_names: list[str] = []
+    product_prices: list[float] = []
     for raw in re.findall(r'<script[^>]+type=["\']application/ld\+json["\'][^>]*>(.*?)</script>', html, re.DOTALL | re.I):
         try:
             data = json.loads(raw.strip())
@@ -50,6 +52,17 @@ def _jsonld_text(html: str) -> tuple[str, str]:
                 _types = {str(x).lower() for x in (_t if isinstance(_t, list) else [_t]) if x}
                 if 'product' in _types and obj.get('name'):
                     product_names.append(str(obj['name']))
+                if 'product' in _types:
+                    _offers = obj.get('offers', [])
+                    if isinstance(_offers, dict):
+                        _offers = [_offers]
+                    for _o in _offers:
+                        try:
+                            _pv = float(str(_o.get('price', '')).replace(',', ''))
+                            if _pv > 0:
+                                product_prices.append(_pv)
+                        except Exception:
+                            pass
                 if obj.get('name'):
                     parts.append('Name: ' + str(obj['name']))
                 if obj.get('description'):
@@ -76,7 +89,8 @@ def _jsonld_text(html: str) -> tuple[str, str]:
             parts_out.append(_ld(data))
         except Exception:
             pass
-    return ' '.join(parts_out), (product_names[0].strip() if product_names else '')
+    return (' '.join(parts_out), (product_names[0].strip() if product_names else ''),
+            (min(product_prices) if product_prices else 0.0))
 
 
 def extract_page_text(html: str, page_url: str, docs_like: bool = False):
@@ -88,7 +102,7 @@ def extract_page_text(html: str, page_url: str, docs_like: bool = False):
     """
     try:
         import html as _html_mod
-        ld_text, ld_product_name = _jsonld_text(html)
+        ld_text, ld_product_name, ld_product_price = _jsonld_text(html)
         title_m = re.search(r'<title[^>]*>(.*?)</title>', html, re.DOTALL | re.I)
         title_text = re.sub(r'<[^>]+>', '', title_m.group(1)).strip() if title_m else ''
         # og:title / JSON-LD Product.name are the storefront's own declaration of
@@ -106,12 +120,41 @@ def extract_page_text(html: str, page_url: str, docs_like: bool = False):
         og_price_line = ''
         og_amt = re.search(r'<meta[^>]+(?:property|name)=["\']og:price:amount["\'][^>]+content=["\']([\d.,]+)["\']', html, re.I) \
             or re.search(r'<meta[^>]+content=["\']([\d.,]+)["\'][^>]+(?:property|name)=["\']og:price:amount["\']', html, re.I)
+        _og_amt_val = 0.0
         if og_amt:
+            try:
+                _og_amt_val = float(og_amt.group(1).replace(",", ""))
+            except Exception:
+                _og_amt_val = 0.0
+        if og_amt and _og_amt_val > 0:  # og:price 0.00 = out-of-stock placeholder, not a price
             og_cur = re.search(r'<meta[^>]+(?:property|name)=["\']og:price:currency["\'][^>]+content=["\']([A-Za-z]{3})["\']', html, re.I) \
                 or re.search(r'<meta[^>]+content=["\']([A-Za-z]{3})["\'][^>]+(?:property|name)=["\']og:price:currency["\']', html, re.I)
             _cur_code = (og_cur.group(1).upper() if og_cur else "")
             _cur_prefix = {"PKR": "Rs.", "USD": "$", "GBP": "£", "EUR": "€"}.get(_cur_code, (_cur_code + " ") if _cur_code else "Rs.")
             og_price_line = f"Price: {_cur_prefix}{og_amt.group(1)}\n"
+        # authority_price: og:price:amount (or JSON-LD Product offer price) as a
+        # NUMBER carried in metadata. The og_price_line above can be glued into
+        # the title line and lost to corpus-frequency scrubbing — metadata
+        # survives every text transform. 0 (out-of-stock placeholder) = absent.
+        authority_price = 0.0
+        authority_currency = "Rs."
+        _CUR_PREFIX_MAP = {"PKR": "Rs.", "USD": "$", "GBP": "£", "EUR": "€"}
+        if _og_amt_val > 0:
+            authority_price = _og_amt_val
+            _ogc = re.search(r'<meta[^>]+(?:property|name)=["\']og:price:currency["\'][^>]+content=["\']([A-Za-z]{3})["\']', html, re.I) \
+                or re.search(r'<meta[^>]+content=["\']([A-Za-z]{3})["\'][^>]+(?:property|name)=["\']og:price:currency["\']', html, re.I)
+            if _ogc:
+                authority_currency = _CUR_PREFIX_MAP.get(_ogc.group(1).upper(), authority_currency)
+        if authority_price <= 0 and ld_product_price > 0:
+            authority_price = ld_product_price
+            _ldc = re.search(r'"priceCurrency"\s*:\s*"([A-Za-z]{3})"', html)
+            if _ldc:
+                authority_currency = _CUR_PREFIX_MAP.get(_ldc.group(1).upper(), authority_currency)
+        if authority_price <= 0 and og_amt and _og_amt_val <= 0:
+            # The storefront DECLARES price 0 (out-of-stock placeholder) and no
+            # other source has a real price: suppress body-derived prices too —
+            # any regex-found number ("DJI RS 3" → Rs.3) is junk by definition.
+            authority_price = -1.0
         # Preserve tables / lists / code blocks before the broad tag strip.
         try:
             from bs4 import BeautifulSoup as _BS
@@ -186,7 +229,7 @@ def extract_page_text(html: str, page_url: str, docs_like: bool = False):
         combined = re.sub(r'(?i)subtotal:?\s*(?:rs\.?|pkr|\$|£|€)\s*0(?:\.00)?\b', ' ', combined)
         combined = re.sub(r'(?i)\b\d+\s+people\s+are\s+viewing\s+this\s+right\s+now\.?', ' ', combined)
         combined = re.sub(r'(?i)(?:[-–—]\s*)?\bdefault\s+title\b(?:\s*[-–—])?', ' ', combined)
-        combined, page_meta = _prepare_crawl_page(combined, page_url, title_hint=title_text, authority_title=authority_title)
+        combined, page_meta = _prepare_crawl_page(combined, page_url, title_hint=title_text, authority_title=authority_title, authority_price=authority_price, authority_currency=authority_currency)
         page_meta = dict(page_meta or {})
         page_meta["source_canonical"] = _canonical_source_url(page_url)
         combined = re.sub(r'[ \t]+', ' ', _clean_text(combined))

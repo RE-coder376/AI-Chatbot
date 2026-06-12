@@ -327,7 +327,7 @@ def _product_query_rerank_score(question: str, doc) -> float:
     return score
 
 
-def _extract_product_summary(text: str, url: str, title_hint: str = "", authority_title: str = "") -> dict:
+def _extract_product_summary(text: str, url: str, title_hint: str = "", authority_title: str = "", authority_price: float = 0.0, authority_currency: str = "Rs.") -> dict:
     import html as _html_mod
     title_hint = _html_mod.unescape(title_hint or "")  # "Toy &ndash; Babyfy" → "Toy – Babyfy"
     body = _strip_storefront_boilerplate(text or "")
@@ -601,21 +601,40 @@ def _extract_product_summary(text: str, url: str, title_hint: str = "", authorit
 
     price_label = ""
     price_num = None
-    pm = _PRODUCT_PRICE_LINE_RE.search(body) or _PRODUCT_PRICE_CAPTURE_RE.search(body)
-    if pm:
-        if pm.re is _PRODUCT_PRICE_LINE_RE:
-            currency = (pm.group(1) or "").strip() or "Rs."
-            digits = pm.group(2)
-        else:
-            whole = pm.group(0)
-            digits = pm.group(1)
-            currency = whole.replace(digits, "").strip() or "Rs."
-        price_label = f"{currency}{digits}"
-        used_structured_fields.append("price")
-        try:
-            price_num = float(digits.replace(",", ""))
-        except Exception:
-            price_num = None
+    if authority_price and authority_price > 0:
+        # og:price:amount / JSON-LD offer price — the storefront's own declared
+        # price, carried as a NUMBER through every text transform. Body regexes
+        # mis-fire on model names ("DJI RS 2" → Rs.2) and piece counts
+        # ("Colors 24" → 24); the authority is immune and never wiped.
+        price_num = float(authority_price)
+        _ap_disp = f"{price_num:,.2f}".rstrip("0").rstrip(".")
+        price_label = f"{authority_currency or 'Rs.'}{_ap_disp}"
+        used_structured_fields.append("price_authority")
+    elif authority_price and authority_price < 0:
+        # Storefront declared price 0 (OOS placeholder) — no price exists on
+        # this page; regex extraction would only find junk.
+        pass
+    else:
+        pm = _PRODUCT_PRICE_LINE_RE.search(body) or _PRODUCT_PRICE_CAPTURE_RE.search(body)
+        if pm:
+            if pm.re is _PRODUCT_PRICE_LINE_RE:
+                currency = (pm.group(1) or "").strip() or "Rs."
+                digits = pm.group(2)
+            else:
+                whole = pm.group(0)
+                digits = pm.group(1)
+                currency = whole.replace(digits, "").strip() or "Rs."
+            price_label = f"{currency}{digits}"
+            used_structured_fields.append("price")
+            try:
+                price_num = float(digits.replace(",", ""))
+            except Exception:
+                price_num = None
+            if price_num is not None and price_num <= 0:
+                # "Rs.0.00" = OOS placeholder / cart remnant, never a price.
+                price_label = ""
+                price_num = None
+                used_structured_fields.remove("price")
     avail = ""
     am = _PRODUCT_AVAIL_RE.search(body)
     if am:
@@ -666,8 +685,9 @@ def _extract_product_summary(text: str, url: str, title_hint: str = "", authorit
                 and title.strip().lower() != _hh_fin.lower()
                 and (_hh_fin_n.startswith(_slug_fin) or _slug_fin.startswith(_hh_fin_n))):
             title = _hh_fin
-            price_label = ""   # stale pair from hijacked title — chunker fallback re-derives
-            price_num = None
+            if "price_authority" not in used_structured_fields:
+                price_label = ""   # stale pair from hijacked title — chunker fallback re-derives
+                price_num = None
     except Exception:
         pass
     # ABSOLUTE title authority: og:title / JSON-LD Product.name is the page's
@@ -829,7 +849,7 @@ def _page_classifier_confidence(
     return 0.35
 
 
-def _prepare_crawl_page(text: str, url: str, title_hint: str = "", authority_title: str = "") -> tuple[str, dict]:
+def _prepare_crawl_page(text: str, url: str, title_hint: str = "", authority_title: str = "", authority_price: float = 0.0, authority_currency: str = "Rs.") -> tuple[str, dict]:
     raw = _clean_text(text or "")
     docs_like = _looks_like_docs_page(url, raw)
     catalog_like = False if docs_like else _looks_like_catalog_page(url, raw)
@@ -859,6 +879,8 @@ def _prepare_crawl_page(text: str, url: str, title_hint: str = "", authority_tit
     # function on scrubbed text with the same inputs (HTML is gone by then).
     meta["title_hint"] = (title_hint or "")[:300]
     meta["authority_title"] = (authority_title or "")[:300]
+    meta["authority_price"] = float(authority_price or 0.0)
+    meta["authority_currency"] = (authority_currency or "Rs.")[:8]
     _dt_hint = authority_title or title_hint
     # Docs pages should derive their title from the actual page text first.
     # Generic site chrome titles are a common failure mode on docs-heavy sites,
@@ -870,7 +892,7 @@ def _prepare_crawl_page(text: str, url: str, title_hint: str = "", authority_tit
         meta["page_type"] = "catalog"
         meta["page_title"] = _derive_page_title(_dt_hint, cleaned, prefer_title_hint=docs_like)
     if product_like:
-        product = _extract_product_summary(cleaned, url, title_hint=title_hint, authority_title=authority_title)
+        product = _extract_product_summary(cleaned, url, title_hint=title_hint, authority_title=authority_title, authority_price=authority_price, authority_currency=authority_currency)
         meta["product"] = product
         meta["contaminated"] = bool(product.get("contaminated"))
         meta["used_structured_fields"] = list(product.get("used_structured_fields") or [])
@@ -883,7 +905,7 @@ def _prepare_crawl_page(text: str, url: str, title_hint: str = "", authority_tit
         # Product/catalog pages often carry policy/footer boilerplate that can
         # overwhelm the classifier. If structured product signals are present,
         # promote them even when the URL path itself is generic.
-        product = _extract_product_summary(cleaned, url, title_hint=title_hint, authority_title=authority_title)
+        product = _extract_product_summary(cleaned, url, title_hint=title_hint, authority_title=authority_title, authority_price=authority_price, authority_currency=authority_currency)
         multiple_price_hits = len(_PRODUCT_PRICE_CAPTURE_RE.findall(cleaned)) + len(_PRODUCT_PRICE_LINE_RE.findall(cleaned))
         if product.get("title") and multiple_price_hits >= 2:
             meta["catalog_listing"] = True
@@ -1156,7 +1178,9 @@ def _smart_chunk_page(text: str, url: str, chunk_size: int = 400, chunk_step: in
         page_meta["page_type"] = "catalog"
         page_meta["catalog_listing"] = True
         product_meta = {}
-    if not _docs_guard and page_meta.get("page_type") == "product" and product_meta.get("title") and not product_meta.get("price_label"):
+    if (not _docs_guard and page_meta.get("page_type") == "product" and product_meta.get("title")
+            and not product_meta.get("price_label")
+            and float(page_meta.get("authority_price") or 0.0) >= 0):  # <0: storefront declared price 0 — no price exists
         # Universal fallback: many product pages print the price adjacent to the
         # title in body text ("$24.99 Nokia 123" / "Nokia 123 ... Rs. 2,499").
         # Without this the chunk gets no "Price:" line and no price metadata,

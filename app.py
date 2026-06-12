@@ -6051,7 +6051,13 @@ def _deterministic_product_catalog_answer(q: str, kb_context: str, max_items: in
         rank_stop = stop | {"cheapest", "lowest", "least", "expensive", "highest", "priced", "priciest", "costliest", "most", "among", "listed", "laptops", "laptop",
                             "is", "the", "you", "your", "yours", "our", "ours", "a", "an", "in", "on", "at",
                             "do", "does", "we", "me", "my", "it", "its", "of", "or", "to", "us", "and", "for",
-                            "can", "buy", "get", "from", "there", "here", "store", "shop", "site", "whats"}
+                            "can", "buy", "get", "from", "there", "here", "store", "shop", "site", "whats",
+                            # Catalog-scope words, not category anchors: "most expensive
+                            # product in your ENTIRE store" must rank the whole catalog,
+                            # not docs that happen to contain the word "entire".
+                            "entire", "whole", "absolute", "absolutely", "overall", "anything",
+                            "everything", "item", "items", "carry", "offer", "offers", "offered",
+                            "catalog", "catalogue", "inventory", "range", "selection", "second"}
         _prod_phrase = _extract_product_name_phrase(q or "")
         anchors = [w for w in re.findall(r"[a-zA-Z]{2,}", (_prod_phrase or ql)) if w not in (rank_stop if rank_mode else stop)][:10]
         # Combined intent (category word + price cap, e.g. "RC products under
@@ -12173,6 +12179,8 @@ async def crawl_site(data: dict, request: Request):
                                     _scrubbed, p["url"],
                                     title_hint=str(_pm_old.get("title_hint") or _pm_old.get("page_title") or ""),
                                     authority_title=str(_pm_old.get("authority_title") or ""),
+                                    authority_price=float(_pm_old.get("authority_price") or 0.0),
+                                    authority_currency=str(_pm_old.get("authority_currency") or "Rs."),
                                 )
                                 _new_meta = dict(_new_meta or {})
                                 for _k in ("source_canonical", "discovery_layer", "categories"):
@@ -12568,23 +12576,52 @@ async def crawl_site(data: dict, request: Request):
                                             bodyText = clone.innerText || '';
                                         }
                                         const ogEl = document.querySelector('meta[property="og:title"], meta[name="og:title"]');
+                                        const ogPriceEl = document.querySelector('meta[property="og:price:amount"], meta[name="og:price:amount"]');
+                                        const ogCurEl = document.querySelector('meta[property="og:price:currency"], meta[name="og:price:currency"]');
+                                        let ldPrice = '';
+                                        try {
+                                            document.querySelectorAll('script[type="application/ld+json"]').forEach(s => {
+                                                if (ldPrice) return;
+                                                let d = JSON.parse(s.textContent || '{}');
+                                                (Array.isArray(d) ? d : [d]).forEach(o => {
+                                                    if (ldPrice || !o) return;
+                                                    const types = [].concat(o['@type'] || []).map(t => String(t).toLowerCase());
+                                                    if (!types.includes('product')) return;
+                                                    [].concat(o.offers || []).forEach(of => {
+                                                        if (!ldPrice && of && of.price && parseFloat(of.price) > 0) ldPrice = String(of.price);
+                                                    });
+                                                });
+                                            });
+                                        } catch (e) {}
                                         return JSON.stringify({
                                             sidebar: sidebarText,
                                             body: (jsonLdText + '\\n' + bodyText).trim(),
-                                            ogTitle: (ogEl && ogEl.getAttribute('content')) || ''
+                                            ogTitle: (ogEl && ogEl.getAttribute('content')) || '',
+                                            ogPrice: (ogPriceEl && ogPriceEl.getAttribute('content')) || ldPrice || '',
+                                            ogCur: (ogCurEl && ogCurEl.getAttribute('content')) || ''
                                         });
                                     }""")
                                     sidebar_raw = ""
                                     _og_title = ""
+                                    _og_price = 0.0
+                                    _og_cur = "Rs."
                                     try:
                                         import json as _json
                                         _parsed = _json.loads(text or "{}")
                                         sidebar_raw = _parsed.get("sidebar", "")
                                         _og_title = str(_parsed.get("ogTitle") or "").strip()
+                                        try:
+                                            _og_price_raw = str(_parsed.get("ogPrice") or "").strip()
+                                            _og_price = float(_og_price_raw.replace(",", "")) if _og_price_raw else 0.0
+                                            if _og_price_raw and _og_price <= 0:
+                                                _og_price = -1.0  # storefront declares price 0 (OOS) — suppress body prices
+                                        except Exception:
+                                            _og_price = 0.0
+                                        _og_cur = {"PKR": "Rs.", "USD": "$", "GBP": "£", "EUR": "€"}.get(str(_parsed.get("ogCur") or "").upper(), "Rs.")
                                         text = _parsed.get("body", "")
                                     except Exception:
                                         pass
-                                    text, page_meta = _prepare_crawl_page(text or "", cur_url, title_hint=title, authority_title=_og_title)
+                                    text, page_meta = _prepare_crawl_page(text or "", cur_url, title_hint=title, authority_title=_og_title, authority_price=_og_price, authority_currency=_og_cur)
                                     page_meta = dict(page_meta or {})
                                     page_meta["source_canonical"] = _canonical_source_url(cur_url)
                                     text = re.sub(r'[ \t]+', ' ', _clean_text(text or ""))
@@ -12618,7 +12655,7 @@ async def crawl_site(data: dict, request: Request):
                                             title = title or (page_meta.get("page_title") or "")
                                         if title and text and not text.lstrip().startswith(title):
                                             text = f"{title}\n\n{text}".strip()
-                                    text, page_meta = _prepare_crawl_page(text or "", cur_url, title_hint=title, authority_title=_og_title)
+                                    text, page_meta = _prepare_crawl_page(text or "", cur_url, title_hint=title, authority_title=_og_title, authority_price=_og_price, authority_currency=_og_cur)
                                     page_meta = dict(page_meta or {})
                                     page_meta["source_canonical"] = _canonical_source_url(cur_url)
                                     text = re.sub(r'[ \t]+', ' ', _clean_text(text or ""))

@@ -1258,10 +1258,11 @@ def _doc_price_value(doc):
         meta = (getattr(doc, "metadata", None) or {})
         price = meta.get("price")
         if isinstance(price, (int, float)):
-            return float(price)
+            return float(price) if float(price) > 0 else None
         if price is not None:
             try:
-                return float(str(price).replace(",", "").strip())
+                _pv = float(str(price).replace(",", "").strip())
+                return _pv if _pv > 0 else None
             except Exception:
                 pass
         body = str(getattr(doc, "page_content", "") or "")
@@ -1270,7 +1271,8 @@ def _doc_price_value(doc):
         m = (re.search(r"Price:\s*(?:\$|£|€|\brs\.?|\bpkr)?\s*([\d,]+(?:\.\d{1,2})?)", body, re.I)
              or re.search(r"(?:\$|£|€|\brs\.?|\bpkr)\s*([\d,]+(?:\.\d{1,2})?)", body, re.I))
         if m:
-            return float(m.group(1).replace(",", ""))
+            _pv = float(m.group(1).replace(",", ""))
+            return _pv if _pv > 0 else None
     except Exception:
         pass
     return None
@@ -1299,6 +1301,15 @@ def _parse_price_bounds(q: str):
     m = re.search(r'\b(?:over|above|more\s+than|at\s+least|min(?:imum)?(?:\s+of)?|pricier\s+than)\s+' + _CURRENCY_PREFIX + r'(\d+(?:\.\d+)?)', ql)
     if m:
         return (float(m.group(1)), None)
+    # Budget phrasing: "I have a budget of Rs.200" / "my budget is Rs.200" /
+    # "I have Rs.200 to spend". Requires an explicit currency marker so plain
+    # quantities ("I have 3 kids") never parse as a price cap.
+    m = re.search(r'\bbudget\s+(?:of\s+|is\s+|around\s+)?(?:rs\.?|pkr|\$|£|€|usd|gbp|eur)\s*(\d+(?:\.\d+)?)', ql)
+    if m:
+        return (None, float(m.group(1)))
+    m = re.search(r'\bi\s+(?:only\s+)?have\s+(?:rs\.?|pkr|\$|£|€|usd|gbp|eur)\s*(\d+(?:\.\d+)?)', ql)
+    if m:
+        return (None, float(m.group(1)))
     return None
 
 
@@ -2849,6 +2860,7 @@ async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansio
             # $100 and $200", "under Rs.5000") and review-rank ("most reviews")
             # answers are rarely inside the similarity top-N window. Scan ALL
             # product chunks and rank/filter numerically instead.
+            _rank_scan_ordered = False
             if db is not None:
                 try:
                     from langchain_core.documents import Document as _PriceDoc
@@ -2862,6 +2874,12 @@ async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansio
                         "under", "below", "between", "over", "above", "than", "less", "more",
                         "cost", "costs", "review", "reviews", "reviewed", "rated", "rating",
                         "popular", "customer", "customers", "best", "from", "with", "does",
+                        # Catalog-scope words ("ABSOLUTE cheapest", "SECOND most expensive",
+                        # "do you CARRY") — anchoring on them hands the ranking to whatever
+                        # docs happen to contain them.
+                        "absolute", "absolutely", "whole", "second", "third", "carry",
+                        "offer", "offers", "offered", "currently", "right", "anything",
+                        "everything", "catalog", "catalogue", "inventory", "selection",
                     }
                     _pr_anchors = [w for w in re.findall(r"[a-zA-Z]{4,}", (q or "").lower()) if w not in _pr_stop][:4]
                     # Short category tokens ("RC", "LED", "USB") are real anchors but the
@@ -2980,10 +2998,19 @@ async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansio
                         if _pr_cands is _pr_anchored and _pr_all:
                             _pr_all.sort(key=lambda t: t[0], reverse=_price_desc)
                             _anchored_ids = {id(_pd) for _pv, _pd in _pr_anchored}
-                            _pr_cands = list(_pr_anchored) + [t for t in _pr_all[:5] if id(t[1]) not in _anchored_ids]
-                        if _pr_cands:
+                            _ext_tail = [t for t in _pr_all[:5] if id(t[1]) not in _anchored_ids]
+                            # Anchored category docs FIRST, global extremes appended —
+                            # a price re-sort of the blend puts Rs.981,000 pools at the
+                            # context head and small-budget providers truncate the
+                            # actual category ("second most expensive easel") away.
+                            _pr_anchored.sort(key=lambda t: t[0], reverse=_price_desc)
+                            _pr_cands = list(_pr_anchored) + _ext_tail
+                            top = _dedup_by_title(_pr_cands, 30) + top[:6]
+                            _rank_scan_ordered = True
+                        elif _pr_cands:
                             _pr_cands.sort(key=lambda t: t[0], reverse=_price_desc)
                             top = _dedup_by_title(_pr_cands, 30) + top[:6]
+                            _rank_scan_ordered = True
                 except Exception as _pr_e:
                     logger.warning(f"[PRICE-RANK] full-catalog scan failed: {_pr_e}")
             # Review order must not be re-sorted by price; bounds order must keep
@@ -2991,7 +3018,9 @@ async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansio
             # context budgets truncate the tail, and an ascending re-sort puts
             # cheap off-category items at the head ("gel pens under Rs.300" →
             # context head full of erasers, gel pens truncated away).
-            if not _is_review_rank_q and not _price_bounds:
+            # The rank scan above already ordered top (anchored-first) — a price
+            # re-sort here would scramble it back to global-extremes-first.
+            if not _is_review_rank_q and not _price_bounds and not _rank_scan_ordered:
                 _priced, _unpriced = [], []
                 for r in top:
                     _pv = _doc_price_value(r)

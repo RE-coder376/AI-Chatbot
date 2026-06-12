@@ -45,6 +45,13 @@ BATTERY = [
     # title — og:title/JSON-LD authority must produce the real product name.
     dict(url="https://thestationerycompany.pk/products/m-g-office-gel-pen-0-7mm-point", kind="product", price=None,
          title_re=r"(?i)gel pen", site="shopify3", optional=True),
+    # Model numbers ("DJI RS 3", "Osmo Mobile 6") used to parse as prices
+    # (Rs.3 / Rs.0) — authority_price (og/JSON-LD) must win; og:price 0.00
+    # (out-of-stock placeholder) must yield NO price, not price 0.
+    dict(url="https://www.thestationerycompany.pk/products/dji-rs3-gimbal-stabilizer-2", kind="product", price=None,
+         price_floor=1000, title_re=r"(?i)dji", site="shopify3", optional=True),
+    dict(url="https://www.thestationerycompany.pk/products/dji-r-vertical-camera-mount-for-rs-2-and-rs-3-pro-gimbals", kind="product", price=None,
+         price_floor=1000, title_re=r"(?i)dji", site="shopify3", optional=True),
     # ── Static catalog with £ + carousels (books.toscrape.com) ──────────────
     dict(url="https://books.toscrape.com/catalogue/a-light-in-the-attic_1000/index.html", kind="product", price=(51.77, 51.77), site="static-catalog"),
     dict(url="https://books.toscrape.com/catalogue/born-for-this-how-to-find-the-work-you-were-meant-to-do_588/index.html", kind="product", price=(21.59, 21.59), site="static-catalog"),
@@ -79,7 +86,7 @@ TITLE_BAD = [
 ]
 # Description line of a product chunk must not carry prices ("Number Book:
 # Teach children... Rs.1,050") — that is related-product carousel leakage.
-DESC_PRICE_RE = re.compile(r'(?im)^description:.*(?:\brs\.?|\bpkr\b|\$|£|€)\s*[\d,]+')
+DESC_PRICE_RE = re.compile(r'(?im)^description:.*(?:\brs\.?|\bpkr\b|\$|£|€)\s*\d[\d,]{1,}')  # 2+ digits: "DJI RS 3" is a model name, not a price
 
 
 def _docs_like(url, hints):
@@ -128,6 +135,12 @@ def check_page(case) -> list[str]:
         pv = d0.metadata.get("price")
         if pv is None or not (lo <= float(pv) <= hi):
             errors.append(f"price={pv}, expected within [{lo}, {hi}]")
+    if case.get("price_floor"):
+        # No price is fine (OOS pages declare price 0); a price BELOW the floor
+        # is a model number / piece count parsed as a price.
+        pv = d0.metadata.get("price")
+        if pv is not None and float(pv) < case["price_floor"]:
+            errors.append(f"price={pv} below floor {case['price_floor']} (model-number-as-price regression)")
     if case.get("title_re"):
         _t0 = str(d0.metadata.get("product_title") or meta.get("page_title") or "")
         if not re.search(case["title_re"], _t0):
