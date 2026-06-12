@@ -6048,7 +6048,10 @@ def _deterministic_product_catalog_answer(q: str, kb_context: str, max_items: in
             "best", "top", "affordable", "currently", "school", "baby", "kids", "toy", "cars",
             "are", "rs", "pkr", "than", "less", "within", "maximum", "max", "rupees"
         }
-        rank_stop = stop | {"cheapest", "lowest", "least", "expensive", "highest", "priced", "priciest", "costliest", "most", "among", "listed", "laptops", "laptop"}
+        rank_stop = stop | {"cheapest", "lowest", "least", "expensive", "highest", "priced", "priciest", "costliest", "most", "among", "listed", "laptops", "laptop",
+                            "is", "the", "you", "your", "yours", "our", "ours", "a", "an", "in", "on", "at",
+                            "do", "does", "we", "me", "my", "it", "its", "of", "or", "to", "us", "and", "for",
+                            "can", "buy", "get", "from", "there", "here", "store", "shop", "site", "whats"}
         _prod_phrase = _extract_product_name_phrase(q or "")
         anchors = [w for w in re.findall(r"[a-zA-Z]{2,}", (_prod_phrase or ql)) if w not in (rank_stop if rank_mode else stop)][:10]
         # Combined intent (category word + price cap, e.g. "RC products under
@@ -6095,8 +6098,29 @@ def _deterministic_product_catalog_answer(q: str, kb_context: str, max_items: in
             anchor_hits = 0
             exact_anchor_hit = False
             if rank_mode:
-                # Ranking queries should not be forced through title anchors; we rank by price.
-                pass
+                # Rank by price, but a category word in the query ("most expensive
+                # backpack") must still gate candidates — without it the global
+                # extremes (Rs.981,000 pools) hijack every category ranking. Doc
+                # text now carries crawl-graph "Category: …" lines, so match
+                # anchors against title + text; drop docs that miss every anchor.
+                if anchors:
+                    _rk_hit = False
+                    for a in anchors:
+                        variants = {a}
+                        if a.endswith("s") and len(a) > 3:
+                            variants.add(a[:-1])
+                        elif len(a) > 3:
+                            variants.add(a + "s")
+                        if a == "rc":
+                            variants.update({"remote", "control"})
+                        for v in variants:
+                            if re.search(rf"\b{re.escape(v)}\b", title_l) or re.search(rf"\b{re.escape(v)}\b", dl):
+                                _rk_hit = True
+                                break
+                        if _rk_hit:
+                            break
+                    if not _rk_hit:
+                        continue
             elif exact_phrase:
                 title_norm = re.sub(r"[^a-z0-9]+", " ", title_l).strip()
                 phrase_norm = re.sub(r"[^a-z0-9]+", " ", exact_phrase).strip()
