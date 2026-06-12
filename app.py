@@ -6147,14 +6147,27 @@ def _deterministic_product_catalog_answer(q: str, kb_context: str, max_items: in
                 if anchor_hits <= 0:
                     continue
             prices = []
-            for raw in re.findall(r"Rs\.?\s*([\d,]+(?:\.\d{1,2})?)", doc, re.I):
+            # The canonical "Price: Rs.X" line is authoritative when present —
+            # body scans hit model numbers ("Erasers 4865" → Rs.4,865, the \b
+            # keeps "...ers 4865" from matching) and the <50 junk floor would
+            # skip genuinely cheap items (Rs.20 ruler, Rs.40 erasers).
+            _label_m = re.search(r"(?im)^price:\s*(?:rs\.?|pkr)\s*([\d,]+(?:\.\d{1,2})?)", doc)
+            if _label_m:
                 try:
-                    val = float(raw.replace(",", ""))
+                    _lv = float(_label_m.group(1).replace(",", ""))
+                    if _lv > 0:
+                        prices.append(_lv)
                 except Exception:
-                    continue
-                if val < 50:
-                    continue
-                prices.append(val)
+                    pass
+            if not prices:
+                for raw in re.findall(r"\bRs\.?\s*([\d,]+(?:\.\d{1,2})?)", doc, re.I):
+                    try:
+                        val = float(raw.replace(",", ""))
+                    except Exception:
+                        continue
+                    if val < 50:
+                        continue
+                    prices.append(val)
             if not prices:
                 continue
             price = min(prices)
