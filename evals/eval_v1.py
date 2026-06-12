@@ -798,6 +798,12 @@ def _make_chunk_question(topic: str, chunk_text: str) -> str:
     topic = _collapse_repeated_prefix(_normalize_question(topic))
     if not topic:
         return ""
+    # Two distinct model codes in one topic = a multi-product mashup leaked
+    # from a comparison/catalog chunk ("MSI GL72M 7RDX Asus ROG Strix
+    # GL553VD-DM535T") — any question built on it is unanswerable as asked.
+    _modelish = set(re.findall(r"\b[A-Z]{1,4}\d{2,}[A-Za-z0-9\-]*\b", topic))
+    if len(_modelish) >= 2 and len(topic.split()) >= 6:
+        return ""
     text = _clean_chunk_text(chunk_text).lower()
     low_topic = topic.lower()
     reference = _chunk_reference_answer(topic, chunk_text)
@@ -1492,7 +1498,13 @@ def _answer_metrics(item: EvalItem, answer_text: str, judge_verdict: JudgeVerdic
 
     total = len(statements)
     deterministic_faithfulness = round(supported / total, 3) if total else 0.0
-    deterministic_answer_relevance = round(relevant / total, 3) if total else 0.0
+    # Per-statement averaging punishes COMPLETE answers: a correct price plus
+    # three supported spec statements scored 0.333 ("did not address the
+    # question"). One directly-responsive statement + supported elaboration is
+    # a good answer — blend peak responsiveness with breadth.
+    _rel_fraction = (relevant / total) if total else 0.0
+    _rel_peak = max(relevance_scores) if relevance_scores else 0.0
+    deterministic_answer_relevance = round(max(_rel_fraction, 0.75 * _rel_peak + 0.25 * _rel_fraction), 3)
     faithfulness = deterministic_faithfulness
     answer_relevance = deterministic_answer_relevance
     judge_used = False

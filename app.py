@@ -1017,10 +1017,22 @@ async def _live_site_query_rescue_context(q: str, cfg: dict, max_urls: int = 3, 
 
 FEEDBACK_FILE = FEEDBACK_FILE_GLOBAL  # alias — use _feedback_file() for per-DB access
 
+def _topics_phrase(cfg, default: str = "our products and services") -> str:
+    """cfg['topics'] as a human phrase. Configs store it as a string OR a list;
+    an empty list rendered raw produced 'I specialize in [] for store.'"""
+    t = (cfg or {}).get("topics")
+    if isinstance(t, (list, tuple, set)):
+        t = ", ".join(str(x).strip() for x in t if str(x).strip())
+    t = str(t or "").strip()
+    if not t or t in ("[]", "{}", "None"):
+        return default
+    return t
+
+
 def get_system_prompt(cfg, context, doc_count: int = 0, is_urdu: bool = False, user_lang: str = "English", is_product_db: bool = False):
     bot_name = cfg.get("bot_name", "AI Assistant")
     biz_name = cfg.get("business_name", "the company")
-    topics = cfg.get("topics", "general information")
+    topics = _topics_phrase(cfg, "general information")
     biz_desc = cfg.get("business_description", "")
     contact_email = cfg.get("contact_email", "")
     secondary_prompt = cfg.get("secondary_prompt", "")
@@ -2226,6 +2238,7 @@ async def _auto_crawl_db(db_name: str, url: str, max_pages: int = 0) -> int:
         _consec_fetch_fail = 0
         _breaker_paused_once = False
         _BREAKER_THRESHOLD = 15
+        _pw_used_since_restart = 0
         _hx_client = _hx.AsyncClient(timeout=15, headers={"User-Agent": "Mozilla/5.0"}, follow_redirects=True)
         # Category propagation (port of the manual path's listing-link pass):
         # map product handle → parent collection URLs via Shopify products.json
@@ -2271,7 +2284,10 @@ async def _auto_crawl_db(db_name: str, url: str, max_pages: int = 0) -> int:
                 logger.warning(f"[AUTO-CRAWL] '{db_name}' hit {_MAX_CRAWL_SECONDS//3600}hr limit at page {_page_idx}/{_total_pages} — stopping")
                 break
             # ── Restart browser every 30 pages to prevent memory accumulation ──
-            if _browser and _page_idx % 30 == 0:
+            # (only when Playwright actually rendered pages since the last
+            # restart — httpx-first means most crawls never touch the browser)
+            if _browser and _page_idx % 30 == 0 and _pw_used_since_restart:
+                _pw_used_since_restart = 0
                 try:
                     await _browser.close()
                     await _pw_ctx.stop()
@@ -2320,6 +2336,7 @@ async def _auto_crawl_db(db_name: str, url: str, max_pages: int = 0) -> int:
                     logger.debug(f"[AUTO-CRAWL] '{db_name}' httpx fetch failed {page_url[:70]}: {_hx_e}")
                 # Playwright fallback — JS-rendered pages where httpx HTML was empty/thin
                 if not text and _browser:
+                    _pw_used_since_restart += 1
                     for _attempt in range(2):
                         _pg = None
                         try:
@@ -3695,7 +3712,7 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
     if _OFF_TOPIC_RE.search(q):
         _trace_event(workflow_trace, "guard_exit", guard="off_topic_pre_retrieval")
         business = cfg.get("business_name", "the company")
-        topics   = cfg.get("topics", "our products and services")
+        topics   = _topics_phrase(cfg, "our products and services")
         reply = (f"I specialize in {topics} for {business}. "
                  f"For other topics, I'd suggest a general search engine. "
                  f"Is there something about {topics} I can help you with?")
@@ -3717,7 +3734,7 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
     if _PROMPT_RE.search(q):
         _trace_event(workflow_trace, "guard_exit", guard="prompt_injection")
         bot_name = cfg.get("bot_name", "Assistant")
-        topics   = cfg.get("topics", "our products and services")
+        topics   = _topics_phrase(cfg, "our products and services")
         reply = f"I'm {bot_name}, here to help with {topics}. What can I assist you with today?"
         if visitor_id: _run_in_bg(save_visitor_turn, visitor_id, "assistant", reply, db_name)
         yield f"data: {json.dumps({'type': 'chunk', 'content': reply})}\n\n"
@@ -3735,7 +3752,7 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
         _trace_event(workflow_trace, "guard_exit", guard="translation")
         bot_name = cfg.get("bot_name", "Assistant")
         business = cfg.get("business_name", "the company")
-        topics   = cfg.get("topics", "our products and services")
+        topics   = _topics_phrase(cfg, "our products and services")
         reply = (f"I'm {bot_name}, a customer service assistant for {business}. "
                  f"I'm not able to translate text. "
                  f"I can help you with {topics} — what would you like to know?")
@@ -3777,7 +3794,7 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
         _trace_event(workflow_trace, "guard_exit", guard="coding_scope")
         bot_name = cfg.get("bot_name", "Assistant")
         business = cfg.get("business_name", "the company")
-        topics   = cfg.get("topics", "our products and services")
+        topics   = _topics_phrase(cfg, "our products and services")
         reply = (f"I'm {bot_name}, a customer service assistant for {business}. "
                  f"I'm not able to help with general coding tasks. "
                  f"I can help you with {topics} — what would you like to know?")
@@ -3807,7 +3824,7 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
         _trace_event(workflow_trace, "guard_exit", guard="general_oos")
         bot_name = cfg.get("bot_name", "Assistant")
         business = cfg.get("business_name", "the company")
-        topics   = cfg.get("topics", "our products and services")
+        topics   = _topics_phrase(cfg, "our products and services")
         reply = (f"I specialize in helping with {topics} for {business}. "
                  f"For other topics, I'd suggest a general search engine. "
                  f"Is there something about {topics} I can help you with?")
@@ -3822,7 +3839,7 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
         _trace_event(workflow_trace, "guard_exit", guard="greeting_fast_path")
         bot_name = cfg.get("bot_name", "Assistant")
         _biz     = cfg.get("business_name", "")
-        topics   = cfg.get("topics", "") or (_biz if _biz else "our products and services")
+        topics   = _topics_phrase(cfg, "") or (_biz if _biz else "our products and services")
         quick_opts = await _get_intro_questions(db_name or _get_active_db(), _local_db, cfg)
         if is_urdu:
             reply = f"Salam! Main {bot_name} hoon. Main aapki {topics} ke baare mein madad kar sakta hoon. Kya jaanna chahte hain?"
@@ -3878,7 +3895,7 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
         _trace_event(workflow_trace, "guard_exit", guard="small_talk_fast_path")
         bot_name = cfg.get("bot_name", "Assistant")
         business = cfg.get("business_name", "")
-        topics   = cfg.get("topics", "") or (f"{business}" if business else "our products and services")
+        topics   = _topics_phrase(cfg, "") or (f"{business}" if business else "our products and services")
         quick_opts = await _get_intro_questions(db_name or _get_active_db(), _local_db, cfg)
         biz_str  = f" for {business}" if business else ""
         if is_urdu:
@@ -3917,7 +3934,7 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
     # ── Ambiguous — ask for clarification before retrieval ────────────────────
     if intent == "ambiguous":
         _trace_event(workflow_trace, "guard_exit", guard="ambiguous_fast_path")
-        topics = cfg.get("topics", "our products and services")
+        topics = _topics_phrase(cfg, "our products and services")
         quick_opts = await _get_intro_questions(db_name or _get_active_db(), _local_db, cfg)
         if is_urdu:
             reply = "Thoda aur detail dein — kya aap price, availability, ya kisi specific product ke baare mein poochh rahe hain?"
@@ -4300,7 +4317,7 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
         _trace_decision(workflow_debug, "exit_guard", "sparse_kb_context_miss")
         _trace_decision(workflow_debug, "sparse_kb_guard_triggered", True)
         _run_in_bg(log_knowledge_gap, q, db_name)
-        topics      = cfg.get("topics", "our services")
+        topics      = _topics_phrase(cfg, "our services")
         contact     = cfg.get("contact_email", "")
         contact_str = f" or reach us at {contact}" if contact else ""
         if is_urdu:
@@ -5102,7 +5119,7 @@ async def chat(request: Request):
                 _fallback_cfg = get_config(tenant_db_name)
                 if _is_greeting(q):
                     _bot = _fallback_cfg.get("bot_name", "AI Assistant")
-                    _topics = _fallback_cfg.get("topics", "our products and services")
+                    _topics = _topics_phrase(_fallback_cfg, "our products and services")
                     return JSONResponse({
                         "answer": f"Hello! I'm {_bot}. I can help you with {_topics}. What would you like to know?",
                         "sources": [],
@@ -5176,7 +5193,7 @@ async def chat(request: Request):
         # ── Pre-LLM guards (same as streaming path) ──────────────────────────
         _bot  = cfg.get("bot_name", "Assistant")
         _biz  = cfg.get("business_name", "the company")
-        _topics = cfg.get("topics", "our products and services")
+        _topics = _topics_phrase(cfg, "our products and services")
         user_lang = detect_language(q)
 
         # Prompt injection
@@ -5642,7 +5659,7 @@ async def chat(request: Request):
                 pass
         if not _t_api_only and not _ctx_hit:
             bot_name = cfg.get("bot_name", "AI Assistant")
-            topics   = cfg.get("topics", "our available content")
+            topics   = _topics_phrase(cfg, "our available content")
             contact  = cfg.get("contact_email", "")
             contact_str = f" or reach us at {contact}" if contact else ""
             idk = (f"I don't have specific details about that in our current records. "
