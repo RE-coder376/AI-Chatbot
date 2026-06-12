@@ -509,6 +509,29 @@ def _write_crawl_status(db_name: str, status: str):
         logger.warning(f"[CRAWL-STATUS] Could not write status for {db_name}: {e}")
 
 
+def _run_crawl_gate_bg(db_name: str):
+    """Post-crawl verification gate (crawl_gate.py): chunk invariants + Shopify
+    ground-truth diff. Background — never blocks or fails the crawl. Verdict in
+    logs + databases/<db>/gate_report.json (served at /admin/gate-report)."""
+    def _gate():
+        try:
+            from crawl_gate import run_gate_for_db
+            try:
+                crawl_url = (get_config(db_name).get("crawl_url") or "").strip()
+            except Exception:
+                crawl_url = ""
+            rep = run_gate_for_db(db_name, str(DATABASES_DIR / db_name), crawl_url)
+            l2 = rep.get("layer2") or {}
+            gt = "" if l2.get("skipped") else f", coverage {l2['coverage']:.1%}, price_acc {l2['price_accuracy']:.1%}"
+            if rep["verdict"] == "PASS":
+                logger.info(f"[GATE] {db_name}: PASS ({rep['layer1']['chunks']} chunks{gt})")
+            else:
+                logger.warning(f"[GATE] {db_name}: FAIL{gt} — " + "; ".join(rep["failures"]))
+        except Exception as e:
+            logger.warning(f"[GATE] {db_name}: gate error: {e}")
+    threading.Thread(target=_gate, daemon=True).start()
+
+
 def _write_crawl_sidecar_fields(db_name: str, **fields):
     """Merge arbitrary crawl metadata into the DB's _crawl_times.json sidecar."""
     try:
@@ -2428,6 +2451,7 @@ async def _auto_crawl_db(db_name: str, url: str, max_pages: int = 0) -> int:
         # Always upload DB zip + crawl_times after a successful refresh (not just when new pages found)
         threading.Thread(target=_github_sync_upload, args=(db_name,), daemon=True).start()
         threading.Thread(target=_github_backup_crawl_times, args=(db_name,), daemon=True).start()
+        _run_crawl_gate_bg(db_name)
     _end_total = _start_total
     try:
         _end_total = int(await asyncio.to_thread(lambda: db._collection.count()))
@@ -11273,6 +11297,16 @@ async def get_crawl_status(request: Request):
                          "running": state.get("running", False),
                          "error": state.get("error", False), "total": len(logs)})
 
+@app.get("/admin/gate-report")
+async def get_gate_report(request: Request):
+    db_name  = request.query_params.get("db_name", "").strip()
+    password = request.query_params.get("password", "")
+    admin_auth(password, get_config(db_name) if db_name else get_config())
+    p = DATABASES_DIR / db_name / "gate_report.json"
+    if not p.exists():
+        return JSONResponse({"error": "no gate report for this DB yet"}, status_code=404)
+    return JSONResponse(json.loads(p.read_text(encoding="utf-8")))
+
 @app.get("/admin/crawl-log")
 async def get_crawl_log(request: Request):
     db_name  = request.query_params.get("db", "").strip()
@@ -13089,6 +13123,8 @@ async def crawl_site(data: dict, request: Request):
             yield _send(f"✅ Done! {total_chunks} chunks ingested into '{db_name}'.")
             _write_crawl_status(db_name, "success")
             asyncio.get_running_loop().run_in_executor(None, _github_sync_upload, db_name)
+            _run_crawl_gate_bg(db_name)
+            yield _send("🔍 Verification gate running — verdict in /admin/gate-report + logs.")
             try:
                 _rl_n = len(_rendered_links)
                 _rsc_n = raw_sitemap_count

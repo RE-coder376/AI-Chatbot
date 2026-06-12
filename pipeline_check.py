@@ -81,7 +81,8 @@ TITLE_BAD = [
     (re.compile(r'(?i)^(?:home|index|sandbox)\b.{0,12}$'), "nav-word title"),
     (re.compile(r'(?i)^(?:rs\.?|pkr|usd|eur|gbp|aed)\s'), "currency-led swatch title"),
     (re.compile(r'(?i)\bsold\s*out\b'), "sold-out title"),
-    (re.compile(r'(?i)[\s\-–](?:rs\.?|pkr|\$|£|€)\s*[\d.,]*$'), "trailing-price title"),
+    # 2+ digit number or bare currency — "DJI RS 3" / "Ronin RS 2" are model names
+    (re.compile(r'(?i)[\s\-–](?:rs\.?|pkr|\$|£|€)\s*(?:\d[\d.,]+)?$'), "trailing-price title"),
     (re.compile(r'(?i)\.\.\.$|\bloading\b|\btranslation\s+missing\b'), "truncated/widget title"),
 ]
 # Description line of a product chunk must not carry prices ("Number Book:
