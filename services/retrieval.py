@@ -2879,19 +2879,25 @@ async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansio
                         if w not in _pr_short_stop and w not in _pr_stop
                     ][:3]
 
-                    def _pr_anchor_match(_bl: str, _src_l: str, _cat_l: str = "") -> bool:
+                    def _pr_anchor_match(_bl: str, _src_l: str, _cat_l: str = "") -> int:
+                        """Count anchor hits. Substring matching is deliberately loose
+                        ("laptops"→"laptop"), so a single hit is weak evidence: "pens"
+                        matches "sharPENer"/"PENcil" too. Callers sort by hit count so
+                        multi-anchor matches ("gel"+"pens") outrank incidental ones."""
+                        _h = 0
                         for _a in _pr_anchors:
-                            if (_a in _bl) or (_a.rstrip("s") in _bl) or (_a in _src_l):
-                                return True
-                            if _cat_l and ((_a in _cat_l) or (_a.rstrip("s") in _cat_l)):
-                                return True
+                            if (_a in _bl) or (_a.rstrip("s") in _bl) or (_a in _src_l) or (
+                                _cat_l and ((_a in _cat_l) or (_a.rstrip("s") in _cat_l))
+                            ):
+                                _h += 1
                         for _a in _pr_anchors_short:
-                            if re.search(rf"\b{re.escape(_a)}\b", _bl) or re.search(rf"\b{re.escape(_a)}\b", _src_l):
-                                return True
-                            if _cat_l and re.search(rf"\b{re.escape(_a)}\b", _cat_l):
-                                return True
-                        return False
+                            if re.search(rf"\b{re.escape(_a)}\b", _bl) or re.search(rf"\b{re.escape(_a)}\b", _src_l) or (
+                                _cat_l and re.search(rf"\b{re.escape(_a)}\b", _cat_l)
+                            ):
+                                _h += 1
+                        return _h
                     _pr_all, _pr_anchored, _rv_all = [], [], []
+                    _pr_hits_by_id: dict[int, int] = {}
                     for _pd_text, _pd_meta in zip(_pr_raw.get("documents", []), _pr_raw.get("metadatas", [])):
                         if not _pd_text:
                             continue
@@ -2920,8 +2926,10 @@ async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansio
                         _pr_all.append((_pv, _pd))
                         if _pr_anchors or _pr_anchors_short:
                             _cat_l = str(_pd_meta.get("categories") or "").lower()
-                            if _pr_anchor_match(str(_pd_text).lower(), _src_l, _cat_l):
+                            _h = _pr_anchor_match(str(_pd_text).lower(), _src_l, _cat_l)
+                            if _h:
                                 _pr_anchored.append((_pv, _pd))
+                                _pr_hits_by_id[id(_pd)] = _h
 
                     def _dedup_by_title(_pairs, _cap):
                         _seen, _out = set(), []
@@ -2948,7 +2956,12 @@ async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansio
                         # word ("RC … under Rs.5000") the matching items can sit past
                         # the 30-cap in a cheap-heavy catalog and vanish from context.
                         _pr_all.sort(key=lambda t: t[0])
-                        _pr_anchored.sort(key=lambda t: t[0])
+                        # Hits-desc before price-asc: substring anchors are loose
+                        # ("pens" hits "pencil" too) — docs matching MORE anchors
+                        # ("gel"+"pens") must precede single incidental hits, or a
+                        # cheap-heavy catalog floods the 30-cap with off-category
+                        # items before the real ones.
+                        _pr_anchored.sort(key=lambda t: (-_pr_hits_by_id.get(id(t[1]), 0), t[0]))
                         _anch_ids = {id(_pd) for _pv, _pd in _pr_anchored}
                         _pr_cands = _pr_anchored + [t for t in _pr_all if id(t[1]) not in _anch_ids]
                         if _pr_cands:
@@ -2973,7 +2986,12 @@ async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansio
                             top = _dedup_by_title(_pr_cands, 30) + top[:6]
                 except Exception as _pr_e:
                     logger.warning(f"[PRICE-RANK] full-catalog scan failed: {_pr_e}")
-            if not _is_review_rank_q:  # review order must not be re-sorted by price
+            # Review order must not be re-sorted by price; bounds order must keep
+            # anchored (category-matching) items FIRST — providers with small
+            # context budgets truncate the tail, and an ascending re-sort puts
+            # cheap off-category items at the head ("gel pens under Rs.300" →
+            # context head full of erasers, gel pens truncated away).
+            if not _is_review_rank_q and not _price_bounds:
                 _priced, _unpriced = [], []
                 for r in top:
                     _pv = _doc_price_value(r)
