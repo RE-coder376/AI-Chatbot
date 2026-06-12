@@ -1541,6 +1541,15 @@ def _grade_answer(item: EvalItem, answer_text: str, judge_verdict: JudgeVerdict 
             and metrics["answer_relevance"] >= 0.99
         ):
             return "PASS", None, overlap
+        if qtype == "pricing":
+            # Variant products: an answer listing several context prices that
+            # INCLUDES the reference price is correct — statement-level
+            # faithfulness under-scores it ("$379.95, $436.29, $454.62, ..."
+            # graded 0.667 with reference $454.62 present).
+            _ref_prices = set(re.findall(r"[\d,]+\.\d{2}|[\d,]{4,}", _reference_text_for(item)))
+            _ans_prices = set(re.findall(r"[\d,]+\.\d{2}|[\d,]{4,}", answer_text or ""))
+            if _ref_prices and (_ref_prices & _ans_prices) and metrics["answer_relevance"] >= 0.5:
+                return "PASS", None, overlap
         if len(answer_text) < 25:
             return "FAIL", "Answer was too short to be trustworthy.", overlap
         if item.retrieve_doc_count <= 0 or item.retrieve_context_length < 80:
