@@ -41,6 +41,10 @@ BATTERY = [
     dict(url="https://belony.pk/", kind="any", price=None, site="shopify2", optional=True),
     # ── Shopify store #3 (thestationerycompany.pk / tsc_pk) ─────────────────
     dict(url="https://thestationerycompany.pk/", kind="any", price=None, site="shopify3"),
+    # Product pages: variant-picker text ("Single Piece Black") used to win the
+    # title — og:title/JSON-LD authority must produce the real product name.
+    dict(url="https://thestationerycompany.pk/products/m-g-office-gel-pen-0-7mm-point", kind="product", price=None,
+         title_re=r"(?i)gel pen", site="shopify3", optional=True),
     # ── Static catalog with £ + carousels (books.toscrape.com) ──────────────
     dict(url="https://books.toscrape.com/catalogue/a-light-in-the-attic_1000/index.html", kind="product", price=(51.77, 51.77), site="static-catalog"),
     dict(url="https://books.toscrape.com/catalogue/born-for-this-how-to-find-the-work-you-were-meant-to-do_588/index.html", kind="product", price=(21.59, 21.59), site="static-catalog"),
@@ -124,6 +128,10 @@ def check_page(case) -> list[str]:
         pv = d0.metadata.get("price")
         if pv is None or not (lo <= float(pv) <= hi):
             errors.append(f"price={pv}, expected within [{lo}, {hi}]")
+    if case.get("title_re"):
+        _t0 = str(d0.metadata.get("product_title") or meta.get("page_title") or "")
+        if not re.search(case["title_re"], _t0):
+            errors.append(f"title {_t0!r} does not match {case['title_re']!r}")
     # Universal og-price consistency: when the page itself declares its current
     # selling price (og:price:amount), the extracted price must equal it —
     # catches compare-at/sale mixups on ANY storefront without hardcoded values.
@@ -188,6 +196,77 @@ def check_category_helpers() -> list[str]:
     return errors
 
 
+def check_boilerplate_filter() -> list[str]:
+    """Offline (no fetch): corpus-frequency junk remover — fragments repeating
+    across pages of one crawl are masked; unique content + structured lines stay."""
+    from services.boilerplate import BoilerplateFilter
+    errors = []
+    pm = {"page_type": "product", "docs_like": False}
+    pages = []
+    for i in range(30):
+        pages.append(
+            f"Gadget unit{i} edition{i} Rs.{100 + i}\n"
+            f"Price: Rs.999\n"                                               # identical everywhere, protected
+            f"Shop Now Location Click to enlarge\n"                          # standalone junk line
+            f"Gadget model{i} unit{i} Shop Now Location Click to enlarge Rs.{200 + i}\n"  # junk glued mid-line
+            f"It offers feature{i} and quality{i} in the box{i}.\n"  # unique prose (no 4 constant words in a row)
+            f"Your trust matters quality assured free shipping every day\n"  # banner
+        )
+    f = BoilerplateFilter(min_pages=24)
+    for t in pages:
+        f.add_page(t, pm)
+    f.calibrate()
+    s = f.scrub(pages[7], pm)
+    if "Click to enlarge" in s or "Shop Now" in s:
+        errors.append("theme widget string survived scrub")
+    if "Your trust matters" in s:
+        errors.append("banner line survived scrub")
+    if "feature7 and quality7" not in s:
+        errors.append("unique content was destroyed by scrub")
+    if "Price: Rs.999" not in s:
+        errors.append("protected Price: line was destroyed")
+    if "model7 unit7" not in s or "Rs.207" not in s:
+        errors.append("mid-line masking removed adjacent real content")
+    # docs/info pages must be exempt (canonical copy of repeated text survives)
+    if f.scrub(pages[0], {"page_type": "policy"}) != pages[0]:
+        errors.append("non-storefront page was scrubbed")
+    # tiny corpora must no-op
+    f2 = BoilerplateFilter()
+    f2.add_page(pages[0], pm)
+    f2.calibrate()
+    if f2.scrub(pages[0], pm) != pages[0]:
+        errors.append("under-calibrated filter scrubbed anyway")
+    return errors
+
+
+def check_title_authority() -> list[str]:
+    """Offline (no fetch): og:title / JSON-LD Product.name must beat
+    variant-picker text that wins every shape heuristic."""
+    errors = []
+    html = """<html><head>
+<title>Single Piece Black &ndash; The Stationery Company</title>
+<meta property="og:title" content="M&amp;G Office Gel Pen 0.7mm Point" />
+<meta property="og:price:amount" content="95.00" />
+<meta property="og:price:currency" content="PKR" />
+<script type="application/ld+json">{"@type":"Product","name":"M&G Office Gel Pen 0.7mm Point",
+ "offers":{"price":"95.00","priceCurrency":"PKR"}}</script>
+</head><body><main>
+<h2>Single Piece Black</h2>
+<p>Single Piece Black Rs.95.00 In stock. A smooth-writing office gel pen with quick-dry ink,
+0.7mm point, ideal for daily writing and exams. Durable tip and comfortable grip body.</p>
+</main></body></html>"""
+    ext = extract_page_text(html, "https://thestationerycompany.pk/products/m-g-office-gel-pen-0-7mm-point")
+    if not ext:
+        return ["extract_page_text returned None on synthetic product page"]
+    prod = (ext["page_meta"].get("product") or {})
+    t = str(prod.get("title") or "")
+    if "gel pen" not in t.lower():
+        errors.append(f"authority title lost: got {t!r}, want JSON-LD/og name")
+    if "single piece black" == t.lower().strip():
+        errors.append("variant-picker text won the title")
+    return errors
+
+
 def main():
     if len(sys.argv) > 1:
         case = dict(url=sys.argv[1], kind="any", price=None, site="manual")
@@ -197,12 +276,15 @@ def main():
             print("  -", e)
         return
     failed = 0
-    _cat_errs = check_category_helpers()
-    print(f"{'PASS' if not _cat_errs else 'FAIL'} {'category-helpers':15s} (offline URL-to-category unit checks)")
-    for e in _cat_errs[:6]:
-        print(f"     - {e}")
-    if _cat_errs:
-        failed += 1
+    for _name, _fn in (("category-helpers", check_category_helpers),
+                       ("boilerplate-filter", check_boilerplate_filter),
+                       ("title-authority", check_title_authority)):
+        _errs = _fn()
+        print(f"{'PASS' if not _errs else 'FAIL'} {_name:18s} (offline unit checks)")
+        for e in _errs[:6]:
+            print(f"     - {e}")
+        if _errs:
+            failed += 1
     for case in BATTERY:
         errs = check_page(case)
         if errs and case.get("optional"):

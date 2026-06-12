@@ -30,8 +30,10 @@ _DOCS_MAIN_SELECTORS = (
 )
 
 
-def _jsonld_text(html: str) -> str:
+def _jsonld_text(html: str) -> tuple[str, str]:
+    """Returns (flattened ld text, authoritative @type=Product name or '')."""
     parts_out = []
+    product_names: list[str] = []
     for raw in re.findall(r'<script[^>]+type=["\']application/ld\+json["\'][^>]*>(.*?)</script>', html, re.DOTALL | re.I):
         try:
             data = json.loads(raw.strip())
@@ -42,6 +44,12 @@ def _jsonld_text(html: str) -> str:
                 if isinstance(obj, list):
                     return ' '.join(_ld(o) for o in obj)
                 parts = []
+                # Only @type=Product names are title-authoritative — Organization/
+                # BreadcrumbList/WebSite objects carry site chrome names.
+                _t = obj.get('@type')
+                _types = {str(x).lower() for x in (_t if isinstance(_t, list) else [_t]) if x}
+                if 'product' in _types and obj.get('name'):
+                    product_names.append(str(obj['name']))
                 if obj.get('name'):
                     parts.append('Name: ' + str(obj['name']))
                 if obj.get('description'):
@@ -68,7 +76,7 @@ def _jsonld_text(html: str) -> str:
             parts_out.append(_ld(data))
         except Exception:
             pass
-    return ' '.join(parts_out)
+    return ' '.join(parts_out), (product_names[0].strip() if product_names else '')
 
 
 def extract_page_text(html: str, page_url: str, docs_like: bool = False):
@@ -79,9 +87,17 @@ def extract_page_text(html: str, page_url: str, docs_like: bool = False):
     app.py:_requests_extract.
     """
     try:
-        ld_text = _jsonld_text(html)
+        import html as _html_mod
+        ld_text, ld_product_name = _jsonld_text(html)
         title_m = re.search(r'<title[^>]*>(.*?)</title>', html, re.DOTALL | re.I)
         title_text = re.sub(r'<[^>]+>', '', title_m.group(1)).strip() if title_m else ''
+        # og:title / JSON-LD Product.name are the storefront's own declaration of
+        # the page name — authoritative over body-derived candidates (variant
+        # pickers like "Single Piece Black" win shape heuristics; only an
+        # authoritative source beats them). Mirror of the og:price authority.
+        og_t = re.search(r'<meta[^>]+(?:property|name)=["\']og:title["\'][^>]+content=["\']([^"\']{3,300})["\']', html, re.I) \
+            or re.search(r'<meta[^>]+content=["\']([^"\']{3,300})["\'][^>]+(?:property|name)=["\']og:title["\']', html, re.I)
+        authority_title = _html_mod.unescape((ld_product_name or (og_t.group(1) if og_t else '')).strip())
         # og:price:amount is the storefront's own declaration of the CURRENT
         # selling price. Body text orders compare-at first ("Rs.2,000 Rs.1,200")
         # and regex-first extraction picks the crossed-out price — the og meta
@@ -162,7 +178,6 @@ def extract_page_text(html: str, page_url: str, docs_like: bool = False):
         combined = f"{title_text}. {og_price_line}{ld_text} {clean}".strip()
         # Decode HTML entities AFTER tag-strip and concat — titles and JSON-LD
         # descriptions carry &ndash;/&amp;/&#39; too, not just the body.
-        import html as _html_mod
         combined = _html_mod.unescape(combined)
         # Storefront widget scrub BEFORE product extraction: cart drawers
         # ("Subtotal: Rs.0.00"), live-viewer counters and Shopify's "Default
@@ -171,7 +186,7 @@ def extract_page_text(html: str, page_url: str, docs_like: bool = False):
         combined = re.sub(r'(?i)subtotal:?\s*(?:rs\.?|pkr|\$|£|€)\s*0(?:\.00)?\b', ' ', combined)
         combined = re.sub(r'(?i)\b\d+\s+people\s+are\s+viewing\s+this\s+right\s+now\.?', ' ', combined)
         combined = re.sub(r'(?i)(?:[-–—]\s*)?\bdefault\s+title\b(?:\s*[-–—])?', ' ', combined)
-        combined, page_meta = _prepare_crawl_page(combined, page_url, title_hint=title_text)
+        combined, page_meta = _prepare_crawl_page(combined, page_url, title_hint=title_text, authority_title=authority_title)
         page_meta = dict(page_meta or {})
         page_meta["source_canonical"] = _canonical_source_url(page_url)
         combined = re.sub(r'[ \t]+', ' ', _clean_text(combined))

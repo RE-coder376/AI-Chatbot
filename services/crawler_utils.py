@@ -327,7 +327,7 @@ def _product_query_rerank_score(question: str, doc) -> float:
     return score
 
 
-def _extract_product_summary(text: str, url: str, title_hint: str = "") -> dict:
+def _extract_product_summary(text: str, url: str, title_hint: str = "", authority_title: str = "") -> dict:
     import html as _html_mod
     title_hint = _html_mod.unescape(title_hint or "")  # "Toy &ndash; Babyfy" → "Toy – Babyfy"
     body = _strip_storefront_boilerplate(text or "")
@@ -670,6 +670,17 @@ def _extract_product_summary(text: str, url: str, title_hint: str = "") -> dict:
             price_num = None
     except Exception:
         pass
+    # ABSOLUTE title authority: og:title / JSON-LD Product.name is the page's
+    # own declaration of its product name. Variant-picker text ("Single Piece
+    # Black", "15ml / BLACK") is structurally indistinguishable from a name —
+    # shape heuristics cannot flag it; the authoritative source always wins.
+    if authority_title:
+        try:
+            _auth = _canonicalize_title(re.split(r'\s*[|–—]\s*| - ', authority_title, maxsplit=1)[0].strip())
+            if _auth and len(_auth) <= 120 and not _is_generic_title(_auth) and title.strip().lower() != _auth.lower():
+                title = _auth
+        except Exception:
+            pass
     canonical_title = _canonicalize_title(title)
     return {
         "title": title.strip(),
@@ -818,7 +829,7 @@ def _page_classifier_confidence(
     return 0.35
 
 
-def _prepare_crawl_page(text: str, url: str, title_hint: str = "") -> tuple[str, dict]:
+def _prepare_crawl_page(text: str, url: str, title_hint: str = "", authority_title: str = "") -> tuple[str, dict]:
     raw = _clean_text(text or "")
     docs_like = _looks_like_docs_page(url, raw)
     catalog_like = False if docs_like else _looks_like_catalog_page(url, raw)
@@ -844,17 +855,22 @@ def _prepare_crawl_page(text: str, url: str, title_hint: str = "") -> tuple[str,
         "source_status": "live",
         "content_hash": content_hash,
     }
+    # Persist the hints so the flush-time boilerplate scrub can re-run this
+    # function on scrubbed text with the same inputs (HTML is gone by then).
+    meta["title_hint"] = (title_hint or "")[:300]
+    meta["authority_title"] = (authority_title or "")[:300]
+    _dt_hint = authority_title or title_hint
     # Docs pages should derive their title from the actual page text first.
     # Generic site chrome titles are a common failure mode on docs-heavy sites,
     # so only treat the title hint as a fallback signal here.
-    meta["page_title"] = _derive_page_title(title_hint, cleaned, prefer_title_hint=docs_like)
+    meta["page_title"] = _derive_page_title(_dt_hint, cleaned, prefer_title_hint=docs_like)
     meta["catalog_listing"] = False
     if catalog_like:
         meta["catalog_listing"] = True
         meta["page_type"] = "catalog"
-        meta["page_title"] = _derive_page_title(title_hint, cleaned, prefer_title_hint=docs_like)
+        meta["page_title"] = _derive_page_title(_dt_hint, cleaned, prefer_title_hint=docs_like)
     if product_like:
-        product = _extract_product_summary(cleaned, url, title_hint=title_hint)
+        product = _extract_product_summary(cleaned, url, title_hint=title_hint, authority_title=authority_title)
         meta["product"] = product
         meta["contaminated"] = bool(product.get("contaminated"))
         meta["used_structured_fields"] = list(product.get("used_structured_fields") or [])
@@ -862,18 +878,18 @@ def _prepare_crawl_page(text: str, url: str, title_hint: str = "") -> tuple[str,
         meta["extraction_mode"] = "structured_product" if meta["used_structured_fields"] else "body_text"
         if product.get("title") and (product.get("price_label") or product.get("description") or meta["used_structured_fields"]):
             meta["page_type"] = "product"
-            meta["page_title"] = _derive_page_title(title_hint, cleaned, product, prefer_title_hint=docs_like)
+            meta["page_title"] = _derive_page_title(_dt_hint, cleaned, product, prefer_title_hint=docs_like)
     elif not docs_like and meta["page_type"] in {"policy", "unknown", "category", "article"}:
         # Product/catalog pages often carry policy/footer boilerplate that can
         # overwhelm the classifier. If structured product signals are present,
         # promote them even when the URL path itself is generic.
-        product = _extract_product_summary(cleaned, url, title_hint=title_hint)
+        product = _extract_product_summary(cleaned, url, title_hint=title_hint, authority_title=authority_title)
         multiple_price_hits = len(_PRODUCT_PRICE_CAPTURE_RE.findall(cleaned)) + len(_PRODUCT_PRICE_LINE_RE.findall(cleaned))
         if product.get("title") and multiple_price_hits >= 2:
             meta["catalog_listing"] = True
             meta["catalog_item_count"] = multiple_price_hits
             meta["page_type"] = "catalog"
-            meta["page_title"] = _derive_page_title(title_hint, cleaned, product)
+            meta["page_title"] = _derive_page_title(_dt_hint, cleaned, product)
         elif product.get("title") and (product.get("price_label") or product.get("description") or product.get("used_structured_fields")):
             meta["product"] = product
             meta["page_type"] = "product"
@@ -881,9 +897,9 @@ def _prepare_crawl_page(text: str, url: str, title_hint: str = "") -> tuple[str,
             meta["used_structured_fields"] = list(product.get("used_structured_fields") or [])
             meta["body_fallback_used"] = bool(product.get("body_fallback_used"))
             meta["extraction_mode"] = "structured_product" if meta["used_structured_fields"] else "body_text"
-            meta["page_title"] = _derive_page_title(title_hint, cleaned, product, prefer_title_hint=docs_like)
+            meta["page_title"] = _derive_page_title(_dt_hint, cleaned, product, prefer_title_hint=docs_like)
         else:
-            meta["page_title"] = _derive_page_title(title_hint, cleaned, prefer_title_hint=docs_like)
+            meta["page_title"] = _derive_page_title(_dt_hint, cleaned, prefer_title_hint=docs_like)
     meta["quality_score"] = _quality_score(
         cleaned,
         page_type=meta["page_type"],
@@ -939,10 +955,10 @@ def _prepare_crawl_page(text: str, url: str, title_hint: str = "") -> tuple[str,
 
 
 def _classify_and_chunk(
-    text: str, url: str, *, title_hint: str = "", discovery_layer: str = ""
+    text: str, url: str, *, title_hint: str = "", authority_title: str = "", discovery_layer: str = ""
 ) -> tuple[str, dict, list]:
     """Classify, prep, and chunk a fetched page. Single call site for both crawl paths."""
-    cleaned, page_meta = _prepare_crawl_page(text, url, title_hint=title_hint)
+    cleaned, page_meta = _prepare_crawl_page(text, url, title_hint=title_hint, authority_title=authority_title)
     page_meta = dict(page_meta or {})
     page_meta["source_canonical"] = _canonical_source_url(url)
     if discovery_layer:

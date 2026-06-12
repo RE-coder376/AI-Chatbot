@@ -12103,9 +12103,58 @@ async def crawl_site(data: dict, request: Request):
                 _retry_pending: set = set()   # transient failures (timeout/429/render error) — requeued up to 2 rounds
                 _rl_state = {"until": 0.0}    # after a 429, ALL workers pause until this timestamp
                 page_index: list = []  # [(url, title)] — for auto site-index doc
+                # Universal junk remover: corpus-frequency boilerplate filter.
+                # Calibrates on the first pages of THIS crawl, then masks text
+                # fragments that repeat across pages (theme widgets, banners) —
+                # no per-site string lists, clean on the first crawl of any theme.
+                from services.boilerplate import BoilerplateFilter
+                _boiler = BoilerplateFilter()
+                _held_pages: list = []  # pages buffered until the filter calibrates
 
                 async def _flush_pages(batch, worker_label="crawl"):
                     nonlocal chroma_db, total_chunks
+                    # ── Corpus-frequency boilerplate scrub ──────────────────
+                    # No awaits between add/calibrate/hold — atomic on the event
+                    # loop, so concurrent workers can't double-calibrate.
+                    for p in batch:
+                        try:
+                            _boiler.add_page(str(p.get("text") or ""), p.get("page_meta"))
+                        except Exception:
+                            pass
+                    if not _boiler.calibrated:
+                        if worker_label == "final" or _boiler.ready:
+                            _boiler.calibrate()
+                            logger.info(
+                                f"[CRAWL] [boilerplate] calibrated on {_boiler.eligible_seen} pages: "
+                                f"{len(_boiler.frequent_lines)} template lines, {len(_boiler.frequent_shingles)} shingles"
+                            )
+                        else:
+                            _held_pages.extend(batch)
+                            return
+                    if _held_pages:
+                        batch = _held_pages + list(batch)
+                        _held_pages.clear()
+                    for p in batch:
+                        try:
+                            _orig = str(p.get("text") or "")
+                            _scrubbed = _boiler.scrub(_orig, p.get("page_meta"))
+                            if _scrubbed != _orig:
+                                # Titles/prices/cards were extracted from junk-bearing
+                                # text at fetch time — rebuild meta from clean text.
+                                _pm_old = dict(p.get("page_meta") or {})
+                                _new_text, _new_meta = _prepare_crawl_page(
+                                    _scrubbed, p["url"],
+                                    title_hint=str(_pm_old.get("title_hint") or _pm_old.get("page_title") or ""),
+                                    authority_title=str(_pm_old.get("authority_title") or ""),
+                                )
+                                _new_meta = dict(_new_meta or {})
+                                for _k in ("source_canonical", "discovery_layer", "categories"):
+                                    if _pm_old.get(_k):
+                                        _new_meta[_k] = _pm_old[_k]
+                                p["text"] = _new_text
+                                p["page_meta"] = _new_meta
+                        except Exception as _sc_e:
+                            logger.warning(f"[CRAWL] [boilerplate-scrub-error] {str(p.get('url') or '')[:90]}: {type(_sc_e).__name__}: {_sc_e}")
                     chunks = []
                     # Best-effort: persist extracted text + meta for replayable reindexing (no network).
                     if artifacts_path:
@@ -12195,7 +12244,10 @@ async def crawl_site(data: dict, request: Request):
                         await log_queue.put(f"[{worker_label}] [chroma-flush] lock acquired — embedding {len(chunks)} chunks")
                         try:
                             chunks = _sanitize_docs_for_chroma(chunks)
-                            await asyncio.wait_for(_chroma_run(chroma_db.add_documents, chunks), timeout=300)
+                            # Slices: the post-calibration backlog can put hundreds of
+                            # pages in one batch — keep each embed call under the timeout.
+                            for _ci in range(0, len(chunks), 300):
+                                await asyncio.wait_for(_chroma_run(chroma_db.add_documents, chunks[_ci:_ci + 300]), timeout=300)
                         except asyncio.TimeoutError:
                             logger.warning(f"[CRAWL] [{worker_label}] [chroma-flush-timeout] add_documents exceeded 300s — skipping batch")
                             await log_queue.put(f"[{worker_label}] [chroma-flush-timeout] 300s exceeded — batch skipped, continuing crawl")
@@ -12488,20 +12540,24 @@ async def crawl_site(data: dict, request: Request):
                                             });
                                             bodyText = clone.innerText || '';
                                         }
+                                        const ogEl = document.querySelector('meta[property="og:title"], meta[name="og:title"]');
                                         return JSON.stringify({
                                             sidebar: sidebarText,
-                                            body: (jsonLdText + '\\n' + bodyText).trim()
+                                            body: (jsonLdText + '\\n' + bodyText).trim(),
+                                            ogTitle: (ogEl && ogEl.getAttribute('content')) || ''
                                         });
                                     }""")
                                     sidebar_raw = ""
+                                    _og_title = ""
                                     try:
                                         import json as _json
                                         _parsed = _json.loads(text or "{}")
                                         sidebar_raw = _parsed.get("sidebar", "")
+                                        _og_title = str(_parsed.get("ogTitle") or "").strip()
                                         text = _parsed.get("body", "")
                                     except Exception:
                                         pass
-                                    text, page_meta = _prepare_crawl_page(text or "", cur_url, title_hint=title)
+                                    text, page_meta = _prepare_crawl_page(text or "", cur_url, title_hint=title, authority_title=_og_title)
                                     page_meta = dict(page_meta or {})
                                     page_meta["source_canonical"] = _canonical_source_url(cur_url)
                                     text = re.sub(r'[ \t]+', ' ', _clean_text(text or ""))
@@ -12535,7 +12591,7 @@ async def crawl_site(data: dict, request: Request):
                                             title = title or (page_meta.get("page_title") or "")
                                         if title and text and not text.lstrip().startswith(title):
                                             text = f"{title}\n\n{text}".strip()
-                                    text, page_meta = _prepare_crawl_page(text or "", cur_url, title_hint=title)
+                                    text, page_meta = _prepare_crawl_page(text or "", cur_url, title_hint=title, authority_title=_og_title)
                                     page_meta = dict(page_meta or {})
                                     page_meta["source_canonical"] = _canonical_source_url(cur_url)
                                     text = re.sub(r'[ \t]+', ' ', _clean_text(text or ""))
@@ -12758,10 +12814,11 @@ async def crawl_site(data: dict, request: Request):
                 if _retry_pending:
                     yield _send(f"⚠️ {len(_retry_pending)} URLs still failing after 2 retry rounds — skipped")
 
-                # Final flush
+                # Final flush — also forces boilerplate calibration + release of
+                # any pages still held for it (small crawls never hit `ready`).
                 async with flush_lock:
-                    if pending_pages:
-                        yield _send(f"💾 Saving final batch ({len(pending_pages)} pages)...")
+                    if pending_pages or _held_pages:
+                        yield _send(f"💾 Saving final batch ({len(pending_pages) + len(_held_pages)} pages)...")
                         await _flush_pages(pending_pages, worker_label="final")
 
                 # Category propagation backfill: tag product chunks with the category
