@@ -11890,6 +11890,43 @@ async def crawl_site(data: dict, request: Request):
                     to_crawl = deduped[:max_pages_eff]
                 yield _send(f"📋 {len(to_crawl)} unique pages to crawl...")
 
+                # Listing-link pass for sitemap crawls: BFS never ran, so the crawl
+                # graph is empty and category propagation has no parents (Shopify
+                # canonical product URLs carry no collection segment). Fetch the
+                # marker-pattern listing pages (/collections/<cat>…) over plain HTTP
+                # and record their outbound product links. Page-1 links only —
+                # query-string pagination is stripped by URL normalization.
+                if not _link_parents:
+                    try:
+                        _lp_listings = [u for u in to_crawl if categories_for_page(u)][:80]
+                        if _lp_listings:
+                            yield _send(f"🏷️ Listing-link pass: fetching {len(_lp_listings)} category pages for the crawl graph...")
+                            from bs4 import BeautifulSoup as _BS_lp
+                            _lp_sem = asyncio.Semaphore(6)
+
+                            async def _lp_fetch(_lu):
+                                async with _lp_sem:
+                                    try:
+                                        r = await asyncio.to_thread(_req.get, _lu, timeout=8, headers={"User-Agent": ua})
+                                        if r.status_code != 200:
+                                            return
+                                        _ls = _BS_lp(r.text, "html.parser")
+                                        _ln_norm = _normalize_url(_lu)
+                                        for _a_tag in _ls.find_all("a", href=True):
+                                            _h = urllib.parse.urljoin(_lu, _a_tag["href"])
+                                            _h = _h.split("#")[0].split("?")[0].rstrip("/")
+                                            if _h.startswith("http") and _strip_www(_h).startswith(_crawl_prefix):
+                                                _hn = _normalize_url(_h)
+                                                if _hn != _ln_norm:
+                                                    _link_parents.setdefault(_hn, set()).add(_lu)
+                                    except Exception:
+                                        pass
+
+                            await asyncio.gather(*[_lp_fetch(u) for u in _lp_listings])
+                            yield _send(f"🏷️ Listing-link pass: graph has {len(_link_parents)} child URLs")
+                    except Exception as _lp_e:
+                        logger.warning(f"[CRAWL] listing-link pass failed: {_lp_e}")
+
                 # --- Embedding model: always bge-small (384-dim) to match the loader ---
                 emb = embeddings_model
                 if emb is None:
@@ -12608,9 +12645,15 @@ async def crawl_site(data: dict, request: Request):
                                         page_meta["discovery_layer"] = _dl
                                     # Marker-based categories (URL paths like /collections/<cat>);
                                     # graph-based listing categories are backfilled post-crawl.
-                                    _cats = categories_for_page(
-                                        cur_url, sorted(_link_parents.get(_normalize_url(cur_url)) or ())
+                                    # Parent-derived tags only for product/listing pages — info
+                                    # pages are linked from every listing's nav and would collect
+                                    # junk category tags.
+                                    _pt_for_cats = str((page_meta or {}).get("page_type") or "")
+                                    _cat_parents = (
+                                        sorted(_link_parents.get(_normalize_url(cur_url)) or ())
+                                        if _pt_for_cats in ("product", "catalog", "category") else ()
                                     )
+                                    _cats = categories_for_page(cur_url, _cat_parents)
                                     if _cats and isinstance(page_meta, dict):
                                         page_meta["categories"] = ", ".join(_cats)
                                 except Exception:
