@@ -2219,7 +2219,48 @@ async def _auto_crawl_db(db_name: str, url: str, max_pages: int = 0) -> int:
         _page_idx = 0
         _total_pages = len(crawl_urls)
         _MAX_CRAWL_SECONDS = 4 * 3600  # 4hr hard limit — kills truly stuck crawls
+        # WAF/IP-block circuit breaker: N consecutive total fetch failures means
+        # the site is blocking this container, not that N pages are broken.
+        # First trip pauses 120s (transient blocks lift); second trip aborts —
+        # grinding the remaining pages at ~60s/page of timeouts produces nothing.
+        _consec_fetch_fail = 0
+        _breaker_paused_once = False
+        _BREAKER_THRESHOLD = 15
         _hx_client = _hx.AsyncClient(timeout=15, headers={"User-Agent": "Mozilla/5.0"}, follow_redirects=True)
+        # Category propagation (port of the manual path's listing-link pass):
+        # map product handle → parent collection URLs via Shopify products.json
+        # so refreshed product chunks KEEP their `categories` metadata — without
+        # this a full auto-recrawl wipes the category tags retrieval relies on.
+        _auto_cat_parents: dict[str, set] = {}
+        try:
+            from urllib.parse import unquote as _unq
+            _coll_urls = [u for u in crawl_urls if re.match(r"^https?://[^/]+/collections/[A-Za-z0-9_\-%]+/?$", u.rstrip("/"))]
+            _cat_sem = asyncio.Semaphore(6)
+            async def _build_cat_map(_cu):
+                _mc = re.match(r"^(https?://[^/]+)/collections/([A-Za-z0-9_\-%]+)$", _cu.rstrip("/"))
+                if not _mc:
+                    return
+                async with _cat_sem:
+                    try:
+                        for _pgi in range(1, 13):
+                            _rc = await _hx_client.get(f"{_mc.group(1)}/collections/{_mc.group(2)}/products.json?limit=250&page={_pgi}")
+                            if _rc.status_code != 200:
+                                break
+                            _prods = (_rc.json() or {}).get("products") or []
+                            for _p in _prods:
+                                _hd = _unq(str(_p.get("handle") or "")).strip().lower()
+                                if _hd:
+                                    _auto_cat_parents.setdefault(_hd, set()).add(_cu)
+                            if len(_prods) < 250:
+                                break
+                    except Exception:
+                        pass
+            if _coll_urls:
+                await asyncio.gather(*[_build_cat_map(u) for u in _coll_urls[:400]])
+                if _auto_cat_parents:
+                    logger.info(f"[AUTO-CRAWL] '{db_name}' category map: {len(_auto_cat_parents)} products across {len(_coll_urls)} collections")
+        except Exception as _cm_e:
+            logger.warning(f"[AUTO-CRAWL] '{db_name}' category propagation skipped: {_cm_e}")
         for page_url in crawl_urls:
             _page_idx += 1
             # ── Cancel check + overall timeout ──
@@ -2253,9 +2294,33 @@ async def _auto_crawl_db(db_name: str, url: str, max_pages: int = 0) -> int:
             try:
                 text = ""
                 _page_title = ""
-                _pw_ok = False
-                if _browser:
-                    for _attempt in range(3):
+                _ext_meta = None
+                _is_docs_url = any(s in page_url.lower() for s in _ac_docs_hints_all)
+                _min_keep = 40 if _is_docs_url else 100
+                from services.page_extract import extract_page_text as _ept_auto
+                # httpx-FIRST through the canonical hardened extraction
+                # (services/page_extract) — same transform as the manual crawl
+                # path, so og:price/JSON-LD authority, entity unescape and cart
+                # scrubbing all apply here too. Playwright is the FALLBACK for
+                # JS-rendered pages only: it was ~3s/page as the primary and its
+                # raw get_text bypassed every pipeline hardening.
+                try:
+                    r = await _hx_client.get(page_url)
+                    if r.status_code == 200:
+                        _ct = (r.headers.get("content-type") or "").lower()
+                        if "text/html" in _ct or "application/xhtml" in _ct:
+                            if "charset" not in _ct:
+                                r.encoding = "utf-8"
+                            _ext = _ept_auto(r.text, page_url, docs_like=_is_docs_url)
+                            if _ext and len(_ext.get("text") or "") > _min_keep:
+                                text = _ext["text"]
+                                _page_title = str(_ext.get("title") or "")
+                                _ext_meta = dict(_ext.get("page_meta") or {})
+                except Exception as _hx_e:
+                    logger.debug(f"[AUTO-CRAWL] '{db_name}' httpx fetch failed {page_url[:70]}: {_hx_e}")
+                # Playwright fallback — JS-rendered pages where httpx HTML was empty/thin
+                if not text and _browser:
+                    for _attempt in range(2):
                         _pg = None
                         try:
                             # Check before awaiting — dead browser returns None directly (not a coroutine)
@@ -2270,16 +2335,18 @@ async def _auto_crawl_db(db_name: str, url: str, max_pages: int = 0) -> int:
                             await _pg.wait_for_timeout(1500)
                             html = await _pg.content()
                             await _pg.close()
-                            soup = BeautifulSoup(html, "html.parser")
-                            for tag in soup(["script","style","nav","header","footer"]): tag.decompose()
-                            for tag in soup.find_all(style=lambda s: s and "display:none" in s.replace(" ","")): tag.decompose()
-                            _content = (soup.find("article") or soup.find("main") or
-                                        soup.find(class_=re.compile(r"markdown|doc-content|theme-doc-markdown", re.I)) or
-                                        soup.body)
-                            _h1 = soup.find("h1")
-                            _page_title = _h1.get_text(strip=True) if _h1 else ""
-                            text = (_content or soup).get_text(separator="\n", strip=True)
-                            _pw_ok = True
+                            _ext = _ept_auto(html, page_url, docs_like=_is_docs_url)
+                            if _ext and len(_ext.get("text") or "") > _min_keep:
+                                text = _ext["text"]
+                                _page_title = str(_ext.get("title") or "")
+                                _ext_meta = dict(_ext.get("page_meta") or {})
+                            else:
+                                # rendered HTML still thin — keep raw text as last resort
+                                soup = BeautifulSoup(html, "html.parser")
+                                for tag in soup(["script","style","nav","header","footer"]): tag.decompose()
+                                _h1 = soup.find("h1")
+                                _page_title = _h1.get_text(strip=True) if _h1 else ""
+                                text = (soup.find("article") or soup.find("main") or soup.body or soup).get_text(separator="\n", strip=True)
                             break
                         except (RuntimeError, TypeError) as _pe:
                             # RuntimeError = our dead-browser check; TypeError = Python's "await None" error
@@ -2294,36 +2361,30 @@ async def _auto_crawl_db(db_name: str, url: str, max_pages: int = 0) -> int:
                             if _pg is not None:
                                 try: await _pg.close()
                                 except Exception: pass
-                            if _attempt < 2:
-                                await asyncio.sleep(1 * (_attempt + 1))
+                            if _attempt < 1:
+                                await asyncio.sleep(1)
                             else:
-                                logger.warning(f"[AUTO-CRAWL] '{db_name}' Playwright failed 3x {page_url[:70]}: {_pe} — trying httpx")
-                # httpx fallback — reuse single client across all pages
-                if not text:
-                    try:
-                        r = await _hx_client.get(page_url)
-                        if r.status_code == 200:
-                            soup = BeautifulSoup(r.text, "html.parser")
-                            for tag in soup(["script","style","nav","header","footer"]): tag.decompose()
-                            for tag in soup.find_all(style=lambda s: s and "display:none" in s.replace(" ","")): tag.decompose()
-                            _content = (soup.find("article") or soup.find("main") or
-                                        soup.find(class_=re.compile(r"markdown|doc-content|theme-doc-markdown", re.I)) or
-                                        soup.body)
-                            _h1 = soup.find("h1")
-                            _page_title = _h1.get_text(strip=True) if _h1 else ""
-                            text = (_content or soup).get_text(separator="\n", strip=True)
-                    except Exception as _hx_e:
-                        logger.warning(f"[AUTO-CRAWL] '{db_name}' httpx also failed {page_url[:70]}: {_hx_e}")
-                _is_docs_url = any(s in page_url.lower() for s in _ac_docs_hints_all)
-                _min_keep = 40 if _is_docs_url else 100
+                                logger.warning(f"[AUTO-CRAWL] '{db_name}' Playwright failed 2x {page_url[:70]}: {_pe}")
                 if not text:
                     _skipped_fetch_failed += 1
                     if len(_fetch_failed_urls) < 25:
                         _fetch_failed_urls.append(page_url)
+                    _consec_fetch_fail += 1
+                    if _consec_fetch_fail >= _BREAKER_THRESHOLD:
+                        if not _breaker_paused_once:
+                            _breaker_paused_once = True
+                            _consec_fetch_fail = 0
+                            logger.warning(f"[AUTO-CRAWL] '{db_name}' {_BREAKER_THRESHOLD} consecutive fetch failures at page {_page_idx}/{_total_pages} — likely IP block, pausing 120s")
+                            await asyncio.sleep(120)
+                        else:
+                            logger.error(f"[AUTO-CRAWL] '{db_name}' ABORTING: {_BREAKER_THRESHOLD} consecutive fetch failures again at page {_page_idx}/{_total_pages} — site is blocking this container")
+                            break
                 elif len(text) <= _min_keep:
                     _skipped_malformed += 1
                     if len(_malformed_urls) < 25:
                         _malformed_urls.append(page_url)
+                if text:
+                    _consec_fetch_fail = 0  # site responded — not a block
                 if text and len(text) > _min_keep:
                     if page_url not in already_seen:
                         _new_pages += 1
@@ -2347,10 +2408,35 @@ async def _auto_crawl_db(db_name: str, url: str, max_pages: int = 0) -> int:
                             await asyncio.to_thread(lambda u=_canon_url: db.delete(where={"source": u}))
                     except Exception as _del_e:
                         logger.debug(f"[AUTO-CRAWL] Could not delete old chunks for {page_url}: {_del_e}")
-                    text, page_meta, _new_docs = _classify_and_chunk(
-                        text, page_url, title_hint=_page_title,
-                        discovery_layer=(_url_layer.get(page_url) or [""])[0]
-                    )
+                    try:
+                        from urllib.parse import unquote as _unq2
+                        _hm = re.match(r"^https?://[^/]+/products/([^/?#]+)", page_url.rstrip("/"))
+                        _cat_parents = sorted(_auto_cat_parents.get(_unq2(_hm.group(1)).strip().lower()) or ()) if _hm else []
+                        _page_cats = categories_for_page(page_url, _cat_parents)
+                    except Exception:
+                        _page_cats = []
+                    if _ext_meta is not None:
+                        # extract_page_text already ran _prepare_crawl_page —
+                        # reuse its page_meta (authority price/title intact)
+                        # exactly like the manual crawl path does.
+                        page_meta = dict(_ext_meta)
+                        _dl = (_url_layer.get(page_url) or [""])[0]
+                        if _dl:
+                            page_meta["discovery_layer"] = _dl
+                        if _page_cats:
+                            page_meta["categories"] = ", ".join(_page_cats)
+                        _new_docs = _smart_chunk_page(text, page_url, page_meta=page_meta)
+                    else:
+                        text, page_meta, _new_docs = _classify_and_chunk(
+                            text, page_url, title_hint=_page_title,
+                            discovery_layer=(_url_layer.get(page_url) or [""])[0]
+                        )
+                        if _page_cats:
+                            for _nd in _new_docs or []:
+                                try:
+                                    _nd.metadata["categories"] = ", ".join(_page_cats)
+                                except Exception:
+                                    pass
                     if not page_meta.get("retrieve_eligible", True):
                         _quarantined += 1
                     _pending_docs.extend(_new_docs)

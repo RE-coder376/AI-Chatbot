@@ -850,6 +850,12 @@ def _page_classifier_confidence(
 
 
 def _prepare_crawl_page(text: str, url: str, title_hint: str = "", authority_title: str = "", authority_price: float = 0.0, authority_currency: str = "Rs.") -> tuple[str, dict]:
+    import html as _html_mod
+    # Hints arrive entity-encoded from raw <title> regex extraction; they feed
+    # page_title and the chunker's "## " heading lines downstream of every
+    # body-text unescape, so decode here or "&ndash;" persists into chunks.
+    title_hint = _html_mod.unescape(title_hint or "")
+    authority_title = _html_mod.unescape(authority_title or "")
     raw = _clean_text(text or "")
     docs_like = _looks_like_docs_page(url, raw)
     catalog_like = False if docs_like else _looks_like_catalog_page(url, raw)
@@ -1232,8 +1238,14 @@ def _smart_chunk_page(text: str, url: str, chunk_size: int = 400, chunk_step: in
         _prod_meta["product_title"] = product_meta["title"]
         _prod_meta["canonical_product_title"] = product_meta.get("canonical_title") or _canonical_product_title(product_meta["title"])
         _prod_meta["page_title"] = product_meta.get("title") or _base_meta.get("page_title") or ""
-        if product_meta.get("price_num") is not None:
-            _prod_meta["price"] = product_meta["price_num"]
+        try:
+            _pn = float(product_meta.get("price_num") or 0.0)
+        except Exception:
+            _pn = 0.0
+        # Storefronts declare 0.00 for unsellable placeholder listings — a 0
+        # price key poisons cheapest/bounds ranking, so omit the key entirely.
+        if _pn > 0:
+            _prod_meta["price"] = _pn
         if product_meta.get("availability"):
             _prod_meta["availability"] = product_meta["availability"]
         _prod_meta["used_structured_fields"] = list(product_meta.get("used_structured_fields") or _base_meta.get("used_structured_fields") or [])
@@ -1269,6 +1281,12 @@ def _smart_chunk_page(text: str, url: str, chunk_size: int = 400, chunk_step: in
             if re.match(r'(?i)^(?:rs\.?|pkr|[\$£€])\s*[\d.,]*$', name):
                 continue
             if not name or len(name) < 3:
+                continue
+            # Sentence fragments masquerading as cards ("Fun, mini fish-shaped
+            # erasers for kids…"): a single-word name whose specs continue in
+            # lowercase is marketing copy split at a comma, not a product card —
+            # and the paired price belongs to the PREVIOUS card.
+            if len(re.findall(r'[A-Za-z0-9]+', name)) == 1 and re.match(r'^[a-z]', specs):
                 continue
             currency_label = "Rs." if re.match(r"(?i)^(?:rs\.?|pkr)$", currency_raw.replace(" ", "")) else (currency_raw or "Rs.")
             products.append((price_num, f"{currency_label}{price_str}", name, specs))
@@ -1312,7 +1330,8 @@ def _smart_chunk_page(text: str, url: str, chunk_size: int = 400, chunk_step: in
                 _card_meta["product_title"] = name
                 _card_meta["canonical_product_title"] = _canonical_product_title(name)
                 _card_meta["page_title"] = _base_meta.get("page_title") or name
-                _card_meta["price"] = price_num
+                if price_num > 0:
+                    _card_meta["price"] = price_num
                 _card_meta["section_id"] = f"catalog_{len(docs)}"
                 _card_meta["chunk_kind"] = "catalog"
                 _card_meta["catalog_listing"] = True
@@ -1352,6 +1371,9 @@ def _smart_chunk_page(text: str, url: str, chunk_size: int = 400, chunk_step: in
             if re.match(r'(?i)^(?:rs\.?|pkr|[\$£€])\s*[\d.,]*$', name):
                 continue
             if not name or len(name) < 3:
+                continue
+            # Sentence fragments masquerading as cards — same guard as Mode 1b.
+            if len(re.findall(r'[A-Za-z0-9]+', name)) == 1 and re.match(r'^[a-z]', specs):
                 continue
             currency_label = "Rs." if re.match(r"(?i)^(?:rs\.?|pkr)$", currency_raw.replace(" ", "")) else (currency_raw or "Rs.")
             products.append((price_num, f"{currency_label}{price_str}", name, specs))
@@ -1393,7 +1415,9 @@ def _smart_chunk_page(text: str, url: str, chunk_size: int = 400, chunk_step: in
                     lines.append(f"Full specs: {name}, {specs}")
                 _prod_text = "\n".join(lines)
                 _prod_meta = dict(_base_meta)
-                _prod_meta.update({"price": price_num, "product_title": name})
+                _prod_meta["product_title"] = name
+                if price_num > 0:
+                    _prod_meta["price"] = price_num
                 _prod_meta["canonical_product_title"] = _canonical_product_title(name)
                 _prod_meta.update(_extract_product_metadata(_prod_text))
                 _prod_meta["section_id"] = f"product_{len(docs)}"
@@ -1676,7 +1700,9 @@ def _extract_product_metadata(text: str) -> dict:
     pm = re.search(r'Price:\s*(?:\$|£|€|\brs\.?\s*|\bpkr\s*)?([\d,]+\.?\d*)', text, re.I)
     if pm:
         try:
-            meta['price'] = float(pm.group(1).replace(',', ''))
+            _pv = float(pm.group(1).replace(',', ''))
+            if _pv > 0:  # "Price: 0.00" = OOS placeholder, never a price
+                meta['price'] = _pv
         except:
             pass
     rm = re.search(r'RAM:\s*(\d+)\s*GB', text, re.I)

@@ -72,7 +72,14 @@ def _jsonld_text(html: str) -> tuple[str, str, float]:
                     offers = [offers]
                 for o in offers:
                     if o.get('price'):
-                        parts.append('Price: ' + str(o['price']) + ' ' + str(o.get('priceCurrency', '')))
+                        try:
+                            _opv = float(str(o['price']).replace(',', ''))
+                        except Exception:
+                            _opv = 0.0
+                        # 0.00 = unsellable-placeholder offer; a "Price: 0.00" line
+                        # gets parsed back into price metadata downstream.
+                        if _opv > 0:
+                            parts.append('Price: ' + str(o['price']) + ' ' + str(o.get('priceCurrency', '')))
                     if o.get('availability'):
                         parts.append('Avail: ' + str(o['availability']).replace('http://schema.org/', ''))
                 if obj.get('brand') and isinstance(obj['brand'], dict):
@@ -104,7 +111,10 @@ def extract_page_text(html: str, page_url: str, docs_like: bool = False):
         import html as _html_mod
         ld_text, ld_product_name, ld_product_price = _jsonld_text(html)
         title_m = re.search(r'<title[^>]*>(.*?)</title>', html, re.DOTALL | re.I)
-        title_text = re.sub(r'<[^>]+>', '', title_m.group(1)).strip() if title_m else ''
+        # Unescape NOW: title_text feeds _prepare_crawl_page's title_hint and the
+        # chunker's "## {page_title}" headings, which run after the combined-text
+        # unescape and otherwise keep "&ndash;" forever.
+        title_text = _html_mod.unescape(re.sub(r'<[^>]+>', '', title_m.group(1)).strip()) if title_m else ''
         # og:title / JSON-LD Product.name are the storefront's own declaration of
         # the page name — authoritative over body-derived candidates (variant
         # pickers like "Single Piece Black" win shape heuristics; only an
