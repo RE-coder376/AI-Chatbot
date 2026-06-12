@@ -2889,7 +2889,10 @@ async def csrf_middleware(request: Request, call_next):
     """Enforce CSRF token on state-changing admin requests (POST/DELETE/PUT to /admin/*)."""
     if request.method in ("POST", "DELETE", "PUT") and request.url.path.startswith("/admin/"):
         # Exempt the CSRF token endpoint itself and ingest/file upload endpoints
-        exempt = {"/admin/csrf-token", "/admin/ingest/files", "/admin/sync-github", "/admin/databases/set-active", "/admin/databases/reload-active", "/admin/crawl", "/admin/crawl/cancel"}
+        # /admin/external-crawl-log: posted by the Modal crawl job container
+        # (no browser session, password-authenticated) — CSRF would 403 every
+        # forwarded log line and leave the admin crawl UI empty.
+        exempt = {"/admin/csrf-token", "/admin/ingest/files", "/admin/sync-github", "/admin/databases/set-active", "/admin/databases/reload-active", "/admin/crawl", "/admin/crawl/cancel", "/admin/external-crawl-log"}
         if request.url.path not in exempt:
             token = request.headers.get("X-CSRF-Token", "")
             if not token or token not in _csrf_tokens or time.time() > _csrf_tokens.get(token, 0):

@@ -36,8 +36,11 @@ image = (
         remote_path="/root/app",
         ignore=[
             ".git", "__pycache__", "databases", "*.zip", "*.log", "*.bin",
-            ".playwright-mcp", "evals", "*.sqlite3", "quiz_*.json",
-            "server_out.log", "server_err.log",
+            ".playwright-mcp", "evals/results", "evals/state", "*.sqlite3",
+            "quiz_*.json", "server_out.log", "server_err.log",
+            # NOTE: "evals" (bare) must NOT be ignored — evals/ is the eval
+            # CODE package (eval_v1.py, llm_judge.py); excluding it 500s
+            # every /admin/evals/* endpoint with "No module named 'evals'".
         ],
     )
 )
