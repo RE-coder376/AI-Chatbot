@@ -149,6 +149,16 @@ def crawl(db_name: str, url: str, max_pages: int = 0):
     ui_handler.setFormatter(logging.Formatter("[SERVER] %(message)s"))
     logging.getLogger().addHandler(ui_handler)
     logging.getLogger("app").addHandler(ui_handler)
+    # Modal captures stdout/stderr; default logging only emits WARNING+ to stderr,
+    # so INFO-level crawl progress was invisible in `modal app logs`. Attach a
+    # stdout StreamHandler at INFO so every page/progress line lands in Modal logs.
+    _stdout_handler = logging.StreamHandler(sys.stdout)
+    _stdout_handler.setLevel(logging.INFO)
+    _stdout_handler.setFormatter(logging.Formatter("[CRAWL] %(asctime)s %(message)s", "%H:%M:%S"))
+    _root = logging.getLogger()
+    _root.setLevel(logging.INFO)
+    _root.addHandler(_stdout_handler)
+    logging.getLogger("app").setLevel(logging.INFO)
     _post_main_ui_log(f"[MODAL-CRAWL] starting '{db_name}' from {url} (max_pages={max_pages})", running=True)
 
     async def _run():
