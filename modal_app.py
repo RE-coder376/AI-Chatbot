@@ -110,11 +110,8 @@ def crawl(db_name: str, url: str, max_pages: int = 0, clear: bool = False):
         def emit(self, record):
             try:
                 msg = self.format(record)
-                if not any(token in msg for token in (
-                    "[AUTO-CRAWL]", "[MODAL-CRAWL]", "[GATE]", "[CRAWL-GATE]",
-                    "Verification gate", "finished:", "failed", "ERROR", "WARNING",
-                )):
-                    return
+                # Forward the full crawl stream so the main app logs/admin panel
+                # behave like HF container logs, not just periodic summaries.
                 # De-dupe noisy repeated health/config lines without hiding progress.
                 key = msg[:240]
                 if key in self._posted and "progress:" not in msg:
@@ -204,3 +201,71 @@ def gate(db_name: str, crawl_url: str = ""):
     vol.commit()  # persist gate_report.json
     print("[GATE] verdict:\n" + _json.dumps(rep, indent=2, ensure_ascii=False)[:6000])
     return rep
+
+
+@app.function(
+    image=image,
+    cpu=1.0,
+    memory=2048,
+    timeout=600,
+    volumes={"/root/app/databases": vol},
+    secrets=SECRETS,
+)
+def scrub(db_name: str):
+    """In-place fix of EXISTING chunks without a recrawl — mirrors the two
+    crawler_utils chokepoint fixes for data already on the volume:
+      1) html.unescape() real HTML entities leaked into chunk documents
+         (page-title seed headings: "Terms of service &ndash; …").
+      2) repair product_title < 4 chars: promote canonical_product_title if it's
+         ≥4 chars, else drop both title keys ("Fun" fragment).
+    modal run modal_app.py::scrub --db-name tsc_pk
+    """
+    _enter_app_dir()
+    import sqlite3
+    import html as _html
+    from pipeline_check import _REAL_ENTITY_RE
+
+    path = "/root/app/databases/" + db_name + "/chroma.sqlite3"
+    con = sqlite3.connect(path)
+    c = con.cursor()
+
+    # 1) entity unescape in chunk documents (only rows holding a real entity ref)
+    c.execute("SELECT id, string_value FROM embedding_metadata "
+              "WHERE key='chroma:document' AND string_value LIKE '%&%'")
+    doc_fixes = 0
+    for _id, sv in c.fetchall():
+        if sv and _REAL_ENTITY_RE.search(sv):
+            new = _html.unescape(sv)
+            if new != sv:
+                c.execute("UPDATE embedding_metadata SET string_value=? "
+                          "WHERE id=? AND key='chroma:document'", (new, _id))
+                doc_fixes += 1
+
+    # 2) short product_title repair
+    c.execute("SELECT id, key, string_value FROM embedding_metadata "
+              "WHERE key IN ('product_title','canonical_product_title')")
+    rows: dict = {}
+    for _id, key, sv in c.fetchall():
+        rows.setdefault(_id, {})[key] = sv
+    title_fixes = 0
+    for _id, d in rows.items():
+        pt = str(d.get("product_title") or "").strip()
+        if pt and len(pt) < 4:
+            ct = str(d.get("canonical_product_title") or "").strip()
+            if len(ct) >= 4:
+                c.execute("UPDATE embedding_metadata SET string_value=? "
+                          "WHERE id=? AND key='product_title'", (ct, _id))
+            else:
+                c.execute("DELETE FROM embedding_metadata WHERE id=? "
+                          "AND key IN ('product_title','canonical_product_title')", (_id,))
+            title_fixes += 1
+
+    con.commit()
+    try:
+        c.execute("PRAGMA wal_checkpoint(TRUNCATE)")  # fold WAL into the main file
+    except Exception:
+        pass
+    con.close()
+    vol.commit()
+    print(f"[SCRUB] {db_name}: {doc_fixes} entity docs, {title_fixes} short titles fixed")
+    return {"entity_docs": doc_fixes, "short_titles": title_fixes}

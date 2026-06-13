@@ -1090,6 +1090,15 @@ def _smart_chunk_page(text: str, url: str, chunk_size: int = 400, chunk_step: in
     clean = re.sub(r'(?i)subtotal:?\s*(?:rs\.?|pkr|\$|£|€)\s*0(?:\.00)?\b', ' ', clean)
     docs = []
     page_meta = page_meta or {}
+    # page_meta["page_title"] is the raw <title> ("Terms of service &ndash;
+    # thestationerycompany.pk") — it seeds Mode-2c "## {heading}" lines and
+    # _base_meta, NEITHER of which flow through the raw_text unescape above. Decode
+    # a shallow copy here so seed headings never leak &ndash;/&amp;/&#39;.
+    if page_meta.get("page_title"):
+        try:
+            page_meta = {**page_meta, "page_title": _html_mod.unescape(str(page_meta["page_title"]))}
+        except Exception:
+            pass
     logger.info(f"[CHUNK-IN] {str(url)[:70]} text={len(text or '')} clean={len(clean)} pt={page_meta.get('page_type')}")
     _canon_source = _canonical_source_url(str((page_meta or {}).get("source_canonical") or url or ""))
     _base_meta = {"source": (_canon_source or url), "source_canonical": (_canon_source or str(url or ""))}
@@ -1163,6 +1172,18 @@ def _smart_chunk_page(text: str, url: str, chunk_size: int = 400, chunk_step: in
                         _m.pop("price", None)
                 except (TypeError, ValueError):
                     _m.pop("price", None)
+            # Universal short-title scrub: a <4-char product_title ("Fun", "Set")
+            # is brand/fragment leakage the gate rejects and that pollutes
+            # retrieval. Promote the canonical title if it's longer, else drop both
+            # title keys. Last chokepoint — catches every assignment path.
+            _pt = str(_m.get("product_title") or "").strip()
+            if _pt and len(_pt) < 4:
+                _ct = str(_m.get("canonical_product_title") or "").strip()
+                if len(_ct) >= 4:
+                    _m["product_title"] = _ct
+                else:
+                    _m.pop("product_title", None)
+                    _m.pop("canonical_product_title", None)
             _sample = str(getattr(_doc, "page_content", "") or "")
             _m["chunk_hash"] = hashlib.sha256(_sample.encode("utf-8", errors="ignore")).hexdigest()
             _doc.metadata = _m
