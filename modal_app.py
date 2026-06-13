@@ -87,9 +87,10 @@ def serve():
     volumes={"/root/app/databases": vol},
     secrets=SECRETS,
 )
-def crawl(db_name: str, url: str, max_pages: int = 0):
+def crawl(db_name: str, url: str, max_pages: int = 0, clear: bool = False):
     """Run a crawl as a standalone job (allowed here, unlike on HF):
     modal run modal_app.py::crawl --db-name tsc_pk --url https://thestationerycompany.pk
+    Pass --clear to wipe the collection first (full rebuild, purges stale chunks).
     """
     _enter_app_dir()
     import asyncio
@@ -162,7 +163,7 @@ def crawl(db_name: str, url: str, max_pages: int = 0):
     _post_main_ui_log(f"[MODAL-CRAWL] starting '{db_name}' from {url} (max_pages={max_pages})", running=True)
 
     async def _run():
-        n = await chatbot._auto_crawl_db(db_name, url, max_pages=max_pages)
+        n = await chatbot._auto_crawl_db(db_name, url, max_pages=max_pages, clear=clear)
         vol.commit()  # persist the new chunks to the volume
         return n
 

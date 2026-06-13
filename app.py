@@ -1588,9 +1588,11 @@ def _check_config_security():
     except Exception as e:
         logger.warning(f"Config security check failed: {e}")
 
-async def _auto_crawl_db(db_name: str, url: str, max_pages: int = 0) -> int:
+async def _auto_crawl_db(db_name: str, url: str, max_pages: int = 0, clear: bool = False) -> int:
     """Scheduled re-crawl — refreshes all sitemap pages (or BFS if no sitemap) for the DB.
-    max_pages=0 means unlimited (crawl entire sitemap)."""
+    max_pages=0 means unlimited (crawl entire sitemap).
+    clear=True wipes the collection first (full rebuild) — purges stale chunks that
+    per-source incremental delete misses (e.g. www/non-www source-string drift)."""
     # Same guard as /admin/crawl: no crawling from a hosted Space.
     if os.environ.get("SPACE_ID") and os.environ.get("ALLOW_SPACE_CRAWL") != "1":
         logger.warning(f"[AUTO-CRAWL] skipped for '{db_name}' — crawling disabled on hosted Space")
@@ -1632,6 +1634,21 @@ async def _auto_crawl_db(db_name: str, url: str, max_pages: int = 0) -> int:
             db = local_db
     if not db or not url:
         return 0
+
+    # Full-rebuild reset: drop every doc in the collection before crawling so stale
+    # chunks from prior crawls (different code, or www/non-www source drift that
+    # per-page delete-by-source can't reach) are purged. Reconcile only removes dead
+    # sources; a content fix on a still-live page needs this to fully take.
+    if clear:
+        try:
+            _all_ids = await asyncio.to_thread(lambda: db._collection.get(include=[])["ids"])
+            if _all_ids:
+                for _i in range(0, len(_all_ids), 5000):
+                    _batch = _all_ids[_i:_i + 5000]
+                    await asyncio.to_thread(lambda b=_batch: db._collection.delete(ids=b))
+            logger.info(f"[AUTO-CRAWL] clear=True: wiped {len(_all_ids)} chunks from '{db_name}' before rebuild")
+        except Exception as _clr_e:
+            logger.warning(f"[AUTO-CRAWL] clear failed for '{db_name}': {type(_clr_e).__name__}: {_clr_e}")
 
     # Per-DB docs path hints — same config-driven detection as the manual crawler.
     _ac_docs_hints = [str(h).lower() for h in ((get_config(db_name) or {}).get("docs_path_hints") or []) if str(h).strip()]
