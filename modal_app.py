@@ -167,3 +167,29 @@ def crawl(db_name: str, url: str, max_pages: int = 0):
         print(msg)
         _post_main_ui_log(msg, running=False, done=True, error=True)
         raise
+
+
+@app.function(
+    image=image,
+    cpu=1.0,
+    memory=4096,
+    timeout=1200,
+    volumes={"/root/app/databases": vol},
+    secrets=SECRETS,
+)
+def gate(db_name: str, crawl_url: str = ""):
+    """Run the post-crawl verification gate on demand against the volume data:
+    modal run modal_app.py::gate --db-name tsc_pk
+    Writes databases/<db>/gate_report.json (served at /admin/gate-report).
+    """
+    _enter_app_dir()
+    import json as _json
+    from crawl_gate import run_gate_for_db
+
+    db_dir = "/root/app/databases/" + db_name
+    web_base = os.environ.get("MODAL_WEB_BASE_URL", "https://re-coder376--ai-chatbot-serve.modal.run").rstrip("/")
+    password = os.environ.get("ADMIN_PASSWORD", "")
+    rep = run_gate_for_db(db_name, db_dir, crawl_url, quiz_base=web_base, password=password)
+    vol.commit()  # persist gate_report.json
+    print("[GATE] verdict:\n" + _json.dumps(rep, indent=2, ensure_ascii=False)[:6000])
+    return rep

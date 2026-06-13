@@ -8092,6 +8092,7 @@ def _delete_faq_from_db(faq_id: str, db_name: str = ""):
 @app.get("/admin/faqs")
 async def get_faqs(request: Request, password: str = ""):
     password = _extract_password(request, password)
+    db_name = _extract_admin_db(request)
     try:
         require_owner_auth(password)
     except HTTPException:

@@ -53,6 +53,7 @@ def load_chunks(sqlite_path: str) -> list[dict]:
 # ── layer 1: invariants ──────────────────────────────────────────────────────
 def layer1(chunks: list[dict]) -> dict:
     junk: dict = {}
+    junk_samples: dict = {}
     bad_titles, nonpos = [], []
     unprintable = 0
     for ch in chunks:
@@ -62,8 +63,17 @@ def layer1(chunks: list[dict]) -> dict:
         if printable / max(1, len(head)) < 0.95:
             unprintable += 1
         for pat, label in JUNK_PATTERNS:
-            if pat.search(body):
+            mm = pat.search(body)
+            if mm:
                 junk[label] = junk.get(label, 0) + 1
+                if len(junk_samples.get(label, [])) < 4:
+                    s = max(0, mm.start() - 40)
+                    junk_samples.setdefault(label, []).append({
+                        "snip": body[s:mm.end() + 40].replace("\n", " "),
+                        "kind": ch.get("chunk_kind"), "source": ch.get("source"),
+                        "url": ch.get("url") or ch.get("source_url"),
+                        "head": body[:120].replace("\n", " "),
+                    })
                 break
         t = str(ch.get("product_title") or "")
         if t:
@@ -78,15 +88,16 @@ def layer1(chunks: list[dict]) -> dict:
         if pv is not None:
             try:
                 if float(pv) <= 0:
-                    nonpos.append((t[:40], pv))
+                    nonpos.append((t[:40], pv, ch.get("chunk_kind"), str(ch.get("source"))[-60:], body[:90].replace("\n", " ")))
             except (TypeError, ValueError):
-                nonpos.append((t[:40], pv))
+                nonpos.append((t[:40], pv, ch.get("chunk_kind"), str(ch.get("source"))[-60:], body[:90].replace("\n", " ")))
     prod = [ch for ch in chunks if str(ch.get("chunk_kind") or "") == "product"]
     priced = sum(1 for ch in prod if ch.get("price") is not None)
     return {
         "chunks": len(chunks), "product_chunks": len(prod),
         "price_coverage": round(priced / len(prod), 3) if prod else None,
-        "junk": junk, "bad_titles": bad_titles[:20], "bad_title_count": len(bad_titles),
+        "junk": junk, "junk_samples": junk_samples,
+        "bad_titles": bad_titles[:20], "bad_title_count": len(bad_titles),
         "nonpositive_prices": nonpos[:10], "nonpositive_count": len(nonpos),
         "unprintable_chunks": unprintable,
     }

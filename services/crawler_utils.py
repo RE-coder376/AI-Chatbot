@@ -6,6 +6,7 @@ No shared mutable app state. Safe to import from anywhere.
 from __future__ import annotations
 
 import hashlib
+import html as _html_mod
 import json
 import logging
 import re
@@ -1074,7 +1075,11 @@ def _smart_chunk_page(text: str, url: str, chunk_size: int = 400, chunk_step: in
     """
     # Important: preserve newline structure for list-ish pages (outcomes, policies, release notes, etc.).
     # _clean_text() is intentionally aggressive and tends to flatten whitespace, which destroys bullet boundaries.
-    raw_text = (text or "")
+    # Markdown "## {title}" headings arrive entity-encoded ("Set Of 8 Pcs &ndash;
+    # thestationerycompany.pk") from raw <title>/H-tag extraction — they become the
+    # chunker's heading lines (Mode 2b) and leak "&ndash;/&amp;/&#39;" into chunk
+    # bodies. Decode at the chunker entry so every downstream heading/body is clean.
+    raw_text = _html_mod.unescape(text or "")
     raw_text = raw_text.replace("\r\n", "\n").replace("\r", "\n")
     raw_text = re.sub(r"[ \t]+", " ", raw_text)
     raw_text = re.sub(r"\n{3,}", "\n\n", raw_text)
@@ -1148,6 +1153,16 @@ def _smart_chunk_page(text: str, url: str, chunk_size: int = 400, chunk_step: in
                     _m["chunk_kind"] = "list"
                 else:
                     _m["chunk_kind"] = "generic"
+            # Universal non-positive-price scrub: storefronts declare 0.00 for
+            # unsellable placeholder listings (e.g. Jmary MT-33 Vlogging Kit). A
+            # price=0 key poisons cheapest/bounds ranking, so drop it regardless of
+            # which path set it. Last chokepoint before docs are returned.
+            if "price" in _m:
+                try:
+                    if float(_m["price"]) <= 0:
+                        _m.pop("price", None)
+                except (TypeError, ValueError):
+                    _m.pop("price", None)
             _sample = str(getattr(_doc, "page_content", "") or "")
             _m["chunk_hash"] = hashlib.sha256(_sample.encode("utf-8", errors="ignore")).hexdigest()
             _doc.metadata = _m
@@ -1280,7 +1295,10 @@ def _smart_chunk_page(text: str, url: str, chunk_size: int = 400, chunk_step: in
             # splitter capture a price fragment as the card name — never a title.
             if re.match(r'(?i)^(?:rs\.?|pkr|[\$£€])\s*[\d.,]*$', name):
                 continue
-            if not name or len(name) < 3:
+            # A bare ≤3-char single word ("Fun" from "WinFun…", "Set") is brand/
+            # fragment leakage, never a full card title — and the gate rejects any
+            # product_title < 4 chars. Align the splitter with that invariant.
+            if not name or len(name.strip()) < 4:
                 continue
             # Sentence fragments masquerading as cards ("Fun, mini fish-shaped
             # erasers for kids…"): a single-word name whose specs continue in
