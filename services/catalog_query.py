@@ -263,7 +263,10 @@ def answer_catalog_query(q: str, db, cfg: dict | None = None, max_list: int = 12
                 continue
             if excl and excl.search(r.title):
                 continue
-            if spec.in_stock and r.availability != "available":
+            # Only exclude clearly out-of-stock rows. Availability strings vary by
+            # source ("available", "in stock", ""), so treat anything not explicitly
+            # out-of-stock as in stock rather than demanding an exact "available".
+            if spec.in_stock and re.search(r"out\s+of\s+stock|sold\s+out|unavailable|not\s+available", r.availability):
                 continue
             sel.append(r)
         # Price bounds apply to every aggregation when present (count of X under Y,
