@@ -934,6 +934,7 @@
           running: false,
           token: Number(window._crawlPollState?.token || 0),
         };
+      if (window._crawlReconnectInterval) { clearInterval(window._crawlReconnectInterval); window._crawlReconnectInterval = null; }
         _pollCrawlStatus(db_name, pass, logsEl, statusEl);
       }
     } catch (_) {}
@@ -1090,6 +1091,7 @@
       loadEmbedCode();
       loadCharts();
       updateHealthStatus();
+      startDetachedCrawlReconnectLoop(db, pass);
       if (window._healthInterval) clearInterval(window._healthInterval);
       // Poll only while the tab is actually visible — on scale-to-zero
       // hosting an idle background tab would keep the container billed.
@@ -2266,6 +2268,53 @@
     const patterns = checked.map(c => c.dataset.pattern);
     document.getElementById('smart-inspect-panel').style.display = 'none';
     await fullCrawl(patterns);
+  }
+
+  function startDetachedCrawlReconnectLoop(db_name, pass) {
+    if (!db_name || !pass) return;
+    if (window._crawlReconnectInterval) clearInterval(window._crawlReconnectInterval);
+    const tryReconnect = () => {
+      if (document.hidden) return;
+      if (window._crawlPollState?.running && window._crawlPollState?.db_name === db_name) {
+        clearInterval(window._crawlReconnectInterval);
+        window._crawlReconnectInterval = null;
+        return;
+      }
+      resumeDetachedCrawlPolling(db_name, pass);
+    };
+    setTimeout(tryReconnect, 500);
+    window._crawlReconnectInterval = setInterval(tryReconnect, 5000);
+  }
+
+  async function resumeDetachedCrawlPolling(db_name, pass) {
+    if (!db_name || !pass) return;
+    if (window._crawlPollState?.running && window._crawlPollState?.db_name === db_name) return;
+    try {
+      const r = await fetch(`${API}/admin/crawl-status?db_name=${encodeURIComponent(db_name)}&password=${encodeURIComponent(pass)}&offset=0`);
+      if (!r.ok) return;
+      const data = await r.json();
+      if (!data.running || data.done) return;
+      const statusEl = document.getElementById('crawl-status');
+      if (!statusEl) return;
+      statusEl.innerHTML = '<div style="margin-bottom:10px;display:flex;align-items:center;gap:10px;">Reconnected to running crawl... <button onclick="cancelActiveCrawl()" style="background:#dc2626;color:#fff;border:none;padding:3px 10px;border-radius:8px;font-size:11px;cursor:pointer;">Stop</button></div><div id="crawl-logs" style="font-family:monospace; font-size:10px; background:#1e293b; color:#86efac; padding:12px; border-radius:12px; max-height:200px; overflow-y:auto; line-height:1.4;"></div>';
+      const logsEl = document.getElementById('crawl-logs');
+      for (const msg of (data.logs || [])) {
+        const log = document.createElement('div');
+        log.textContent = `> ${msg}`;
+        logsEl.appendChild(log);
+      }
+      logsEl.scrollTop = logsEl.scrollHeight;
+      window._activeCrawlDb = db_name;
+      window._activeCrawlPass = pass;
+      window._crawlPollState = {
+        db_name,
+        pass,
+        offset: Number(data.total || 0),
+        running: false,
+        token: Number(window._crawlPollState?.token || 0),
+      };
+      _pollCrawlStatus(db_name, pass, logsEl, statusEl);
+    } catch (_) {}
   }
 
   async function fullCrawl(urlPatterns = []) {

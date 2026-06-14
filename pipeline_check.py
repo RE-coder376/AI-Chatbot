@@ -10,10 +10,19 @@ Usage:  python pipeline_check.py            # full battery
         python pipeline_check.py <url>      # single page, verbose dump
 """
 
+import html.entities as _he
 import re
 import sys
 
 import requests
+
+# Only genuine HTML entities count as junk. Source text like "blue&yellow;pink"
+# (a literal description) matched the old `&[a-z]+;` and FAILED the gate forever,
+# since html.unescape leaves non-entities untouched. Build the matcher from the
+# canonical HTML5 set so it catches real un-decoded refs (&ndash; &amp; &#39;)
+# without false-positiving on arbitrary `&word;` substrings.
+_ENTITY_NAMES = sorted({k[:-1] for k in _he.html5 if k.endswith(";")}, key=len, reverse=True)
+_REAL_ENTITY_RE = re.compile(r"&(?:" + "|".join(map(re.escape, _ENTITY_NAMES)) + r"|#\d+|#x[0-9a-fA-F]+);")
 
 sys.path.insert(0, ".")
 from services.page_extract import extract_page_text  # noqa: E402
@@ -71,7 +80,7 @@ JUNK_PATTERNS = [
     (re.compile(r'(?i)toggle navigation'), "nav boilerplate"),
     (re.compile(r'(?i)your cart is currently empty'), "cart widget"),
     (re.compile(r'(?i)subtotal:?\s*(?:rs\.?|pkr|\$|£|€)\s*0(?:\.00)?\b'), "zero subtotal"),
-    (re.compile(r'&[a-z]+;|&#\d+;'), "HTML entity"),
+    (_REAL_ENTITY_RE, "HTML entity"),
     (re.compile(r'Â£'), "mojibake"),
 ]
 TITLE_BAD = [

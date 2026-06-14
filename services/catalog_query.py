@@ -57,6 +57,7 @@ class Row:
     availability: str
     source: str
     hay: str  # lowercased title + categories + body head, for anchor matching
+    currency: str = "Rs."  # detected per-row; engine output stays currency-agnostic
 
 
 @dataclass
@@ -179,18 +180,35 @@ def load_rows(db, limit: int = 12000) -> list[Row]:
         src_l = src.lower()
         kind = str(meta.get("chunk_kind") or "").lower()
         ctype = str(meta.get("content_type") or "").lower()
+        # Structured-shape signal: a positive `price` meta + a product title carrier
+        # (name/title meta or a "Product:" line). Catches per-product chunks tagged
+        # with a category/listing URL and no chunk_kind (webscraper.io-style ingests)
+        # that the URL/kind tests miss. Listing/nav chunks lack a single price meta.
+        try:
+            _has_price_meta = meta.get("price") is not None and float(meta.get("price")) > 0
+        except (TypeError, ValueError):
+            _has_price_meta = False
+        _has_title_meta = any(str(meta.get(k) or "").strip() for k in ("name", "product_title", "canonical_product_title"))
+        _has_prod_line = bool(re.search(r"(?im)^product:\s*\S", doc))
         is_prod = (
             bool(re.search(r"/(?:products?|items?)(?:/|$|#)", src_l))
             or (kind == "product" and ctype == "product" and "/collections/" not in src_l)
+            or (_has_price_meta and (_has_title_meta or _has_prod_line) and "/collections/" not in src_l)
         )
         if not is_prod:
             continue
         title = ""
-        for k in ("canonical_product_title", "product_title", "page_title"):
+        # `name` (webscraper.io-style) and a leading "Product:" doc line are the
+        # universal title carriers when a crawl/ingest didn't set *_product_title.
+        for k in ("canonical_product_title", "product_title", "page_title", "name"):
             t = str(meta.get(k) or "").strip()
             if t:
                 title = re.sub(r"\s+", " ", t).strip(" -:|")
                 break
+        if not title:
+            m = re.search(r"(?im)^product:\s*([^\n]{3,120})", doc)
+            if m:
+                title = re.sub(r"\s+", " ", m.group(1)).strip(" -:|")
         if not title or len(title) < 4:
             continue
         tl = title.lower()
@@ -214,6 +232,13 @@ def load_rows(db, limit: int = 12000) -> list[Row]:
             if m:
                 v = _num(m.group(1))
                 price = v if (v and v > 0) else None
+        # Currency follows the data, not a hardcoded "Rs." — read the symbol off the
+        # labeled Price: line (then any body symbol) so $/£/€ stores render correctly.
+        cur = "Rs."
+        cm = re.search(r"(?im)^price:\s*(Rs\.?|PKR|[\$£€])", doc) or re.search(r"([\$£€])\s*[\d]", doc)
+        if cm:
+            sym = cm.group(1)
+            cur = sym if sym in ("$", "£", "€") else "Rs."
         avail = str(meta.get("availability") or "").strip().lower()
         if not avail:
             avail = "out of stock" if re.search(r"(?i)\b(out of stock|sold out|currently unavailable)\b", doc) else "available"
@@ -221,7 +246,7 @@ def load_rows(db, limit: int = 12000) -> list[Row]:
         # description. A prose mention ("pairs well with our sharpener") must not
         # count an unrelated product into the "sharpener" category.
         hay = " ".join([tl, str(meta.get("categories") or "").lower()])
-        rows.append(Row(title, price, avail, src, hay))
+        rows.append(Row(title, price, avail, src, hay, cur))
     return rows
 
 
@@ -238,8 +263,58 @@ def _dedup(xs):
     return list(dict.fromkeys(x for x in xs if x))
 
 
-def _price_s(p: float) -> str:
-    return f"Rs.{p:,.0f}" if float(p).is_integer() else f"Rs.{p:,.2f}"
+def _price_s(p: float, cur: str = "Rs.") -> str:
+    body = f"{p:,.0f}" if float(p).is_integer() else f"{p:,.2f}"
+    return f"{cur}{body}"
+
+
+# DB-type gate thresholds — a product catalog is a corpus where product rows are a
+# MEANINGFUL SHARE of the chunks, not a handful of accidental matches inside a docs
+# corpus. A docs/RAG DB (e.g. agentfactory: 7.5k doc chunks) must never trip the
+# catalog engine just because a lesson contains a "$9" example or a chapter-ingest
+# mislabeled sections as products.
+_MIN_CATALOG_ROWS = 5        # absolute floor of distinct product rows
+_MIN_CATALOG_FRAC = 0.10     # product rows must be >=10% of all chunks
+_DOCS_DBTYPES = {"docs", "documentation", "document", "text", "knowledge", "kb",
+                 "rag", "article", "articles", "blog", "wiki", "manual", "guide"}
+_PRODUCT_DBTYPES = {"product", "products", "catalog", "catalogue", "store", "shop",
+                    "ecommerce", "e-commerce", "retail", "inventory"}
+
+
+def is_catalog_db(db, rows: list, cfg: dict | None = None) -> bool:
+    """Is this DB a product catalog (a TABLE of priced items) or a text/docs corpus?
+
+    The catalog engine only owns the former. Order of authority: explicit config
+    flag → docs/product type keyword → docs_path_hints (a docs-site marker) →
+    corpus-share heuristic. Returning False sends the question to ordinary RAG/LLM.
+    """
+    cfg = cfg or {}
+    flag = cfg.get("is_product_db")
+    if flag is None:
+        flag = cfg.get("product_db")
+    if flag is True:
+        return True
+    if flag is False:
+        return False
+    db_type = str(cfg.get("db_type") or cfg.get("mode") or cfg.get("catalog_mode") or "").lower().strip()
+    if db_type in _DOCS_DBTYPES:
+        return False
+    if db_type in _PRODUCT_DBTYPES:
+        return True
+    # A configured docs-site (per-language doc paths) is a documentation corpus.
+    if cfg.get("docs_path_hints"):
+        return False
+    # Heuristic: product rows must be both numerous AND a real share of the corpus.
+    n = len(rows)
+    if n < _MIN_CATALOG_ROWS:
+        return False
+    try:
+        total = int(db._collection.count() or 0)
+    except Exception:
+        total = 0
+    if total > 0 and (n / total) < _MIN_CATALOG_FRAC:
+        return False
+    return True
 
 
 def answer_catalog_query(q: str, db, cfg: dict | None = None, max_list: int = 12) -> tuple[str | None, list[str]]:
@@ -254,6 +329,10 @@ def answer_catalog_query(q: str, db, cfg: dict | None = None, max_list: int = 12
             return None, []
         rows = load_rows(db)
         if not rows:
+            return None, []
+        # DB-type gate: only a real product catalog gets the structured engine; a
+        # text/docs corpus (with stray priced rows) falls through to RAG/LLM.
+        if not is_catalog_db(db, rows, cfg):
             return None, []
         excl = _excl_re(cfg, spec.anchors)
 
@@ -307,7 +386,7 @@ def answer_catalog_query(q: str, db, cfg: dict | None = None, max_list: int = 12
         items = priced[:n_show]
         lines = ["Here are matching products from the catalog:"]
         for i, r in enumerate(items, 1):
-            lines.append(f"{i}. {r.title} - {_price_s(r.price)} - {r.availability}")
+            lines.append(f"{i}. {r.title} - {_price_s(r.price, r.currency)} - {r.availability}")
         return "\n".join(lines), _dedup(r.source for r in items)[:max_list]
     except Exception:
         return None, []
