@@ -558,6 +558,7 @@ def _visitor_dir(db_name: str = "") -> Path:
 local_db = None
 embeddings_model = None
 legacy_embeddings = None
+multilingual_embeddings = None  # FastEmbed paraphrase-multilingual-MiniLM-L12-v2, lazy-loaded for multilingual DBs
 import random
 
 _status = "starting"
@@ -1274,6 +1275,14 @@ ANSWER TIER FRAMEWORK — EXECUTE THIS DECISION LOGIC BEFORE EVERY RESPONSE:
    Is there something about {topics} I can help you with?"
    This rule overrides ALL other instructions. You are NOT a general assistant.
    NEVER output the out-of-scope answer alongside or after the redirect. Output ONLY the redirect message.
+11. NO ACRONYM GUESSING — HARD RULE: NEVER invent or expand an acronym, initialism, or abbreviation
+    unless its expansion appears verbatim in the Knowledge Base context. If the expansion is not in
+    context, say "I don't have the full form of [acronym] in my knowledge base" — never guess
+    (e.g. do NOT turn "MCP" into a made-up phrase).
+12. ENUMERATE WHEN ASKED — If the user asks for a list, set, or count of named items
+    (e.g. "the seven X", "which domains", "list all Y") and those items appear in the context,
+    list EVERY one as a numbered list. Do NOT decline, summarize, or say you can't list them
+    when the items are present in context.
 {_product_catalog_section}"""
 
 def detect_language(text: str) -> str:
@@ -1532,7 +1541,7 @@ async def _get_intro_questions(db_name: str, db, cfg) -> list:
 
 def _load_db_now():
     """Load embeddings model + ChromaDB. Called lazily on first chat request."""
-    global local_db, embeddings_model, _status
+    global local_db, embeddings_model, multilingual_embeddings, _status
     if _status == "loading":
         return  # already loading in another thread
     _status = "loading"
@@ -1558,8 +1567,19 @@ def _load_db_now():
         if embeddings_model is None:
             logger.info("📡 Loading FastEmbed engine (BAAI/bge-small-en-v1.5, onnxruntime)...")
             embeddings_model = FastEmbedEmbeddings(model_name="BAAI/bge-small-en-v1.5")
+        # Honor the per-DB embedding model — the active DB must query with the SAME model it was
+        # indexed with. agentfactory is indexed with multilingual MiniLM; bge is also 384-dim so a
+        # mismatch is silent but tanks retrieval (P1). Was previously always bge for the active DB.
+        if db_cfg.get("embedding_model") == "multilingual":
+            if multilingual_embeddings is None:
+                logger.info("📡 Loading FastEmbed multilingual (paraphrase-multilingual-MiniLM-L12-v2)...")
+                multilingual_embeddings = FastEmbedEmbeddings(
+                    model_name="sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2")
+            _active_emb = multilingual_embeddings
+        else:
+            _active_emb = embeddings_model
         tmp_dir = _ensure_tmp_chroma(active, db_path)
-        local_db = Chroma(persist_directory=str(tmp_dir), embedding_function=embeddings_model)
+        local_db = Chroma(persist_directory=str(tmp_dir), embedding_function=_active_emb)
         local_db._db_name = active  # stored for BM25 lookup (path may have timestamps)
         gc.collect()  # return freed memory to OS after heavy load
         _status = "ready"
@@ -3178,7 +3198,25 @@ def _context_addresses_query(context: str, q: str) -> bool:
         hit_count = sum(1 for kw in list(keywords)[:12] if kw in context_lower)
         if hit_count >= 1:
             return True
-    
+
+    return False
+
+
+def _oos_override_ok(context: str, q: str) -> bool:
+    """Stricter than _context_addresses_query — used ONLY to decide whether to override a
+    pre-retrieval OOS redirect (math/trivia/"calculate X"/"definition of X"). A query flagged
+    out-of-scope is let through only when a PHRASE from the question (two adjacent content words,
+    stopwords ignored) appears verbatim in the KB context. Single-keyword overlap is not enough —
+    "capital" and "france" both appear in finance docs, but "capital france" never co-occurs,
+    whereas "credit loss" / "expected credit" from a real IFRS question does. Universal."""
+    if not context or len(context.strip()) < 40:
+        return False
+    cl = context.lower()
+    content = [w for w in (re.sub(r"[^a-z0-9 ]", " ", (q or "").lower())).split()
+               if w not in _QUERY_STOP and len(w) > 3]
+    for i in range(len(content) - 1):
+        if re.search(re.escape(content[i]) + r"\W+" + re.escape(content[i + 1]), cl):
+            return True
     return False
 
 
@@ -3751,6 +3789,49 @@ async def _comparative_retrieve(q: str, db) -> tuple:
     return merged, len(merged.split()), list(dict.fromkeys(src_a + src_b))[:5]
 
 
+# Universal scope-decline phrasings the SCOPE GUARD / IDENTITY rules emit. Used to detect when
+# the LLM redirected instead of answering. Substring match, lowercased.
+_SCOPE_DECLINE_SIGS = (
+    "i specialize in helping with", "for other topics, i'd suggest", "general search engine",
+    "outside that scope", "outside my scope", "i'm here to help with", "here to help with",
+    "the assistant for", "my identity can only be changed",
+)
+
+
+async def _regenerate_grounded(q: str, context: str, cfg: dict) -> str:
+    """Universal scope/IDK rescue (any docs/RAG DB): re-ask the LLM with a minimal grounded-QA
+    prompt that has NO scope guard. Used only when the main prompt over-refused a question the
+    retrieved KB context actually answers. Returns "" on failure or if it still refuses."""
+    if not context or not any_key_ready():
+        return ""
+    bot_name = cfg.get("bot_name", "Assistant") if cfg else "Assistant"
+    biz_name = (cfg.get("business_name", "the company") if cfg else "the company")
+    sys = (
+        f"You are {bot_name}, the assistant for {biz_name}. The user's question has been verified as "
+        f"IN-SCOPE and answerable from the Knowledge Base below. Answer it directly and specifically "
+        f"using ONLY this context. Do NOT redirect, do NOT mention scope/specialization, do NOT say it is "
+        f"outside your scope. If a specific detail is genuinely absent from the context, say so in one "
+        f"short sentence.\n\nKNOWLEDGE BASE:\n{context[:12000]}"
+    )
+    msgs = [SystemMessage(content=sys), HumanMessage(content=q)]
+    for _ in range(3):
+        llm = get_fresh_llm()
+        if not llm:
+            return ""
+        buf = []
+        try:
+            async with asyncio.timeout(12):
+                async for ch in llm.astream(msgs):
+                    buf.append(ch.content)
+            out = "".join(buf).strip()
+            return out if (out and not any(s in out.lower() for s in _SCOPE_DECLINE_SIGS)) else ""
+        except (TimeoutError, asyncio.TimeoutError):
+            continue
+        except Exception:
+            continue
+    return ""
+
+
 async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "", page_url: str = "", page_title: str = "", request: Request = None, cfg: dict = None, tenant_db=None, db_name: str = "", include_debug_artifacts: bool = False) -> AsyncGenerator[str, None]:
     # SSE comment — keeps HF Space proxy alive during retrieval (proxy closes idle connections)
     workflow_trace = {"events": []}
@@ -3789,6 +3870,12 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
     _early_entity_task = asyncio.create_task(_extract_search_entity(q))
     _early_expansion_task = asyncio.create_task(async_intent_aware_expansion(q))
 
+    # Deferred pre-retrieval scope redirect: off_topic/general_oos regexes also match legit in-KB
+    # questions ("calculate ECL", "define MCP", a docs page explaining a "for loop"). Instead of a
+    # hard early return, we stash the redirect and resolve it AFTER retrieval — only firing it when
+    # the KB context does not address the query. Universal across docs/RAG DBs.
+    _deferred_scope_redirect = ""
+
     # ── Off-topic guard — code-level, fires before retrieval ─────────────────
     _OFF_TOPIC_RE = re.compile(
         r'\bcapital\s+(?:city\s+)?of\s+\w+\b'
@@ -3801,17 +3888,12 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
         re.IGNORECASE
     )
     if _OFF_TOPIC_RE.search(q):
-        _trace_event(workflow_trace, "guard_exit", guard="off_topic_pre_retrieval")
+        _trace_event(workflow_trace, "guard_defer", guard="off_topic_pre_retrieval")
         business = cfg.get("business_name", "the company")
         topics   = _topics_phrase(cfg, "our products and services")
-        reply = (f"I specialize in {topics} for {business}. "
+        _deferred_scope_redirect = (f"I specialize in {topics} for {business}. "
                  f"For other topics, I'd suggest a general search engine. "
                  f"Is there something about {topics} I can help you with?")
-        if visitor_id: _run_in_bg(save_visitor_turn, visitor_id, "assistant", reply, db_name)
-        yield f"data: {json.dumps({'type': 'chunk', 'content': reply})}\n\n"
-        yield f"data: {json.dumps(_metadata_payload(False, []))}\n\n"
-        yield "data: {\"type\": \"done\"}\n\n"
-        return
 
     # ── Translation request — decline immediately (no LLM call) ──────────────
     # ── Prompt injection / system prompt reveal guard ────────────────────────
@@ -3912,18 +3994,13 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
         re.IGNORECASE
     )
     if _OOS_RE.search(q) and not _PRODUCT_Q_RE.search(q):
-        _trace_event(workflow_trace, "guard_exit", guard="general_oos")
+        _trace_event(workflow_trace, "guard_defer", guard="general_oos")
         bot_name = cfg.get("bot_name", "Assistant")
         business = cfg.get("business_name", "the company")
         topics   = _topics_phrase(cfg, "our products and services")
-        reply = (f"I specialize in helping with {topics} for {business}. "
+        _deferred_scope_redirect = (f"I specialize in helping with {topics} for {business}. "
                  f"For other topics, I'd suggest a general search engine. "
                  f"Is there something about {topics} I can help you with?")
-        if visitor_id: _run_in_bg(save_visitor_turn, visitor_id, "assistant", reply, db_name)
-        yield f"data: {json.dumps({'type': 'chunk', 'content': reply})}\n\n"
-        yield f"data: {json.dumps({'type': 'metadata', 'capture_lead': False, 'sources': [], 'workflow_trace': workflow_trace})}\n\n"
-        yield "data: {\"type\": \"done\"}\n\n"
-        return
 
     # ── Greeting — no retrieval needed ───────────────────────────────────────
     if intent == "greeting":
@@ -4079,6 +4156,18 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
         context, doc_count, sources = await retrieve_context(q, None, expansion_task=_early_expansion_task, history=history)
         _trace_event(workflow_trace, "retrieval_path", path="api_only")
     _trace_event(workflow_trace, "retrieval_result", doc_count=doc_count, source_count=len(sources or []), context_chars=len(context or ""))
+    # Resolve a deferred pre-retrieval scope redirect: fire it ONLY if the KB context does not
+    # address the query. Lets in-domain "calculate/define X" questions through on any docs DB,
+    # while still blocking genuine trivia (whose retrieved context is irrelevant).
+    if _deferred_scope_redirect:
+        if not _oos_override_ok(context or "", q):
+            _trace_event(workflow_trace, "guard_exit", guard="deferred_scope_redirect")
+            if visitor_id: _run_in_bg(save_visitor_turn, visitor_id, "assistant", _deferred_scope_redirect, db_name)
+            yield f"data: {json.dumps({'type': 'chunk', 'content': _deferred_scope_redirect})}\n\n"
+            yield f"data: {json.dumps(_metadata_payload(False, []))}\n\n"
+            yield "data: {\"type\": \"done\"}\n\n"
+            return
+        _trace_event(workflow_trace, "deferred_scope_redirect_overridden", reason="context_addresses_query")
     if _is_strict_scope_query(q):
         _trace_event(workflow_trace, "strict_sources_pre_filter", source_count=len(sources or []), sample=list((sources or [])[:5]))
         _pre_sources = list(sources or [])
@@ -4689,6 +4778,34 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
                 _trace_event(workflow_trace, 'validator_rewrite', reason='quote_first_extract')
                 _trace_decision(workflow_debug, 'quote_first_rewrite', True)
                 cleaned = _qf
+
+        # ── Universal scope/IDK rescue (any docs/RAG DB) ────────────────────────
+        # The main prompt's SCOPE GUARD / IDENTITY rules sometimes make the LLM redirect or punt a
+        # question that the retrieved KB context actually answers (specialized-but-in-KB topics —
+        # e.g. finance/banking/people). When the answer is a scope-decline (or a short early IDK)
+        # BUT the context addresses the query, regenerate once with a grounded, scope-free prompt.
+        # Gated by _context_addresses_query so genuinely out-of-scope questions are NOT rescued.
+        if context and not is_product_db:
+            _cl_pp = cleaned.lower()
+            _is_scope_decline = any(s in _cl_pp for s in _SCOPE_DECLINE_SIGS)
+            # Soft-refusals: the LLM has context but punts ("not explicitly listed in the provided
+            # context"). Fire the rescue at any length for these.
+            _soft_refusal = any(s in _cl_pp for s in (
+                "not explicitly listed", "not explicitly mentioned", "not explicitly stated",
+                "does not explicitly", "is not explicitly", "isn't explicitly",
+                "not provided in the context", "not in the provided context",
+                "context does not", "context doesn't", "not specified in the"))
+            _is_short_idk = (_soft_refusal or (len(cleaned) < 320 and any(
+                s in _cl_pp for s in ("don't have", "do not have", "no specific", "not in my",
+                                      "no information", "not have specific"))))
+            if (_is_scope_decline or _is_short_idk) and _context_addresses_query(context, q):
+                _resc = await _regenerate_grounded(q, context, cfg)
+                if _resc:
+                    _resc = _strip_source_leaks(_resc, kb_context=context)
+                    logger.info("[Validator] scope_idk_rescue → regenerated grounded answer")
+                    _trace_event(workflow_trace, "validator_rewrite", reason="scope_idk_rescue")
+                    _trace_decision(workflow_debug, "scope_rescue_triggered", True)
+                    cleaned = _resc
 
         if visitor_id: _run_in_bg(save_visitor_turn, visitor_id, "assistant", cleaned, db_name)
         yield f"data: {json.dumps({'type': 'chunk', 'content': cleaned})}\n\n"
@@ -5343,8 +5460,12 @@ async def chat(request: Request):
             re.IGNORECASE
         )
         _PRODUCT_Q_RE_NS = re.compile(r'\b(do you (sell|carry|have|offer)|is .* available)\b', re.IGNORECASE)
+        # DEFER: these words ("calculate", "definition of") also match legit in-KB questions on a
+        # docs DB (e.g. "calculate ECL under IFRS 9"). Resolve after retrieval — only redirect if the
+        # KB context does not address the query. Universal across docs/RAG DBs.
+        _deferred_oos_ns = ""
         if _OOS_RE_NS.search(q) and not _PRODUCT_Q_RE_NS.search(q):
-            return JSONResponse({"answer": f"I specialize in {_topics} for {_biz}. For other topics, I'd suggest a general search engine."})
+            _deferred_oos_ns = f"I specialize in {_topics} for {_biz}. For other topics, I'd suggest a general search engine."
 
         # Greeting (match streaming fast path)
         intent_ns = classify_intent(q)
@@ -5384,6 +5505,18 @@ async def chat(request: Request):
             _trace_event(workflow_trace, "retrieve_done", doc_count=int(doc_count or 0), ctx_chars=int(len(context or "")))
         except Exception:
             pass
+        # Resolve deferred OOS redirect: fire unless the KB context STRONGLY addresses the query.
+        if _deferred_oos_ns and (not _oos_override_ok(context or "", q)):
+            try:
+                _trace_event(workflow_trace, "guard_exit", guard="deferred_oos_ns")
+            except Exception:
+                pass
+            payload = {"answer": _deferred_oos_ns, "sources": []}
+            if debug_effective:
+                payload["debug"] = {"workflow_trace": workflow_trace,
+                                    "guard_decisions": workflow_debug["guard_decisions"],
+                                    "answer_artifacts": workflow_debug["answer_artifacts"]}
+            return JSONResponse(payload)
         if _is_strict_scope_query(q) and (not _context_addresses_query(context or "", q)):
             try:
                 _strict_live_ctx, _strict_live_src = await _live_site_strict_scope_probe(q, cfg, max_urls=8)
@@ -5908,6 +6041,29 @@ async def chat(request: Request):
                     _trace_event(workflow_trace, "llm_attempt_success", attempt=int(attempt + 1))
                 except Exception:
                     pass
+                # Universal scope/IDK rescue (parity with streaming path): if the answer is a
+                # scope-decline or a soft/short IDK but the KB context addresses the query,
+                # regenerate once with a grounded, scope-free prompt.
+                if context and (not _is_product_db_local):
+                    _cl_ns = str(_ans or "").lower()
+                    _dec_ns = any(s in _cl_ns for s in _SCOPE_DECLINE_SIGS)
+                    _soft_ns = any(s in _cl_ns for s in (
+                        "not explicitly listed", "not explicitly mentioned", "not explicitly stated",
+                        "does not explicitly", "is not explicitly", "isn't explicitly",
+                        "not provided in the context", "not in the provided context",
+                        "context does not", "context doesn't", "not specified in the"))
+                    _idk_ns = _soft_ns or (len(str(_ans or "")) < 320 and any(
+                        s in _cl_ns for s in ("don't have", "do not have", "no specific", "not in my",
+                                              "no information", "not have specific")))
+                    if (_dec_ns or _idk_ns) and _context_addresses_query(context, q):
+                        _resc_ns = await _regenerate_grounded(q, context, cfg)
+                        if _resc_ns:
+                            _ans = _strip_source_leaks(_resc_ns, kb_context=context)
+                            try:
+                                workflow_debug["guard_decisions"]["scope_rescue_used"] = True
+                                _trace_event(workflow_trace, "validator_rewrite", reason="scope_idk_rescue")
+                            except Exception:
+                                pass
                 payload = {
                     "answer": _ans,
                     "sources": (sources or [])[:5],

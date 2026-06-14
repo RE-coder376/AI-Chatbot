@@ -910,6 +910,25 @@ def _is_prompt_template_chunk(text: str) -> bool:
         return False
 
 
+_INTRO_HOOK_HINTS = (
+    'imagine ', 'welcome to', 'have you ever', "let's dive", 'lets dive',
+    'get ready', 'in this lesson', 'in this chapter', 'by the end of this',
+    "you'll learn how", 'we will explore', "we'll explore", 'picture this',
+)
+
+
+def _is_intro_hook_chunk(text: str) -> bool:
+    """Lesson marketing/intro-hook block: parrots the topic but rarely carries the
+    concrete mechanism/answer. Requires 2+ hook signals near the top to fire (P2)."""
+    try:
+        head = (text or "").lower()[:400]
+        if not head:
+            return False
+        return sum(1 for h in _INTRO_HOOK_HINTS if h in head) >= 2
+    except Exception:
+        return False
+
+
 def _has_explicit_outcomes_marker(text: str) -> bool:
     try:
         tl = (text or "").lower()
@@ -1378,6 +1397,11 @@ def _heuristic_rerank_score(doc, q: str, title_phrase: str) -> float:
         # are not the canonical "outcomes/policy/spec" sections users ask for.
         if _is_prompt_template_chunk(body):
             score -= 7.0
+
+        # Penalize lesson intro/marketing-hook chunks for specific/mechanism questions —
+        # they outrank the answer-bearing body chunk and the LLM parrots the intro (P2).
+        if (not _OUTCOMES_INTENT_RE.search(q or '')) and _is_intro_hook_chunk(body):
+            score -= 5.0
 
         # Reward explicit outcomes markers (kept separate from prompt templates).
         if _has_explicit_outcomes_marker(body) and not _is_prompt_template_chunk(body):

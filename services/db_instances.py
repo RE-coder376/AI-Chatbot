@@ -149,8 +149,22 @@ def _get_db_instance(db_name: str, refresh: bool = False):
                 logger.warning("[DB] sentence-transformers not installed, falling back to fastembed")
                 _app.legacy_embeddings = _app.embeddings_model
         emb = _app.legacy_embeddings
+    elif emb_setting == "multilingual":
+        # DBs indexed with paraphrase-multilingual-MiniLM-L12-v2 (384-dim, e.g. agentfactory).
+        # MUST query with the SAME model: bge-small is also 384-dim, so a mismatch raises no
+        # dim error — it silently tanks retrieval relevance (P1 root cause). Served via FastEmbed
+        # (onnxruntime, no torch) to keep the image lean — same weights as the indexing model.
+        if getattr(_app, "multilingual_embeddings", None) is None:
+            try:
+                from langchain_community.embeddings.fastembed import FastEmbedEmbeddings
+                _app.multilingual_embeddings = FastEmbedEmbeddings(
+                    model_name="sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2")
+            except Exception as e:
+                logger.warning(f"[DB] multilingual FastEmbed load failed ({e}); falling back to bge (mismatch)")
+                _app.multilingual_embeddings = _app.embeddings_model
+        emb = _app.multilingual_embeddings
     else:
-        # All other DBs (bge, multilingual, unset) — crawler always writes bge-small-en-v1.5 (384-dim)
+        # All other DBs (bge, unset) — crawler always writes bge-small-en-v1.5 (384-dim)
         # so we must query with the same model. bge-base-en-v1.5 is 768-dim and would mismatch.
         emb = _app.embeddings_model  # FastEmbed BAAI/bge-small-en-v1.5, 384-dim
     if src_dir is not None:

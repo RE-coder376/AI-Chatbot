@@ -29,6 +29,8 @@ image = (
     .pip_install_from_requirements("requirements.txt")
     .run_commands(
         "python -c \"from langchain_community.embeddings.fastembed import FastEmbedEmbeddings; FastEmbedEmbeddings(model_name='BAAI/bge-small-en-v1.5')\" || true",
+        # Prebake the multilingual model too — agentfactory queries with it (P1 fix); avoids a cold-start download.
+        "python -c \"from langchain_community.embeddings.fastembed import FastEmbedEmbeddings; FastEmbedEmbeddings(model_name='sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2')\" || true",
         "playwright install --with-deps chromium",
     )
     .add_local_dir(
