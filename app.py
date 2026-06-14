@@ -192,6 +192,7 @@ from services.audit import (
     audit_db_stats,
     audit_api_sources,
 )
+from services.catalog_query import answer_catalog_query as _answer_catalog_query
 
 # HF Spaces / containerised deploy: restore files from env vars if missing
 _keys_env = os.environ.get("KEYS_JSON", "")
@@ -234,6 +235,75 @@ def _add_documents_deterministic(db, docs) -> None:
     except TypeError:
         # Compatibility fallback for wrappers that don't expose ids kwarg.
         db.add_documents(docs)
+
+
+def catalog_reingest_products(db_name: str, url: str, clear_products: bool = True) -> dict:
+    """Deterministic product ingestion from the store's /products.json — replaces
+    product chunks with the COMPLETE, order-stable catalog so counts/coverage are
+    constant across re-ingests (BFS crawl-discovery captures a fluctuating subset).
+    Non-product pages (policies/FAQ/about) are untouched — add those via crawl."""
+    from services.catalog_api import build_catalog_docs
+    db = _get_db_instance(db_name)
+    if db is None:
+        return {"error": f"db '{db_name}' not loadable"}
+    docs = build_catalog_docs(url, canonicalize=_canonical_product_title)
+    if not docs:
+        return {"error": "no products from /products.json (not a Shopify store or blocked)"}
+    try:
+        docs = _sanitize_docs_for_chroma(docs)
+    except Exception as _se:
+        logger.warning(f"[CATALOG] sanitize failed: {_se}")
+    if clear_products:
+        for _w in ({"chunk_kind": "product"}, {"content_type": "product"}):
+            try:
+                db._collection.delete(where=_w)
+            except Exception as _de:
+                logger.warning(f"[CATALOG] product clear ({_w}) failed: {_de}")
+    _add_documents_deterministic(db, docs)
+    # _get_db_instance loads the DB into /dev/shm (tmpfs WAL fix); writes there are
+    # ephemeral. Checkpoint + copy back to the volume path so they survive (mirrors
+    # the crawl flow's copy-back) — without this vol.commit() persists nothing.
+    _shm = Path(f"/dev/shm/chroma_{db_name}")
+    _dst = DATABASES_DIR / db_name
+    try:
+        import sqlite3 as _sql
+        _sp = _shm / "chroma.sqlite3"
+        if _sp.exists():
+            _c = _sql.connect(str(_sp))
+            try:
+                _c.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            finally:
+                _c.close()
+    except Exception as _ce:
+        logger.warning(f"[CATALOG] checkpoint failed: {_ce}")
+    copied = False
+    if _shm.exists() and _dst.exists():
+        try:
+            for _itm in _shm.iterdir():
+                _d = _dst / _itm.name
+                if _itm.is_dir():
+                    if _d.exists():
+                        shutil.rmtree(str(_d))
+                    shutil.copytree(str(_itm), str(_d))
+                else:
+                    shutil.copy2(str(_itm), str(_d))
+            copied = True
+        except Exception as _cb:
+            logger.warning(f"[CATALOG] copy-back failed: {_cb}")
+    # Publish the refreshed zip to the GitHub DB repo. Without this the volume holds
+    # catalog data but the GitHub zip stays old, and serve's startup/tenant-load
+    # restore (_github_sync_download / _github_sync_download_one) re-downloads the
+    # stale zip OVER the volume — silently reverting every ingest (root cause of the
+    # "copied_back=True but live counts unchanged" bug).
+    published = False
+    if copied:
+        try:
+            _github_sync_upload(db_name)
+            published = True
+        except Exception as _pe:
+            logger.warning(f"[CATALOG] publish failed: {_pe}")
+    logger.info(f"[CATALOG] {db_name}: ingested {len(docs)} products from {url} (copied_back={copied}, published={published})")
+    return {"db": db_name, "products_ingested": len(docs), "copied_back": copied, "published": published}
 def _get_active_db() -> str:
     if ACTIVE_DB_FILE.exists():
         v = ACTIVE_DB_FILE.read_text(encoding="utf-8").strip()
@@ -1501,7 +1571,7 @@ def init_systems():
     DATABASES_DIR.mkdir(exist_ok=True)
     _status = "ready_no_db"
     # Auto-sync from GitHub in background if GITHUB_PAT is set (restores DBs after redeploy)
-    if os.environ.get("GITHUB_PAT"):
+    if os.environ.get("GITHUB_PAT") and os.environ.get("SKIP_STARTUP_GITHUB_RESTORE") != "1":
         logger.info("🔄 Auto-syncing databases from GitHub in background...")
         threading.Thread(target=_startup_sync, daemon=True).start()
     else:
@@ -4267,10 +4337,27 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
     is_product_db = _check_is_product_db(_local_db, db_name) or ("smart_search" in set(cfg.get("features", [])))
     _prod_det = None
     if is_product_db:
-        _prod_det, _prod_bounds_src = _deterministic_product_bounds_answer(q, _local_db)
-        if _prod_bounds_src:
-            sources = list(dict.fromkeys(_prod_bounds_src + (sources or [])))[:8]
-            _trace_decision(workflow_debug, "product_bounds_scan_used", True)
+        # Universal structured-catalog engine: one filter+aggregate path for count,
+        # existence/absence, cheapest/priciest, price-bounds and list. The
+        # per-shape bounds/count answerers below remain only as a fallback for data
+        # that lacks structured product metadata. See services/catalog_query.py.
+        _prod_det, _ucq_src = _answer_catalog_query(q, _local_db, cfg)
+        if _prod_det:
+            if _ucq_src:
+                sources = list(dict.fromkeys(_ucq_src + (sources or [])))[:8]
+            _trace_decision(workflow_debug, "catalog_query_used", True)
+        if not _prod_det:
+            _prod_det, _prod_bounds_src = _deterministic_product_bounds_answer(q, _local_db)
+            if _prod_bounds_src:
+                sources = list(dict.fromkeys(_prod_bounds_src + (sources or [])))[:8]
+                _trace_decision(workflow_debug, "product_bounds_scan_used", True)
+            if not _prod_det:
+                _cnt_ans, _cnt_src = _deterministic_count_answer(q, _local_db, cfg)
+                if _cnt_ans:
+                    _prod_det = _cnt_ans
+                    if _cnt_src:
+                        sources = list(dict.fromkeys(_cnt_src + (sources or [])))[:8]
+                    _trace_decision(workflow_debug, "count_answer_used", True)
     if not _prod_det:
         _prod_det = _deterministic_product_catalog_answer(q, context or "")
     if is_product_db and not _prod_det and str(cfg.get("crawl_url") or "").strip():
@@ -4370,10 +4457,16 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
 
     _prod_det = None
     if is_product_db:
-        _prod_det, _prod_bounds_src = _deterministic_product_bounds_answer(q, _local_db)
-        if _prod_bounds_src:
-            sources = list(dict.fromkeys(_prod_bounds_src + (sources or [])))[:8]
-            _trace_decision(workflow_debug, "product_bounds_scan_used", True)
+        _prod_det, _ucq_src = _answer_catalog_query(q, _local_db, cfg)
+        if _prod_det:
+            if _ucq_src:
+                sources = list(dict.fromkeys(_ucq_src + (sources or [])))[:8]
+            _trace_decision(workflow_debug, "catalog_query_used", True)
+        if not _prod_det:
+            _prod_det, _prod_bounds_src = _deterministic_product_bounds_answer(q, _local_db)
+            if _prod_bounds_src:
+                sources = list(dict.fromkeys(_prod_bounds_src + (sources or [])))[:8]
+                _trace_decision(workflow_debug, "product_bounds_scan_used", True)
     if not _prod_det:
         _prod_det = _deterministic_product_catalog_answer(q, context or "")
     if is_product_db and not _prod_det and str(cfg.get("crawl_url") or "").strip():
@@ -5613,12 +5706,25 @@ async def chat(request: Request):
         _is_product_db_local = _check_is_product_db(tenant_db_instance, tenant_db_name) or ("smart_search" in set(cfg.get("features", [])))
         _prod_det = None
         if _is_product_db_local and tenant_db_instance:
-            _prod_det, _prod_bounds_src = _deterministic_product_bounds_answer(q, tenant_db_instance)
-            if _prod_bounds_src:
-                sources = list(dict.fromkeys(_prod_bounds_src + (sources or [])))[:8]
-                workflow_debug["guard_decisions"]["product_bounds_scan_used"] = True
-                if debug_effective:
-                    workflow_debug["answer_artifacts"]["product_bounds_sources"] = _prod_bounds_src[:8]
+            _prod_det, _ucq_src = _answer_catalog_query(q, tenant_db_instance, cfg)
+            if _prod_det:
+                if _ucq_src:
+                    sources = list(dict.fromkeys(_ucq_src + (sources or [])))[:8]
+                workflow_debug["guard_decisions"]["catalog_query_used"] = True
+            if not _prod_det:
+                _prod_det, _prod_bounds_src = _deterministic_product_bounds_answer(q, tenant_db_instance)
+                if _prod_bounds_src:
+                    sources = list(dict.fromkeys(_prod_bounds_src + (sources or [])))[:8]
+                    workflow_debug["guard_decisions"]["product_bounds_scan_used"] = True
+                    if debug_effective:
+                        workflow_debug["answer_artifacts"]["product_bounds_sources"] = _prod_bounds_src[:8]
+                if not _prod_det:
+                    _cnt_ans, _cnt_src = _deterministic_count_answer(q, tenant_db_instance, cfg)
+                    if _cnt_ans:
+                        _prod_det = _cnt_ans
+                        if _cnt_src:
+                            sources = list(dict.fromkeys(_cnt_src + (sources or [])))[:8]
+                        workflow_debug["guard_decisions"]["count_answer_used"] = True
         if not _prod_det:
             _prod_det = _deterministic_product_catalog_answer(q, context or "")
         if (not _prod_det) and _is_product_db_local and tenant_db_instance:
@@ -5714,12 +5820,25 @@ async def chat(request: Request):
 
         _prod_det = None
         if _is_product_db_local and tenant_db_instance:
-            _prod_det, _prod_bounds_src = _deterministic_product_bounds_answer(q, tenant_db_instance)
-            if _prod_bounds_src:
-                sources = list(dict.fromkeys(_prod_bounds_src + (sources or [])))[:8]
-                workflow_debug["guard_decisions"]["product_bounds_scan_used"] = True
-                if debug_effective:
-                    workflow_debug["answer_artifacts"]["product_bounds_sources"] = _prod_bounds_src[:8]
+            _prod_det, _ucq_src = _answer_catalog_query(q, tenant_db_instance, cfg)
+            if _prod_det:
+                if _ucq_src:
+                    sources = list(dict.fromkeys(_ucq_src + (sources or [])))[:8]
+                workflow_debug["guard_decisions"]["catalog_query_used"] = True
+            if not _prod_det:
+                _prod_det, _prod_bounds_src = _deterministic_product_bounds_answer(q, tenant_db_instance)
+                if _prod_bounds_src:
+                    sources = list(dict.fromkeys(_prod_bounds_src + (sources or [])))[:8]
+                    workflow_debug["guard_decisions"]["product_bounds_scan_used"] = True
+                    if debug_effective:
+                        workflow_debug["answer_artifacts"]["product_bounds_sources"] = _prod_bounds_src[:8]
+                if not _prod_det:
+                    _cnt_ans, _cnt_src = _deterministic_count_answer(q, tenant_db_instance, cfg)
+                    if _cnt_ans:
+                        _prod_det = _cnt_ans
+                        if _cnt_src:
+                            sources = list(dict.fromkeys(_cnt_src + (sources or [])))[:8]
+                        workflow_debug["guard_decisions"]["count_answer_used"] = True
         if not _prod_det:
             _prod_det = _deterministic_product_catalog_answer(q, context or "")
         if _is_product_db_local and _prod_det:
@@ -6351,6 +6470,118 @@ def _deterministic_product_bounds_answer(q: str, db, max_items: int = 8) -> tupl
             if source:
                 sources.append(source)
         return "\n".join(lines), list(dict.fromkeys(sources))[:max_items]
+    except Exception:
+        return None, []
+
+
+def _deterministic_count_answer(q: str, db, cfg: dict | None = None, max_list: int = 12) -> tuple[str | None, list[str]]:
+    """Answer 'how many X' and 'do you sell/carry X' (incl. absence) from a full
+    catalog scan. Counts are impossible from top-k context, and similarity never
+    surfaces a 'no results' page — so absence reads as wrong items without this.
+    Runs on the tenant DB before the LLM, so it bypasses the sparse-KB guard.
+
+    Accessory/refill words that inflate a category count ("Stapler Pin", ink
+    "Cartridge") are NOT hardcoded here — they live per-DB in config
+    `count_exclude_terms`, so the engine stays domain-agnostic. A term is only
+    excluded when the user did not ask for it (so 'how many stapler pins' works)."""
+    try:
+        if not q or db is None:
+            return None, []
+        ql = (q or "").lower()
+        # Price/rank/bounds phrasings belong to the bounds/catalog answerers.
+        if re.search(r"\b(price|prices|cost|how\s+much|cheap(?:est)?|expensive|priciest|under|below|less\s+than|within|budget|over|above|between)\b", ql):
+            return None, []
+        _count_q = bool(re.search(r"\b(how\s+many|number\s+of|count\s+of)\b", ql))
+        _exist_q = bool(re.search(
+            r"\bdo(?:es)?\s+(?:you|we|they|the\s+store)\b.*\b(?:sell|stock|carry|carries|have|has|offer|got|keep)\b"
+            r"|\b(?:are|is)\s+there\s+(?:any|some)\b|\bany\b.*\b(?:available|in\s+stock)\b"
+            r"|\bdo\s+you\s+(?:sell|stock|carry|have|offer)\b", ql))
+        if not (_count_q or _exist_q):
+            return None, []
+        stop = {
+            "how", "many", "number", "count", "of", "do", "does", "you", "your", "we", "our",
+            "they", "the", "store", "sell", "sells", "stock", "carry", "carries", "have", "has",
+            "offer", "offers", "got", "keep", "any", "some", "are", "is", "there", "available",
+            "in", "products", "product", "items", "item", "different", "types", "type", "kinds",
+            "kind", "total", "catalog", "catalogue", "shop", "and", "or", "for", "with", "rs",
+            "pkr", "currently", "stocked", "range", "selection", "what", "which", "sale", "your",
+        }
+        # Anchors come straight from the question — _extract_product_name_phrase is
+        # tuned for "price of X" exact-name lookups and returns a trailing phrase
+        # ("do you have") for count/existence questions, leaving zero anchors.
+        anchors = [w for w in re.findall(r"[a-zA-Z]{3,}", ql) if w not in stop][:4]
+        if not anchors:
+            return None, []
+        # Per-DB accessory/refill terms (domain vocab, not engine logic). Skip a
+        # term if the user actually asked for it (anchor), so it stays a no-op for
+        # "how many stapler pins".
+        _anchor_set = set(anchors) | {a.rstrip("s") for a in anchors}
+        _excl = [str(t).lower().strip() for t in ((cfg or {}).get("count_exclude_terms") or [])
+                 if str(t).lower().strip() and str(t).lower().strip().rstrip("s") not in _anchor_set]
+        _excl_re = re.compile(r"\b(?:" + "|".join(re.escape(t) for t in _excl) + r")\b", re.I) if _excl else None
+
+        def _hit(hay: str) -> bool:
+            h = hay.lower()
+            for a in anchors:  # ALL anchors must hit (a "gel pen" query needs both)
+                variants = {a}
+                if a.endswith("s") and len(a) > 3:
+                    variants.add(a[:-1])
+                elif len(a) > 3:
+                    variants.add(a + "s")
+                if not any(re.search(rf"\b{re.escape(v)}\b", h) for v in variants):
+                    return False
+            return True
+
+        try:
+            total = min(int(db._collection.count() or 0), 12000)
+            raw = db._collection.get(limit=total, include=["documents", "metadatas"])
+        except Exception:
+            return None, []
+        seen: dict[str, tuple[str, str]] = {}
+        for doc, meta in zip(raw.get("documents", []) or [], raw.get("metadatas", []) or []):
+            meta = meta or {}
+            if not str(doc or ""):
+                continue
+            src_l = str(meta.get("source") or meta.get("source_canonical") or "").lower()
+            kind = str(meta.get("chunk_kind") or "").lower()
+            ctype = str(meta.get("content_type") or "").lower()
+            is_productish = (
+                bool(re.search(r"/(?:products?|items?)(?:/|$|#)", src_l))
+                or (kind == "product" and ctype == "product" and "/collections/" not in src_l)
+            )
+            if not is_productish:
+                continue
+            title = ""
+            for key in ("canonical_product_title", "product_title", "page_title"):
+                t = str(meta.get(key) or "").strip()
+                if t:
+                    title = re.sub(r"\s+", " ", t).strip(" -:|")
+                    break
+            if not title or len(title) < 4:
+                continue
+            if _excl_re and _excl_re.search(title):
+                continue  # accessory/refill (per-DB count_exclude_terms), not the product
+            if not _hit(" ".join([title, str(meta.get("categories") or "")])):
+                continue
+            norm = re.sub(r"[^a-z0-9]+", " ", title.lower()).strip()
+            if norm and norm not in seen:
+                seen[norm] = (title, str(meta.get("source") or ""))
+        label = " ".join(anchors)
+        n = len(seen)
+        if n == 0:
+            if _exist_q:
+                return (f"No — we don't currently carry any {label}. I couldn't find any "
+                        f"{label} in our catalog. Is there something else I can help you find?"), []
+            return (f"We don't currently have any {label} listed in our catalog."), []
+        rows = list(seen.values())
+        body = "\n".join(f"- {t}" for t, _ in rows[:max_list])
+        more = f"\n…and {n - max_list} more." if n > max_list else ""
+        if _count_q:
+            head = f"We have {n} {label} product{'s' if n != 1 else ''} in our catalog:"
+        else:
+            head = f"Yes — we carry {label}. We have {n} option{'s' if n != 1 else ''}:"
+        srcs = list(dict.fromkeys(s for _, s in rows if s))[:max_list]
+        return f"{head}\n{body}{more}", srcs
     except Exception:
         return None, []
 
@@ -11727,9 +11958,14 @@ async def external_crawl_log(data: dict, request: Request):
         return JSONResponse({"detail": "db_name required"}, status_code=400)
     cfg = get_config(db_name)
     admin_auth(_extract_password(request, str(data.get("password") or "")), cfg)
+    msg = str(data.get("msg") or "")
+    if msg:
+        line = f"[EXTERNAL-CRAWL][{db_name}] {msg}"
+        logger.warning(line)
+        print(line, flush=True)
     _push_crawl_status_log(
         db_name,
-        str(data.get("msg") or ""),
+        msg,
         done=bool(data.get("done", False)),
         running=bool(data.get("running", True)) if "running" in data else None,
         error=bool(data.get("error", False)),

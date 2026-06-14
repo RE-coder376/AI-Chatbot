@@ -97,6 +97,7 @@ def crawl(db_name: str, url: str, max_pages: int = 0, clear: bool = False):
     import logging
     import app as chatbot
 
+    os.environ["SKIP_STARTUP_GITHUB_RESTORE"] = "1"
     chatbot.init_systems()
 
     web_base = os.environ.get("MODAL_WEB_BASE_URL", "https://re-coder376--ai-chatbot-serve.modal.run").rstrip("/")
@@ -205,6 +206,32 @@ def gate(db_name: str, crawl_url: str = ""):
 
 @app.function(
     image=image,
+    cpu=2.0,
+    memory=8192,
+    timeout=3600,
+    volumes={"/root/app/databases": vol},
+    secrets=SECRETS,
+)
+def catalog_ingest(db_name: str, url: str = "", clear_products: bool = True):
+    """Deterministic product ingestion from the store's /products.json — complete,
+    order-stable catalog → constant counts/coverage (vs fluctuating BFS crawl).
+    modal run modal_app.py::catalog_ingest --db-name stationery_studio
+    Replaces product chunks only; run a crawl separately for policy/FAQ pages.
+    """
+    _enter_app_dir()
+    import app as chatbot
+    os.environ["SKIP_STARTUP_GITHUB_RESTORE"] = "1"
+    chatbot.init_systems()
+    if not url:
+        url = (chatbot.get_config(db_name) or {}).get("crawl_url") or ""
+    res = chatbot.catalog_reingest_products(db_name, url, clear_products=clear_products)
+    vol.commit()
+    print(f"[CATALOG] {res}")
+    return res
+
+
+@app.function(
+    image=image,
     cpu=1.0,
     memory=2048,
     timeout=600,
@@ -260,6 +287,26 @@ def scrub(db_name: str):
                           "AND key IN ('product_title','canonical_product_title')", (_id,))
             title_fixes += 1
 
+    # 3) nav-chrome strip in documents + product titles (mirrors _finalize_docs
+    #    _CHROME_RE — storefront button/badge text that leaked into pre-fix data).
+    import re as _re
+    _CHROME_RE = _re.compile(r"(?i)\b(?:shop now|buy online|click to (?:enlarge|zoom)|add to (?:cart|wishlist|bag)|quick view|view (?:cart|details)|sold out|pre[\s-]?order|location click|location)\b")
+    c.execute("SELECT id, key, string_value FROM embedding_metadata "
+              "WHERE key IN ('chroma:document','product_title','canonical_product_title')")
+    chrome_fixes = 0
+    for _id, key, sv in c.fetchall():
+        if not sv or not _CHROME_RE.search(sv):
+            continue
+        if key == "chroma:document":
+            new = _re.sub(r"[ \t]{2,}", " ", _CHROME_RE.sub(" ", sv))
+        else:
+            new = _re.sub(r"\s{2,}", " ", _CHROME_RE.sub(" ", sv)).strip(" -:|")
+            if len(new) < 4:
+                continue  # don't strip a title down to a fragment
+        if new != sv and new.strip():
+            c.execute("UPDATE embedding_metadata SET string_value=? WHERE id=? AND key=?", (new, _id, key))
+            chrome_fixes += 1
+
     con.commit()
     try:
         c.execute("PRAGMA wal_checkpoint(TRUNCATE)")  # fold WAL into the main file
@@ -267,5 +314,5 @@ def scrub(db_name: str):
         pass
     con.close()
     vol.commit()
-    print(f"[SCRUB] {db_name}: {doc_fixes} entity docs, {title_fixes} short titles fixed")
-    return {"entity_docs": doc_fixes, "short_titles": title_fixes}
+    print(f"[SCRUB] {db_name}: {doc_fixes} entity docs, {title_fixes} short titles, {chrome_fixes} chrome strips fixed")
+    return {"entity_docs": doc_fixes, "short_titles": title_fixes, "chrome_strips": chrome_fixes}

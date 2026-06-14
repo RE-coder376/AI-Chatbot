@@ -266,6 +266,23 @@ def _check_is_product_db(db, db_name: str = "") -> bool:
     result = False
     if db:
         try:
+            # Authoritative + insertion-order independent: does ANY chunk carry
+            # product metadata? The 24-chunk head sample missed product pages on
+            # large DBs (tsc_pk's first chunks are home/policy/nav), so is_product_db
+            # flipped False per-container and silently disabled the deterministic
+            # product answerers.
+            for _w in ({"chunk_kind": "product"}, {"content_type": "product"}):
+                try:
+                    _hit = db._collection.get(where=_w, limit=1)
+                    if (_hit.get("ids") or _hit.get("documents")):
+                        result = True
+                        break
+                except Exception:
+                    pass
+            if result:
+                if db_name:
+                    _product_db_cache[db_name] = True
+                return True
             sample = db._collection.get(limit=24, include=["documents", "metadatas"])
             docs = sample.get("documents") or []
             metas = sample.get("metadatas") or []
@@ -1184,6 +1201,24 @@ def _smart_chunk_page(text: str, url: str, chunk_size: int = 400, chunk_step: in
                 else:
                     _m.pop("product_title", None)
                     _m.pop("canonical_product_title", None)
+            # Universal nav-chrome scrub: storefront button/badge text ("Shop Now",
+            # "Click to enlarge", "Sold out", "Pre order") leaks into titles + the
+            # chunk head when boilerplate misses a varying-prefix banner. These tokens
+            # are never product content — strip from titles (gate invariant) and body.
+            _CHROME_RE = re.compile(r"(?i)\b(?:shop now|buy online|click to (?:enlarge|zoom)|add to (?:cart|wishlist|bag)|quick view|view (?:cart|details)|sold out|pre[\s-]?order|location click|location)\b")
+            for _tk in ("product_title", "canonical_product_title"):
+                _tv = str(_m.get(_tk) or "")
+                if _tv and _CHROME_RE.search(_tv):
+                    _tv2 = re.sub(r"\s{2,}", " ", _CHROME_RE.sub(" ", _tv)).strip(" -:|")
+                    if len(_tv2) >= 4:
+                        _m[_tk] = _tv2
+                    else:
+                        _m.pop(_tk, None)
+            _body0 = str(getattr(_doc, "page_content", "") or "")
+            if _CHROME_RE.search(_body0):
+                _body1 = re.sub(r"[ \t]{2,}", " ", _CHROME_RE.sub(" ", _body0))
+                if _body1.strip():
+                    _doc.page_content = _body1
             _sample = str(getattr(_doc, "page_content", "") or "")
             _m["chunk_hash"] = hashlib.sha256(_sample.encode("utf-8", errors="ignore")).hexdigest()
             _doc.metadata = _m

@@ -35,6 +35,23 @@ PRICE_ACC_MIN = 0.99      # matched products whose price equals a live variant p
 PRICE_META_WARN = 0.70    # product chunks carrying price metadata (warn only)
 
 _HANDLE_RE = re.compile(r"/products/([^/?#]+)")
+NAV_CHROME = re.compile(r"shop now|click to enlarge|sold out|pre[\s-]?order|add to (cart|wishlist)|view (cart|details)|quick view|click to (enlarge|zoom)", re.I)
+_CAT_STOP = {
+    # structural / generic
+    "the","and","for","with","your","new","pack","size","gift","quality","piece","pieces",
+    "original","brand","set","sets","style","styles","design","designs","print","printed",
+    "premium","deluxe","classic","assorted","multi","regular","standard","custom","edition",
+    "single","double","value","combo","item","items","product","products","range",
+    # adjectives of dimension/shape/texture
+    "mini","large","small","big","medium","jumbo","round","square","soft","hard","smooth","flat",
+    # colours (incl. plurals — "colours" is what slipped through before) + common colour names
+    "color","colour","colors","colours","colored","coloured","multicolor","multicolour",
+    "black","blue","white","red","green","yellow","pink","purple","orange","brown","grey","gray",
+    "gold","golden","silver","clear","transparent","rainbow","pastel",
+    # materials
+    "plastic","metal","steel","wooden","wood","glass","paper","rubber","leather","fabric","cotton",
+}
+_ABSENCE_CANDIDATES = ["backpack","umbrella","mattress","bicycle","helmet","perfume","jacket","tyre","blanket","kettle"]
 
 
 # ── chunk loading ────────────────────────────────────────────────────────────
@@ -80,10 +97,13 @@ def layer1(chunks: list[dict]) -> dict:
             if len(t.strip()) < 4:
                 bad_titles.append(("short title", t))
             else:
+                _hit = False
                 for pat, label in TITLE_BAD:
                     if pat.search(t):
-                        bad_titles.append((label, t[:60]))
+                        bad_titles.append((label, t[:60])); _hit = True
                         break
+                if not _hit and NAV_CHROME.search(t):
+                    bad_titles.append(("nav-chrome", t[:60]))
         pv = ch.get("price")
         if pv is not None:
             try:
@@ -218,8 +238,10 @@ def _ask(base: str, wk: str, q: str) -> str:
         return r.text
 
 
-def gen_quiz(gt: list[dict] | None, chunks: list[dict]) -> list[dict]:
-    """Questions with answers computed from ground truth (GT preferred, else chunk meta)."""
+def gen_quiz(gt: list[dict] | None, chunks: list[dict], exclude_terms: tuple = ()) -> list[dict]:
+    """Questions with answers computed from ground truth (GT preferred, else chunk meta).
+    exclude_terms (per-DB count_exclude_terms): accessory/refill words dropped from
+    category groups so the count GT matches the engine's count_exclude logic."""
     if gt:
         items = [{"title": p["title"], "price": p["prices"][0]} for p in gt if p["prices"] and p["prices"][0] > 0]
     else:
@@ -244,11 +266,40 @@ def gen_quiz(gt: list[dict] | None, chunks: list[dict]) -> list[dict]:
     under = [x for x in items if x["price"] <= cap]
     qs.append({"q": f"Which products do you have under {cap + 1:.0f}?", "label": "bounds",
                "expect_any_num": [x["price"] for x in under]})
+    # per-category: counts, scoped extremes, full-set bounds (catches pollution/recall/count bugs)
+    from collections import Counter
+    cnt = Counter()
+    for it in items:
+        for w in set(re.findall(r"[A-Za-z]{4,}", it["title"].lower())):
+            if w not in _CAT_STOP:
+                cnt[w] += 1
+    # mid-size buckets only: skip giant buckets (367 notebooks) + brand/adjective noise; lands on clean categories
+    _excl_re = re.compile(r"\b(?:" + "|".join(re.escape(str(t)) for t in exclude_terms) + r")\b", re.I) if exclude_terms else None
+    for cat in [c for c, n in cnt.most_common() if 3 <= n <= 40][:4]:
+        grp = [x for x in items if re.search(rf"\b{re.escape(cat)}", x["title"].lower())
+               and not (_excl_re and cat not in str(_excl_re.pattern).lower() and _excl_re.search(x["title"]))]
+        if not 3 <= len(grp) <= 40:
+            continue
+        gp = sorted(g["price"] for g in grp)
+        qs.append({"q": f"How many {cat} products do you have?", "expect_count": len(grp), "label": f"count:{cat}"})
+        qs.append({"q": f"What is the cheapest {cat} you sell?", "expect_num": gp[0], "label": f"cat-min:{cat}"})
+        qs.append({"q": f"What is the most expensive {cat} you sell?", "expect_num": gp[-1], "label": f"cat-max:{cat}"})
+        hi = gp[min(len(gp) - 1, max(1, len(gp) // 2))]
+        inb = [p for p in gp if gp[0] <= p <= hi]
+        if 2 <= len(inb) <= 12:
+            qs.append({"q": f"Which {cat} products are priced between {gp[0]:.0f} and {hi:.0f}?",
+                       "expect_all_num": inb, "label": f"bounds:{cat}"})
+    present = " ".join(x["title"].lower() for x in items)
+    for cand in _ABSENCE_CANDIDATES:
+        if cand not in present:
+            qs.append({"q": f"Do you sell {cand}s? If you don't carry them, say so.",
+                       "expect_absent": True, "label": f"absence:{cand}"})
+            break
     return qs
 
 
-def layer3(base: str, db: str, password: str, gt, chunks) -> dict:
-    quiz = gen_quiz(gt, chunks)
+def layer3(base: str, db: str, password: str, gt, chunks, exclude_terms: tuple = ()) -> dict:
+    quiz = gen_quiz(gt, chunks, exclude_terms)
     if not quiz:
         return {"skipped": "not enough priced products to generate a quiz"}
     wk = _widget_key(base, db, password)
@@ -257,18 +308,27 @@ def layer3(base: str, db: str, password: str, gt, chunks) -> dict:
         ans = _ask(base, wk, item["q"])
         if "expect_num" in item:
             ok = _num_in(ans, item["expect_num"])
+        elif "expect_count" in item:
+            ok = _num_in(ans, item["expect_count"])
+        elif "expect_all_num" in item:
+            ok = all(_num_in(ans, v) for v in item["expect_all_num"])  # full membership, not any
+        elif "expect_absent" in item:
+            al = ans.lower()
+            ok = bool(re.search(r"don'?t (carry|stock|sell|have)|do not (carry|stock|sell|have)|"
+                                r"not (carry|stock|available)|we don'?t|currently (don'?t|do not)|no .{0,25}(available|in stock|found)", al))
         else:
             ok = any(_num_in(ans, v) for v in item["expect_any_num"])
         passed += ok
         results.append({"label": item["label"], "q": item["q"], "pass": bool(ok),
-                        "expected": item.get("expect_num") or item.get("expect_any_num"), "answer": ans[:300]})
+                        "expected": item.get("expect_num") or item.get("expect_count") or item.get("expect_all_num")
+                        or item.get("expect_any_num") or ("absent" if item.get("expect_absent") else None), "answer": ans[:300]})
         time.sleep(4)
     return {"asked": len(quiz), "passed": passed, "results": results}
 
 
 # ── verdict + entry points ───────────────────────────────────────────────────
 def run_gate(db_name: str, sqlite_path: str, crawl_url: str = "",
-             quiz_base: str = "", password: str = "") -> dict:
+             quiz_base: str = "", password: str = "", exclude_terms: tuple = ()) -> dict:
     chunks = load_chunks(sqlite_path)
     report = {"db": db_name, "sqlite": sqlite_path, "layer1": layer1(chunks)}
     gt = None
@@ -279,7 +339,7 @@ def run_gate(db_name: str, sqlite_path: str, crawl_url: str = "",
         report["layer2"] = {"skipped": "no crawl_url"}
     if quiz_base:
         try:
-            report["layer3"] = layer3(quiz_base.rstrip("/"), db_name, password, gt, chunks)
+            report["layer3"] = layer3(quiz_base.rstrip("/"), db_name, password, gt, chunks, exclude_terms)
         except Exception as e:
             report["layer3"] = {"error": str(e)}
     fails = []
@@ -315,7 +375,13 @@ def run_gate(db_name: str, sqlite_path: str, crawl_url: str = "",
 def run_gate_for_db(db_name: str, db_dir: str, crawl_url: str = "", quiz_base: str = "", password: str = "") -> dict:
     """Importable entry point (app.py post-crawl). Writes gate_report.json next to the DB."""
     sq = str(Path(db_dir) / "chroma.sqlite3")
-    report = run_gate(db_name, sq, crawl_url, quiz_base, password)
+    _excl = ()
+    try:
+        _cfg = json.loads((Path(db_dir) / "config.json").read_text(encoding="utf-8-sig"))
+        _excl = tuple(_cfg.get("count_exclude_terms") or ())
+    except Exception:
+        pass
+    report = run_gate(db_name, sq, crawl_url, quiz_base, password, _excl)
     try:
         out = Path(db_dir) / "gate_report.json"
         out.write_text(json.dumps(report, ensure_ascii=False, indent=1, default=str), encoding="utf-8")
@@ -335,20 +401,24 @@ def main():
     db_dir = Path("databases") / a.db_name
     sq = a.sqlite or str(db_dir / "chroma.sqlite3")
     crawl_url = a.url
+    _cfg = {}
+    cfg_p = db_dir / "config.json"
+    if cfg_p.exists():
+        try:
+            _cfg = json.loads(cfg_p.read_text(encoding="utf-8-sig"))
+        except Exception:
+            pass
     if not crawl_url:
-        cfg_p = db_dir / "config.json"
-        if cfg_p.exists():
-            try:
-                crawl_url = json.loads(cfg_p.read_text(encoding="utf-8-sig")).get("crawl_url") or ""
-            except Exception:
-                pass
-    report = run_gate(a.db_name, sq, crawl_url, a.quiz, a.password)
+        crawl_url = _cfg.get("crawl_url") or ""
+    exclude_terms = tuple(_cfg.get("count_exclude_terms") or ())
+    report = run_gate(a.db_name, sq, crawl_url, a.quiz, a.password, exclude_terms)
     out = Path(sq).parent / "gate_report.json"
     out.write_text(json.dumps(report, ensure_ascii=False, indent=1, default=str), encoding="utf-8")
     l1, l2 = report["layer1"], report["layer2"]
     print(f"chunks={l1['chunks']} product={l1['product_chunks']} priced={l1['price_coverage']}")
     if not l2.get("skipped"):
-        print(f"GT: {l2['matched']}/{l2['gt_products']} products matched, coverage={l2['coverage']:.1%}, price_acc={l2['price_accuracy']:.1%}")
+        pa = l2['price_accuracy']
+        print(f"GT: {l2['matched']}/{l2['gt_products']} matched, coverage={(l2['coverage'] or 0):.1%}, price_acc={'n/a' if pa is None else format(pa, '.1%')}")
     else:
         print(f"GT: {l2['skipped']}")
     if report.get("layer3", {}).get("asked"):
