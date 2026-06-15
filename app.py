@@ -3329,12 +3329,32 @@ def _deterministic_docs_fact_answer(q: str, context: str) -> str | None:
             if learners and monthly:
                 return f"TutorClaw serves **{_clean_fact(learners.group(1))} learners** at roughly **{_clean_fact(monthly.group(1))}/month** in infrastructure cost."
 
-        if re.search(r"\bmcp\b", ql) and re.search(r"\b(?:stand|stands|mean|means|full\s+form)\b", ql):
-            m = (re.search(r"\bMCP\b\s+(?:stands\s+for|means|is short for)\s+([A-Z][A-Za-z ]{6,80})", context, re.I)
-                 or re.search(r"\b([A-Z][A-Za-z]+(?:\s+[A-Z][A-Za-z]+){2,8})\s*\(\s*MCP\s*\)", context)
-                 or re.search(r"\bMCP\s*[-:]\s*([A-Z][A-Za-z]+(?:\s+[A-Z][A-Za-z]+){2,8})", context))
-            if m:
-                return f"**MCP** stands for **{_clean_fact(m.group(1))}**."
+        if re.search(r"\b(?:stand|stands|mean|means|full\s+form|short\s+for|abbreviat)\b", ql):
+            # Universal acronym expansion: take the acronym FROM THE QUESTION,
+            # find candidate expansions in context, and accept only the one whose
+            # word-initials spell the acronym ("Model Context Protocol" -> MCP).
+            # This rejects nearby noise like "Wrapping Skill Help (MCP)" -> WSH.
+            def _initials_match(acr: str, phrase: str) -> bool:
+                words = [w for w in re.findall(r"[A-Za-z][A-Za-z0-9]*", phrase)
+                         if w.lower() not in {"of", "the", "for", "and", "a", "an", "to", "in", "on"}]
+                inits = "".join(w[0] for w in words).upper()
+                return inits == acr.upper() or inits.startswith(acr.upper())
+            acrs = [a for a in re.findall(r"\b[A-Z][A-Z0-9]{1,8}\b", q or "")
+                    if a.lower() not in {"db", "orm", "api", "what", "does", "the"}][:4]
+            for acr in acrs:
+                ace = re.escape(acr)
+                cands = []
+                for pat in (
+                    rf"\b{ace}\b\s+(?:stands?\s+for|means|is\s+short\s+for)\s+([A-Z][A-Za-z]+(?:\s+[A-Za-z]+){{1,8}})",
+                    rf"\b([A-Z][A-Za-z]+(?:\s+[A-Za-z]+){{1,8}})\s*\(\s*{ace}\s*\)",
+                    rf"\b{ace}\s*[-:–]\s*([A-Z][A-Za-z]+(?:\s+[A-Za-z]+){{1,8}})",
+                ):
+                    for mm in re.finditer(pat, context):
+                        cands.append(_clean_fact(mm.group(1)))
+                good = next((c for c in cands if _initials_match(acr, c)), None)
+                if good:
+                    good = re.sub(r"^(?:the|a|an)\s+", "", good, flags=re.I)
+                    return f"**{acr}** stands for **{good}**."
 
         if re.search(r"\btdd\b|\btest(?:ing)?\b", ql) and re.search(r"\b(?:library|coverage|target|recommend)\b", ql):
             libs = []
@@ -3357,6 +3377,27 @@ def _deterministic_docs_fact_answer(q: str, context: str) -> str | None:
                 parts = [p for p in parts if len(p) > 2][:9]
                 if len(parts) >= 5:
                     return "The seven domains listed in the context are: " + "; ".join(parts[:7]) + "."
+
+        # Universal enumeration: "what are the N <units> of X" answered by a
+        # context sentence "<num> <units>: A, B, and C" or "<num> <units> are
+        # A, B, and C". Answer-agnostic — it only formats a list found verbatim
+        # in context. Generalizes the seven-domains extractor to any docs DB.
+        _unit_m = re.search(r"\b(components?|steps?|parts?|pillars?|stages?|phases?|elements?|principles?|factors?|ingredients?|properties)\b", ql)
+        if _unit_m and re.search(r"\b(what|which|list|name|how\s+many)\b", ql):
+            _unit = _unit_m.group(1)
+            _unit_re = _unit.rstrip("s") + r"s?"
+            _num_re = r"(?:two|three|four|five|six|seven|eight|nine|ten|\d{1,2})"
+            _enum = re.compile(
+                rf"{_num_re}\s+{_unit_re}\b\s*(?:are\b|:|—|–|,?\s+namely\b|,?\s+including\b)\s*:?\s*(.{{12,400}}?)(?:\.\s|\.$|\n)",
+                re.I,
+            )
+            for _mm in _enum.finditer(context):
+                _raw = re.sub(r"\s+", " ", _mm.group(1)).strip(" -:;,.")
+                _items = [re.sub(r"^(?:the|a|an)\s+", "", p.strip(" -:;,."), flags=re.I)
+                          for p in re.split(r",|\band\b|;", _raw)]
+                _items = [p for p in _items if len(p) > 1][:9]
+                if len(_items) >= 2:
+                    return f"The {_unit} are: " + "; ".join(_items) + "."
 
         if ("panaversity" in ql and re.search(r"\b(?:lead|leads|co-?authors?|authors?)\b", ql)):
             lead = ""
