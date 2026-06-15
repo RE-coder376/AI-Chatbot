@@ -3395,8 +3395,10 @@ def _deterministic_docs_fact_answer(q: str, context: str) -> str | None:
                 r"\b(?:the\s+)?([A-Za-z][A-Za-z0-9&.-]+(?:\s+[A-Za-z][A-Za-z0-9&.-]+){0,4})\s+"
                 r"(?:pattern|cycle|process|protocol|framework|approach|method|workflow|lifecycle|loop|paradigm)\b",
                 ql)
+            _subj_stop = {"the", "for", "and", "agent", "agents", "use", "used", "uses",
+                          _unit, _unit.rstrip("s"), "step", "steps", "component", "components"}
             _subj_tokens = [t for t in re.findall(r"[a-z0-9-]{3,}", (_subj_m.group(1) if _subj_m else ""))
-                            if t not in {"the", "for", "and"}]
+                            if t not in _subj_stop]
             _enum = re.compile(
                 rf"{_num_re}\s+{_unit_re}\b\s*(?:are\b|:|—|–|,?\s+namely\b|,?\s+including\b)\s*:?\s*(.{{12,400}}?)(?:\.\s|\.$|\n)",
                 re.I,
