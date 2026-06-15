@@ -3606,6 +3606,12 @@ def _is_exact_title_factual_query(q: str) -> bool:
         # fact. Defer to the normal retrieval+enumerator path. Universal.
         if re.search(r"(?i)\b(?:steps?|stages?|phases?|components?|pillars?|principles?|procedures?)\b", q or ""):
             return False
+        # Explanation questions ("why / what problem / how does X help / purpose /
+        # solve / difference / compared") need RAG+LLM synthesis. The exact-title
+        # probe has no single fact to extract and dead-ends empty. Route to normal
+        # generation (proven to work). Universal — fixes the class, not one Q.
+        if re.search(r"(?i)\b(?:why|what\s+problem|problem\s+does|how\s+does|how\s+is|how\s+are|purpose\s+of|benefit|advantage|trying\s+to|meant\s+to|help\s+with|solve|differ(?:ence)?|compared?|role\s+does|used\s+for|important)\b", q or ""):
+            return False
         title = _extract_doc_title_phrase(q or "")
         if not title:
             return False
