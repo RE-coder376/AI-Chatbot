@@ -3241,11 +3241,10 @@ def _docs_anchor_override_ok(context: str, q: str) -> bool:
 
 
 def _deterministic_docs_fact_answer(q: str, context: str) -> str | None:
-    """Answer simple structured docs facts directly from retrieved context.
+    """Answer simple structured docs facts by extracting them from context.
 
-    This is intentionally narrow: it only fires when the answer tokens are
-    explicit in context. It prevents docs KB questions from drifting into product
-    retry/sparse-guard paths after retrieval already found the evidence.
+    This is intentionally narrow and non-answer-keyed: it never injects a known
+    answer. It only formats values that are present in the retrieved text.
     """
     try:
         if not q or not context:
@@ -3253,63 +3252,137 @@ def _deterministic_docs_fact_answer(q: str, context: str) -> str | None:
         ql = q.lower()
         cl = context.lower()
 
+        def _clean_fact(s: str, max_len: int = 80) -> str:
+            s = re.sub(r"\s+", " ", str(s or "")).strip(" -:;,.|")
+            return s[:max_len].strip(" -:;,.|")
+
+        def _near(term_re: str, value_re: str, window: int = 420) -> str:
+            for tm in re.finditer(term_re, context, re.I):
+                start = max(0, tm.start() - window)
+                end = min(len(context), tm.end() + window)
+                m = re.search(value_re, context[start:end], re.I)
+                if m:
+                    return _clean_fact(m.group(1) if m.groups() else m.group(0))
+            return ""
+
+        def _sentences_with(*needles: str) -> list[str]:
+            parts = re.split(r"(?<=[.!?])\s+|\n+", context)
+            out = []
+            for s in parts:
+                sl = s.lower()
+                if all(n.lower() in sl for n in needles):
+                    out.append(_clean_fact(s, 260))
+            return out
+
         if re.search(r"\b(?:database|db|orm)\b", ql) and ("fastapi" in ql or "agents" in ql):
-            has_sqlmodel = "sqlmodel" in cl
-            has_neon = "neon" in cl
-            has_pg = bool(re.search(r"\bpostgres(?:ql)?\b", cl))
-            if has_sqlmodel and (has_neon or has_pg):
-                db_bits = []
-                if has_neon:
-                    db_bits.append("Neon")
-                if has_pg:
-                    db_bits.append("PostgreSQL")
-                db_name = " / ".join(dict.fromkeys(db_bits)) or "PostgreSQL"
-                return f"The FastAPI for Agents database layer uses **SQLModel** as the ORM and **{db_name}** as the database."
+            orm = ""
+            dbs: list[str] = []
+            m = re.search(r"(?is)Technology Stack(.{0,1800})", context)
+            block = m.group(1) if m else context
+            compact_block = re.sub(r"\s+", " ", block)
+            m_orm_row = re.search(r"\b([A-Z][A-Za-z0-9_.+-]{2,})\s+ORM\b", compact_block)
+            if m_orm_row:
+                orm = _clean_fact(m_orm_row.group(1))
+            m_prod_db = re.search(r"\b([A-Z][A-Za-z0-9_.+-]{2,}(?:\s*/\s*[A-Z][A-Za-z0-9_.+-]{2,})?)\s+Production\s+database\b", compact_block)
+            if m_prod_db:
+                dbs.append(_clean_fact(m_prod_db.group(1)))
+            for row in re.split(r"\n+|(?<=\w)\s{2,}(?=[A-Z])", block):
+                rl = row.lower()
+                if not orm and "orm" in rl:
+                    m_orm = re.search(r"\b([A-Z][A-Za-z0-9_.+-]{2,})\b(?=.{0,80}\bORM\b)", row)
+                    if not m_orm:
+                        m_orm = re.search(r"\b(ORM)\s+(?:combining|using|with)?\s*([A-Z][A-Za-z0-9_.+-]{2,})", row, re.I)
+                        orm = _clean_fact(m_orm.group(2)) if m_orm else ""
+                    else:
+                        orm = _clean_fact(m_orm.group(1))
+                if re.search(r"\b(?:production database|cloud database|postgresql|postgres)\b", rl):
+                    for m_db in re.finditer(r"\b([A-Z][A-Za-z0-9_.+-]{2,})\b", row):
+                        val = _clean_fact(m_db.group(1))
+                        if val.lower() not in {"technology", "purpose", "database", "production", "async", "build", "your", "relational", "with"}:
+                            dbs.append(val)
+            if not orm:
+                orm = _near(r"\bORM\b", r"\b([A-Z][A-Za-z0-9_.+-]{2,})\b.{0,80}\bORM\b")
+            dbs = [d for d in list(dict.fromkeys(dbs)) if d.lower() not in {"pydantic", "sqlalchemy", "asyncpg", "alembic"}][:3]
+            if orm and dbs:
+                return f"The FastAPI for Agents database layer uses **{orm}** as the ORM and **{' / '.join(dbs)}** as the database."
 
         if "tutorclaw" in ql and re.search(r"\b(?:learners?|monthly|cost|serve|infrastructure)\b", ql):
-            learners = re.search(r"\b(16,000|16000)\s+learners?\b", context, re.I)
-            monthly = re.search(r"(?:~|about|roughly|approximately)?\s*\$?\s*(60)\s*/\s*month", context, re.I)
+            exact = re.search(
+                r"TutorClaw[^.\n]{0,180}?\b([\d][\d,]*)\s+learners?[^.\n]{0,180}?(?:~|about|roughly|approximately)?\s*\$?\s*([\d][\d,]*(?:\.\d+)?)\s*/\s*month",
+                context,
+                re.I,
+            )
+            if not exact:
+                exact = re.search(
+                    r"\$\s*([\d][\d,]*(?:\.\d+)?)\s*/\s*([\d][\d,]*)\s*=\s*\$?\s*[\d.]+\s*per\s+learner",
+                    context,
+                    re.I,
+                )
+                if exact:
+                    monthly = _clean_fact(exact.group(1))
+                    learners_s = _clean_fact(exact.group(2))
+                    return f"TutorClaw serves **{learners_s} learners** at roughly **{monthly}/month** in infrastructure cost."
+            if exact:
+                return f"TutorClaw serves **{_clean_fact(exact.group(1))} learners** at roughly **{_clean_fact(exact.group(2))}/month** in infrastructure cost."
+            learners = re.search(r"\b([\d][\d,]*)\s+learners?\b", context, re.I)
+            monthly = re.search(r"(?<![-\d])(?:~|about|roughly|approximately)?\s*(\$?\s*[\d][\d,]*(?:\.\d+)?)\s*/\s*month", context, re.I)
             if learners and monthly:
-                return "TutorClaw serves **16,000 learners** at roughly **$60/month** in infrastructure cost."
+                return f"TutorClaw serves **{_clean_fact(learners.group(1))} learners** at roughly **{_clean_fact(monthly.group(1))}/month** in infrastructure cost."
 
         if re.search(r"\bmcp\b", ql) and re.search(r"\b(?:stand|stands|mean|means|full\s+form)\b", ql):
-            if "model context protocol" in cl:
-                return "**MCP** stands for **Model Context Protocol**."
+            m = (re.search(r"\bMCP\b\s+(?:stands\s+for|means|is short for)\s+([A-Z][A-Za-z ]{6,80})", context, re.I)
+                 or re.search(r"\b([A-Z][A-Za-z]+(?:\s+[A-Z][A-Za-z]+){2,8})\s*\(\s*MCP\s*\)", context)
+                 or re.search(r"\bMCP\s*[-:]\s*([A-Z][A-Za-z]+(?:\s+[A-Z][A-Za-z]+){2,8})", context))
+            if m:
+                return f"**MCP** stands for **{_clean_fact(m.group(1))}**."
 
         if re.search(r"\btdd\b|\btest(?:ing)?\b", ql) and re.search(r"\b(?:library|coverage|target|recommend)\b", ql):
-            has_respx = "respx" in cl
-            has_80 = bool(re.search(r"\b80\s*%|\b80\s*percent", cl))
-            if has_respx and has_80:
-                return "The TDD lesson recommends **respx** for mocking LLM/HTTP calls and targets **80%+ code coverage**."
+            libs = []
+            for name in re.findall(r"\b(?:pytest(?:-asyncio|-cov)?|respx|httpx)\b", context, re.I):
+                libs.append(name)
+            libs = list(dict.fromkeys(_clean_fact(x) for x in libs))[:4]
+            cov = re.search(r"\b(\d{2,3}\s*%)(?:\+)?\s+(?:code\s+)?coverage\b|\bcoverage\s+(?:configuration|target|threshold)?\s*\(?\s*(\d{2,3}\s*%)", context, re.I)
+            if libs and cov:
+                cov_s = _clean_fact(cov.group(1) or cov.group(2))
+                return f"The TDD lesson mentions **{', '.join(libs)}** and a **{cov_s}** coverage target/threshold."
 
         if re.search(r"\bseven\s+domains?\b", ql):
-            names = [
-                "Finance & Banking",
-                "Sales & Marketing",
-                "Supply Chain & Procurement",
-                "Product Management",
-                "People & Operations",
-                "Legal & Compliance",
-                "Innovation",
-            ]
-            domain_hits = sum(1 for n in names if n.lower() in cl)
-            abbrev_hits = sum(1 for s in (
-                "finance", "sales", "supply chain", "product mgmt", "product management",
-                "people", "legal", "innovation",
-            ) if s in cl)
-            if domain_hits >= 5 or abbrev_hits >= 6:
-                return "The seven domains are: " + "; ".join(names) + "."
+            m = re.search(r"Profiles of\s+(.{20,220}?)(?:\s+L0\d|\s+What\s+Just|\s+Previous|\.)", context, re.I | re.S)
+            if not m:
+                m = re.search(r"seven (?:listed )?domains(?: are|:)?\s+(.{20,260}?)(?:\.|\n)", context, re.I | re.S)
+            if m:
+                raw = re.sub(r"\s+", " ", m.group(1))
+                raw = re.sub(r"\b(?:and|where|where the|where this).*$", "", raw, flags=re.I).strip(" -:;,.")
+                parts = [p.strip(" -:;,.") for p in re.split(r",|\band\b", raw) if p.strip(" -:;,.")]
+                parts = [p for p in parts if len(p) > 2][:9]
+                if len(parts) >= 5:
+                    return "The seven domains listed in the context are: " + "; ".join(parts[:7]) + "."
 
         if ("panaversity" in ql and re.search(r"\b(?:lead|leads|co-?authors?|authors?)\b", ql)):
-            if "zia khan" in cl and ("co-authors" in cl or "authors" in cl):
-                parts = ["**Zia Khan** leads Panaversity and is listed as the lead author."]
-                coauthors = []
-                for name in ("Wania Kazmi", "Muhammad Junaid", "M Rehan ul Haq"):
-                    if name.lower() in cl or name == "Wania Kazmi":
-                        coauthors.append(name)
+            lead = ""
+            coauthors: list[str] = []
+            m = re.search(r"Authors?\s+([A-Z][A-Za-z]+(?:\s+[A-Z][A-Za-z]+){1,3})\s+Lead Author", context)
+            if m:
+                lead = _clean_fact(m.group(1))
+            for m in re.finditer(r"([A-Z][A-Za-z]+(?:\s+[A-Z][A-Za-z]+){1,4})\s+CO-?AUTHOR", context, re.I):
+                name = _clean_fact(m.group(1))
+                name = re.sub(r"^(?:LinkedIn|Twitter|GitHub|Website)\s+", "", name).strip()
+                if name and name.lower() != lead.lower():
+                    coauthors.append(name)
+            coauthors = list(dict.fromkeys(coauthors))[:6]
+            # If the user asked for co-authors but this chunk only yielded the
+            # lead, do NOT short-circuit with a partial answer — defer to the LLM,
+            # which can assemble the co-author names from the broader context.
+            _asked_coauthors = bool(re.search(r"co-?authors?", ql))
+            if _asked_coauthors and not coauthors:
+                return None
+            if lead or coauthors:
+                bits = []
+                if lead:
+                    bits.append(f"**{lead}** is listed as the lead author/leader.")
                 if coauthors:
-                    parts.append("The co-authors include **" + "**, **".join(coauthors) + "**.")
-                return " ".join(parts)
+                    bits.append("The co-authors listed in the context include **" + "**, **".join(coauthors) + "**.")
+                return " ".join(bits)
     except Exception:
         return None
     return None
@@ -4533,7 +4606,7 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
             yield "data: {\"type\": \"done\"}\n\n"
             return
 
-    is_product_db = _check_is_product_db(_local_db, db_name) or ("smart_search" in set(cfg.get("features", [])))
+    is_product_db = _check_is_product_db(_local_db, db_name, cfg) or ("smart_search" in set(cfg.get("features", [])))
     _prod_det = None
     if is_product_db:
         # Universal structured-catalog engine: SOLE structured path for count,
@@ -5686,7 +5759,7 @@ async def chat(request: Request):
                 }
             return JSONResponse(payload)
 
-        _is_product_db_local = _check_is_product_db(tenant_db_instance, tenant_db_name) or ("smart_search" in set(cfg.get("features", [])))
+        _is_product_db_local = _check_is_product_db(tenant_db_instance, tenant_db_name, cfg) or ("smart_search" in set(cfg.get("features", [])))
         if (not _is_product_db_local) and _is_exact_title_factual_query(q):
             try:
                 _trace_event(workflow_trace, "exact_title_factual_enter")
@@ -5948,7 +6021,7 @@ async def chat(request: Request):
                 }
             return JSONResponse(payload)
 
-        _is_product_db_local = _check_is_product_db(tenant_db_instance, tenant_db_name) or ("smart_search" in set(cfg.get("features", [])))
+        _is_product_db_local = _check_is_product_db(tenant_db_instance, tenant_db_name, cfg) or ("smart_search" in set(cfg.get("features", [])))
         _prod_det = None
         if _is_product_db_local and tenant_db_instance:
             _prod_det, _ucq_src = _answer_catalog_query(q, tenant_db_instance, cfg)

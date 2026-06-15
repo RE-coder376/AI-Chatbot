@@ -258,9 +258,30 @@ def _derive_page_title(title_hint: str, cleaned: str, product: dict | None = Non
     return candidates[0] if candidates else ""
 
 
-def _check_is_product_db(db, db_name: str = "") -> bool:
+_DOCS_DB_TYPES = {"docs", "documentation", "text", "rag", "knowledge", "kb", "corpus"}
+
+
+def _check_is_product_db(db, db_name: str = "", cfg: dict | None = None) -> bool:
     """Return True if the DB collection looks like a product/catalog DB.
-    Result cached per db_name so the sample query runs at most once per DB."""
+    Result cached per db_name so the sample query runs at most once per DB.
+
+    Config authority (mirrors catalog_query.is_catalog_db) runs BEFORE the chunk
+    sample: an explicit flag / docs db_type / docs_path_hints marks a docs corpus,
+    so a stray product-tagged enrichment chunk can't flip a docs DB to product
+    (which wrongly fires the product-retry/live-rescue that clobbers docs context)."""
+    cfg = cfg or {}
+    _flag = cfg.get("is_product_db")
+    if _flag is None:
+        _flag = cfg.get("product_db")
+    if _flag is True:
+        return True
+    if _flag is False:
+        return False
+    _db_type = str(cfg.get("db_type") or cfg.get("mode") or cfg.get("catalog_mode") or "").lower().strip()
+    if _db_type in _DOCS_DB_TYPES:
+        return False
+    if cfg.get("docs_path_hints"):
+        return False
     if db_name and db_name in _product_db_cache:
         return _product_db_cache[db_name]
     result = False

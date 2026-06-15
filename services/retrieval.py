@@ -1149,7 +1149,7 @@ def _docs_query_anchors(q: str) -> list[str]:
     """High-signal lexical anchors for docs/RAG pages.
 
     Vector search is good at concepts, but docs questions often hinge on exact
-    page/heading words ("seven domains", "Wania Kazmi", "SQLModel"). Build a
+    page/heading words ("seven domains", proper names, module titles). Build a
     small universal set of phrase/slug anchors from the question plus common
     technical synonyms so lexical/BM25 and reranking can pull the right page.
     """
@@ -1172,24 +1172,20 @@ def _docs_query_anchors(q: str) -> list[str]:
         if m:
             anchors.append(m.group(1))
 
-        # DB/ORM questions are usually answered by page titles/slugs containing
-        # the concrete technology rather than the words "database" or "ORM".
-        if re.search(r"\b(?:database|db|orm|persistent|persistence|sql)\b", ql):
-            anchors.extend(["sqlmodel", "postgresql", "postgres", "neon", "relational databases"])
-        if "fastapi" in ql and re.search(r"\b(?:database|db|orm)\b", ql):
-            anchors.extend(["relational databases sqlmodel", "relational-databases-sqlmodel"])
-
-        if "tutorclaw" in ql and re.search(r"\b(?:learners?|monthly|cost|serve|infrastructure)\b", ql):
-            anchors.extend(["TutorClaw", "16,000 learners", "60/month", "cost per learner", "agents as economic actors"])
-
-        if re.search(r"\bmcp\b", ql) and re.search(r"\b(?:stand|stands|mean|means|full\s+form)\b", ql):
-            anchors.extend(["Model Context Protocol", "model-context-protocol"])
-
-        if re.search(r"\btdd\b|\btest(?:ing)?\b", ql) and re.search(r"\b(?:library|coverage|target|recommend)\b", ql):
-            anchors.extend(["respx", "80%+ code coverage", "80% threshold", "agent-tdd"])
+        # Preserve subject/module names from the question itself, but do not add
+        # expected answer terms. The answerer must extract facts from context.
+        m = re.search(r"\b(?:the\s+)?([A-Za-z][A-Za-z0-9&.-]+(?:\s+[A-Za-z][A-Za-z0-9&.-]+){1,6})\s+module\b", qq, re.I)
+        if m:
+            anchors.append(m.group(1))
+        if "tutorclaw" in ql:
+            anchors.append("TutorClaw")
+        if re.search(r"\bmcp\b", ql):
+            anchors.append("MCP")
+        if re.search(r"\btdd\b", ql):
+            anchors.extend(["TDD", "TDD lesson"])
 
         if re.search(r"\bco-?authors?\b", ql) or re.search(r"\b(?:lead|leads|leader|ceo)\b", ql):
-            anchors.extend(["authors", "co-authors", "Zia Khan", "Wania Kazmi"])
+            anchors.extend(["authors", "co-authors", "lead author", "CEO"])
 
         out: list[str] = []
         seen: set[str] = set()
@@ -1506,6 +1502,35 @@ def _heuristic_rerank_score(doc, q: str, title_phrase: str) -> float:
                 score += 16.0
             if "sqlite" in bl[:1200] and not re.search(r"\bsqlite\b", _ql):
                 score -= 8.0
+
+        # Acronym-definition boost (answer-agnostic): "what does MCP stand for?".
+        # A chunk that actually DEFINES the acronym ("MCP stands for ...", "MCP
+        # (Model ...)", "Model Context Protocol (MCP)") must beat the many pages
+        # that merely mention the acronym. We never inject the expansion itself.
+        if re.search(r"\b(?:stands?\s+for|\bmean(?:s|ing)?\b|full\s+form|short\s+for|abbreviat)\b", _ql):
+            _acros = [a for a in re.findall(r"\b[A-Z][A-Z0-9]{1,8}\b", q or "")
+                      if a.lower() not in {"db", "orm", "api", "what", "does"}][:4]
+            for _ac in _acros:
+                _ace = re.escape(_ac)
+                _head = body[:1200]
+                if re.search(rf"\b{_ace}\b\s*(?:stands?\s+for|means|is\s+short\s+for|:|=|–|-)\s*[A-Z]", _head):
+                    score += 18.0
+                if re.search(rf"\(\s*{_ace}\s*\)", _head) or re.search(rf"\b{_ace}\b\s*\([A-Z]", _head):
+                    score += 14.0
+                if _ac.lower() in sl:
+                    score += 4.0
+
+        # Authors/team page boost (answer-agnostic): role/people questions are
+        # answered by the canonical /authors|/team page, whose URL is a stronger
+        # signal than vector similarity. Boost ALL such chunks (lead + co-author
+        # chunks can be split) so the full author list reaches context.
+        if re.search(r"\b(?:authors?|co-?authors?|lead(?:s|er)?|ceo|founder|team|people|who\s+(?:wrote|leads?|made))\b", _ql):
+            if re.search(r"/(?:authors?|team|people|about)(?:$|[/?#-])", sl):
+                score += 18.0
+            if re.search(r"\bco-?authors?\b", bl[:3000]):
+                score += 6.0
+            if re.search(r"\blead\s+author\b", bl[:3000]):
+                score += 4.0
 
         # If a title phrase exists, prioritize docs that contain it.
         if title_phrase:
@@ -2146,9 +2171,8 @@ async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansio
         except Exception:
             pass
 
-    # Exact docs/name rescue: pull chunks containing high-signal anchors like
-    # "Wania Kazmi", "60/month", "relational-databases-sqlmodel". This is
-    # universal for docs/RAG DBs and runs before vector/BM25 merge.
+    # Exact docs/name rescue: pull chunks containing high-signal question anchors.
+    # This is universal for docs/RAG DBs and runs before vector/BM25 merge.
     if not _skip_chromadb and _docs_anchors and db is not None:
         try:
             from langchain_core.documents import Document as _Doc
@@ -2170,6 +2194,94 @@ async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansio
                         if _sk not in rescue_seen:
                             rescue_seen.add(_sk)
                             rescue_results.append(_Doc(page_content=_sd, metadata=_sm or {}))
+        except Exception:
+            pass
+
+    # Acronym-definition rescue: for questions like "What does MCP stand for?",
+    # search using the acronym from the question plus generic definition cues.
+    # This is answer-agnostic; it only helps the right definition page reach context.
+    if not _skip_chromadb and db is not None and re.search(r"\b(?:stand|stands|mean|means|full\s+form)\b", q or "", re.I):
+        try:
+            from langchain_core.documents import Document as _Doc
+            _acronyms = [
+                a for a in re.findall(r"\b[A-Z][A-Z0-9]{1,8}\b", q or "")
+                if a.lower() not in {"DB", "ORM", "API"}
+            ][:4]
+            _cue_re = re.compile(r"\b(?:stands?\s+for|means|short\s+for|long\s+form|acronym|protocol)\b", re.I)
+            for _acro in _acronyms:
+                try:
+                    _raw = db._collection.get(
+                        where_document={"$contains": _acro},
+                        include=["documents", "metadatas"],
+                        limit=80,
+                    )
+                except Exception:
+                    continue
+                _candidates = []
+                for _sd, _sm in zip(_raw.get("documents", []), _raw.get("metadatas", [])):
+                    if not _sd:
+                        continue
+                    _body = str(_sd)
+                    if _cue_re.search(_body):
+                        _meta = _sm or {}
+                        _src = str(_meta.get("source") or "").lower()
+                        _score = 0
+                        _head = _body[:1000]
+                        if re.search(rf"\b{re.escape(_acro)}\b\s+(?:stands?\s+for|means|is\s+short\s+for)", _head, re.I):
+                            _score += 8
+                        if re.search(rf"\([ ]*{re.escape(_acro)}[ ]*\)", _head):
+                            _score += 6
+                        if _acro.lower() in _src:
+                            _score += 4
+                        _candidates.append((_score, _sd, _meta))
+                for _score, _sd, _sm in sorted(_candidates, key=lambda t: t[0], reverse=True)[:8]:
+                    _sk = _sd[:100]
+                    if _sk not in rescue_seen:
+                        rescue_seen.add(_sk)
+                        rescue_results.append(_Doc(page_content=_sd, metadata=_sm or {}))
+        except Exception:
+            pass
+
+    # People/team rescue: role questions often need an authors/team/about page
+    # whose URL is a stronger signal than vector similarity.
+    if not _skip_chromadb and db is not None and re.search(r"\b(?:authors?|co-?authors?|lead(?:s|er)?|ceo|founder|team|people)\b", q or "", re.I):
+        try:
+            from langchain_core.documents import Document as _Doc
+            _total = 0
+            try:
+                _total = int(db._collection.count())
+            except Exception:
+                _total = 6000
+            _raw = db._collection.get(
+                limit=min(max(_total, 1), 18000),
+                include=["documents", "metadatas"],
+            )
+            _path_re = re.compile(r"/(?:authors?|team|people|about)(?:$|[/?#-])", re.I)
+            _role_re = re.compile(r"\b(?:lead\s+author|co-?author|author|ceo|founder|team)\b", re.I)
+            _candidates = []
+            for _sd, _sm in zip(_raw.get("documents", []), _raw.get("metadatas", [])):
+                if not _sd:
+                    continue
+                _meta = _sm or {}
+                _src = str(_meta.get("source") or "")
+                _body = str(_sd)
+                if not (_path_re.search(_src) or _role_re.search(_body[:2000])):
+                    continue
+                _score = 0
+                if _path_re.search(_src):
+                    _score += 8
+                if re.search(r"\bco-?author\b", _body[:3000], re.I):
+                    _score += 5
+                if re.search(r"\blead\s+author\b", _body[:3000], re.I):
+                    _score += 5
+                if re.search(r"\bceo\b", _body[:3000], re.I):
+                    _score += 2
+                _candidates.append((_score, _sd, _meta))
+            for _score, _sd, _sm in sorted(_candidates, key=lambda t: t[0], reverse=True)[:10]:
+                _sk = _sd[:100]
+                if _sk not in rescue_seen:
+                    rescue_seen.add(_sk)
+                    rescue_results.append(_Doc(page_content=_sd, metadata=_sm or {}))
         except Exception:
             pass
 
@@ -2276,8 +2388,18 @@ async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansio
     _required_flags = {}
     _ram_min_req = None
     _db_name_guess = str(getattr(db, "_db_name", "") or "")
+    # Load per-DB config so the docs-gate (db_type/docs_path_hints/is_product_db
+    # flag) in _check_is_product_db fires on this path too — not just app.py
+    # callers. Without cfg a stray product-tagged chunk can flip a docs DB to
+    # product and clobber docs context. Universal for any docs/RAG DB.
+    _gate_cfg = None
+    if _db_name_guess:
+        try:
+            _gate_cfg = json.loads((DATABASES_DIR / _db_name_guess / "config.json").read_text(encoding="utf-8"))
+        except Exception:
+            _gate_cfg = None
     try:
-        _is_product_db = bool(_check_is_product_db(db, _db_name_guess)) if db is not None else False
+        _is_product_db = bool(_check_is_product_db(db, _db_name_guess, _gate_cfg)) if db is not None else False
     except Exception:
         _is_product_db = False
     _pm = re.search(r'(?:under|below|less\s+than|max(?:imum)?|budget\s+of|within)\s+(?:rs\.?\s*)?[\$£€]?([\d,]+)', q, re.I)
