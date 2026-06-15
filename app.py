@@ -3388,11 +3388,24 @@ def _deterministic_docs_fact_answer(q: str, context: str) -> str | None:
             _unit = _unit_m.group(1)
             _unit_re = _unit.rstrip("s") + r"s?"
             _num_re = r"(?:two|three|four|five|six|seven|eight|nine|ten|\d{1,2})"
+            # Subject-gate: if the question names a concept ("safety-first
+            # pattern"), only accept a list that sits NEAR that subject, so we
+            # never return an unrelated "N steps" list from a different page.
+            _subj_m = re.search(
+                r"\b(?:the\s+)?([A-Za-z][A-Za-z0-9&.-]+(?:\s+[A-Za-z][A-Za-z0-9&.-]+){0,4})\s+"
+                r"(?:pattern|cycle|process|protocol|framework|approach|method|workflow|lifecycle|loop|paradigm)\b",
+                ql)
+            _subj_tokens = [t for t in re.findall(r"[a-z0-9-]{3,}", (_subj_m.group(1) if _subj_m else ""))
+                            if t not in {"the", "for", "and"}]
             _enum = re.compile(
                 rf"{_num_re}\s+{_unit_re}\b\s*(?:are\b|:|—|–|,?\s+namely\b|,?\s+including\b)\s*:?\s*(.{{12,400}}?)(?:\.\s|\.$|\n)",
                 re.I,
             )
             for _mm in _enum.finditer(context):
+                if _subj_tokens:
+                    _around = context[max(0, _mm.start() - 320):_mm.end() + 80].lower()
+                    if not any(t in _around for t in _subj_tokens):
+                        continue
                 _raw = re.sub(r"\s+", " ", _mm.group(1)).strip(" -:;,.")
                 _items = [re.sub(r"^(?:the|a|an)\s+", "", p.strip(" -:;,."), flags=re.I)
                           for p in re.split(r",|\band\b|;", _raw)]
