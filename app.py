@@ -3252,6 +3252,14 @@ def _deterministic_docs_fact_answer(q: str, context: str) -> str | None:
         ql = q.lower()
         cl = context.lower()
 
+        # Universal guard: deterministic extractors answer IDENTITY/fact questions
+        # ("which DB?", "what does MCP stand for?"). Explanation-style questions
+        # ("what problem does X solve", "why", "how does X help", "purpose/benefit")
+        # need RAG+LLM synthesis — defer so an identity extractor can't hijack them
+        # with a canned fact (e.g. Q18 'what problem does SQLModel solve').
+        if re.search(r"\b(?:why|what\s+problem|problem\s+does|how\s+does|how\s+is|how\s+are|purpose\s+of|benefit|advantage|trying\s+to|meant\s+to|help\s+with|solve|differ(?:ence)?|compared?)\b", ql):
+            return None
+
         def _clean_fact(s: str, max_len: int = 80) -> str:
             s = re.sub(r"\s+", " ", str(s or "")).strip(" -:;,.|")
             return s[:max_len].strip(" -:;,.|")

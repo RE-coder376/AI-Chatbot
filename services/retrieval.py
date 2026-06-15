@@ -929,6 +929,40 @@ def _is_intro_hook_chunk(text: str) -> bool:
         return False
 
 
+_EXERCISE_JUNK_MARKERS = (
+    "show answer", "click to flip", "try with ai", "test your skill",
+    "update it to include", "try building", "show how an agent would",
+    "what you are learning:", "scoring guide", "click to reveal",
+)
+_BLOOM_RE = re.compile(r"question\s+\d+\s*\((?:remember|understand|apply|analyze|evaluate|create)\)", re.I)
+_TOC_RANGE_RE = re.compile(r"chapters?\s+\d{1,3}\s*[–\-]\s*\d{1,3}|\(chapters?\s+\d", re.I)
+
+
+def _is_low_value_docs_chunk(text: str) -> bool:
+    """High-precision detector for chunk CLASSES that parrot a topic but don't
+    carry the answer: flashcard/quiz scaffolds, 'Try With AI' exercise prompts,
+    intro-hook marketing prose, and chapter-listing TOC blocks. Universal across
+    docs/RAG DBs — drives a de-junk pass so the LLM grounds on real body chunks
+    instead of echoing a scaffold. Answer-agnostic: keyed on structure, not topic."""
+    try:
+        t = text or ""
+        if not t:
+            return True
+        tl = t.lower()
+        if _is_prompt_template_chunk(t) or _is_intro_hook_chunk(t):
+            return True
+        if sum(1 for m in _EXERCISE_JUNK_MARKERS if m in tl) >= 1 and len(t) < 1400:
+            return True
+        if len(_BLOOM_RE.findall(t)) >= 2:
+            return True
+        # TOC / "Part N's 16 chapters build through..." chapter-range listings.
+        if len(_TOC_RANGE_RE.findall(t)) >= 2:
+            return True
+        return False
+    except Exception:
+        return False
+
+
 def _has_explicit_outcomes_marker(text: str) -> bool:
     try:
         tl = (text or "").lower()
@@ -3049,6 +3083,15 @@ async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansio
     else:
         _top_cap = (min(_cnt, 100) if _small_db_full_retrieval else 40)
         top = _combined_before_cap[:_top_cap]
+        # Universal de-junk pass for docs/RAG queries: remove low-value chunk
+        # CLASSES (flashcard/quiz scaffolds, 'Try With AI' exercises, intro hooks,
+        # TOC listings) so the LLM grounds on the answer-bearing body chunk instead
+        # of echoing a scaffold — the dominant failure mode on docs quizzes. Keep
+        # them only if too little substantive context would remain (never starve).
+        if not (_has_product_meta or _is_product_db):
+            _subst = [d for d in top if not _is_low_value_docs_chunk(str(getattr(d, "page_content", "") or ""))]
+            if len(_subst) >= 5:
+                top = _subst
 
     # Safe defaults for later product-ranking branches.
     # These must exist even when the product-intent block does not run,
