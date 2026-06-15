@@ -3454,14 +3454,27 @@ def _deterministic_docs_fact_answer(q: str, context: str) -> str | None:
 
 
 def _is_strict_scope_query(q: str) -> bool:
-    return bool(
-        re.search(r"\b(?:chapter|part)\s+\d{1,4}[A-Za-z]?\b", q or "", re.I)
-        or re.search(r"^\s*in\s+[^,\n]{6,200}\s*,\s*(?:what|why|how|which|who|when)\b", q or "", re.I)
-        or re.search(
-            r"\bin\s+[A-Z][A-Za-z\-']+(?:\s+(?:[A-Z][A-Za-z\-']+|[a-z]{1,4})){1,8}\s*\??$",
-            q or "",
-        )
-    )
+    # Numbered chapter/part is always a hard scope ("In Part 6, ...", "Chapter 3").
+    if re.search(r"\b(?:chapter|part)\s+\d{1,4}[A-Za-z]?\b", q or "", re.I):
+        return True
+    # "In <X>, what/which/..." is a hard scope ONLY when X names a concrete section:
+    # it contains a digit, or a proper Title (a capitalized content word — a named
+    # module/page). A generic lowercase topic phrase ("the relational databases lesson",
+    # "the realtime voice agent material") is NOT a hard scope — it's a normal docs
+    # question that needs LLM synthesis across the section, not single-block extraction.
+    # Universal across docs/text DBs; mirrors the retrieval-side strict-scope gate.
+    _m_in = re.search(r"^\s*in\s+([^,\n]{6,200})\s*,\s*(?:what|why|how|which|who|when)\b", q or "", re.I)
+    if _m_in:
+        _x = re.sub(r"^(?:the|a|an)\s+", "", _m_in.group(1).strip(), flags=re.I)
+        if re.search(r"\d", _x) or re.search(r"\b[A-Z][A-Za-z]{2,}", _x):
+            return True
+    # Trailing proper-title scope ("... in Building Realtime Voice Agents?").
+    if re.search(
+        r"\bin\s+[A-Z][A-Za-z\-']+(?:\s+(?:[A-Z][A-Za-z\-']+|[a-z]{1,4})){1,8}\s*\??$",
+        q or "",
+    ):
+        return True
+    return False
 
 
 def _context_has_scope_anchor(context: str, q: str) -> bool:
@@ -3605,6 +3618,11 @@ def _is_exact_title_factual_query(q: str) -> bool:
         # Routing them here dead-ends on a live probe that yields no extractable
         # fact. Defer to the normal retrieval+enumerator path. Universal.
         if re.search(r"(?i)\b(?:steps?|stages?|phases?|components?|pillars?|principles?|procedures?)\b", q or ""):
+            return False
+        # Multi-item synthesis ("which platforms/frameworks are...", "what X and Y are...")
+        # cannot be answered by a single exact-title block — the probe dead-ends or returns
+        # one off-target chunk. Defer to retrieval+LLM synthesis. Universal, answer-agnostic.
+        if _is_multi_item_question(q):
             return False
         # Explanation questions ("why / what problem / how does X help / purpose /
         # solve / difference / compared") need RAG+LLM synthesis. The exact-title
@@ -5029,7 +5047,7 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
         # This is especially useful for chapter goals/learning outcomes, policies, definitions.
         if context and not is_product_db and (not _LEARNING_GOALS_Q_RE.search(q or "")):
             _qf = _deterministic_extractive_quote_answer(q, context)
-            if _qf:
+            if _qf and _should_quote_override(q, cleaned):
                 logger.info('[Validator] quote_first_extract ? overriding with verbatim KB span')
                 _trace_event(workflow_trace, 'validator_rewrite', reason='quote_first_extract')
                 _trace_decision(workflow_debug, 'quote_first_rewrite', True)
@@ -6295,7 +6313,7 @@ async def chat(request: Request):
                     _ans = re.sub(r"\n{3,}", "\n\n", _ans).strip()
                 if context and (not _is_product_db_local) and (not _is_strict_scope_query(q)) and (not _LEARNING_GOALS_Q_RE.search(q or "")):
                     _qf = _deterministic_extractive_quote_answer(q, context)
-                    if _qf:
+                    if _qf and _should_quote_override(q, _ans):
                         _ans = _qf
                 # Provider sanity check: if the model returns mojibake/control-char garbage,
                 # treat it like a provider failure and rotate keys/providers.
@@ -6788,6 +6806,74 @@ def _evidence_spans_for_answer(q: str, kb_context: str, max_spans: int = 3) -> l
         return spans
     except Exception:
         return []
+
+
+# Plural target nouns that signal a question expects MULTIPLE distinct items.
+# Universal across docs/RAG DBs — answer-agnostic (keyed on question shape, not content).
+_MULTI_ITEM_NOUNS = (
+    "platforms", "frameworks", "kits", "tools", "stacks", "drivers", "layers", "components",
+    "steps", "domains", "principles", "libraries", "stages", "phases", "methods", "techniques",
+    "options", "features", "types", "kinds", "categories", "services", "providers", "models",
+    "patterns", "factors", "benefits", "reasons", "differences", "responsibilities", "roles",
+    "approaches", "strategies", "elements", "parts", "pieces", "aspects", "concepts",
+)
+_MULTI_ITEM_NOUN_RE = re.compile(r"\b(?:which|what)\b[^?]*\b(?:" + "|".join(_MULTI_ITEM_NOUNS) + r")\b", re.I)
+_MULTI_ITEM_VERB_RE = re.compile(r"\b(compare|compared|comparison|discussed|listed|enumerate|major|both)\b", re.I)
+_MULTI_ITEM_COORD_RE = re.compile(r"\b(?:what|which)\b[^?]*\b[a-z]{3,}\s+(?:and|or)\s+[a-z]{3,}\b", re.I)
+
+
+def _is_multi_item_question(q: str) -> bool:
+    """A question expecting MORE THAN ONE item (a list/synthesis), where a single
+    verbatim block cannot be the complete answer. Universal, answer-agnostic."""
+    try:
+        ql = (q or "").lower()
+        if not ql:
+            return False
+        if _MULTI_ITEM_NOUN_RE.search(ql):
+            return True
+        if _MULTI_ITEM_VERB_RE.search(ql):
+            return True
+        # "what X and Y are part of...", "configuration and integration layers" —
+        # a coordinating conjunction joining two asked-for content words.
+        if _MULTI_ITEM_COORD_RE.search(ql):
+            return True
+        return False
+    except Exception:
+        return False
+
+
+_QUOTE_IDK_SIGS = (
+    "don't have", "do not have", "no specific", "not in my", "no information",
+    "not available", "cannot find", "can't find", "not sure", "couldn't find",
+    "not explicitly", "does not explicitly", "is not explicitly", "context does not",
+    "context doesn't", "not provided in the context", "i specialize in helping with",
+)
+
+
+def _should_quote_override(q: str, llm_answer: str) -> bool:
+    """Gate the verbatim quote-first override (universal, all docs/text DBs).
+
+    The quote extractor returns ONE contiguous block. That is only a safe REPLACEMENT
+    for the LLM answer as a genuine fallback: when the question is single-fact AND the
+    LLM answer is weak/empty/IDK. For multi-item synthesis questions, or when the LLM
+    already produced a substantive grounded answer, keep the LLM answer — a single block
+    structurally cannot carry a multi-part answer and clobbering it is the dominant
+    docs-quiz failure mode (LLM synthesizes correctly, override parrots a lead chunk)."""
+    try:
+        if _is_multi_item_question(q):
+            return False
+        ans = str(llm_answer or "").strip()
+        al = ans.lower()
+        _is_idk = (not ans) or any(s in al[:400] for s in _QUOTE_IDK_SIGS)
+        if _is_idk:
+            return True  # genuine fallback — LLM punted
+        # LLM gave a substantive answer: keep it.
+        if len(ans) >= 160:
+            return False
+        # Short, non-IDK answer: allow the verbatim span to stand in.
+        return True
+    except Exception:
+        return True
 
 
 def _deterministic_extractive_quote_answer(q: str, kb_context: str) -> str | None:

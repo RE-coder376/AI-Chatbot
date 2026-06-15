@@ -929,6 +929,41 @@ def _is_intro_hook_chunk(text: str) -> bool:
         return False
 
 
+_NARRATIVE_VERBS = (
+    "scrolled", "opened", "leaned", "stared", "sighed", "walked", "looked", "remembered",
+    "glanced", "typed", "watched", "sat", "smiled", "frowned", "paused", "noticed", "realized",
+    "stood", "turned", "grabbed", "pulled", "closed", "stepped", "reached", "nodded", "shrugged",
+    "clicked", "pressed", "checked", "scanned", "rubbed", "blinked",
+)
+_NARRATIVE_LEAD_RE = re.compile(
+    r"^(?:[A-Z][a-z]+|He|She|They|His|Her|Their)\b[^.\n]{0,90}\b(?:" + "|".join(_NARRATIVE_VERBS) + r")\b",
+)
+_RETRO_MARKERS = ("retrospective", "looking back", "five chapters", "past five", "past four")
+
+
+def _is_narrative_lead_chunk(text: str) -> bool:
+    """Story-style lesson opener: a heading followed by a personal-narrative sentence
+    ("James scrolled through...", "He opened his TutorClaw project..."). These parrot the
+    lesson topic but carry no concrete mechanism/answer, yet often out-rank body chunks.
+    Universal + answer-agnostic: keyed on narrative sentence structure, not topic. Used to
+    SINK (not drop) such chunks so generation grounds on substantive body chunks."""
+    try:
+        t = (text or "").strip()
+        if not t:
+            return False
+        # Scan the first couple of lines after an optional short heading.
+        lines = [ln.strip() for ln in t.splitlines() if ln.strip()][:3]
+        head = " ".join(lines)[:260]
+        if _NARRATIVE_LEAD_RE.search(head):
+            return True
+        hl = head.lower()
+        if sum(1 for m in _RETRO_MARKERS if m in hl) >= 1 and re.search(r"\b(he|she|they|his|her)\b", hl):
+            return True
+        return False
+    except Exception:
+        return False
+
+
 _EXERCISE_JUNK_MARKERS = (
     "show answer", "click to flip", "try with ai", "test your skill",
     "update it to include", "try building", "show how an agent would",
@@ -3140,6 +3175,13 @@ async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansio
             _subst = [d for d in top if not _is_low_value_docs_chunk(str(getattr(d, "page_content", "") or ""))]
             if len(_subst) >= 5:
                 top = _subst
+            # Sink narrative/story-lead chunks behind substantive body chunks (stable).
+            # The LLM (and extractor) ground on whatever leads the context; a story opener
+            # that parrots the topic but carries no mechanism is the dominant echo source.
+            _body = [d for d in top if not _is_narrative_lead_chunk(str(getattr(d, "page_content", "") or ""))]
+            _narr = [d for d in top if _is_narrative_lead_chunk(str(getattr(d, "page_content", "") or ""))]
+            if _narr and len(_body) >= 3:
+                top = _body + _narr
 
     # Safe defaults for later product-ranking branches.
     # These must exist even when the product-intent block does not run,
