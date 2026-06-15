@@ -3592,6 +3592,12 @@ def _is_exact_title_factual_query(q: str) -> bool:
             return False
         if re.search(r"(?i)\b(?:price|prices|cost|availability|available|stock|sold out|in stock|buy|sale)\b", q or ""):
             return False
+        # Enumeration/process questions ("what are the steps/components/phases of
+        # X") need multi-part RAG synthesis, not a single exact-title fact probe.
+        # Routing them here dead-ends on a live probe that yields no extractable
+        # fact. Defer to the normal retrieval+enumerator path. Universal.
+        if re.search(r"(?i)\b(?:steps?|stages?|phases?|components?|pillars?|principles?|procedures?)\b", q or ""):
+            return False
         title = _extract_doc_title_phrase(q or "")
         if not title:
             return False
