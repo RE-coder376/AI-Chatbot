@@ -1219,6 +1219,27 @@ def _docs_query_anchors(q: str) -> list[str]:
             _subj = m.group(1).strip()
             anchors.append(_subj)
             anchors.append(_subj + " " + m.group(0).split()[-1])
+        # Topic-scope phrase ("In the <topic> material/lesson/blueprint, ...").
+        # Strip the leading article and a trailing generic container noun, then
+        # emit the core phrase + adjacent bigrams as lexical anchors. Generic
+        # words alone ("voice","agent") match unrelated pages, but a contiguous
+        # bigram ("realtime voice","voice agent") lands on the right section.
+        # Universal for natural "In X, <wh-word> ..." docs questions where the
+        # topic isn't title-cased or numbered (so the spans above miss it).
+        _ms = re.search(r"^\s*in\s+([^,\n]{6,200})\s*,\s*(?:what|why|how|which|who|when)\b", qq, re.I)
+        if _ms:
+            _core = _ms.group(1).strip().strip("\"'")
+            _core = re.sub(r"^(?:the|a|an)\s+", "", _core, flags=re.I)
+            _core = re.sub(
+                r"\s+(?:material|materials|lesson|lessons|section|sections|content|module|modules|"
+                r"chapter|chapters|part|parts|unit|units|course|courses|docs|documentation|"
+                r"guide|guides|blueprint|tutorial|tutorials|overview)\s*$",
+                "", _core, flags=re.I).strip()
+            _toks = [t for t in re.findall(r"[A-Za-z0-9'&.-]+", _core) if len(t) >= 3]
+            if len(_toks) >= 2:
+                anchors.append(" ".join(_toks))
+                for _i in range(len(_toks) - 1):
+                    anchors.append(_toks[_i] + " " + _toks[_i + 1])
         if "tutorclaw" in ql:
             anchors.append("TutorClaw")
         if re.search(r"\bmcp\b", ql):
@@ -2007,6 +2028,25 @@ async def async_intent_aware_expansion(q: str) -> list:
         logger.error(f"Intent expansion failed: {e}")
         return [q]
 
+def _cap_keep_query(queries: list, n: int, original: str) -> list:
+    """Slice search_queries to n entries but GUARANTEE the original user query
+    survives the cut. Front-inserted anchors/title phrases (insert(0, ...)) push
+    the literal question toward the back; a small cap (esp. [:2]) then evicts it,
+    so vector search runs on anchors only and drifts off-topic. We keep the top
+    (n-1) front entries (anchor-first ordering the passing set relies on) AND
+    re-append the original query so recall is restored. Order-preserving de-dup."""
+    capped = list(queries[:n])
+    if original and original not in capped:
+        capped = (capped[: max(1, n - 1)] + [original]) if n >= 1 else [original]
+    seen: set = set()
+    out: list = []
+    for x in capped:
+        if x not in seen:
+            seen.add(x)
+            out.append(x)
+    return out
+
+
 async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansion_task=None, history: list = None) -> tuple:
     """Multilingual Retrieval: Handles English and Urdu in the same vector space.
     Returns (context_text, doc_count, sources) so callers can cite sources.
@@ -2037,8 +2077,16 @@ async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansio
     # keep retrieval focused and avoid broad expansion drift.
     # v10: \d{1,4}[A-Za-z]? handles suffixed chapters like "Chapter 21B"
     _strict_scope_q = bool(re.search(r"\b(?:chapter|part)\s+\d{1,4}[A-Za-z]?\b", q or "", re.I))
-    if not _strict_scope_q and re.search(r"^\s*in\s+[^,\n]{6,200}\s*,\s*(?:what|why|how|which|who|when)\b", q or "", re.I):
-        _strict_scope_q = True
+    if not _strict_scope_q:
+        _mscope = re.search(r"^\s*in\s+([^,\n]{6,200})\s*,\s*(?:what|why|how|which|who|when)\b", q or "", re.I)
+        if _mscope:
+            _xph = _mscope.group(1).strip()
+            # Only strict-scope when X names a concrete numbered unit (Chapter/Part/
+            # Section N) or a proper-noun Title. A generic topic phrase like "the
+            # relational databases lesson" must NOT lock retrieval — doing so
+            # collapsed the candidate pool to a tiny off-topic subset (recall bug).
+            if re.search(r"\d", _xph) or re.match(r"(?:the\s+)?[A-Z][A-Za-z0-9'\-]+(?:\s+[A-Z0-9][A-Za-z0-9'\-]*){1,}", _xph):
+                _strict_scope_q = True
     # Also treat "Title (N)" queries (e.g. "Voice Foundations (109)") as scoped.
     if not _strict_scope_q and re.search(r"\b[A-Z][A-Za-z\s]{3,60}\s*\(\s*\d{1,4}\s*\)", q or ""):
         _strict_scope_q = True
@@ -2093,8 +2141,8 @@ async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansio
             if _mq and all(_mq.lower() != str(sq).lower() for sq in search_queries):
                 search_queries.append(_mq)
 
-    # Cap variants to keep latency bounded
-    search_queries = search_queries[: (3 if _strict_scope_q else 8)]
+    # Cap variants to keep latency bounded — never evict the original query.
+    search_queries = _cap_keep_query(search_queries, 3 if _strict_scope_q else 8, q)
 
     # Extra query signal: if the user asks about 'Chapter N: Title' or 'Part N: Title',
     # add the title portion as an additional retrieval query. This dramatically improves
@@ -2105,7 +2153,7 @@ async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansio
             _title_q = _m_title.group(1).strip().strip("\"'")
             if _title_q and all(_title_q.lower() != str(sq).lower() for sq in search_queries):
                 search_queries.insert(0, _title_q)
-                search_queries = search_queries[:4]
+                search_queries = _cap_keep_query(search_queries, 4, q)
     except Exception:
         pass
 
@@ -2136,7 +2184,7 @@ async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansio
         for v in intent_vars:
             if v not in search_queries:
                 search_queries.append(v)
-        search_queries = search_queries[:2]
+        search_queries = _cap_keep_query(search_queries, 2, q)
 
     # Await smart_search expand result and merge
     if _ss_task is not None:
@@ -2152,7 +2200,7 @@ async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansio
                     search_queries.append(_v)
         except Exception as _sse:
             logger.warning(f"[SmartSearch] merge failed: {_sse}")
-        search_queries = search_queries[:4]  # original + hyde + 2 variants
+        search_queries = _cap_keep_query(search_queries, 4, q)  # original + hyde + 2 variants
 
     logger.debug(f"Expanded queries: {search_queries}")
     
