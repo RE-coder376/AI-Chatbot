@@ -3347,6 +3347,7 @@ def _deterministic_docs_fact_answer(q: str, context: str) -> str | None:
                 for pat in (
                     rf"\b{ace}\b\s+(?:stands?\s+for|means|is\s+short\s+for)\s+([A-Z][A-Za-z]+(?:\s+[A-Za-z]+){{1,8}})",
                     rf"\b([A-Z][A-Za-z]+(?:\s+[A-Za-z]+){{1,8}})\s*\(\s*{ace}\s*\)",
+                    rf"\b{ace}\s*\(\s*([A-Z][A-Za-z]+(?:\s+[A-Za-z]+){{1,8}})\s*\)",
                     rf"\b{ace}\s*[-:–]\s*([A-Z][A-Za-z]+(?:\s+[A-Za-z]+){{1,8}})",
                 ):
                     for mm in re.finditer(pat, context):

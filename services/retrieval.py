@@ -2145,6 +2145,10 @@ async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansio
     # Keyword rescue FIRST — exact matches; skipped if Jikan fast path or no DB
     rescue_seen: set = set()
     rescue_results = []
+    # High-confidence chunks that must survive the context char-cap (e.g. a chunk
+    # that literally DEFINES the acronym asked about). Merged before every other
+    # group so a long tail of generic same-term chunks can't truncate it out.
+    priority_results = []
     if not _skip_chromadb and db is not None:
         for rescue_q in [q] + search_queries:
             for r in _keyword_rescue(rescue_q, db, rescue_seen):
@@ -2208,36 +2212,59 @@ async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansio
                 if a.lower() not in {"DB", "ORM", "API"}
             ][:4]
             _cue_re = re.compile(r"\b(?:stands?\s+for|means|short\s+for|long\s+form|acronym|protocol)\b", re.I)
+            _STOPW = {"of", "the", "for", "and", "a", "an", "to", "in", "on"}
+            def _expansion_matches(acr, phrase):
+                ws = [w for w in re.findall(r"[A-Za-z][A-Za-z0-9]*", phrase or "") if w.lower() not in _STOPW]
+                inits = "".join(w[0] for w in ws).upper()
+                return bool(inits) and (inits == acr.upper() or inits.startswith(acr.upper()))
             for _acro in _acronyms:
                 try:
                     _raw = db._collection.get(
                         where_document={"$contains": _acro},
                         include=["documents", "metadatas"],
-                        limit=80,
+                        limit=120,
                     )
                 except Exception:
                     continue
+                _ace = re.escape(_acro)
+                # Both forms: "Expansion (ACR)" and "ACR (Expansion)".
+                _form_a = re.compile(rf"\b([A-Z][A-Za-z]+(?:\s+[A-Za-z]+){{1,8}})\s*\(\s*{_ace}\s*\)")
+                _form_b = re.compile(rf"\b{_ace}\s*\(\s*([A-Z][A-Za-z]+(?:\s+[A-Za-z]+){{1,8}})\s*\)")
+                _form_c = re.compile(rf"\b{_ace}\b\s+(?:stands?\s+for|means|is\s+short\s+for)\s+([A-Z][A-Za-z]+(?:\s+[A-Za-z]+){{1,8}})", re.I)
                 _candidates = []
                 for _sd, _sm in zip(_raw.get("documents", []), _raw.get("metadatas", [])):
                     if not _sd:
                         continue
                     _body = str(_sd)
-                    if _cue_re.search(_body):
-                        _meta = _sm or {}
-                        _src = str(_meta.get("source") or "").lower()
-                        _score = 0
-                        _head = _body[:1000]
-                        if re.search(rf"\b{re.escape(_acro)}\b\s+(?:stands?\s+for|means|is\s+short\s+for)", _head, re.I):
-                            _score += 8
-                        if re.search(rf"\([ ]*{re.escape(_acro)}[ ]*\)", _head):
-                            _score += 6
-                        if _acro.lower() in _src:
-                            _score += 4
-                        _candidates.append((_score, _sd, _meta))
-                for _score, _sd, _sm in sorted(_candidates, key=lambda t: t[0], reverse=True)[:8]:
+                    if not _cue_re.search(_body):
+                        continue
+                    _meta = _sm or {}
+                    _src = str(_meta.get("source") or "").lower()
+                    _head = _body[:1500]
+                    _score = 0
+                    _defines = False
+                    for _f in (_form_c, _form_b, _form_a):
+                        for _mm in _f.finditer(_head):
+                            if _expansion_matches(_acro, _mm.group(1)):
+                                _defines = True
+                                _score += 20
+                                break
+                        if _defines:
+                            break
+                    if _acro.lower() in _src:
+                        _score += 4
+                    _candidates.append((_score, _defines, _sd, _meta))
+                _candidates.sort(key=lambda t: t[0], reverse=True)
+                for _score, _defines, _sd, _sm in _candidates[:8]:
                     _sk = _sd[:100]
-                    if _sk not in rescue_seen:
-                        rescue_seen.add(_sk)
+                    if _sk in rescue_seen:
+                        continue
+                    rescue_seen.add(_sk)
+                    # A chunk that actually defines the acronym goes to the front
+                    # priority group so the char-cap can't drop it.
+                    if _defines:
+                        priority_results.append(_Doc(page_content=_sd, metadata=_sm or {}))
+                    else:
                         rescue_results.append(_Doc(page_content=_sd, metadata=_sm or {}))
         except Exception:
             pass
@@ -2688,7 +2715,7 @@ async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansio
     _combined_before_cap: list = []
     # Outcomes-title results are a high-signal extra retrieval pass (title phrase only).
     # Include them early so the correct chapter/part page outranks broad overviews.
-    for _grp in (policy_results, _bm25_raw, _bm25_title_raw, _outcomes_title_results, rescue_results, _vector_raw):
+    for _grp in (priority_results, policy_results, _bm25_raw, _bm25_title_raw, _outcomes_title_results, rescue_results, _vector_raw):
         for _r in _grp:
             if not _retrieval_visible_doc(_r):
                 continue
@@ -2753,7 +2780,7 @@ async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansio
     # keep minimally-usable chunks so answer generation can still ground on evidence.
     if not _combined_before_cap:
         _fallback_seen: set = set()
-        for _grp in (policy_results, _bm25_raw, _bm25_title_raw, _outcomes_title_results, rescue_results, _vector_raw):
+        for _grp in (priority_results, policy_results, _bm25_raw, _bm25_title_raw, _outcomes_title_results, rescue_results, _vector_raw):
             for _r in _grp:
                 if not _minimally_usable_doc(_r):
                     continue
