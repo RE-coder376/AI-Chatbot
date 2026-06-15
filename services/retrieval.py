@@ -1172,11 +1172,19 @@ def _docs_query_anchors(q: str) -> list[str]:
         if m:
             anchors.append(m.group(1))
 
-        # Preserve subject/module names from the question itself, but do not add
-        # expected answer terms. The answerer must extract facts from context.
-        m = re.search(r"\b(?:the\s+)?([A-Za-z][A-Za-z0-9&.-]+(?:\s+[A-Za-z][A-Za-z0-9&.-]+){1,6})\s+module\b", qq, re.I)
+        # Preserve subject names from the question itself, but do not add expected
+        # answer terms. The answerer must extract facts from context. A named
+        # concept ("safety-first pattern", "FastAPI module", "ECL cycle") is a
+        # far stronger retrieval signal than the generic head word ("steps",
+        # "components") which lexically matches unrelated exercise chunks.
+        m = re.search(
+            r"\b(?:the\s+)?([A-Za-z][A-Za-z0-9&.-]+(?:\s+[A-Za-z][A-Za-z0-9&.-]+){0,5})\s+"
+            r"(?:module|pattern|cycle|process|protocol|framework|approach|method|workflow|lifecycle|loop|paradigm)\b",
+            qq, re.I)
         if m:
-            anchors.append(m.group(1))
+            _subj = m.group(1).strip()
+            anchors.append(_subj)
+            anchors.append(_subj + " " + m.group(0).split()[-1])
         if "tutorclaw" in ql:
             anchors.append("TutorClaw")
         if re.search(r"\bmcp\b", ql):
