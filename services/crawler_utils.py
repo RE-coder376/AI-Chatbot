@@ -1521,14 +1521,50 @@ def _smart_chunk_page(text: str, url: str, chunk_size: int = 400, chunk_step: in
                 return _finalize_docs(_merge_variant_docs(docs))
 
     # Mode 2: FAQ / section page
+    # The split regex fires on any line starting with How/What/Why/etc., so it
+    # over-triggers on long-form prose. The old code then truncated each section
+    # with sec[:2000], silently discarding everything past 2000 chars — on long
+    # pages this dropped >90% of the content and made it unretrievable. Chunk long
+    # sections (sentence-bounded) instead of truncating, so no content is lost.
     sections = _FAQ_SPLIT_RE.split(clean)
     if len(sections) >= 3:
         for sec in sections:
             sec = sec.strip()
-            if len(sec) > 40:
+            if len(sec) <= 40:
+                continue
+            if len(sec) <= 1800:
                 _m2 = dict(_base_meta)
                 _m2["section_id"] = f"faq_{len(docs)}"
-                docs.append(Document(page_content=sec[:2000], metadata=_m2))
+                docs.append(Document(page_content=sec, metadata=_m2))
+                continue
+            # Long section: pack whole sentences into ~1400-char chunks with a
+            # one-sentence tail overlap rather than dropping the overflow.
+            _fs = [s.strip() for s in re.split(r"(?<=[.!?])\s+(?=[A-Z0-9“\"'(])", sec) if s and s.strip()] or [sec]
+            _fb: list[str] = []
+            _fc = 0
+            for _s in _fs:
+                if _fc and (_fc + len(_s) + 1 > 1400) and _fc >= 300:
+                    _m2 = dict(_base_meta)
+                    _m2["section_id"] = f"faq_{len(docs)}"
+                    docs.append(Document(page_content=" ".join(_fb).strip(), metadata=_m2))
+                    _tail = _fb[-1] if (_fb and len(_fb[-1]) < 400) else ""
+                    _fb, _fc = ([_tail], len(_tail)) if _tail else ([], 0)
+                if len(_s) > 1800:
+                    for _w in _s.split():
+                        _fb.append(_w)
+                        _fc += len(_w) + 1
+                        if _fc > 1400:
+                            _m2 = dict(_base_meta)
+                            _m2["section_id"] = f"faq_{len(docs)}"
+                            docs.append(Document(page_content=" ".join(_fb).strip(), metadata=_m2))
+                            _fb, _fc = [], 0
+                    continue
+                _fb.append(_s)
+                _fc += len(_s) + 1
+            if _fb and " ".join(_fb).strip():
+                _m2 = dict(_base_meta)
+                _m2["section_id"] = f"faq_{len(docs)}"
+                docs.append(Document(page_content=" ".join(_fb).strip(), metadata=_m2))
         if docs:
             return _finalize_docs(docs)
 
@@ -1776,16 +1812,79 @@ def _smart_chunk_page(text: str, url: str, chunk_size: int = 400, chunk_step: in
     except Exception:
         pass
 
-    # Mode 3: generic word-split (existing behaviour — unchanged)
-    words = clean.split()
-    for j in range(0, max(1, len(words)), chunk_step):
-        chunk = " ".join(words[j:j + chunk_size])
-        if len(chunk) > 20:
-            _m5 = dict(_base_meta)
-            _m5["section_id"] = f"generic_{len(docs)}"
-            docs.append(Document(page_content=chunk, metadata=_m5))
-        if j + chunk_size >= len(words):
-            break
+    # Mode 3 (legacy word-split) — kept verbatim for any non-prose page that slips
+    # through to the fallback (product/catalog/category). A raw word-count window is
+    # fine for price-card text and must not change, so product DBs are untouched.
+    def _legacy_word_split():
+        words = clean.split()
+        for j in range(0, max(1, len(words)), chunk_step):
+            chunk = " ".join(words[j:j + chunk_size])
+            if len(chunk) > 20:
+                _m5 = dict(_base_meta)
+                _m5["section_id"] = f"generic_{len(docs)}"
+                docs.append(Document(page_content=chunk, metadata=_m5))
+            if j + chunk_size >= len(words):
+                break
+        return _finalize_docs(docs)
+
+    if str(page_meta.get("page_type") or "") in {"product", "catalog", "category"}:
+        return _legacy_word_split()
+
+    # Mode 3 (prose): structure-aware, sentence-bounded, heading-prefixed.
+    # The old raw word-count window cut sentences mid-phrase and stripped section
+    # context, diluting chunk embeddings and hurting retrieval recall (the dominant
+    # failure mode on docs DBs). We now pack WHOLE sentences to a focused size and
+    # prepend the page title as heading context (mirrors Mode 2c). Smaller, coherent,
+    # context-anchored chunks embed far more precisely.
+    _heading_ctx = str(_base_meta.get("page_title") or "").strip()
+    if _heading_ctx and re.search(r"(?i)(all rights reserved|privacy policy|terms of service|home\s*\|)$", _heading_ctx):
+        _heading_ctx = ""
+    _prose_src = re.sub(r"\s+", " ", clean).strip()
+    _sents = [s.strip() for s in re.split(r"(?<=[.!?])\s+(?=[A-Z0-9“\"'(])", _prose_src) if s and s.strip()]
+    if not _sents and _prose_src:
+        _sents = [_prose_src]
+    _TARGET = 1100   # ~180 words: focused enough for precise embeddings
+    _HARDMAX = 1600
+    _pbuf: list[str] = []
+    _plen = 0
+
+    def _emit_prose():
+        nonlocal _pbuf, _plen
+        _body = " ".join(_pbuf).strip()
+        if not _body:
+            _pbuf, _plen = [], 0
+            return
+        if _heading_ctx:
+            _body = f"## {_heading_ctx}\n\n{_body}"
+        _m = dict(_base_meta)
+        _m["section_id"] = f"prose_{len(docs)}"
+        _m["chunk_kind"] = "prose"
+        if _heading_ctx:
+            _m["heading"] = _heading_ctx
+        docs.append(Document(page_content=_body, metadata=_m))
+        # carry the last sentence as overlap for cross-chunk continuity
+        _carry = _pbuf[-1] if _pbuf else ""
+        if _carry and len(_carry) < 400:
+            _pbuf, _plen = [_carry], len(_carry)
+        else:
+            _pbuf, _plen = [], 0
+
+    for _s in _sents:
+        if _plen and (_plen + len(_s) + 1 > _TARGET) and _plen >= 300:
+            _emit_prose()
+        if len(_s) > _HARDMAX:   # pathological single sentence: word-pack it
+            for _w in _s.split():
+                _pbuf.append(_w)
+                _plen += len(_w) + 1
+                if _plen > _TARGET:
+                    _emit_prose()
+            continue
+        _pbuf.append(_s)
+        _plen += len(_s) + 1
+    if _pbuf:
+        _emit_prose()
+    if not docs:   # safety: sentence packing yielded nothing
+        return _legacy_word_split()
     return _finalize_docs(docs)
 
 
