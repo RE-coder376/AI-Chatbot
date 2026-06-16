@@ -1254,6 +1254,14 @@ def _docs_query_anchors(q: str) -> list[str]:
             _subj = m.group(1).strip()
             anchors.append(_subj)
             anchors.append(_subj + " " + m.group(0).split()[-1])
+        m = re.search(
+            r"\b(?:the\s+)?([A-Za-z0-9&.-]+(?:\s+[A-Za-z0-9&.-]+){0,5})\s+"
+            r"(?:chapter|lesson|material|materials|guide|overview|blueprint|section|unit|course)\b",
+            qq, re.I)
+        if m:
+            _subj = re.sub(r"\s+", " ", m.group(1)).strip()
+            if len(re.findall(r"[A-Za-z0-9]{3,}", _subj)) >= 2:
+                anchors.append(_subj)
         # Topic-scope phrase ("In the <topic> material/lesson/blueprint, ...").
         # Strip the leading article and a trailing generic container noun, then
         # emit the core phrase + adjacent bigrams as lexical anchors. Generic
@@ -1281,6 +1289,14 @@ def _docs_query_anchors(q: str) -> list[str]:
             anchors.append("MCP")
         if re.search(r"\btdd\b", ql):
             anchors.extend(["TDD", "TDD lesson"])
+        if "analogy" in ql:
+            anchors.extend(["analogy", "think of it as"])
+        if "principle" in ql:
+            anchors.extend(["principle", "most important"])
+        if re.search(r"\b(?:frameworks?|kits?)\b", ql):
+            anchors.extend(["frameworks", "kits", "compared"])
+        if re.search(r"\b(?:platforms?|stacks?)\b", ql):
+            anchors.extend(["platforms", "stacks"])
 
         if re.search(r"\bco-?authors?\b", ql) or re.search(r"\b(?:lead|leads|leader|ceo)\b", ql):
             anchors.extend(["authors", "co-authors", "lead author", "CEO"])
@@ -1352,6 +1368,27 @@ def _extract_scope_phrase(q: str) -> str:
     try:
         qq = (q or "").strip()
         m = re.search(r"^\s*in\s+([^,\n]{6,200})\s*,\s*(?:what|why|how|which|who|when)\b", qq, re.I)
+        if not m:
+            return ""
+        phrase = m.group(1).strip().strip('"\'')
+        phrase = re.sub(r"\s{2,}", " ", phrase).strip()
+        return phrase[:120]
+    except Exception:
+        return ""
+
+
+def _extract_scenario_phrase(q: str) -> str:
+    """Scenario clause from 'When <doing X>, what/which/how ...?' questions.
+
+    Answer-agnostic structural extraction: the gerund/condition clause names the
+    situation the user asks about (e.g. "combining multiple MCP servers"). Added as
+    a retrieval query variant so the chunk that literally describes that scenario is
+    pulled into the candidate pool — otherwise generic 'principle/important' prose
+    dominates the vector hit and the answer-bearing chunk never reaches reranking.
+    """
+    try:
+        qq = (q or "").strip()
+        m = re.search(r"^\s*when\s+(.+?)\s*,\s*(?:what|which|how|why|who)\b", qq, re.I)
         if not m:
             return ""
         phrase = m.group(1).strip().strip('"\'')
@@ -1601,6 +1638,33 @@ def _heuristic_rerank_score(doc, q: str, title_phrase: str) -> float:
             if "sqlite" in bl[:1200] and not re.search(r"\bsqlite\b", _ql):
                 score -= 8.0
 
+        # Coordination-principle questions ("when combining multiple servers/tools,
+        # what principle matters most?") should prefer chunks about overlap,
+        # conflicts, naming, and composition over generic security prose.
+        if (
+            re.search(r"\b(?:combine|combining|multiple)\b", _ql)
+            and re.search(r"\b(?:server|servers|tools|clients)\b", _ql)
+            and re.search(r"\b(?:principle|important|most important)\b", _ql)
+        ):
+            # On-topic gate: a "combining multiple <X> servers" question is about the
+            # qualifier <X> (e.g. "MCP"). Without this, a generic chunk that merely
+            # contains "conflict" (e.g. an unrelated knowledge-extraction reconciliation
+            # page) gets the +18 and hijacks the top evidence slot. Require the query's
+            # domain qualifier to appear in the chunk. Answer-agnostic.
+            _comb_quals = [
+                w.lower() for w in re.findall(
+                    r"\b([A-Za-z][A-Za-z0-9\-]{1,15})\s+(?:servers?|tools?|clients?|services?)\b",
+                    q or "", re.I)
+                if w.lower() not in {"multiple", "combining", "combine", "many", "several",
+                                     "these", "those", "the", "your", "two", "different", "other"}
+            ]
+            _comb_ontopic = (not _comb_quals) or any((qz in bl[:2400]) or (qz in sl) for qz in _comb_quals)
+            if _comb_ontopic:
+                if re.search(r"\b(?:overlap|conflict|conflicts|tool naming|naming collisions?|avoid conflicts|minimal overlap)\b", bl[:1800], re.I):
+                    score += 18.0
+                if re.search(r"\b(?:least privilege|least surface area|permissions?)\b", bl[:1800], re.I):
+                    score += 5.0
+
         # Acronym-definition boost (answer-agnostic): "what does MCP stand for?".
         # A chunk that actually DEFINES the acronym ("MCP stands for ...", "MCP
         # (Model ...)", "Model Context Protocol (MCP)") must beat the many pages
@@ -1678,6 +1742,33 @@ def _heuristic_rerank_score(doc, q: str, title_phrase: str) -> float:
                 _sh = sum(1 for t in _s_tokens if t in bl)
                 _sh_url = sum(1 for t in _s_tokens if t in sl)
                 score += (_sh * 1.5) + (_sh_url * 1.4)
+            _scope_core = re.sub(r"^(?:the|a|an)\s+", "", _slp, flags=re.I)
+            _scope_core = re.sub(
+                r"\s+(?:material|materials|lesson|lessons|section|sections|content|module|modules|"
+                r"chapter|chapters|part|parts|unit|units|course|courses|docs|documentation|"
+                r"guide|guides|blueprint|tutorial|tutorials|overview)\s*$",
+                "",
+                _scope_core,
+                flags=re.I,
+            ).strip()
+            _scope_slug = _slugish(_scope_core)
+            _scope_core_tokens = [
+                t for t in re.findall(r"[a-zA-Z0-9]{3,}", _scope_core)
+                if t not in {"what", "does", "used", "for", "mean", "means", "agent"}
+            ][:8]
+            if _scope_slug and _scope_slug in sl:
+                score += 18.0
+            _scope_bigrams = [
+                f"{_scope_core_tokens[i]}-{_scope_core_tokens[i + 1]}"
+                for i in range(len(_scope_core_tokens) - 1)
+            ]
+            _bg_hits = sum(1 for bg in _scope_bigrams if bg in sl)
+            if _bg_hits:
+                score += 7.0 * _bg_hits
+            if len(_scope_core_tokens) >= 2:
+                _scope_url_token_hits = sum(1 for t in _scope_core_tokens if t in sl)
+                if _scope_url_token_hits >= 2:
+                    score += 8.0 + (_scope_url_token_hits * 1.5)
 
         # Reward outcome-marker docs when the question is asking for goals/learning/outcomes.
         if _OUTCOMES_INTENT_RE.search(q or ''):
@@ -2108,6 +2199,12 @@ async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansio
         except Exception:
             pass
 
+    _multi_item_q = bool(
+        re.search(r"\b(?:which|what)\b[^?]*\b(?:frameworks?|kits?|platforms?|stacks?|steps?|stages?|phases?|components?|pillars?|principles?|procedures?)\b", q or "", re.I)
+        or re.search(r"\b(compare|compared|comparison|discussed|listed|enumerate|major|both)\b", q or "", re.I)
+        or re.search(r"\b(?:what|which)\b[^?]*\b[a-z]{3,}\s+(?:and|or)\s+[a-z]{3,}\b", q or "", re.I)
+    )
+
     # Tight latency path for strict chapter/part questions:
     # keep retrieval focused and avoid broad expansion drift.
     # v10: \d{1,4}[A-Za-z]? handles suffixed chapters like "Chapter 21B"
@@ -2135,13 +2232,31 @@ async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansio
         fast = True
         # Don't cap k for small-DB full-retrieval: queries like "available in Black?"
         # or "ship to Lahore?" trigger Pattern 4 but need the full catalog, not 18 chunks.
-        if not _small_db_full_retrieval:
+        if (not _small_db_full_retrieval) and (not _multi_item_q):
             k = min(k, 18)
 
     # 1. Start with hardcoded concept expansion (fast)
     search_queries = expand_query(q)
 
     _title_phrase = _extract_title_phrase(q)
+    # Coarse "Part N" scope on a comparison/enumeration question spans many chapter
+    # pages: only the Part-intro page literally says "Part N", so the strict-scope
+    # discard filter + section-lock + bare-"Part N" title filter collapse retrieval
+    # to that one teaser and lose the per-chapter content being enumerated. Chapters
+    # are single pages where the number anchor is reliable, so keep strict behavior
+    # there. Answer-agnostic: only structural (Part vs Chapter) + intent (multi-item).
+    _title_minus_part = re.sub(r"(?i)\bpart\s*\d+[A-Za-z]?\b", "", _title_phrase or "").strip()
+    _part_scope_broad = bool(
+        _strict_scope_q
+        and _multi_item_q
+        and _extract_part_number(q) is not None
+        and _extract_chapter_number(q) is None
+        and not _title_minus_part
+    )
+    if _part_scope_broad:
+        # Bare "Part N" is not a real page title — blank it so title-match filtering
+        # and title rerank locks do not re-collapse the pool to the Part-intro page.
+        _title_phrase = ""
     _title_slug = _slugish(_title_phrase or "")
     _scope_phrase = _extract_scope_phrase(q)
     _focus_phrase = _extract_focus_phrase(q)
@@ -2152,7 +2267,7 @@ async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansio
     for _da in _docs_anchors[:6]:
         if _da and all(_da.lower() != str(sq).lower() for sq in search_queries):
             search_queries.insert(0, _da)
-    if _strict_scope_q and _scope_phrase:
+    if _scope_phrase:
         _combo_qs = [_scope_phrase]
         if _focus_phrase:
             _combo_qs.extend([
@@ -2163,6 +2278,13 @@ async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansio
             _cq = re.sub(r"\s+", " ", (_cq or "").strip())
             if _cq and all(_cq.lower() != str(sq).lower() for sq in search_queries):
                 search_queries.insert(0, _cq)
+
+    # Scenario-clause retrieval: "When <doing X>, what ...?" — pull the chunk that
+    # describes scenario X (e.g. "combining multiple MCP servers") so it reaches the
+    # candidate pool instead of being crowded out by generic principle/security prose.
+    _scenario_phrase = _extract_scenario_phrase(q)
+    if _scenario_phrase and all(_scenario_phrase.lower() != str(sq).lower() for sq in search_queries):
+        search_queries.insert(0, _scenario_phrase)
 
     # Outcomes-marker-first retrieval: add explicit markers as query variants so we pull the actual
     # learning outcomes list instead of generic book/TOC pages.
@@ -2177,7 +2299,10 @@ async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansio
                 search_queries.append(_mq)
 
     # Cap variants to keep latency bounded — never evict the original query.
-    search_queries = _cap_keep_query(search_queries, 3 if _strict_scope_q else 8, q)
+    # Multi-item strict-scope docs questions need a slightly broader query set so
+    # section-intro/comparison pages are not crowded out by one narrow chapter hit.
+    _cap_n = 8 if (not _strict_scope_q or _multi_item_q) else 3
+    search_queries = _cap_keep_query(search_queries, _cap_n, q)
 
     # Extra query signal: if the user asks about 'Chapter N: Title' or 'Part N: Title',
     # add the title portion as an additional retrieval query. This dramatically improves
@@ -2274,6 +2399,7 @@ async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansio
     # that literally DEFINES the acronym asked about). Merged before every other
     # group so a long tail of generic same-term chunks can't truncate it out.
     priority_results = []
+    _scope_best_sk: str | None = None
     if not _skip_chromadb and db is not None:
         for rescue_q in [q] + search_queries:
             for r in _keyword_rescue(rescue_q, db, rescue_seen):
@@ -2323,6 +2449,70 @@ async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansio
                         if _sk not in rescue_seen:
                             rescue_seen.add(_sk)
                             rescue_results.append(_Doc(page_content=_sd, metadata=_sm or {}))
+        except Exception:
+            pass
+
+    # Scope-path rescue: when a question scopes itself to a docs section
+    # ("in the realtime voice agent material", "in the relational databases lesson"),
+    # prefer chunks whose source URL path matches the scoped phrase family. This is
+    # answer-agnostic and helps when a single generic token ("voice") would
+    # otherwise drag retrieval into an unrelated page.
+    if not _skip_chromadb and db is not None and _scope_phrase:
+        try:
+            from langchain_core.documents import Document as _Doc
+            _scope_core = re.sub(r"^(?:the|a|an)\s+", "", str(_scope_phrase or "").strip(), flags=re.I)
+            _scope_core = re.sub(
+                r"\s+(?:material|materials|lesson|lessons|section|sections|content|module|modules|"
+                r"chapter|chapters|part|parts|unit|units|course|courses|docs|documentation|"
+                r"guide|guides|blueprint|tutorial|tutorials|overview)\s*$",
+                "",
+                _scope_core,
+                flags=re.I,
+            ).strip()
+            _scope_slug = _slugish(_scope_core)
+            _scope_tokens = [t for t in re.findall(r"[A-Za-z0-9]{3,}", _scope_core.lower()) if t not in {"agent"}][:8]
+            _scope_bigrams = [
+                f"{_scope_tokens[i]}-{_scope_tokens[i + 1]}"
+                for i in range(len(_scope_tokens) - 1)
+            ]
+            if _scope_slug or _scope_bigrams:
+                _total = 0
+                try:
+                    _total = int(db._collection.count())
+                except Exception:
+                    _total = 6000
+                _raw = db._collection.get(
+                    limit=min(max(_total, 1), 18000),
+                    include=["documents", "metadatas"],
+                )
+                _cand = []
+                _family_scores: dict[str, int] = {}
+                for _sd, _sm in zip(_raw.get("documents", []), _raw.get("metadatas", [])):
+                    if not _sd:
+                        continue
+                    _meta = _sm or {}
+                    _src = str(_meta.get("source") or "").lower()
+                    _score = 0
+                    if _scope_slug and _scope_slug in _src:
+                        _score += 8
+                    _score += sum(3 for _bg in _scope_bigrams if _bg in _src)
+                    _tok_hits = sum(1 for _t in _scope_tokens if _t in _src)
+                    if _tok_hits >= 2:
+                        _score += 2 + _tok_hits
+                    if _score <= 0:
+                        continue
+                    if _scope_slug and _scope_slug in _src:
+                        _fam = _src.split(_scope_slug, 1)[0] + _scope_slug
+                        if _score > _family_scores.get(_fam, 0):
+                            _family_scores[_fam] = _score
+                    _cand.append((_score, _sd, _meta))
+                if _family_scores:
+                    _scope_best_sk = max(_family_scores.items(), key=lambda kv: kv[1])[0]
+                for _score, _sd, _sm in sorted(_cand, key=lambda t: t[0], reverse=True)[:12]:
+                    _sk = _sd[:100]
+                    if _sk not in rescue_seen:
+                        rescue_seen.add(_sk)
+                        priority_results.append(_Doc(page_content=_sd, metadata=_sm or {}))
         except Exception:
             pass
 
@@ -2947,7 +3137,7 @@ async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansio
 
     # Heuristic rerank for non-product DBs: improves chapter/part/title lookup accuracy.
     if not (_has_product_meta or _is_product_db) and _combined_before_cap:
-        _title_phrase = _extract_title_phrase(q)
+        _title_phrase = "" if _part_scope_broad else _extract_title_phrase(q)
         chapter_no = _extract_chapter_number(q)
         part_no = _extract_part_number(q)
 
@@ -3015,7 +3205,7 @@ async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansio
 
         # Universal strict-scope gate: for chapter/part queries, discard chunks
         # that do not carry matching scope anchors.
-        if _strict_scope_q:
+        if _strict_scope_q and not _part_scope_broad:
             _scoped = [d for d in _combined_before_cap if _doc_matches_strict_scope(d, q, _title_phrase)]
             if _scoped:
                 _combined_before_cap = _scoped
@@ -3110,6 +3300,37 @@ async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansio
         # Baseline rerank after optional filtering
         _combined_before_cap.sort(key=lambda d: _heuristic_rerank_score(d, q, _title_phrase), reverse=True)
 
+        # If question anchors clearly point at a named docs family (for example
+        # "mcp-fundamentals" or "building-agent-factories"), let that family lead
+        # before broader section lock / top-cap trimming. This is answer-agnostic:
+        # it only uses question-derived anchor slugs and source paths.
+        _anchor_family_slugs = []
+        for _a in _docs_anchors[:10]:
+            _asg = _slugish(str(_a or ""))
+            if _asg and "-" in _asg:
+                _anchor_family_slugs.append(_asg)
+        _anchor_best_sk = None
+        if _anchor_family_slugs:
+            _anchor_scores: dict[str, int] = {}
+            for _d in _combined_before_cap[:40]:
+                _sk = _source_section_key(_d) or ""
+                if not _sk:
+                    continue
+                for _asg in _anchor_family_slugs:
+                    if _asg in _sk:
+                        _anchor_scores[_sk] = _anchor_scores.get(_sk, 0) + 1
+            if _anchor_scores:
+                _anchor_best_sk = max(_anchor_scores.items(), key=lambda kv: kv[1])[0]
+        if _anchor_best_sk:
+            _anchor_lead = [d for d in _combined_before_cap
+                            if ((_source_section_key(d) or "") == _anchor_best_sk
+                                or (_source_section_key(d) or "").startswith(_anchor_best_sk + "/"))]
+            _anchor_tail = [d for d in _combined_before_cap
+                            if not ((_source_section_key(d) or "") == _anchor_best_sk
+                                    or (_source_section_key(d) or "").startswith(_anchor_best_sk + "/"))]
+            if len(_anchor_lead) >= 1:
+                _combined_before_cap = _anchor_lead + _anchor_tail
+
         # v11: If rescue found a chapter-anchored source, force it to lead before section lock fires.
         # Uses startswith so multi-lesson chapters (e.g. build-first-ai-employee/project-brief)
         # are all captured, not just the single page that scored highest.
@@ -3123,9 +3344,19 @@ async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansio
             if len(_resc_lead) >= 2:
                 _combined_before_cap = _resc_lead + _resc_tail
 
+        if _scope_best_sk:
+            _scope_lead = [d for d in _combined_before_cap
+                           if ((_source_section_key(d) or "") == _scope_best_sk
+                               or (_source_section_key(d) or "").startswith(_scope_best_sk + "/"))]
+            _scope_tail = [d for d in _combined_before_cap
+                           if not ((_source_section_key(d) or "") == _scope_best_sk
+                                   or (_source_section_key(d) or "").startswith(_scope_best_sk + "/"))]
+            if len(_scope_lead) >= 1:
+                _combined_before_cap = _scope_lead + _scope_tail
+
         # Section lock for strict scoped lookups (Chapter/Part): keep context mostly from
         # the strongest page/section to avoid mixed nearby-chapter contamination.
-        if _strict_scope_q and _combined_before_cap:
+        if _strict_scope_q and _combined_before_cap and not _part_scope_broad:
             _top_key = _source_section_key(_combined_before_cap[0])
             if _top_key:
                 _same = [d for d in _combined_before_cap if _source_section_key(d) == _top_key]
