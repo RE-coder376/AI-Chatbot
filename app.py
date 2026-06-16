@@ -234,12 +234,23 @@ def _add_documents_deterministic(db, docs) -> None:
     """Write docs with stable IDs to prevent duplicate drift across re-crawls."""
     if not docs:
         return
-    ids = [_stable_chunk_id(d) for d in docs]
+    # Drop in-batch duplicate IDs (identical source+normalized content). ChromaDB
+    # rejects the ENTIRE batch on any duplicate id ("Expected IDs to be unique"),
+    # which silently dropped up to 100 real chunks per failed batch. Keep first.
+    _seen_ids: set = set()
+    _u_docs, _u_ids = [], []
+    for _d in docs:
+        _i = _stable_chunk_id(_d)
+        if _i in _seen_ids:
+            continue
+        _seen_ids.add(_i)
+        _u_docs.append(_d)
+        _u_ids.append(_i)
     try:
-        db.add_documents(docs, ids=ids)
+        db.add_documents(_u_docs, ids=_u_ids)
     except TypeError:
         # Compatibility fallback for wrappers that don't expose ids kwarg.
-        db.add_documents(docs)
+        db.add_documents(_u_docs)
 
 
 def catalog_reingest_products(db_name: str, url: str, clear_products: bool = True) -> dict:
