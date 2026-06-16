@@ -73,6 +73,11 @@ BATTERY = [
     # ── Docs site (agentfactory.panaversity.org) ─────────────────────────────
     dict(url="https://agentfactory.panaversity.org/", kind="any", price=None, site="docs", docs_hints=["/roman/", "/arabic/", "/spanish/", "/hindi/", "/chinese/"]),
     dict(url="https://agentfactory.panaversity.org/docs/intro", kind="any", price=None, site="docs", docs_hints=["/roman/", "/arabic/", "/spanish/", "/hindi/", "/chinese/"], optional=True),
+    # Long-form docs article: guards the content-loss regression where the FAQ
+    # mode truncated each section to sec[:2000] and dropped >90% of the page. The
+    # chunker must retain essentially all of it (coverage ≥ 0.85).
+    dict(url="https://agentfactory.panaversity.org/docs/agentic-coding-crash-course", kind="any", price=None, site="docs",
+         docs_hints=["/roman/", "/arabic/", "/spanish/", "/hindi/", "/chinese/"], min_coverage=0.85),
 ]
 
 # Universal invariants applied to EVERY chunk of every page
@@ -102,6 +107,23 @@ DESC_PRICE_RE = re.compile(r'(?im)^description:.*(?:\brs\.?|\bpkr\b|\$|£|€)\s
 def _docs_like(url, hints):
     u = url.lower()
     return any(h in u for h in (["/docs/", "/guide"] + (hints or [])))
+
+
+def _content_coverage(text, docs) -> float:
+    """Fraction of the page's content that survives into chunks. Samples fragments
+    evenly across the normalized source text and checks each appears in some chunk.
+    A truncating chunker (the sec[:2000] bug that dropped 90%+ of long docs pages)
+    scores near 0; a lossless chunker scores ~1.0. Robust to chunk overlap."""
+    norm = re.sub(r"\s+", " ", text or "").strip()
+    if len(norm) < 600:
+        return 1.0
+    blob = " ".join(re.sub(r"\s+", " ", d.page_content) for d in docs)
+    n, hits, L = 20, 0, len(norm)
+    for i in range(n):
+        pos = int((i + 0.5) / n * (L - 50))
+        if norm[pos:pos + 40] in blob:
+            hits += 1
+    return hits / n
 
 
 def check_page(case) -> list[str]:
@@ -135,6 +157,16 @@ def check_page(case) -> list[str]:
     if not docs:
         errors.append("0 chunks produced")
         return errors
+    # Content-loss guard for docs pages: the chunker must not silently drop content.
+    if case.get("min_coverage"):
+        cov = _content_coverage(text, docs)
+        if cov < case["min_coverage"]:
+            errors.append(f"content coverage {cov:.2f} < {case['min_coverage']} — chunker dropped page content (truncation regression)")
+    # Prose chunks must carry their section/title heading so the embedding has context.
+    if meta.get("page_title"):
+        _prose = [d for d in docs if str(d.metadata.get("chunk_kind") or "") == "prose"]
+        if _prose and not any(d.page_content.startswith("## ") for d in _prose):
+            errors.append("prose chunks missing heading prefix (lost section context)")
     d0 = docs[0]
     kind = str(d0.metadata.get("chunk_kind") or "")
     _want = case["kind"] if isinstance(case["kind"], tuple) else (case["kind"],)

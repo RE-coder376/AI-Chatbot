@@ -251,6 +251,24 @@ def _add_documents_deterministic(db, docs) -> None:
     except TypeError:
         # Compatibility fallback for wrappers that don't expose ids kwarg.
         db.add_documents(_u_docs)
+    except Exception:
+        # Cross-batch duplicates: some IDs already exist in the collection (e.g. a
+        # page re-crawled by the retry queue). Chroma rejects the whole add, which
+        # would drop the genuinely-new docs riding in the same batch. Re-add only
+        # the new IDs so the batch never fails and nothing is lost or re-embedded.
+        try:
+            _existing: set = set()
+            try:
+                _got = db._collection.get(ids=_u_ids, include=[])
+                _existing = set(_got.get("ids") or [])
+            except Exception:
+                _existing = set()
+            _new_docs = [d for d, i in zip(_u_docs, _u_ids) if i not in _existing]
+            _new_ids = [i for i in _u_ids if i not in _existing]
+            if _new_docs:
+                db.add_documents(_new_docs, ids=_new_ids)
+        except Exception as _e2:
+            logger.warning(f"[ADD] deterministic add failed after existing-id filter: {_e2}")
 
 
 def catalog_reingest_products(db_name: str, url: str, clear_products: bool = True) -> dict:
