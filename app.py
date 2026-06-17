@@ -1727,6 +1727,12 @@ async def _auto_crawl_db(db_name: str, url: str, max_pages: int = 0, clear: bool
     from urllib.parse import urlparse, urljoin
     from langchain_core.documents import Document
     global embeddings_model
+    user_agents = [
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:123.0) Gecko/20100101 Firefox/123.0",
+    ]
     # Ensure embeddings model is loaded — needed even if active DB is API-only
     if embeddings_model is None:
         try:
