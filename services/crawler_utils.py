@@ -169,6 +169,19 @@ def set_docs_path_hints(hints) -> None:
     _DOCS_PATH_HINTS = [str(h).lower() for h in (hints or []) if str(h).strip()]
 
 
+# A docs corpus has no products. Per-page product/catalog detection still misfires
+# on non-/docs content pages (e.g. /authors, /about): a title + descriptive prose
+# but no price gets shaped into a "Product:/Full specs:" card with triple-title +
+# nav boilerplate, which then outranks/garbles the real answer. When this flag is
+# set at crawl start for a docs-only DB, every page is treated as docs content.
+_DOCS_ONLY_DB: bool = False
+
+
+def set_docs_only_db(flag) -> None:
+    global _DOCS_ONLY_DB
+    _DOCS_ONLY_DB = bool(flag)
+
+
 def _looks_like_docs_page(url: str, body: str = "") -> bool:
     """Heuristic for docs/tutorial/chapter pages that should not be forced into product shaping."""
     u = (url or "").lower()
@@ -896,7 +909,7 @@ def _prepare_crawl_page(text: str, url: str, title_hint: str = "", authority_tit
     title_hint = _html_mod.unescape(title_hint or "")
     authority_title = _html_mod.unescape(authority_title or "")
     raw = _clean_text(text or "")
-    docs_like = _looks_like_docs_page(url, raw)
+    docs_like = True if _DOCS_ONLY_DB else _looks_like_docs_page(url, raw)
     catalog_like = False if docs_like else _looks_like_catalog_page(url, raw)
     product_like = False if docs_like or catalog_like else _looks_like_product_page(url, raw)
     cleaned = _strip_storefront_boilerplate(raw) if product_like else _dedupe_repeated_lines(raw)
@@ -1594,8 +1607,18 @@ def _smart_chunk_page(text: str, url: str, chunk_size: int = 400, chunk_step: in
                 # Large sections: split on paragraphs / sentence boundaries and
                 # keep a small overlap so answers spanning a boundary are not lost.
                 blocks = [p.strip() for p in re.split(r"\n{2,}|(?<=[.?!])\s{2,}", seg_text) if p.strip()]
-                if len(blocks) <= 1:
-                    blocks = [seg_text[i:i + 1200] for i in range(0, len(seg_text), 1200)]
+                # A single block can still be huge (long code block, prose with no
+                # paragraph breaks). bge-small embeds only ~512 tokens (~2000 chars),
+                # so any oversized block must be hard-split into windows or its tail
+                # is never embedded (the silent recall killer). Enforce per-block.
+                _MAX_BLK = 1400
+                _bounded = []
+                for _blk in blocks:
+                    if len(_blk) <= _MAX_BLK:
+                        _bounded.append(_blk)
+                    else:
+                        _bounded.extend(_blk[i:i + 1200] for i in range(0, len(_blk), 1200))
+                blocks = _bounded or [seg_text[i:i + 1200] for i in range(0, len(seg_text), 1200)]
                 packed = []
                 buf = []
                 buf_chars = 0
@@ -1703,11 +1726,15 @@ def _smart_chunk_page(text: str, url: str, chunk_size: int = 400, chunk_step: in
                     _flush_para_buf()
                     _last_heading = _hm.group(1).strip()
                     continue
-                _para_txt = para
-                if _buf and (_chars + len(_para_txt) + 2 > 1600):
-                    _flush_para_buf()
-                _buf.append(_para_txt)
-                _chars += len(_para_txt) + 2
+                # A single paragraph with no internal breaks can exceed the
+                # embedding window; window-split it so its tail still gets embedded.
+                _para_pieces = ([para] if len(para) <= 1600
+                                else [para[i:i + 1200] for i in range(0, len(para), 1200)])
+                for _para_txt in _para_pieces:
+                    if _buf and (_chars + len(_para_txt) + 2 > 1600):
+                        _flush_para_buf()
+                    _buf.append(_para_txt)
+                    _chars += len(_para_txt) + 2
             _flush_para_buf()
             if docs:
                 return _finalize_docs(docs)
