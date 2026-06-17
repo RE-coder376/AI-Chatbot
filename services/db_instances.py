@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 import logging
+import sqlite3
 from pathlib import Path
 
 from services.config import DATABASES_DIR
@@ -23,6 +24,30 @@ def _sqlite_mtime(path: Path) -> float | None:
 
 def _tmp_chroma_dir(db_name: str) -> Path:
     return Path(f"/dev/shm/chroma_{db_name}")
+
+
+def _tmp_chroma_looks_valid(tmp_path: Path) -> bool:
+    """Lightweight tmpfs DB sanity check without instantiating Chroma's Rust client.
+
+    Reopening the same temp path through chromadb.PersistentClient while another
+    client is still winding down can trip internal Rust cache/state bugs. For the
+    overlayfs WAL fix we only need to know whether the copied sqlite file is
+    structurally present, not fully boot a second client.
+    """
+    sqlite_path = tmp_path / "chroma.sqlite3"
+    if not sqlite_path.exists():
+        return False
+    try:
+        conn = sqlite3.connect(str(sqlite_path))
+        try:
+            row = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name IN ('collections', 'segments', 'embeddings') LIMIT 1"
+            ).fetchone()
+            return bool(row)
+        finally:
+            conn.close()
+    except Exception:
+        return False
 
 def _resolve_source_dir(db_path: Path) -> Path | None:
     """Return the live Chroma source directory, preferring nested chroma/ when present."""
@@ -61,11 +86,8 @@ def _ensure_tmp_chroma(db_name: str, src_path: Path, refresh: bool = False) -> P
             except Exception as _e:
                 logger.warning(f"[ChromaDB] copy {item.name} → /tmp failed: {_e}")
         logger.info(f"[ChromaDB] Copied {db_name} → /dev/shm/chroma_{db_name} (overlayfs WAL fix)")
-    # Validate tmp — if corrupt (no collection), wipe and use src directly
-    try:
-        import chromadb as _cdb
-        _cdb.PersistentClient(path=str(tmp_path)).get_collection("langchain")
-    except Exception:
+    # Validate tmp without opening a second Rust-backed Chroma client on the same path.
+    if not _tmp_chroma_looks_valid(tmp_path):
         logger.warning(f"[ChromaDB] tmp for {db_name} is corrupt — wiping, using src directly")
         _shutil.rmtree(str(tmp_path), ignore_errors=True)
         return src_path

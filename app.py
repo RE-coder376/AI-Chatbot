@@ -122,6 +122,7 @@ from services.safety import (
 
 from services.crawler_utils import (
     set_docs_path_hints,
+    set_docs_only_db,
     _product_db_cache,
     _check_is_product_db,
     _PRODUCT_QUERY_STOP,
@@ -1775,9 +1776,16 @@ async def _auto_crawl_db(db_name: str, url: str, max_pages: int = 0, clear: bool
             logger.warning(f"[AUTO-CRAWL] clear failed for '{db_name}': {type(_clr_e).__name__}: {_clr_e}")
 
     # Per-DB docs path hints — same config-driven detection as the manual crawler.
-    _ac_docs_hints = [str(h).lower() for h in ((get_config(db_name) or {}).get("docs_path_hints") or []) if str(h).strip()]
+    _ac_cfg = get_config(db_name) or {}
+    _ac_docs_hints = [str(h).lower() for h in (_ac_cfg.get("docs_path_hints") or []) if str(h).strip()]
     set_docs_path_hints(_ac_docs_hints)
     _ac_docs_hints_all = ["/docs/", "/guide"] + _ac_docs_hints
+    # Docs-only corpus → never product/catalog-shape any page (incl. /authors,
+    # /about). Detected via docs_path_hints or db_type, and only when the DB has
+    # no product signal (is_product_db flag / smart_search feature).
+    _ac_docs_only = bool(_ac_docs_hints) or str(_ac_cfg.get("db_type", "")).lower() in ("docs", "documentation")
+    _ac_has_product = bool(_ac_cfg.get("is_product_db")) or ("smart_search" in set(_ac_cfg.get("features", []) or []))
+    set_docs_only_db(_ac_docs_only and not _ac_has_product)
 
     # Admin UI wants "new chunks" as net growth, not "chunks processed".
     # Some Chroma versions don't support count(where=...), so track net via total count.
@@ -12094,9 +12102,15 @@ async def crawl_site(data: dict, request: Request):
         # Docs-path detection: universal prefixes + per-DB hints from config
         # (databases/<name>/config.json "docs_path_hints") — replaces hardcoded
         # site-specific language paths (/roman/, /arabic/, ...) in crawl logic.
-        _db_docs_hints = [str(h).lower() for h in ((get_config(db_name) or {}).get("docs_path_hints") or []) if str(h).strip()]
+        _mc_cfg = get_config(db_name) or {}
+        _db_docs_hints = [str(h).lower() for h in (_mc_cfg.get("docs_path_hints") or []) if str(h).strip()]
         set_docs_path_hints(_db_docs_hints)
         _docs_hints_all = ["/docs/", "/guide"] + _db_docs_hints
+        # Mirror _auto_crawl_db: docs-only corpus → never product/catalog-shape any
+        # page (incl. /authors, /about). Keeps both crawl paths identical.
+        _mc_docs_only = bool(_db_docs_hints) or str(_mc_cfg.get("db_type", "")).lower() in ("docs", "documentation")
+        _mc_has_product = bool(_mc_cfg.get("is_product_db")) or ("smart_search" in set(_mc_cfg.get("features", []) or []))
+        set_docs_only_db(_mc_docs_only and not _mc_has_product)
 
         def _is_docs_like(u: str) -> bool:
             _ul = (u or "").lower()
@@ -13820,13 +13834,21 @@ async def crawl_site(data: dict, request: Request):
                 # 2. Reusing chroma_dir path after journal_mode change confuses the
                 #    Rust PersistentClient singleton cache.
                 shutil.rmtree(str(chroma_dir), ignore_errors=True)
+                _db_instance_cache.pop(db_name, None)
+                _bm25_cache.pop(db_name, None)
+                _old_local_db = local_db
+                local_db = None
+                try:
+                    del _old_local_db
+                except Exception:
+                    pass
+                gc.collect()
                 # Evict stale load-dirs so _ensure_tmp_chroma copies fresh from db_dir
                 for _old_d in Path("/dev/shm").glob(f"chroma_{db_name}*"):
                     shutil.rmtree(str(_old_d), ignore_errors=True)
                 for _old_d in Path("/dev/shm").glob(f"load_{db_name}_*"):
                     shutil.rmtree(str(_old_d), ignore_errors=True)
                 # Reload via standard startup path — same as server boot, known to work
-                local_db = None
                 await asyncio.to_thread(_load_db_now)
                 _cnt_after = local_db._collection.count() if local_db else 0
                 logger.info(f"[POST-CRAWL] local_db reloaded from disk: {_cnt_after} chunks")
