@@ -2063,10 +2063,19 @@ def _get_bm25_index(db, db_name: str):
         # Only rebuild if chunk count changed by >50 — avoids full 131MB re-read on every auto-crawl write
         if cached and abs(cached["num_docs"] - total) < 50:
             return cached
-        # Load all docs and build index
-        all_data = db._collection.get(limit=total + 100, include=["documents", "metadatas"])
-        docs = all_data.get("documents") or []
-        metas = all_data.get("metadatas") or [{}] * len(docs)
+        # Load all docs and build index. Paginate: a single huge .get() binds one
+        # SQLite variable per row → "too many SQL variables" past ~32k chunks (85k+ DBs).
+        docs, metas = [], []
+        _page = 10000
+        _off = 0
+        while _off < total:
+            _batch = db._collection.get(limit=_page, offset=_off, include=["documents", "metadatas"])
+            _bd = _batch.get("documents") or []
+            if not _bd:
+                break
+            docs.extend(_bd)
+            metas.extend(_batch.get("metadatas") or [{}] * len(_bd))
+            _off += len(_bd)
         if not docs:
             return None
         def _tokenize_bm25(text):

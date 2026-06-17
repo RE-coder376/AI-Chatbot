@@ -273,6 +273,35 @@ def _github_sync_download(load_db_callback=None):
             if allowed and db_name not in allowed:
                 logger.info(f"[GH-SYNC] Skipping restore for {db_name} — not in restore allowlist")
                 return
+            # Volume-authoritative guard: the persistent Modal volume is the live
+            # working copy. Never restore a GitHub backup OVER an already-populated
+            # DB — a cold-start restore of a stale zip silently clobbers a fresh
+            # crawl that hasn't been re-published yet (the recurring data-loss bug).
+            # Only restore into a missing/empty/husk DB dir (true disaster recovery).
+            # Disable with GH_SYNC_PRESERVE_VOLUME=0.
+            if os.environ.get("GH_SYNC_PRESERVE_VOLUME", "1").strip().lower() not in ("0", "false", "no", "off"):
+                try:
+                    _existing = DATABASES_DIR / db_name
+                    _sqlite = _existing / "chroma.sqlite3"
+                    _populated = False
+                    if _sqlite.exists() and _sqlite.stat().st_size >= 100 * 1024:
+                        _populated = True
+                    else:
+                        # Fallback: a real vector segment (data_level0.bin) present.
+                        for _seg in _existing.rglob("data_level0.bin"):
+                            if _seg.stat().st_size > 0:
+                                _populated = True
+                                break
+                    if _populated:
+                        _local_mb = sum(f.stat().st_size for f in _existing.rglob("*") if f.is_file()) / 1024 / 1024
+                        logger.info(
+                            f"[GH-SYNC] Preserving volume copy of {db_name} "
+                            f"({_local_mb:.1f}MB on disk) — skipping restore of GitHub zip "
+                            f"({asset['size']/1024/1024:.1f}MB). Set GH_SYNC_PRESERVE_VOLUME=0 to force."
+                        )
+                        return
+                except Exception as _pv_err:
+                    logger.warning(f"[GH-SYNC] volume-preserve check failed for {db_name}: {_pv_err}")
             size_mb = asset["size"] / 1024 / 1024
             logger.info(f"[GH-SYNC] Downloading {db_name}.zip ({size_mb:.1f}MB)...")
             _github_sync_result["detail"] = f"Restoring {db_name}.zip ({size_mb:.1f}MB)"
