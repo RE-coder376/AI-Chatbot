@@ -1601,6 +1601,76 @@ def _split_comparison_entities(q: str) -> list:
     return ents if len(ents) >= 2 else []
 
 
+_FANOUT_STOP = {"the", "and", "for", "with", "set", "pcs", "pack", "piece", "single", "pair"}
+
+
+def _fanout_match(ent, docs, metas, mk_doc):
+    """Best product Document for one named phrase, via body-token match with a
+    title-coverage fallback (how much of the ROW TITLE the phrase names — catches a
+    phrase that adds descriptor words beyond the stored title). Shared by the
+    comparison fan-out and the single-product resolver so both resolve identically."""
+    et = [t for t in re.findall(r"[a-z0-9]+", (ent or "").lower()) if len(t) >= 2 and t not in _FANOUT_STOP]
+    if not et:
+        return None
+    et_set = set(et)
+    need = max(2, int(round(len(et) * 0.6)))
+    best, best_score = None, 0.0
+    fb, fb_score = None, 0.0
+    for ct, cm in zip(docs, metas):
+        if not ct:
+            continue
+        cm = cm or {}
+        title = str(cm.get("canonical_product_title") or cm.get("product_title")
+                    or cm.get("page_title") or cm.get("name") or "").lower()
+        body = str(ct).lower()
+        if not title:
+            m = re.search(r"(?im)^product:\s*([^\n]{3,120})", body)
+            title = (m.group(1) if m else body.split("\n", 1)[0])[:120].strip()
+        hay = title + " " + body[:1200]
+        title_frac = (sum(1 for t in et if t in title) / len(et)) if et else 0.0
+        tt = [t for t in re.findall(r"[a-z0-9]+", title) if len(t) > 1]
+        title_cov = (sum(1 for t in tt if t in et_set) / len(tt)) if len(tt) >= 2 else 0.0
+        fbk = max(title_frac, title_cov)
+        if fbk >= 0.5 and fbk > fb_score:
+            fb, fb_score = mk_doc(page_content=str(ct), metadata=cm), fbk
+        hit = sum(1 for t in et if t in hay)
+        if hit < need:
+            continue
+        score = hit / len(et) + (title_frac * 0.5)
+        if score > best_score:
+            best, best_score = mk_doc(page_content=str(ct), metadata=cm), score
+    return best if best is not None else fb
+
+
+_SP_CUE_RE = re.compile(
+    r"(?i)\b(price|prices|priced|cost|costs|how\s+much|availability|available|"
+    r"in\s+stock|sold\s+out|do\s+you\s+(?:have|sell|stock|carry))\b")
+# Query-framing words to strip so only the product noun phrase remains.
+_SP_FRAME_RE = re.compile(
+    r"(?i)\b(what'?s?|what|whats|which|is|are|the|how\s+much|does|do|you|your|sell|sells|"
+    r"have|has|stock|stocks|carry|carries|price|prices|priced|cost|costs|of|for|me|tell|"
+    r"about|availability|available|in|stock|sold|out|please|a|an|its|and|currently|got)\b")
+
+
+def _extract_single_product_phrase(q: str) -> str:
+    """Product noun phrase from a single-product lookup ('price of Retro - Spiral
+    Notebook', 'is X available'). Empty unless it's a price/availability cue AND the
+    phrase has >=2 content tokens. Rank/count/bounds/comparison queries are excluded
+    (handled by the catalog engine / price-rank / fan-out)."""
+    ql = q or ""
+    if not _SP_CUE_RE.search(ql):
+        return ""
+    if re.search(r"(?i)\b(cheapest|lowest|least\s+expensive|most\s+expensive|priciest|costliest|"
+                 r"how\s+many|number\s+of|count|under|below|over|above|between|less\s+than|"
+                 r"more\s+than|compare|compared|versus|vs\.?|difference\s+between|list|show)\b", ql):
+        return ""
+    phrase = _SP_FRAME_RE.sub(" ", ql)
+    phrase = re.sub(r"[?\"'.]", " ", phrase)
+    phrase = re.sub(r"\s{2,}", " ", phrase).strip(" -:|")
+    toks = [t for t in re.findall(r"[a-z0-9]+", phrase.lower()) if len(t) > 1]
+    return phrase if len(toks) >= 2 else ""
+
+
 _CURRENCY_PREFIX = r'(?:rs\.?|pkr|\$|£|€|usd|gbp|eur)?\s*'
 
 
@@ -3653,55 +3723,10 @@ async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansio
                 from langchain_core.documents import Document as _CmpDoc
                 _cmp_total = min(int(db._collection.count() or 0), 8000)
                 _cmp_raw = db._collection.get(limit=_cmp_total, include=["documents", "metadatas"])
-                _cmp_stop = {"the", "and", "for", "with", "set", "pcs", "pack", "piece", "single", "pair"}
                 _cmp_docs = []
                 for _ent in _cmp_ents:
-                    # Keep 2-char tokens too — "rc", "3d", "tv", "hd" are real product/
-                    # model codes; _cmp_stop has no 2-char fillers so nothing leaks.
-                    _et = [t for t in re.findall(r"[a-z0-9]+", _ent.lower()) if len(t) >= 2 and t not in _cmp_stop]
-                    if not _et:
-                        continue
-                    _best, _best_score = None, 0.0
-                    _fb, _fb_score = None, 0.0   # fallback: best by TITLE overlap alone
-                    _need = max(2, int(round(len(_et) * 0.6)))
-                    for _ct, _cm in zip(_cmp_raw.get("documents", []), _cmp_raw.get("metadatas", [])):
-                        if not _ct:
-                            continue
-                        _cm = _cm or {}
-                        _title = str(_cm.get("canonical_product_title") or _cm.get("product_title")
-                                     or _cm.get("page_title") or _cm.get("name") or "").lower()
-                        _body = str(_ct).lower()
-                        # HTML-crawl chunks often carry NO title meta — derive a pseudo
-                        # title from a "Product:" line or the first body line so the
-                        # title-coverage fallback below has something to match against.
-                        if not _title:
-                            _m = re.search(r"(?im)^product:\s*([^\n]{3,120})", _body)
-                            _title = (_m.group(1) if _m else _body.split("\n", 1)[0])[:120].strip()
-                        # Wider body window: product spec/price lines sit past 400 chars
-                        # in many themes, and truncating there drops the token match.
-                        _hay = _title + " " + _body[:1200]
-                        _et_set = set(_et)
-                        _title_frac = (sum(1 for t in _et if t in _title) / len(_et)) if _et else 0.0
-                        # Title-coverage: how much of THIS product's (short) title the
-                        # entity names. Catches a query that adds descriptor words beyond
-                        # the stored title ("Pop N Play - Quick Push Pop Game" vs "Pop N
-                        # Play") where _title_frac stays low because the entity is long.
-                        _tt = [t for t in re.findall(r"[a-z0-9]+", _title) if len(t) > 1]
-                        _title_cov = (sum(1 for t in _tt if t in _et_set) / len(_tt)) if len(_tt) >= 2 else 0.0
-                        _fbk = max(_title_frac, _title_cov)
-                        # Track the best title match so a short named product still
-                        # surfaces if no row meets the body-token _need threshold.
-                        if _fbk >= 0.5 and _fbk > _fb_score:
-                            _fb, _fb_score = _CmpDoc(page_content=str(_ct), metadata=_cm), _fbk
-                        _hit = sum(1 for t in _et if t in _hay)
-                        if _hit < _need:
-                            continue
-                        # Title match is stronger evidence than a body mention.
-                        _score = _hit / len(_et) + (_title_frac * 0.5)
-                        if _score > _best_score:
-                            _best, _best_score = _CmpDoc(page_content=str(_ct), metadata=_cm), _score
-                    if _best is None and _fb is not None:
-                        _best = _fb   # named product matched its title but not the body threshold
+                    _best = _fanout_match(_ent, _cmp_raw.get("documents", []),
+                                          _cmp_raw.get("metadatas", []), _CmpDoc)
                     if _best is not None:
                         _cmp_docs.append(_best)
                 if len(_cmp_docs) >= 2:
@@ -3717,6 +3742,29 @@ async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansio
         # catalog price scan (which would replace the named products with the
         # global cheapest/priciest). Suppress the rank/bounds branch below.
         _is_price_rank_q = False
+
+    # ── Single named-product resolver ────────────────────────────────────────
+    # A product-specific lookup ("price of Retro - Spiral Notebook", "is X
+    # available") can miss when similarity returns same-prefix siblings instead of
+    # the exact item (the quoted form works, the bare form didn't). Resolve the
+    # named product by the SAME title-coverage scan the fan-out uses and put it at
+    # the head of context, so the exact product (and its price) is present.
+    if (not _cmp_override) and (not _is_price_rank_q) and (not _price_bounds) \
+            and (_has_product_meta or _is_product_db) and db is not None:
+        _sp_phrase = _extract_single_product_phrase(q or "")
+        if _sp_phrase:
+            try:
+                from langchain_core.documents import Document as _SpDoc
+                _sp_total = min(int(db._collection.count() or 0), 8000)
+                _sp_raw = db._collection.get(limit=_sp_total, include=["documents", "metadatas"])
+                _sp_best = _fanout_match(_sp_phrase, _sp_raw.get("documents", []),
+                                         _sp_raw.get("metadatas", []), _SpDoc)
+                if _sp_best is not None:
+                    _spk = str(getattr(_sp_best, "page_content", ""))[:80]
+                    top = [_sp_best] + [d for d in top if str(getattr(d, "page_content", ""))[:80] != _spk]
+                    logger.info("[SP-RESOLVE] injected named product")
+            except Exception as _sp_e:
+                logger.warning(f"[SP-RESOLVE] failed: {_sp_e}")
 
     # ── Product catalog: dedup + GPU ranking ─────────────────────────────────
     if _has_product_meta or _is_product_db:
