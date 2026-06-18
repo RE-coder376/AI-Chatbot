@@ -6,6 +6,7 @@ No shared mutable app state. Safe to import from anywhere.
 
 from __future__ import annotations
 
+import html as _html
 import re
 import urllib.parse
 from collections import Counter
@@ -119,8 +120,19 @@ def _clean_text(text: str) -> str:
     """Strip invisible Unicode chars + the universal "skip to main content" nav
     link. The skip-link is an accessibility anchor present on most CMS/docs pages
     (Docusaurus etc.); left in, it dominates short title chunks and gets quoted as
-    if it were content (e.g. "co-authors include Factory Skip to main content")."""
-    return _SKIP_LINK_RE.sub(" ", _INVISIBLE_CHARS.sub("", text))
+    if it were content (e.g. "co-authors include Factory Skip to main content").
+    Also decodes HTML entities (&amp; &#39; &ndash;) so un-decoded refs never reach
+    chunk bodies — the crawl_gate flags them as junk and quarantines the whole DB.
+    unescape is idempotent (decoded text is untouched), so applying it universally
+    here is safe even where callers already unescaped upstream. Loops because Shopify
+    text is often double-encoded ("&amp;amp;" → "&amp;" after one pass)."""
+    s = text or ""
+    for _ in range(4):
+        u = _html.unescape(s)
+        if u == s:
+            break
+        s = u
+    return _SKIP_LINK_RE.sub(" ", _INVISIBLE_CHARS.sub("", s))
 
 
 _PRODUCT_PRICE_CAPTURE_RE = re.compile(

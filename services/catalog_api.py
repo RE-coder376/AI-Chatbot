@@ -32,7 +32,14 @@ def _html_to_text(s: str) -> str:
     s = re.sub(r"(?i)<br\s*/?>", "\n", s)
     s = re.sub(r"(?i)</(p|div|li|h[1-6])>", "\n", s)
     s = _TAG_RE.sub(" ", s)
-    s = _html.unescape(s)
+    # Shopify body_html is frequently double-encoded ("&amp;amp;" → "&amp;" after one
+    # pass), which leaves a literal "&amp;" in the chunk that crawl_gate flags as junk
+    # and quarantines the DB. Unescape until stable (capped) so no entity survives.
+    for _ in range(4):
+        _u = _html.unescape(s)
+        if _u == s:
+            break
+        s = _u
     s = re.sub(r"[ \t]{2,}", " ", s)
     s = re.sub(r"[ \t]*\n[ \t\n]*", "\n", s).strip()
     return s

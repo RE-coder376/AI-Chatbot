@@ -347,6 +347,36 @@ def catalog_reingest_products(db_name: str, url: str, clear_products: bool = Tru
             logger.warning(f"[CATALOG] publish failed: {_pe}")
     logger.info(f"[CATALOG] {db_name}: ingested {len(docs)} products from {url} (copied_back={copied}, published={published})")
     return {"db": db_name, "products_ingested": len(docs), "copied_back": copied, "published": published}
+
+def _catalog_ingest_into_db(db, db_name: str, url: str) -> int:
+    """In-place Shopify catalog ingest on an EXISTING db instance — replaces the
+    crawl's product/catalog/category chunks with the authoritative, junk-free
+    /products.json catalog. Prose (article/policy/faq) chunks are preserved.
+    NO copy-back / publish: the caller (_auto_crawl_db finalize) owns persistence +
+    gate. Returns products added, or 0 when the store has no /products.json
+    (not Shopify / blocked) — caller then leaves crawl product chunks as-is.
+    [[junk-fix-structured-ingest-not-regex]]"""
+    from services.catalog_api import build_catalog_docs
+    if not db or not url:
+        return 0
+    docs = build_catalog_docs(url, canonicalize=_canonical_product_title)
+    if not docs:
+        return 0
+    try:
+        docs = _sanitize_docs_for_chroma(docs)
+    except Exception as _se:
+        logger.warning(f"[CATALOG] sanitize failed: {_se}")
+    for _w in ({"chunk_kind": "product"}, {"content_type": "product"},
+               {"chunk_kind": "catalog"}, {"content_type": "catalog"},
+               {"chunk_kind": "category"}, {"content_type": "category"}):
+        try:
+            db._collection.delete(where=_w)
+        except Exception as _de:
+            logger.warning(f"[CATALOG] listing clear ({_w}) failed: {_de}")
+    _add_documents_deterministic(db, docs)
+    logger.info(f"[CATALOG] {db_name}: in-place ingest {len(docs)} products from /products.json")
+    return len(docs)
+
 def _get_active_db() -> str:
     if ACTIVE_DB_FILE.exists():
         v = ACTIVE_DB_FILE.read_text(encoding="utf-8").strip()
@@ -2724,6 +2754,18 @@ async def _auto_crawl_db(db_name: str, url: str, max_pages: int = 0, clear: bool
             await asyncio.to_thread(seen_file.write_text, "\n".join(already_seen | set(newly_seen)), "utf-8")
         except Exception as e: logger.warning(f"[AUTO-CRAWL] Could not persist seen URLs for {db_name}: {e}")
         threading.Thread(target=_github_backup_crawled_urls, args=(db_name,), daemon=True).start()
+    # Shopify: products always come from the structured /products.json, never the
+    # HTML crawl (which leaks swatch/cart junk per theme). Runs on the staging db
+    # BEFORE copy-back so the existing finalize (copy-back → gate → publish) persists
+    # and validates it. No-op (returns 0) for docs-only DBs and non-Shopify stores.
+    if db and not _ac_docs_only:
+        try:
+            _cat_n = await asyncio.to_thread(_catalog_ingest_into_db, db, db_name, url)
+            if _cat_n > 0:
+                added += _cat_n
+                logger.info(f"[AUTO-CRAWL] '{db_name}': catalog_ingest replaced product chunks with {_cat_n} from /products.json")
+        except Exception as _cat_e:
+            logger.warning(f"[AUTO-CRAWL] '{db_name}': catalog_ingest skipped: {_cat_e}")
     if added > 0:
         _bm25_cache.pop(db_name, None)
         # Copy the local staging DB back to databases/ so new docs survive restart.
