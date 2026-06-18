@@ -164,6 +164,12 @@ def parse(q: str) -> Spec:
     cheapest = bool(re.search(r"\b(cheapest|lowest[\s-]+priced?|least\s+expensive|most\s+affordable|lowest\s+cost)\b", ql))
     priciest = bool(re.search(r"\b(most\s+expensive|highest[\s-]+priced?|priciest|costliest|most\s+costly|dearest|highest\s+cost)\b", ql))
     list_q = bool(re.search(r"\b(show|list|which|what'?s?|give|display|products?|items?|sell|have|available)\b", ql))
+    # Single-product price/availability lookup ("price of X", "how much is X",
+    # "is X available"). Routed to the list path so the full-catalog scan (with the
+    # title-coverage fallback) resolves the EXACT named product instead of the
+    # similarity top-N returning same-prefix siblings. Bare price queries with no
+    # product fall through the no-anchor guard below to ordinary RAG.
+    priceof_q = bool(re.search(r"\b(price|prices|priced|pricing|cost|costs|costing|how\s+much|rate|rates)\b", ql))
 
     if count_q:
         agg = "count"
@@ -179,6 +185,8 @@ def parse(q: str) -> Spec:
     elif exist_q:
         agg = "exists"
     elif list_q:
+        agg = "list"
+    elif priceof_q:
         agg = "list"
     else:
         return Spec("none", structured=False)
