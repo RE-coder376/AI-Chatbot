@@ -293,6 +293,13 @@ def _deterministic_product_catalog_answer(q: str, kb_context: str, max_items: in
         if not q or not kb_context:
             return None
         ql = q.lower()
+        # A comparison ("compare A and B", "X vs Y") must reach the LLM to
+        # synthesize a side-by-side answer over BOTH products; this single-best
+        # catalog list would drop one. Step aside so the comparison fan-out +
+        # LLM path (which already places both products in context) handles it.
+        if (re.search(r"\b(compare|compared|comparison|versus|vs\.?|difference\s+between)\b", ql)
+                and re.search(r"\b(and|or|vs\.?|versus|than)\b", ql)):
+            return None
         rank_mode = None
         if re.search(r"\b(cheapest|lowest\s+price|lowest\s+priced|least\s+expensive|most\s+affordable|budget)\b", ql, re.I):
             rank_mode = "asc"
