@@ -139,6 +139,15 @@ def parse(q: str) -> Spec:
     combination composes — that is what makes the engine universal."""
     ql = (q or "").lower()
 
+    # Comparisons ("compare A and B", "X vs Y") are NOT a single structured
+    # aggregation — they need the retrieval fan-out (which matches each named
+    # product in both name directions) + LLM synthesis. Hand them off; otherwise a
+    # "compare the price of A and B" would be caught by the price-of list path and
+    # return whichever product's title the query happens to fully name.
+    if (re.search(r"\b(compare|compared|comparison|versus|vs\.?|difference\s+between)\b", ql)
+            and re.search(r"\b(and|or|vs\.?|versus|than)\b", ql)):
+        return Spec("none", structured=False)
+
     pmin = pmax = None
     m = re.search(r"between\s+" + _NUM + r"\s*(?:and|to|-|–)\s*" + _NUM, ql)
     if m:
