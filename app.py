@@ -269,7 +269,8 @@ def _add_documents_deterministic(db, docs) -> None:
             if _new_docs:
                 db.add_documents(_new_docs, ids=_new_ids)
         except Exception as _e2:
-            logger.warning(f"[ADD] deterministic add failed after existing-id filter: {_e2}")
+            logger.error(f"[ADD] deterministic add failed after existing-id filter: {_e2}")
+            raise RuntimeError(f"Chroma write failed: {_e2}") from _e2
 
 
 def catalog_reingest_products(db_name: str, url: str, clear_products: bool = True) -> dict:
@@ -1723,6 +1724,9 @@ async def _auto_crawl_db(db_name: str, url: str, max_pages: int = 0, clear: bool
     max_pages=0 means unlimited (crawl entire sitemap).
     clear=True wipes the collection first (full rebuild) — purges stale chunks that
     per-source incremental delete misses (e.g. www/non-www source-string drift)."""
+    class _CrawlWriteError(RuntimeError):
+        """Fatal storage failure; must abort rather than skip data and report success."""
+
     # Same guard as /admin/crawl: no crawling from a hosted Space.
     if os.environ.get("SPACE_ID") and os.environ.get("ALLOW_SPACE_CRAWL") != "1":
         logger.warning(f"[AUTO-CRAWL] skipped for '{db_name}' — crawling disabled on hosted Space")
@@ -2637,10 +2641,13 @@ async def _auto_crawl_db(db_name: str, url: str, max_pages: int = 0, clear: bool
                             await asyncio.wait_for(asyncio.to_thread(_add_documents_deterministic, db, _sanitize_docs_for_chroma(_pending_docs)), timeout=120)
                             logger.info(f"[AUTO-CRAWL] '{db_name}' batch written: {len(_pending_docs)} docs")
                         except Exception as _bw_e:
-                            logger.warning(f"[AUTO-CRAWL] '{db_name}' batch write failed: {_bw_e}")
+                            logger.error(f"[AUTO-CRAWL] '{db_name}' batch write failed: {_bw_e}")
+                            raise _CrawlWriteError(str(_bw_e)) from _bw_e
                         _pending_docs = []
                 if page_url not in already_seen:
                     newly_seen.append(page_url)
+            except _CrawlWriteError:
+                raise
             except Exception as e:
                 logger.warning(f"[AUTO-CRAWL] Page error {page_url}: {e}")
                 if len(_failures) < 25:
@@ -2675,7 +2682,8 @@ async def _auto_crawl_db(db_name: str, url: str, max_pages: int = 0, clear: bool
             try:
                 await asyncio.wait_for(asyncio.to_thread(_add_documents_deterministic, db, _sanitize_docs_for_chroma(_pending_docs)), timeout=120)
             except Exception as _fw_e:
-                logger.warning(f"[AUTO-CRAWL] '{db_name}' final batch write failed: {_fw_e}")
+                logger.error(f"[AUTO-CRAWL] '{db_name}' final batch write failed: {_fw_e}")
+                raise _CrawlWriteError(str(_fw_e)) from _fw_e
 
         if _browser:
             try: await _browser.close()
@@ -2707,23 +2715,56 @@ async def _auto_crawl_db(db_name: str, url: str, max_pages: int = 0, clear: bool
         threading.Thread(target=_github_backup_crawled_urls, args=(db_name,), daemon=True).start()
     if added > 0:
         _bm25_cache.pop(db_name, None)
-        # Copy /dev/shm back to databases/ so new docs survive restart
-        _shm_path = Path(f"/dev/shm/chroma_{db_name}")
+        # Copy the local staging DB back to databases/ so new docs survive restart.
+        # Modal crawls use a large /tmp ephemeral disk; other deployments keep the
+        # existing /dev/shm behavior. Never assume one hard-coded staging root.
+        _stage_path = Path(
+            getattr(db, "_persist_directory", "")
+            or (Path(os.environ.get("CHROMA_TMP_ROOT", "/dev/shm")) / f"chroma_{db_name}")
+        )
         _db_dst = DATABASES_DIR / db_name
-        if _shm_path.exists() and _db_dst.exists():
+        if _stage_path.exists():
             try:
                 def _copy_back():
-                    for _itm in _shm_path.iterdir():
+                    import sqlite3 as _sq
+
+                    _src_sqlite = _stage_path / "chroma.sqlite3"
+                    if not _src_sqlite.exists():
+                        raise RuntimeError(f"staging DB missing: {_src_sqlite}")
+                    _src_conn = _sq.connect(str(_src_sqlite), timeout=30)
+                    try:
+                        _src_conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+                        _src_count = int(_src_conn.execute("SELECT COUNT(*) FROM embeddings").fetchone()[0])
+                    finally:
+                        _src_conn.close()
+
+                    _db_dst.mkdir(parents=True, exist_ok=True)
+                    for _itm in _stage_path.iterdir():
                         _d = _db_dst / _itm.name
                         if _itm.is_dir():
                             if _d.exists(): shutil.rmtree(str(_d))
                             shutil.copytree(str(_itm), str(_d))
                         else:
                             shutil.copy2(str(_itm), str(_d))
+
+                    _dst_sqlite = _db_dst / "chroma.sqlite3"
+                    _dst_conn = _sq.connect(f"file:{_dst_sqlite}?mode=ro", uri=True, timeout=30)
+                    try:
+                        _ok = str(_dst_conn.execute("PRAGMA quick_check").fetchone()[0]).lower() == "ok"
+                        _dst_count = int(_dst_conn.execute("SELECT COUNT(*) FROM embeddings").fetchone()[0])
+                    finally:
+                        _dst_conn.close()
+                    if not _ok or _dst_count != _src_count:
+                        raise RuntimeError(
+                            f"copy verification failed: quick_check={_ok}, source={_src_count}, destination={_dst_count}"
+                        )
                 await asyncio.to_thread(_copy_back)
                 logger.info(f"[AUTO-CRAWL] Copy-back to databases/{db_name} done")
             except Exception as _cb_e:
-                logger.warning(f"[AUTO-CRAWL] Copy-back failed (non-fatal): {_cb_e}")
+                logger.error(f"[AUTO-CRAWL] Copy-back failed: {_cb_e}")
+                raise _CrawlWriteError(f"persistent copy-back failed: {_cb_e}") from _cb_e
+        else:
+            raise _CrawlWriteError(f"crawl staging path missing: {_stage_path}")
         # QUARANTINE GATE: verify BEFORE publishing to customers. A FAIL is not
         # uploaded — the last good hosted zip keeps serving (no human in loop).
         _gate_rep = await asyncio.to_thread(_run_crawl_gate, db_name)

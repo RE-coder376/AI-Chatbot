@@ -85,7 +85,12 @@ def serve():
     image=image,
     cpu=2.0,
     memory=8192,
+    ephemeral_disk=32768,
     timeout=4 * 3600,
+    env={
+        "CHROMA_TMP_ROOT": "/tmp/chroma",
+        "CHROMA_TMP_ALWAYS_REFRESH": "1",
+    },
     volumes={"/root/app/databases": vol},
     secrets=SECRETS,
 )

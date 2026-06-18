@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import sqlite3
 from pathlib import Path
 
@@ -23,7 +24,8 @@ def _sqlite_mtime(path: Path) -> float | None:
         return None
 
 def _tmp_chroma_dir(db_name: str) -> Path:
-    return Path(f"/dev/shm/chroma_{db_name}")
+    root = Path(os.environ.get("CHROMA_TMP_ROOT", "/dev/shm"))
+    return root / f"chroma_{db_name}"
 
 
 def _tmp_chroma_looks_valid(tmp_path: Path) -> bool:
@@ -63,15 +65,21 @@ def _ensure_tmp_chroma(db_name: str, src_path: Path, refresh: bool = False) -> P
     import sys as _sys, shutil as _shutil
     if _sys.platform == "win32":
         return src_path  # No WAL fix needed on Windows
-    # If source has no sqlite3 yet (GH sync still downloading), use src directly
+    # Dedicated crawl jobs can request local ephemeral staging even for a brand-new
+    # DB. This keeps SQLite writes off the mounted volume until the crawl succeeds.
     if not (src_path / "chroma.sqlite3").exists():
+        if os.environ.get("CHROMA_TMP_ROOT"):
+            tmp_path = _tmp_chroma_dir(db_name)
+            tmp_path.mkdir(parents=True, exist_ok=True)
+            return tmp_path
         return src_path
     tmp_path = _tmp_chroma_dir(db_name)
     src_sqlite = src_path / "chroma.sqlite3"
     tmp_sqlite = tmp_path / "chroma.sqlite3"
     src_mtime = _sqlite_mtime(src_sqlite)
     tmp_mtime = _sqlite_mtime(tmp_sqlite)
-    needs_refresh = refresh or (not tmp_sqlite.exists()) or (src_mtime is not None and (tmp_mtime is None or src_mtime > tmp_mtime + 1e-6))
+    force_refresh = os.environ.get("CHROMA_TMP_ALWAYS_REFRESH") == "1"
+    needs_refresh = refresh or force_refresh or (not tmp_sqlite.exists()) or (src_mtime is not None and (tmp_mtime is None or src_mtime > tmp_mtime + 1e-6))
     if needs_refresh:
         _shutil.rmtree(str(tmp_path), ignore_errors=True)
         tmp_path.mkdir(parents=True, exist_ok=True)
