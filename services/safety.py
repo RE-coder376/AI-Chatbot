@@ -112,9 +112,15 @@ def expand_query(q: str) -> list:
 _INVISIBLE_CHARS = re.compile(r'[\u200b\u200c\u200d\ufeff\u00ad\u2060]')
 
 
+_SKIP_LINK_RE = re.compile(r'(?i)\bskip to (?:main )?(?:content|navigation|nav)\b')
+
+
 def _clean_text(text: str) -> str:
-    """Strip invisible Unicode characters that break retrieval."""
-    return _INVISIBLE_CHARS.sub("", text)
+    """Strip invisible Unicode chars + the universal "skip to main content" nav
+    link. The skip-link is an accessibility anchor present on most CMS/docs pages
+    (Docusaurus etc.); left in, it dominates short title chunks and gets quoted as
+    if it were content (e.g. "co-authors include Factory Skip to main content")."""
+    return _SKIP_LINK_RE.sub(" ", _INVISIBLE_CHARS.sub("", text))
 
 
 _PRODUCT_PRICE_CAPTURE_RE = re.compile(
@@ -141,7 +147,9 @@ _STORE_BOILERPLATE_PATTERNS = [
     re.compile(r'(?is)\byour cart\b.*?(?=(?:\bcheckout\b|\bcontinue shopping\b|\Z))'),
     re.compile(r'(?is)\bsubtotal\b.*?(?=(?:\bcheckout\b|\bcontinue shopping\b|\Z))'),
     re.compile(r'(?is)\badd to wishlist\b'),
-    re.compile(r'(?is)\bfree shipping on orders over\b[^\n\.!]*'),
+    re.compile(r'(?is)\b(?:decrease|increase)\s+quantity\s+for\b[^\n\.!]*'),
+    re.compile(r'(?is)\bshipping calculated at checkout\b\.?'),
+    re.compile(r'(?is)\bfree shipping on orders?\s+(?:over|above)\b[^\n\.!]*?(?:/-|\bpkr\b|\d)[^\n\.!]*'),
     re.compile(r'(?is)\buse code\s+[A-Z0-9_-]+\s+for\s+\d+% off\b'),
 ]
 
@@ -214,8 +222,23 @@ def _dedupe_repeated_lines(text: str) -> str:
     return "\n\n".join(out_blocks) if out_blocks else raw
 
 
+_SHOPIFY_PDP_PREAMBLE_RE = re.compile(r'(?is)^.*?\bskip to product information\b')
+_MEDIA_MODAL_RE = re.compile(r'(?i)\bopen media\s+\d+\s+in modal\b')
+_SHOPIFY_VENDOR_PLACEHOLDER_RE = re.compile(r'(?i)\bmy store\b')
+
+
 def _strip_storefront_boilerplate(text: str) -> str:
     cleaned = text or ""
+    # Shopify PDPs (Dawn-based themes) flatten the entire header nav + promo bar
+    # ahead of the product. The "Skip to product information" skip-link is the
+    # theme's universal main-content anchor — everything before it is chrome, so
+    # cutting up to it isolates the real product title/price. Only fires when the
+    # marker exists (non-Shopify text is untouched). Without this, flattened nav
+    # text makes the title a menu fragment and "FREE SHIPPING above Rs.X" the price.
+    if _SHOPIFY_PDP_PREAMBLE_RE.search(cleaned):
+        cleaned = _SHOPIFY_PDP_PREAMBLE_RE.sub(" ", cleaned, count=1)
+        cleaned = _MEDIA_MODAL_RE.sub(" ", cleaned)
+        cleaned = _SHOPIFY_VENDOR_PLACEHOLDER_RE.sub(" ", cleaned)
     cleaned = _dedupe_repeated_lines(cleaned)
     for pat in _STORE_BOILERPLATE_PATTERNS:
         cleaned = pat.sub(" ", cleaned)

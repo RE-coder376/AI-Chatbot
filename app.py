@@ -615,27 +615,32 @@ def _write_crawl_status(db_name: str, status: str):
         logger.warning(f"[CRAWL-STATUS] Could not write status for {db_name}: {e}")
 
 
-def _run_crawl_gate_bg(db_name: str):
-    """Post-crawl verification gate (crawl_gate.py): chunk invariants + Shopify
-    ground-truth diff. Background — never blocks or fails the crawl. Verdict in
-    logs + databases/<db>/gate_report.json (served at /admin/gate-report)."""
-    def _gate():
+def _run_crawl_gate(db_name: str) -> dict:
+    """Post-crawl verification gate (crawl_gate.py): chunk invariants + live
+    Shopify ground-truth diff (catalog coverage + price accuracy). Runs
+    SYNCHRONOUSLY and RETURNS the report so callers can QUARANTINE a FAIL — a
+    DB that fails must NOT be published to customers. Verdict also goes to logs
+    + databases/<db>/gate_report.json (served at /admin/gate-report).
+
+    Fail-OPEN on gate infra error (verdict 'ERROR'): a gate bug or unreachable
+    site must not block deploys; only a real FAIL verdict quarantines."""
+    try:
+        from crawl_gate import run_gate_for_db
         try:
-            from crawl_gate import run_gate_for_db
-            try:
-                crawl_url = (get_config(db_name).get("crawl_url") or "").strip()
-            except Exception:
-                crawl_url = ""
-            rep = run_gate_for_db(db_name, str(DATABASES_DIR / db_name), crawl_url)
-            l2 = rep.get("layer2") or {}
-            gt = "" if l2.get("skipped") else f", coverage {l2['coverage']:.1%}, price_acc {l2['price_accuracy']:.1%}"
-            if rep["verdict"] == "PASS":
-                logger.info(f"[GATE] {db_name}: PASS ({rep['layer1']['chunks']} chunks{gt})")
-            else:
-                logger.warning(f"[GATE] {db_name}: FAIL{gt} — " + "; ".join(rep["failures"]))
-        except Exception as e:
-            logger.warning(f"[GATE] {db_name}: gate error: {e}")
-    threading.Thread(target=_gate, daemon=True).start()
+            crawl_url = (get_config(db_name).get("crawl_url") or "").strip()
+        except Exception:
+            crawl_url = ""
+        rep = run_gate_for_db(db_name, str(DATABASES_DIR / db_name), crawl_url)
+        l2 = rep.get("layer2") or {}
+        gt = "" if l2.get("skipped") else f", coverage {(l2.get('coverage') or 0):.1%}, price_acc {(l2.get('price_accuracy') or 0):.1%}"
+        if rep.get("verdict") == "PASS":
+            logger.info(f"[GATE] {db_name}: PASS ({rep['layer1']['chunks']} chunks{gt})")
+        else:
+            logger.warning(f"[GATE] {db_name}: {rep.get('verdict')}{gt} — " + "; ".join(rep.get("failures") or []))
+        return rep
+    except Exception as e:
+        logger.warning(f"[GATE] {db_name}: gate error: {e}")
+        return {"verdict": "ERROR", "failures": [f"gate error: {e}"]}
 
 
 def _write_crawl_sidecar_fields(db_name: str, **fields):
@@ -1824,6 +1829,19 @@ async def _auto_crawl_db(db_name: str, url: str, max_pages: int = 0, clear: bool
     crawl_urls, added, deleted = [], 0, 0
     newly_seen: list = []
     discovery_rendered_added = 0
+    def _normalize_url(u):
+        try:
+            p = urllib.parse.urlparse(str(u or "").strip())
+            scheme = (p.scheme or "https").lower()
+            netloc = (p.netloc or "").lower()
+            if netloc.startswith("www."):
+                netloc = netloc[4:]
+            path = re.sub(r"/+", "/", p.path or "/")
+            if path != "/":
+                path = path.rstrip("/")
+            return f"{scheme}://{netloc}{path}"
+        except Exception:
+            return str(u or "").strip().rstrip("/")
     def _domain_match(u_netloc: str, ref: str) -> bool:
         """True if netloc matches ref, ignoring www. prefix."""
         return u_netloc.lstrip("www.") == ref.lstrip("www.")
@@ -2706,10 +2724,16 @@ async def _auto_crawl_db(db_name: str, url: str, max_pages: int = 0, clear: bool
                 logger.info(f"[AUTO-CRAWL] Copy-back to databases/{db_name} done")
             except Exception as _cb_e:
                 logger.warning(f"[AUTO-CRAWL] Copy-back failed (non-fatal): {_cb_e}")
-        # Always upload DB zip + crawl_times after a successful refresh (not just when new pages found)
-        threading.Thread(target=_github_sync_upload, args=(db_name,), daemon=True).start()
+        # QUARANTINE GATE: verify BEFORE publishing to customers. A FAIL is not
+        # uploaded — the last good hosted zip keeps serving (no human in loop).
+        _gate_rep = await asyncio.to_thread(_run_crawl_gate, db_name)
+        if _gate_rep.get("verdict") == "FAIL":
+            _reasons = "; ".join(_gate_rep.get("failures") or [])[:300]
+            logger.warning(f"[AUTO-CRAWL] {db_name} QUARANTINED — not published. {_reasons}")
+            _write_crawl_status(db_name, (f"quarantined: {_reasons}")[:400])
+        else:
+            threading.Thread(target=_github_sync_upload, args=(db_name,), daemon=True).start()
         threading.Thread(target=_github_backup_crawl_times, args=(db_name,), daemon=True).start()
-        _run_crawl_gate_bg(db_name)
     _end_total = _start_total
     try:
         _end_total = int(await asyncio.to_thread(lambda: db._collection.count()))
@@ -13871,9 +13895,20 @@ async def crawl_site(data: dict, request: Request):
             yield _send(f"🔄 DB reloaded in memory — no restart needed.")
             yield _send(f"✅ Done! {total_chunks} chunks ingested into '{db_name}'.")
             _write_crawl_status(db_name, "success")
-            asyncio.get_running_loop().run_in_executor(None, _github_sync_upload, db_name)
-            _run_crawl_gate_bg(db_name)
-            yield _send("🔍 Verification gate running — verdict in /admin/gate-report + logs.")
+            # QUARANTINE GATE: verify against the live catalog (coverage + price
+            # accuracy) BEFORE publishing to customers. A FAIL is NOT uploaded —
+            # the last good hosted zip keeps serving. No human edge-case testing.
+            yield _send("🔍 Running verification gate (live catalog + price diff)...")
+            _gate_rep = await asyncio.to_thread(_run_crawl_gate, db_name)
+            if _gate_rep.get("verdict") == "FAIL":
+                _reasons = "; ".join(_gate_rep.get("failures") or [])[:400]
+                _write_crawl_status(db_name, (f"quarantined: {_reasons}")[:500])
+                yield _send("⛔ Gate FAILED — DB QUARANTINED, NOT published to customers.")
+                yield _send(f"   Reasons: {_reasons}")
+                yield _send("   Last good customer DB unchanged. Fix & re-crawl. Details: /admin/gate-report.")
+            else:
+                asyncio.get_running_loop().run_in_executor(None, _github_sync_upload, db_name)
+                yield _send(f"✅ Gate {_gate_rep.get('verdict','PASS')} — published to customers (/admin/gate-report).")
             try:
                 _rl_n = len(_rendered_links)
                 _rsc_n = raw_sitemap_count
