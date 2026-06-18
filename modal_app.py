@@ -87,7 +87,11 @@ def serve():
     image=image,
     cpu=2.0,
     memory=8192,
-    ephemeral_disk=32768,
+    # NOTE: explicit ephemeral_disk was 32768 MiB, but Modal now requires the
+    # value in [524288, 3145728] MiB (512 GiB–3 TiB). 32 GiB is below the floor
+    # and hard-fails every crawl at launch ("disk request out of bounds"). Drop
+    # it → Modal's default container disk (ample for the /tmp/chroma scratch;
+    # the DB itself lives on the mounted volume, not ephemeral disk).
     timeout=4 * 3600,
     env={
         "CHROMA_TMP_ROOT": "/tmp/chroma",
