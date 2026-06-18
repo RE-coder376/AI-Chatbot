@@ -1001,7 +1001,15 @@ def _prepare_crawl_page(text: str, url: str, title_hint: str = "", authority_tit
     )
     quarantine_reason = ""
     retrieve_eligible = True
-    if meta["page_type"] in {"structural", "category"}:
+    if re.search(r'/(?:cart|checkout|account|login|register|logout|orders?|addresses|wishlist|search)(?:/|$|\?|#)', url or "", re.I):
+        # Storefront utility pages (cart/checkout/account/login/search) are pure
+        # chrome, never content. A populated cart page ("Your cart is currently
+        # empty … Top Selling") clears the category word-count gate below, so
+        # guard by URL FIRST — and however the page entered the frontier
+        # (sitemap/seed URLs bypass the discovery junk-scorer that lists 'cart').
+        retrieve_eligible = False
+        quarantine_reason = "utility_page"
+    elif meta["page_type"] in {"structural", "category"}:
         # Large structural/category pages are often the canonical overview pages
         # for doc sets. Keep docs-like overviews searchable even when they are
         # compact, because many chapter/outcomes pages are short but meaningful.

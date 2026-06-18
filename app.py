@@ -2633,8 +2633,12 @@ async def _auto_crawl_db(db_name: str, url: str, max_pages: int = 0, clear: bool
                                     pass
                     if not page_meta.get("retrieve_eligible", True):
                         _quarantined += 1
-                    _pending_docs.extend(_new_docs)
-                    added += len(_new_docs)
+                    # Utility pages (cart/checkout/account) are pure storefront
+                    # chrome — never store them: they bloat the DB and trip the
+                    # gate on a chunk no customer can ever retrieve.
+                    if page_meta.get("quarantine_reason") != "utility_page":
+                        _pending_docs.extend(_new_docs)
+                        added += len(_new_docs)
                     # Batch write every 100 docs — prevents unbounded RAM + avoids single huge write at end
                     if len(_pending_docs) >= 100:
                         try:
