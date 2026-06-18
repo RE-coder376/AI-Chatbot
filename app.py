@@ -290,11 +290,18 @@ def catalog_reingest_products(db_name: str, url: str, clear_products: bool = Tru
     except Exception as _se:
         logger.warning(f"[CATALOG] sanitize failed: {_se}")
     if clear_products:
-        for _w in ({"chunk_kind": "product"}, {"content_type": "product"}):
+        # Clear product AND HTML listing chunks (catalog/category). On Shopify the
+        # /products.json ingest is the authoritative product list, so HTML
+        # collection/category pages are redundant — and they carry the swatch-title
+        # junk ("PKR Regular price Sale price Rs.1", chunk_kind=catalog) that the
+        # crawl mis-extracts. Prose (article/policy/faq) chunks are preserved.
+        for _w in ({"chunk_kind": "product"}, {"content_type": "product"},
+                   {"chunk_kind": "catalog"}, {"content_type": "catalog"},
+                   {"chunk_kind": "category"}, {"content_type": "category"}):
             try:
                 db._collection.delete(where=_w)
             except Exception as _de:
-                logger.warning(f"[CATALOG] product clear ({_w}) failed: {_de}")
+                logger.warning(f"[CATALOG] listing clear ({_w}) failed: {_de}")
     _add_documents_deterministic(db, docs)
     # _get_db_instance loads the DB into /dev/shm (tmpfs WAL fix); writes there are
     # ephemeral. Checkpoint + copy back to the volume path so they survive (mirrors
