@@ -3670,14 +3670,29 @@ async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansio
                         _cm = _cm or {}
                         _title = str(_cm.get("canonical_product_title") or _cm.get("product_title")
                                      or _cm.get("name") or "").lower()
+                        _body = str(_ct).lower()
+                        # HTML-crawl chunks often carry NO title meta — derive a pseudo
+                        # title from a "Product:" line or the first body line so the
+                        # title-coverage fallback below has something to match against.
+                        if not _title:
+                            _m = re.search(r"(?im)^product:\s*([^\n]{3,120})", _body)
+                            _title = (_m.group(1) if _m else _body.split("\n", 1)[0])[:120].strip()
                         # Wider body window: product spec/price lines sit past 400 chars
                         # in many themes, and truncating there drops the token match.
-                        _hay = _title + " " + str(_ct).lower()[:1200]
+                        _hay = _title + " " + _body[:1200]
+                        _et_set = set(_et)
                         _title_frac = (sum(1 for t in _et if t in _title) / len(_et)) if _et else 0.0
-                        # Track the best title-only match so a short named product
-                        # (e.g. "Pop N Play") still surfaces if no row meets _need.
-                        if _title_frac >= 0.5 and _title_frac > _fb_score:
-                            _fb, _fb_score = _CmpDoc(page_content=str(_ct), metadata=_cm), _title_frac
+                        # Title-coverage: how much of THIS product's (short) title the
+                        # entity names. Catches a query that adds descriptor words beyond
+                        # the stored title ("Pop N Play - Quick Push Pop Game" vs "Pop N
+                        # Play") where _title_frac stays low because the entity is long.
+                        _tt = [t for t in re.findall(r"[a-z0-9]+", _title) if len(t) > 1]
+                        _title_cov = (sum(1 for t in _tt if t in _et_set) / len(_tt)) if len(_tt) >= 2 else 0.0
+                        _fbk = max(_title_frac, _title_cov)
+                        # Track the best title match so a short named product still
+                        # surfaces if no row meets the body-token _need threshold.
+                        if _fbk >= 0.5 and _fbk > _fb_score:
+                            _fb, _fb_score = _CmpDoc(page_content=str(_ct), metadata=_cm), _fbk
                         _hit = sum(1 for t in _et if t in _hay)
                         if _hit < _need:
                             continue

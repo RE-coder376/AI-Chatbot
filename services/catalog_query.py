@@ -114,6 +114,25 @@ def _cats_hit(row: Row, anchors: list[str]) -> bool:
     return True
 
 
+def _anchor_set(anchors: list[str]) -> set[str]:
+    s: set[str] = set()
+    for a in anchors:
+        s |= _variants(a)
+    return s
+
+
+def _title_cover(title: str, anchor_set: set[str]) -> float:
+    """How much of THIS product's title the query names. Catches a query that adds
+    descriptor words beyond the stored (canonical) title — e.g. asking for
+    'Pop N Play - Quick Push Pop Game' when the row title is just 'Pop N Play'.
+    The strict all-anchor _hit fails there (extra words absent from the title);
+    title-coverage resolves it by measuring the other direction."""
+    tt = [t for t in re.findall(r"[a-z0-9]+", (title or "").lower()) if len(t) > 1]
+    if len(tt) < 2:
+        return 0.0
+    return sum(1 for t in tt if t in anchor_set) / len(tt)
+
+
 def parse(q: str) -> Spec:
     """Extract orthogonal dimensions (aggregation + price bounds + stock + anchors)
     from the question. Each dimension is detected independently, so any
@@ -355,10 +374,16 @@ def answer_catalog_query(q: str, db, cfg: dict | None = None, max_list: int = 12
             return None, []
         excl = _excl_re(cfg, spec.anchors)
 
+        _base = [r for r in rows if _hit(r, spec.anchors)]
+        if not _base and spec.anchors:
+            # Strict all-anchor match found nothing — fall back to title-coverage so
+            # a fully-named product still resolves. Only triggers when strict yields
+            # 0, so a non-empty count can never be inflated.
+            _aset = _anchor_set(spec.anchors)
+            _cov = [(_title_cover(r.title, _aset), r) for r in rows]
+            _base = [r for c, r in sorted(_cov, key=lambda x: -x[0]) if c >= 0.7]
         sel = []
-        for r in rows:
-            if not _hit(r, spec.anchors):
-                continue
+        for r in _base:
             if excl and excl.search(r.title):
                 continue
             # Only exclude clearly out-of-stock rows. Availability strings vary by
