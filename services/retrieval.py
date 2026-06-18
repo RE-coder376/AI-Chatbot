@@ -3669,7 +3669,7 @@ async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansio
                             continue
                         _cm = _cm or {}
                         _title = str(_cm.get("canonical_product_title") or _cm.get("product_title")
-                                     or _cm.get("name") or "").lower()
+                                     or _cm.get("page_title") or _cm.get("name") or "").lower()
                         _body = str(_ct).lower()
                         # HTML-crawl chunks often carry NO title meta — derive a pseudo
                         # title from a "Product:" line or the first body line so the
