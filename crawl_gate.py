@@ -76,7 +76,10 @@ def layer1(chunks: list[dict]) -> dict:
     for ch in chunks:
         body = str(ch.get("chroma:document") or "")
         head = body[:2000]
-        printable = sum(1 for x in head if x.isprintable() or x in "\n\r\t")
+        # isspace() (not just \n\r\t) so non-breaking/unicode spaces (\xa0 from
+        # Shopify specs "Type :\xa0Gel Pen") count as printable, not binary —
+        # NBSP is whitespace, not corruption. Guards against false unprintable.
+        printable = sum(1 for x in head if x.isprintable() or x.isspace())
         if printable / max(1, len(head)) < 0.95:
             unprintable += 1
         for pat, label in JUNK_PATTERNS:
