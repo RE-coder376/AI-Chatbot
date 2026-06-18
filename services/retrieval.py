@@ -3656,7 +3656,9 @@ async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansio
                 _cmp_stop = {"the", "and", "for", "with", "set", "pcs", "pack", "piece", "single", "pair"}
                 _cmp_docs = []
                 for _ent in _cmp_ents:
-                    _et = [t for t in re.findall(r"[a-z0-9]+", _ent.lower()) if len(t) > 2 and t not in _cmp_stop]
+                    # Keep 2-char tokens too — "rc", "3d", "tv", "hd" are real product/
+                    # model codes; _cmp_stop has no 2-char fillers so nothing leaks.
+                    _et = [t for t in re.findall(r"[a-z0-9]+", _ent.lower()) if len(t) >= 2 and t not in _cmp_stop]
                     if not _et:
                         continue
                     _best, _best_score = None, 0.0
