@@ -3660,6 +3660,7 @@ async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansio
                     if not _et:
                         continue
                     _best, _best_score = None, 0.0
+                    _fb, _fb_score = None, 0.0   # fallback: best by TITLE overlap alone
                     _need = max(2, int(round(len(_et) * 0.6)))
                     for _ct, _cm in zip(_cmp_raw.get("documents", []), _cmp_raw.get("metadatas", [])):
                         if not _ct:
@@ -3667,14 +3668,23 @@ async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansio
                         _cm = _cm or {}
                         _title = str(_cm.get("canonical_product_title") or _cm.get("product_title")
                                      or _cm.get("name") or "").lower()
-                        _hay = _title + " " + str(_ct).lower()[:400]
+                        # Wider body window: product spec/price lines sit past 400 chars
+                        # in many themes, and truncating there drops the token match.
+                        _hay = _title + " " + str(_ct).lower()[:1200]
+                        _title_frac = (sum(1 for t in _et if t in _title) / len(_et)) if _et else 0.0
+                        # Track the best title-only match so a short named product
+                        # (e.g. "Pop N Play") still surfaces if no row meets _need.
+                        if _title_frac >= 0.5 and _title_frac > _fb_score:
+                            _fb, _fb_score = _CmpDoc(page_content=str(_ct), metadata=_cm), _title_frac
                         _hit = sum(1 for t in _et if t in _hay)
                         if _hit < _need:
                             continue
                         # Title match is stronger evidence than a body mention.
-                        _score = _hit / len(_et) + (sum(1 for t in _et if t in _title) / len(_et) * 0.5)
+                        _score = _hit / len(_et) + (_title_frac * 0.5)
                         if _score > _best_score:
                             _best, _best_score = _CmpDoc(page_content=str(_ct), metadata=_cm), _score
+                    if _best is None and _fb is not None:
+                        _best = _fb   # named product matched its title but not the body threshold
                     if _best is not None:
                         _cmp_docs.append(_best)
                 if len(_cmp_docs) >= 2:

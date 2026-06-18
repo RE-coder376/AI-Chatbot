@@ -58,6 +58,7 @@ class Row:
     source: str
     hay: str  # lowercased title + categories + body head, for anchor matching
     currency: str = "Rs."  # detected per-row; engine output stays currency-agnostic
+    cats: str = ""  # structured categories only (product_type + tags) for tag-precise counting
 
 
 @dataclass
@@ -92,6 +93,23 @@ def _hit(row: Row, anchors: list[str]) -> bool:
                 continue
             return False
         if not any(re.search(rf"\b{re.escape(v)}\b", h) for v in _variants(a)):
+            return False
+    return True
+
+
+def _cats_hit(row: Row, anchors: list[str]) -> bool:
+    """Like _hit but against the STRUCTURED categories field only (product_type +
+    tags), never the title or body. A count of 'claws' should be the products
+    tagged as claws — not every title that happens to contain the substring."""
+    c = row.cats
+    if not anchors or not c:
+        return False
+    for a in anchors:
+        if a == "rc":
+            if re.search(r"\brc\b", c) or "remote control" in c:
+                continue
+            return False
+        if not any(re.search(rf"\b{re.escape(v)}\b", c) for v in _variants(a)):
             return False
     return True
 
@@ -245,8 +263,9 @@ def load_rows(db, limit: int = 12000) -> list[Row]:
         # Membership matches title + curated categories only — NOT the body
         # description. A prose mention ("pairs well with our sharpener") must not
         # count an unrelated product into the "sharpener" category.
-        hay = " ".join([tl, str(meta.get("categories") or "").lower()])
-        rows.append(Row(title, price, avail, src, hay, cur))
+        cats_l = str(meta.get("categories") or "").lower()
+        hay = " ".join([tl, cats_l])
+        rows.append(Row(title, price, avail, src, hay, cur, cats_l))
     return rows
 
 
@@ -358,6 +377,17 @@ def answer_catalog_query(q: str, db, cfg: dict | None = None, max_list: int = 12
         label = " ".join(spec.anchors) if spec.anchors else "products"
 
         if spec.agg in ("count", "exists"):
+            # Count precision: in a tag-bearing catalog, count only rows whose
+            # STRUCTURED categories match the anchor (GT/attribute semantics).
+            # A free title-substring match over-counts ("claw" leaks into unrelated
+            # titles). Falls back to the title/hay match when the catalog has no
+            # tags or no row is tagged with the anchor (untagged/HTML-crawl DBs).
+            if spec.agg == "count" and spec.anchors:
+                _tagged = sum(1 for r in rows if r.cats.strip())
+                if rows and (_tagged / len(rows)) >= 0.5:
+                    _tag_sel = [r for r in sel if _cats_hit(r, spec.anchors)]
+                    if _tag_sel:
+                        sel = _tag_sel
             n = len(sel)
             if n == 0:
                 if spec.agg == "exists":
@@ -365,7 +395,11 @@ def answer_catalog_query(q: str, db, cfg: dict | None = None, max_list: int = 12
                             f"in our catalog. Is there something else I can help you find?"), []
                 return (f"No — we don't currently carry any {label}. Is there something else "
                         f"I can help you find?"), []
-            body = "\n".join(f"- {r.title}" for r in sel[:max_list])
+            # Show the price alongside each item when known — answers the common
+            # "do you have X and its price" multi-intent in one shot.
+            def _il(r):
+                return f"- {r.title} — {_price_s(r.price, r.currency)}" if r.price is not None else f"- {r.title}"
+            body = "\n".join(_il(r) for r in sel[:max_list])
             more = f"\n…and {n - max_list} more." if n > max_list else ""
             if spec.agg == "count":
                 head = (f"We have {n} {label} product{'s' if n != 1 else ''} in our catalog:"
