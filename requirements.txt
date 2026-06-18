@@ -24,8 +24,9 @@ openai==2.26.0
 groq==0.37.1
 google-genai==1.67.0
 
-# Embeddings — fastembed uses onnxruntime (no torch), fits in low-RAM envs
-fastembed>=0.3.0
+# Embeddings + cross-encoder rerank — fastembed uses onnxruntime (no torch).
+# >=0.4.2 guarantees fastembed.rerank.cross_encoder.TextCrossEncoder.
+fastembed>=0.4.2
 huggingface_hub==1.5.0
 
 # RAG utilities

@@ -28,6 +28,69 @@ logger = logging.getLogger(__name__)
 # Debug-only: helps confirm which extractor logic is running on HF.
 _OUTCOMES_EXTRACTOR_VERSION = "2026-06-06.v23"
 
+# ---------------------------------------------------------------------------
+# Cross-encoder reranker (ONNX via fastembed, no torch). Used as the FINAL
+# precision pass over the fused/heuristic-ranked candidate pool for docs DBs.
+# Full-coverage chunking lifts recall but floods the pool with near-duplicate
+# noise; a cross-encoder picks the genuinely answer-bearing chunk. Disable with
+# RERANK_CROSS_ENCODER=0. Model is downloaded once, cached in-container.
+# ---------------------------------------------------------------------------
+_CROSS_ENCODER = None
+_CROSS_ENCODER_FAILED = False
+_CROSS_ENCODER_MODEL = os.environ.get("RERANK_CE_MODEL", "Xenova/ms-marco-MiniLM-L-6-v2")
+
+
+def _cross_encoder_enabled() -> bool:
+    return os.environ.get("RERANK_CROSS_ENCODER", "1").strip().lower() not in ("0", "false", "no", "off")
+
+
+def _get_cross_encoder():
+    """Lazy singleton. Returns the reranker or None if unavailable (safe no-op)."""
+    global _CROSS_ENCODER, _CROSS_ENCODER_FAILED
+    if _CROSS_ENCODER is not None or _CROSS_ENCODER_FAILED:
+        return _CROSS_ENCODER
+    if not _cross_encoder_enabled():
+        _CROSS_ENCODER_FAILED = True
+        return None
+    try:
+        from fastembed.rerank.cross_encoder import TextCrossEncoder
+        _CROSS_ENCODER = TextCrossEncoder(model_name=_CROSS_ENCODER_MODEL)
+        logger.info(f"[RERANK] cross-encoder ready: {_CROSS_ENCODER_MODEL}")
+    except Exception as _ce_err:
+        _CROSS_ENCODER_FAILED = True
+        logger.warning(f"[RERANK] cross-encoder unavailable ({_ce_err}); skipping rerank")
+    return _CROSS_ENCODER
+
+
+def _cross_encoder_rerank(q: str, docs: list, max_score: int = 60):
+    """Reorder `docs` (highest cross-encoder relevance first). Scores at most
+    `max_score` candidates for latency; any tail keeps original order and is
+    appended. Pure reorder — never drops a doc. Returns the same list reordered
+    (or the input unchanged on any failure)."""
+    if not docs or len(docs) < 2 or not (q or "").strip():
+        return docs
+    ce = _get_cross_encoder()
+    if ce is None:
+        return docs
+    try:
+        head = docs[:max_score]
+        tail = docs[max_score:]
+        passages = [str(getattr(d, "page_content", "") or "")[:2000] for d in head]
+        scores = list(ce.rerank(q, passages))
+        if len(scores) != len(head):
+            return docs
+        order = sorted(range(len(head)), key=lambda i: scores[i], reverse=True)
+        reranked = [head[i] for i in order]
+        try:
+            _top_sc = max(scores)
+            logger.info(f"[RERANK] cross-encoder reordered {len(head)} docs (top={_top_sc:.2f})")
+        except Exception:
+            pass
+        return reranked + tail
+    except Exception as _rr_err:
+        logger.warning(f"[RERANK] cross-encoder rerank failed ({_rr_err}); keeping prior order")
+        return docs
+
 
 def _is_binary_chunk(text: str) -> bool:
     """Return True if a DB chunk contains binary/corrupted data (not readable text)."""
@@ -1501,6 +1564,41 @@ def _is_price_ranking_query(q: str) -> tuple[bool, bool]:
     asc = bool(re.search(r"\b(cheapest|lowest\s+price|lowest\s+priced|least\s+expensive|most\s+affordable|budget)\b", ql))
     desc = bool(re.search(r"\b(most\s+expensive|highest\s+price|highest\s+priced|priciest|costliest|most\s+costly)\b", ql))
     return (asc or desc, desc)
+
+
+_CMP_CUE_RE = re.compile(
+    r'(?i)\b(compare|compared|comparison|versus|vs\.?|difference between|'
+    r'most to least|least to most|how much (?:more|less)|which (?:is|one is) (?:more|cheaper|expensive))\b')
+_CMP_LEAD_RE = re.compile(
+    r'(?i)^\s*(?:please\s+)?(?:can you\s+)?(?:compare|contrast|'
+    r'how much (?:more|less) (?:expensive|cheap|costly)?\s*(?:is|are)?|'
+    r'what(?:\'?s| is) the (?:price )?difference between|difference between|'
+    r'which (?:is|one is) (?:more expensive|cheaper|pricier)(?:,)?)\b[:,]?\s*')
+_CMP_TRAIL_RE = re.compile(
+    r'(?i)\s*\b(?:from )?(?:most to least|least to most)(?: expensive| costly)?\b.*$'
+    r'|\s*\bin price\b.*$|\s*\bprice[\- ]?wise\b.*$|\s*\bby price\b.*$')
+_CMP_SPLIT_RE = re.compile(
+    r'(?i)\s*(?:,|;|\band\b|\bvs\.?\b|\bversus\b|\bthan\b|\bor\b|'
+    r'\bagainst\b|\bcompared (?:to|with)\b)\s*')
+
+
+def _split_comparison_entities(q: str) -> list:
+    """For "compare A, B and C" / "how much more is A than B" return the named
+    product phrases [A, B, C]. Empty unless there's a comparison cue AND >=2
+    multi-word entities — a generic price-rank ("cheapest product") must NOT
+    parse as a comparison. Lets retrieval fetch EACH named product instead of
+    treating all their words as one over-constrained anchor set, and stops a
+    stray "least expensive" from hijacking the query into a full-catalog scan."""
+    if not (q or "").strip() or not _CMP_CUE_RE.search(q):
+        return []
+    body = _CMP_TRAIL_RE.sub("", _CMP_LEAD_RE.sub("", q)).strip(" ?.!,")
+    ents = []
+    for part in _CMP_SPLIT_RE.split(body):
+        part = (part or "").strip(" ?.!,")
+        toks = [t for t in re.findall(r"[A-Za-z0-9]+", part) if len(t) > 1]
+        if len(toks) >= 2:          # a real product name, not a stray filler word
+            ents.append(part)
+    return ents if len(ents) >= 2 else []
 
 
 _CURRENCY_PREFIX = r'(?:rs\.?|pkr|\$|£|€|usd|gbp|eur)?\s*'
@@ -3423,6 +3521,19 @@ async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansio
             if _narr and len(_body) >= 3:
                 top = _body + _narr
 
+            # FINAL precision pass: cross-encoder rerank over the capped docs pool.
+            # Full-coverage chunking recovers recall but lets near-duplicate noise
+            # outrank the answer-bearing chunk; the cross-encoder reorders by true
+            # (query, passage) relevance so top[:k] carries the right page. Pure
+            # reorder (never drops); safe no-op if the model is unavailable.
+            if not fast and len(top) >= 2 and _cross_encoder_enabled():
+                try:
+                    top = await asyncio.wait_for(
+                        asyncio.to_thread(_cross_encoder_rerank, q, top), timeout=12
+                    )
+                except Exception:
+                    pass
+
     # Safe defaults for later product-ranking branches.
     # These must exist even when the product-intent block does not run,
     # otherwise downstream guards can raise UnboundLocalError on non-price queries.
@@ -3527,6 +3638,59 @@ async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansio
                     except Exception:
                         pass
 
+    # ── Named-entity comparison fan-out ─────────────────────────────────────
+    # "compare A, B and C" / "how much more is A than B": the combined-anchor
+    # pass requires a doc to match MOST query words, so no single product (each
+    # matching only its own 2-3 words) qualifies and the named items never
+    # surface; worse, a stray "least/most expensive" flips it into a global
+    # price-rank that returns the catalog's cheapest/priciest instead. Fetch
+    # each named product directly so every one enters context with its price.
+    _cmp_override = False
+    if (_has_product_meta or _is_product_db) and db is not None:
+        _cmp_ents = _split_comparison_entities(q or "")
+        if _cmp_ents:
+            try:
+                from langchain_core.documents import Document as _CmpDoc
+                _cmp_total = min(int(db._collection.count() or 0), 8000)
+                _cmp_raw = db._collection.get(limit=_cmp_total, include=["documents", "metadatas"])
+                _cmp_stop = {"the", "and", "for", "with", "set", "pcs", "pack", "piece", "single", "pair"}
+                _cmp_docs = []
+                for _ent in _cmp_ents:
+                    _et = [t for t in re.findall(r"[a-z0-9]+", _ent.lower()) if len(t) > 2 and t not in _cmp_stop]
+                    if not _et:
+                        continue
+                    _best, _best_score = None, 0.0
+                    _need = max(2, int(round(len(_et) * 0.6)))
+                    for _ct, _cm in zip(_cmp_raw.get("documents", []), _cmp_raw.get("metadatas", [])):
+                        if not _ct:
+                            continue
+                        _cm = _cm or {}
+                        _title = str(_cm.get("canonical_product_title") or _cm.get("product_title")
+                                     or _cm.get("name") or "").lower()
+                        _hay = _title + " " + str(_ct).lower()[:400]
+                        _hit = sum(1 for t in _et if t in _hay)
+                        if _hit < _need:
+                            continue
+                        # Title match is stronger evidence than a body mention.
+                        _score = _hit / len(_et) + (sum(1 for t in _et if t in _title) / len(_et) * 0.5)
+                        if _score > _best_score:
+                            _best, _best_score = _CmpDoc(page_content=str(_ct), metadata=_cm), _score
+                    if _best is not None:
+                        _cmp_docs.append(_best)
+                if len(_cmp_docs) >= 2:
+                    # Named products at the head; keep a short similarity tail.
+                    _cmp_keys = {d.page_content[:80] for d in _cmp_docs}
+                    top = _cmp_docs + [d for d in top if str(getattr(d, "page_content", ""))[:80] not in _cmp_keys][:8]
+                    _cmp_override = True
+                    logger.info(f"[CMP-FANOUT] matched {len(_cmp_docs)}/{len(_cmp_ents)} named products")
+            except Exception as _cmp_e:
+                logger.warning(f"[CMP-FANOUT] failed: {_cmp_e}")
+    if _cmp_override:
+        # A comparison of specific items must not be re-ranked as a generic
+        # catalog price scan (which would replace the named products with the
+        # global cheapest/priciest). Suppress the rank/bounds branch below.
+        _is_price_rank_q = False
+
     # ── Product catalog: dedup + GPU ranking ─────────────────────────────────
     if _has_product_meta or _is_product_db:
         # Dedup: same product+price should appear only once
@@ -3562,6 +3726,14 @@ async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansio
                         "absolute", "absolutely", "whole", "second", "third", "carry",
                         "offer", "offers", "offered", "currently", "right", "anything",
                         "everything", "catalog", "catalogue", "inventory", "selection",
+                        # Query-framing / presentation words ("next-most-expensive",
+                        # "item SHOWN", "LISTED", "RANKED") are not product categories.
+                        # Anchoring on them restricts the rank to chunks that happen to
+                        # contain the word and demotes the true global extreme (e.g. an
+                        # Rs.981,000 pool that never says "shown" → GoPro wins instead).
+                        "next", "show", "shows", "shown", "showing", "displayed",
+                        "display", "list", "listed", "listing", "ranked", "ranking",
+                        "order", "ordered", "thing", "things",
                     }
                     _pr_anchors = [w for w in re.findall(r"[a-zA-Z]{4,}", (q or "").lower()) if w not in _pr_stop][:4]
                     # Short category tokens ("RC", "LED", "USB") are real anchors but the

@@ -31,6 +31,8 @@ image = (
         "python -c \"from langchain_community.embeddings.fastembed import FastEmbedEmbeddings; FastEmbedEmbeddings(model_name='BAAI/bge-small-en-v1.5')\" || true",
         # Prebake the multilingual model too — agentfactory queries with it (P1 fix); avoids a cold-start download.
         "python -c \"from langchain_community.embeddings.fastembed import FastEmbedEmbeddings; FastEmbedEmbeddings(model_name='sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2')\" || true",
+        # Prebake the cross-encoder reranker (final precision pass for docs DBs) — avoids cold-start download.
+        "python -c \"from fastembed.rerank.cross_encoder import TextCrossEncoder; TextCrossEncoder(model_name='Xenova/ms-marco-MiniLM-L-6-v2')\" || true",
         "playwright install --with-deps chromium",
     )
     .add_local_dir(
