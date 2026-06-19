@@ -550,29 +550,106 @@ def _answer_multi(mp: dict, rows: list[Row]) -> tuple[str, list[str]] | None:
     return txt, srcs
 
 
+# Coarse "is this plausibly a product question?" gate for the LLM net. Broad on
+# purpose (a quoted span or any price/buy/compare signal); the LLM does the precise
+# classification. Keeps the extra call off pure policy/greeting questions.
+_PRODUCTISH = re.compile(
+    r'["“”]|\b(price[ds]?|cost(?:s|ly)?|how\s+much|cheap(?:er|est)?|expensive|afford|'
+    r'total|combined|altogether|buy|buys|buying|purchas\w*|pay|spend|stock|stocked|'
+    r'carry|carries|available|availability|sell|sells|which|compare|versus|vs\.?|'
+    r'than|set\s+of|pack\s+of|do\s+you\s+have|in\s+stock)\b', re.I)
+
+
+def _anchors_from(text: str) -> list:
+    return [w for w in re.findall(r"[a-z0-9]{2,}", (text or "").lower()) if w not in _STOP][:6]
+
+
+def _plan_to_specs(plan: dict) -> tuple[dict | None, "Spec | None"]:
+    """Map an LLM-extracted plan onto the engine's existing (mp | Spec) execution.
+    Returns (mp, spec) with at most one non-None. None,None = not executable here."""
+    kind = plan.get("kind")
+    names = [n for n in (plan.get("products") or []) if n]
+    if kind in ("compare", "order", "basket"):
+        if len(names) < 2:
+            return None, None
+        return {"op": kind, "names": names[:6],
+                "asc": plan.get("order_dir") == "asc",
+                "cmp_more": plan.get("compare_dir") == "more"}, None
+    pmin, pmax, in_stock = plan.get("price_min"), plan.get("price_max"), bool(plan.get("in_stock"))
+    if kind == "count":
+        return None, Spec("count", _anchors_from(plan.get("category") or (names[0] if names else "")), pmin, pmax, in_stock)
+    if kind == "cheapest":
+        return None, Spec("min", _anchors_from(plan.get("category") or ""), pmin, pmax, in_stock)
+    if kind == "priciest":
+        return None, Spec("max", _anchors_from(plan.get("category") or ""), pmin, pmax, in_stock)
+    if kind == "exists":
+        if not names:
+            return None, None
+        return None, Spec("exists", _anchors_from(names[0]), pmin, pmax, in_stock)
+    if kind in ("lookup", "filter"):
+        anch = _anchors_from(names[0] if names else (plan.get("category") or ""))
+        if not anch and pmin is None and pmax is None:
+            return None, None
+        return None, Spec("list", anch, pmin, pmax, in_stock)
+    return None, None
+
+
 def answer_catalog_query(q: str, db, cfg: dict | None = None, max_list: int = 12) -> tuple[str | None, list[str]]:
     """Single front-door for structured catalog questions. Returns (text, sources),
     or (None, []) when the question is not a structured-catalog question (caller
-    then falls back to ordinary retrieval/LLM)."""
+    then falls back to ordinary retrieval/LLM).
+
+    Deterministic regex parser runs first (exact, no LLM). If it declines AND the DB
+    is a real catalog, ONE structured LLM extraction (the router) is tried as a net,
+    so unusual phrasings still resolve — but execution stays fully deterministic, so
+    a number is never invented; an unresolved entity falls through to RAG."""
     try:
         if not q or db is None:
             return None, []
         spec = parse(q)
         mp = _parse_multi(q)
+        rows = None
         if not spec.structured and not mp:
-            return None, []
-        rows = load_rows(db)
-        if not rows:
-            return None, []
-        # DB-type gate: only a real product catalog gets the structured engine; a
-        # text/docs corpus (with stray priced rows) falls through to RAG/LLM.
-        if not is_catalog_db(db, rows, cfg):
-            return None, []
+            # Deterministic router declined. Fire the LLM extractor only when the
+            # question is plausibly about products (coarse signal — the LLM still does
+            # the precise classification), so policy/greeting questions don't pay for
+            # an extra call.
+            if not _PRODUCTISH.search(q):
+                return None, []
+            rows = load_rows(db)
+            if not rows or not is_catalog_db(db, rows, cfg):
+                return None, []
+            try:
+                from services.catalog_router import extract_plan
+                plan = extract_plan(q)
+            except Exception:
+                plan = None
+            if not plan or plan.get("kind") in (None, "browse", "other"):
+                return None, []
+            mp, spec = _plan_to_specs(plan)
+            if mp is None and (spec is None or not getattr(spec, "structured", False)):
+                return None, []
+        if rows is None:
+            rows = load_rows(db)
+            if not rows:
+                return None, []
+            # DB-type gate: only a real product catalog gets the structured engine; a
+            # text/docs corpus (with stray priced rows) falls through to RAG/LLM.
+            if not is_catalog_db(db, rows, cfg):
+                return None, []
         # Multi-product reasoning (compare / order / basket): fan out to resolve each
         # named product, then compute. Owns the question outright — a correct answer
         # or hand to RAG; never a single-product dump masquerading as a comparison.
         if mp:
             return _answer_multi(mp, rows) or (None, [])
+        return _execute_spec(spec, rows, cfg, max_list)
+    except Exception:
+        return None, []
+
+
+def _execute_spec(spec: "Spec", rows: list[Row], cfg: dict | None, max_list: int) -> tuple[str | None, list[str]]:
+    """Deterministic execution of a (filter + aggregation) spec against the rows."""
+    try:
         excl = _excl_re(cfg, spec.anchors)
 
         _base = [r for r in rows if _hit(r, spec.anchors)]
