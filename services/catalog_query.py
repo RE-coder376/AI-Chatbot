@@ -415,9 +415,18 @@ def answer_catalog_query(q: str, db, cfg: dict | None = None, max_list: int = 12
             # Strict all-anchor match found nothing — fall back to title-coverage so
             # a fully-named product still resolves. Only triggers when strict yields
             # 0, so a non-empty count can never be inflated.
+            # The fallback's real job is the SUPERSET case: the query names the whole
+            # stored title plus extra descriptors (coverage→1.0, e.g. "Pop N Play -
+            # Quick Push Pop Game" → row "Pop N Play"). A loose 0.7 floor admitted
+            # same-category SIBLINGS sharing only generic words ("Goldfish Fountain
+            # Pen Single" for a query naming a DIFFERENT fountain pen) → a
+            # confidently-wrong product. Require near-full coverage AND keep only the
+            # best-covered rows, so an exact superset wins outright and a query for an
+            # absent product yields nothing (→ graceful RAG/IDK, not a wrong sibling).
             _aset = _anchor_set(spec.anchors)
-            _cov = [(_title_cover(r.title, _aset), r) for r in rows]
-            _base = [r for c, r in sorted(_cov, key=lambda x: -x[0]) if c >= 0.7]
+            _ranked = sorted(((_title_cover(r.title, _aset), r) for r in rows), key=lambda x: -x[0])
+            _top = _ranked[0][0] if _ranked else 0.0
+            _base = [r for c, r in _ranked if c >= 0.85 and c >= _top - 1e-9]
         sel = []
         for r in _base:
             if excl and excl.search(r.title):
