@@ -391,6 +391,121 @@ def is_catalog_db(db, rows: list, cfg: dict | None = None) -> bool:
     return True
 
 
+def _norm(s: str) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", (s or "").lower()).strip()
+
+
+def _extract_names(q: str) -> list[str]:
+    """Pull the individual product names a multi-product question references.
+    Quoted names are the reliable signal (the hard quiz quotes each product, and
+    real users naming a specific product tend to quote/capitalise it). Falls back
+    to splitting on connectors only when there are no quotes."""
+    names = [n.strip() for n in re.findall(r'[\"“”]([^\"“”]{3,})[\"“”]', q) if n.strip()]
+    if len(names) >= 2:
+        return names[:5]
+    seg = q.split(":", 1)[1] if ":" in q else q
+    parts = re.split(r"\s+(?:versus|vs\.?|and|or)\s+|,\s*", seg)
+    parts = [re.sub(r"[?.\"]+$", "", p).strip(" .\"") for p in parts]
+    parts = [p for p in parts if len(p) >= 4 and len(p.split()) >= 2]
+    return parts[:5] if len(parts) >= 2 else names
+
+
+_CMP_RE = re.compile(
+    r"\bcheaper\b|\bpricier\b|\bdearer\b|\bmore\s+expensive\b|\bless\s+expensive\b"
+    r"|\bdifference\s+between\b|\bby\s+how\s+much\b|\bhow\s+much\s+(?:more|less|cheaper)\b"
+    r"|\bwhich\s+(?:one\s+)?(?:is|costs?)\b|\bversus\b|\bvs\.?\b|\bcosts?\s+(?:less|more)\b", re.I)
+_ORDER_RE = re.compile(r"\b(order|rank|sort|arrange|list\s+these)\b", re.I)
+_PRICE_DIM_RE = re.compile(r"\b(expensive|cheap(?:er|est)?|price[ds]?|cost(?:s|ly)?|least|most)\b", re.I)
+_BASKET_RE = re.compile(r"\b(total|sum|altogether|combined|buy(?:ing)?|basket|both)\b", re.I)
+_ASC_RE = re.compile(r"least\s+to\s+most|cheap(?:est)?\s+first|low(?:est)?\s+to\s+high|ascending", re.I)
+
+
+def _parse_multi(q: str) -> dict | None:
+    """Detect a multi-product reasoning question (compare / order / basket) and the
+    product names it spans. Returns None for everything else."""
+    ql = (q or "").lower()
+    is_order = bool(_ORDER_RE.search(ql) and _PRICE_DIM_RE.search(ql))
+    is_basket = bool(_BASKET_RE.search(ql) and re.search(r"\b(cost|total|price|much|sum)\b", ql))
+    is_cmp = bool(_CMP_RE.search(ql))
+    if not (is_order or is_basket or is_cmp):
+        return None
+    names = _extract_names(q)
+    if len(names) < 2:
+        return None
+    op = "order" if is_order else ("basket" if is_basket else "compare")
+    return {"op": op, "names": names, "asc": bool(_ASC_RE.search(ql))}
+
+
+def _resolve_one(name: str, rows: list[Row]) -> Row | None:
+    """Resolve ONE named product to its row. Exact normalized-title match wins;
+    otherwise a bidirectional coverage match (the query names the whole stored
+    title, e.g. a superset, OR the stored title contains the whole query) with a
+    high floor so same-category siblings are rejected (→ None, graceful)."""
+    key = _norm(name)
+    qtoks = [t for t in key.split() if len(t) > 1]
+    if not qtoks:
+        return None
+    qset: set[str] = set()
+    for t in qtoks:
+        qset |= _variants(t)
+    best = None
+    best_key = (-1.0, -1.0, -1e9)
+    for r in rows:
+        rt = _norm(r.title)
+        if rt == key:
+            return r
+        rtoks = [t for t in rt.split() if len(t) > 1]
+        if not rtoks:
+            continue
+        rset: set[str] = set()
+        for t in rtoks:
+            rset |= _variants(t)
+        cover = sum(1 for t in rtoks if t in qset) / len(rtoks)    # stored title named by query
+        qcover = sum(1 for t in qtoks if t in rset) / len(qtoks)   # query named by stored title
+        if not (cover >= 0.85 or qcover >= 0.85) or (cover + qcover) / 2 < 0.5:
+            continue
+        sk = (max(cover, qcover), min(cover, qcover), -abs(len(rtoks) - len(qtoks)))
+        if sk > best_key:
+            best_key, best = sk, r
+    return best
+
+
+def _answer_multi(mp: dict, rows: list[Row]) -> tuple[str, list[str]] | None:
+    """Resolve every named product, then compute the comparison / ordering / total.
+    Returns None (→ RAG) unless EVERY named product resolves to a priced row, so a
+    partial resolution never produces a confidently-wrong half-answer."""
+    found = []
+    for name in mp["names"]:
+        r = _resolve_one(name, rows)
+        if r is None or r.price is None:
+            return None
+        found.append(r)
+    if len(found) < 2:
+        return None
+    cur = found[0].currency
+    srcs = _dedup(r.source for r in found)
+    op = mp["op"]
+    if op == "basket":
+        total = sum(r.price for r in found)
+        lines = ["Based on our catalog:"]
+        lines += [f"- {r.title}: {_price_s(r.price, r.currency)}" for r in found]
+        lines.append(f"\nTotal cost: {_price_s(total, cur)}")
+        return "\n".join(lines), srcs
+    if op == "order":
+        ordered = sorted(found, key=lambda r: (r.price if mp["asc"] else -r.price, r.title.lower()))
+        head = "From least to most expensive:" if mp["asc"] else "From most to least expensive:"
+        lines = [head] + [f"{i}. {r.title} — {_price_s(r.price, r.currency)}" for i, r in enumerate(ordered, 1)]
+        return "\n".join(lines), _dedup(r.source for r in ordered)
+    # compare: state both prices, the cheaper one, and the exact difference.
+    pair = sorted(found, key=lambda r: r.price)
+    cheaper, dearer = pair[0], pair[-1]
+    diff = dearer.price - cheaper.price
+    txt = (f"- {cheaper.title}: {_price_s(cheaper.price, cheaper.currency)}\n"
+           f"- {dearer.title}: {_price_s(dearer.price, dearer.currency)}\n\n"
+           f"{cheaper.title} is cheaper by {_price_s(diff, cur)}.")
+    return txt, srcs
+
+
 def answer_catalog_query(q: str, db, cfg: dict | None = None, max_list: int = 12) -> tuple[str | None, list[str]]:
     """Single front-door for structured catalog questions. Returns (text, sources),
     or (None, []) when the question is not a structured-catalog question (caller
@@ -399,7 +514,8 @@ def answer_catalog_query(q: str, db, cfg: dict | None = None, max_list: int = 12
         if not q or db is None:
             return None, []
         spec = parse(q)
-        if not spec.structured:
+        mp = _parse_multi(q)
+        if not spec.structured and not mp:
             return None, []
         rows = load_rows(db)
         if not rows:
@@ -408,6 +524,11 @@ def answer_catalog_query(q: str, db, cfg: dict | None = None, max_list: int = 12
         # text/docs corpus (with stray priced rows) falls through to RAG/LLM.
         if not is_catalog_db(db, rows, cfg):
             return None, []
+        # Multi-product reasoning (compare / order / basket): fan out to resolve each
+        # named product, then compute. Owns the question outright — a correct answer
+        # or hand to RAG; never a single-product dump masquerading as a comparison.
+        if mp:
+            return _answer_multi(mp, rows) or (None, [])
         excl = _excl_re(cfg, spec.anchors)
 
         _base = [r for r in rows if _hit(r, spec.anchors)]
