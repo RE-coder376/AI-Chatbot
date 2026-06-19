@@ -72,7 +72,8 @@ def run(db, qs):
         diff = q["difficulty"]; by.setdefault(diff, [0, 0]); by[diff][1] += 1; by[diff][0] += ok
         pe += ok
         tag = "PASS" if ok else "FAIL"
-        print(f"{q['id']} [{tag}] ({q['kind']}) {q['question'][:78]}", flush=True)
+        line = f"{q['id']} [{tag}] ({q['kind']}) {q['question'][:78]}"
+        print(line.encode("ascii", "replace").decode(), flush=True)
         if not ok:
             print(f"     ans: {ans[:200].encode('ascii','replace').decode()}")
         time.sleep(5)

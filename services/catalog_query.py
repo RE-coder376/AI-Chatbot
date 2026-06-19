@@ -219,7 +219,17 @@ def parse(q: str) -> Spec:
     else:
         return Spec("none", structured=False)
 
-    anchors = [w for w in re.findall(r"[a-zA-Z]{2,}", ql) if w not in _STOP][:6]
+    # Anchors include digit tokens (a model/size/style number disambiguates a
+    # specific SKU — "Spiral Notebook Style 43" must not match every style, "Paint
+    # 500ml" / "Set of 48" pin the variant). Drop numbers already consumed as price
+    # bounds so "products under 500" doesn't anchor on 500.
+    _price_tokens = set()
+    for _v in (pmin, pmax):
+        if _v is not None:
+            _price_tokens.add(f"{_v:.0f}")
+            _price_tokens.add(str(_v))
+    anchors = [w for w in re.findall(r"[a-z0-9]{2,}", ql)
+               if w not in _STOP and w not in _price_tokens][:6]
 
     # A bare "list / what products do you sell" with no category and no price
     # bound is an open-ended browse — leave that to normal RAG, don't dump a
@@ -243,7 +253,7 @@ def load_rows(db, limit: int = 12000) -> list[Row]:
     except Exception:
         return []
     rows: list[Row] = []
-    seen: set[str] = set()
+    seen: dict[str, Row] = {}
     for doc, meta in zip(raw.get("documents", []) or [], raw.get("metadatas", []) or []):
         meta = meta or {}
         doc = str(doc or "")
@@ -290,9 +300,8 @@ def load_rows(db, limit: int = 12000) -> list[Row]:
         if len(re.findall(r"[a-zA-Z0-9]+", title)) <= 1 and not re.search(r"\d", title):
             continue
         key = re.sub(r"[^a-z0-9]+", " ", tl).strip()
-        if not key or key in seen:
+        if not key:
             continue
-        seen.add(key)
         price = None
         try:
             mv = meta.get("price")
@@ -320,7 +329,25 @@ def load_rows(db, limit: int = 12000) -> list[Row]:
         # count an unrelated product into the "sharpener" category.
         cats_l = str(meta.get("categories") or "").lower()
         hay = " ".join([tl, cats_l])
-        rows.append(Row(title, price, avail, src, hay, cur, cats_l))
+        row = Row(title, price, avail, src, hay, cur, cats_l)
+        # Dedup by normalized title, but PREFER the priced chunk: a catalog that was
+        # both crawled and catalog-ingested has two chunks per product (a crawl chunk
+        # often without a structured price + a priced ingest chunk). Keeping whichever
+        # came first dropped the price for products whose unpriced chunk sorted first
+        # (then compare/basket couldn't use them). Upgrade in place when a later
+        # duplicate carries a price the kept one lacks; also fill missing categories.
+        prev = seen.get(key)
+        if prev is None:
+            seen[key] = row
+            rows.append(row)
+        elif prev.price is None and price is not None:
+            prev.price = price
+            prev.currency = cur
+            if avail and not re.search(r"out\s+of\s+stock|sold\s+out", prev.availability):
+                prev.availability = avail
+            if not prev.cats and cats_l:
+                prev.cats = cats_l
+                prev.hay = " ".join([prev.title.lower(), cats_l])
     return rows
 
 
@@ -416,7 +443,14 @@ _CMP_RE = re.compile(
     r"|\bwhich\s+(?:one\s+)?(?:is|costs?)\b|\bversus\b|\bvs\.?\b|\bcosts?\s+(?:less|more)\b", re.I)
 _ORDER_RE = re.compile(r"\b(order|rank|sort|arrange|list\s+these)\b", re.I)
 _PRICE_DIM_RE = re.compile(r"\b(expensive|cheap(?:er|est)?|price[ds]?|cost(?:s|ly)?|least|most)\b", re.I)
-_BASKET_RE = re.compile(r"\b(total|sum|altogether|combined|buy(?:ing)?|basket|both)\b", re.I)
+# Basket = "buy/total/combined" of several named items. Broad on purpose: customers
+# phrase it many ways ("total cost of buying X and Y", "buys one X plus one Y, what
+# combined amount should they pay", "X together with Y"). Compare/order are detected
+# first and win, so these verbs can't hijack a comparison/ranking. NOT 'cost' alone
+# (that word appears in "which costs more" comparisons).
+_BASKET_RE = re.compile(
+    r"\b(total|sum|altogether|combined|basket|plus|together|spend|spends|owe|"
+    r"purchas\w*|buy|buys|buying|bought|pay|pays|paying)\b", re.I)
 _ASC_RE = re.compile(r"least\s+to\s+most|cheap(?:est)?\s+first|low(?:est)?\s+to\s+high|ascending", re.I)
 
 
@@ -425,14 +459,17 @@ def _parse_multi(q: str) -> dict | None:
     product names it spans. Returns None for everything else."""
     ql = (q or "").lower()
     is_order = bool(_ORDER_RE.search(ql) and _PRICE_DIM_RE.search(ql))
-    is_basket = bool(_BASKET_RE.search(ql) and re.search(r"\b(cost|total|price|much|sum)\b", ql))
     is_cmp = bool(_CMP_RE.search(ql))
-    if not (is_order or is_basket or is_cmp):
+    is_basket = bool(_BASKET_RE.search(ql))
+    if not (is_order or is_cmp or is_basket):
         return None
     names = _extract_names(q)
     if len(names) < 2:
         return None
-    op = "order" if is_order else ("basket" if is_basket else "compare")
+    # order and compare have distinct, specific verbs; basket is the remaining
+    # multi-product intent. Compare wins over basket so "which costs more" is never
+    # summed.
+    op = "order" if is_order else ("compare" if is_cmp else "basket")
     # Compare direction: "which costs more / more expensive" names the dearer item;
     # default ("cheaper / costs less") names the cheaper. Either way both prices and
     # the exact gap are stated, so the answer carries the fact regardless.
@@ -505,9 +542,9 @@ def _answer_multi(mp: dict, rows: list[Row]) -> tuple[str, list[str]] | None:
     pair = sorted(found, key=lambda r: r.price)
     cheaper, dearer = pair[0], pair[-1]
     diff = dearer.price - cheaper.price
-    verdict = (f"{dearer.title} costs more, by {_price_s(diff, cur)}."
+    verdict = (f"{dearer.title} is more expensive by {_price_s(diff, cur)}."
                if mp.get("cmp_more")
-               else f"{cheaper.title} is cheaper, by {_price_s(diff, cur)}.")
+               else f"{cheaper.title} is cheaper by {_price_s(diff, cur)}.")
     txt = (f"- {cheaper.title}: {_price_s(cheaper.price, cheaper.currency)}\n"
            f"- {dearer.title}: {_price_s(dearer.price, dearer.currency)}\n\n{verdict}")
     return txt, srcs
