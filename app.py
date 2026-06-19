@@ -5103,8 +5103,9 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
     _attempt_timeout_s = 9 if _strict_q else 12
     response_buffer = []
     success = False
+    _tried_providers = set()
     for attempt in range(max_retries):
-        llm = get_fresh_llm()
+        llm = get_fresh_llm(avoid_providers=_tried_providers)
         if not llm:
             _trace_event(workflow_trace, "guard_exit", guard="no_llm_instance")
             _trace_decision(workflow_debug, "exit_guard", "no_llm_instance")
@@ -5156,6 +5157,8 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
             else:
                 logger.warning(f"Provider error (rotating to next key): {str(e)[:100]}")
         if _should_rotate:
+            if _prov_name:
+                _tried_providers.add(str(_prov_name).lower())  # next retry prefers a different provider
             try:
                 raw_key = (getattr(llm, 'groq_api_key', None) or
                            getattr(llm, 'google_api_key', None) or
@@ -6458,8 +6461,9 @@ async def chat(request: Request):
         _strict_q2 = _is_strict_scope_query(q)
         max_retries = 4 if _strict_q2 else 10
         _attempt_timeout_s2 = 9 if _strict_q2 else 30
+        _tried_providers2 = set()
         for attempt in range(max_retries):
-            llm = get_fresh_llm()
+            llm = get_fresh_llm(avoid_providers=_tried_providers2)
             if not llm:
                 try:
                     workflow_debug["guard_decisions"]["llm_no_active_keys"] = True
@@ -6569,6 +6573,8 @@ async def chat(request: Request):
                 except Exception:
                     pass
                 _should_rotate = True  # rotate on ALL provider errors by default
+                if _prov_name2:
+                    _tried_providers2.add(str(_prov_name2).lower())  # next retry prefers a different provider
                 if any(p in err_str for p in ["invalid_api_key", "incorrect api key", "unauthorized", "401 "]):
                     logger.error(f"Permanent key failure, marking and rotating: {str(e)[:100]}")
                 else:

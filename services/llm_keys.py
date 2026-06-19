@@ -235,8 +235,14 @@ def _peek_provider() -> str:
         return 'groq'
 
 
-def get_fresh_llm():
-    """Multi-provider key rotation: Groq (llama-3.3-70b) + OpenAI (gpt-4o-mini) fallback."""
+def get_fresh_llm(avoid_providers=None):
+    """Multi-provider key rotation: Groq (llama-3.3-70b) + OpenAI (gpt-4o-mini) fallback.
+
+    avoid_providers: providers already failed in THIS request — ranked last so a
+    single exhausted provider/org (e.g. one Groq account out of daily quota) is
+    skipped on the very next retry instead of burning the budget on its sibling
+    keys. Avoided-but-healthy still outrank cooled-down keys (usable last resort)."""
+    avoid = {str(p).lower() for p in (avoid_providers or [])}
     try:
         actives = []
         if KEYS_FILE.exists():
@@ -262,23 +268,27 @@ def get_fresh_llm():
         def key_health_score(k):
             s = _key_status.get(k['key'], {})
             prov = str(k.get('provider', '') or '').lower()
+            _skip = (-1, -1, 0, 0, random.random())
             if prov and now < _provider_cooldown.get(prov, 0):
-                return (-1, 0, 0, random.random())
+                return _skip
             if now < s.get("cooldown_until", 0):
-                return (-1, 0, 0, random.random())
+                return _skip
             org_id = _key_org_map.get(k['key'])
             if org_id and now < _org_cooldown.get(org_id, 0):
-                return (-1, 0, 0, random.random())
+                return _skip
             # Proactive RPM check — skip key if it's near its per-minute limit
             prov = k.get('provider', 'groq')
             soft_limit = _KEY_RPM_SOFT_LIMIT.get(prov, 25)
             rpm_dq = _key_rpm_window.get(k['key'], deque())
             recent_reqs = sum(1 for t in rpm_dq if now - t < 60)
             if recent_reqs >= soft_limit:
-                return (-1, 0, 0, random.random())
+                return _skip
             tier = _PROV_TIER.get(prov, 2)
             tokens = s.get("tokens", 6000)
-            return (tier, tokens, -s.get("last_used", 0), random.random())
+            # avoid_rank: providers already failed this request rank below fresh ones
+            # but still above cooled (-1) keys.
+            avoid_rank = 0 if prov in avoid else 1
+            return (avoid_rank, tier, tokens, -s.get("last_used", 0), random.random())
 
         with _llm_key_lock:
             healthiest = sorted(actives, key=key_health_score, reverse=True)
