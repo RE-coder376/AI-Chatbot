@@ -38,6 +38,10 @@ _STOP = {
     "dollars", "currently", "entire", "whole", "absolute", "absolutely", "overall", "anything",
     "everything", "sale", "best", "top", "good", "quality", "options", "option", "can", "could",
     "would", "buy", "get", "from", "want", "need", "needed", "looking", "find", "please", "name",
+    # price/value filler — never product-name anchors (else "what's the going RATE
+    # for X" makes going/rate junk anchors that crowd out X's distinctive words)
+    "going", "rate", "rates", "run", "runs", "damage", "charge", "charges", "charged",
+    "worth", "value", "asking", "ask", "pay", "paying", "spend", "deal", "going-rate",
 }
 
 _NUM = r"(?:rs\.?\s*|pkr\s*|[\$£€])?\s*([\d][\d,]*(?:\.\d{1,2})?)"
@@ -229,7 +233,7 @@ def parse(q: str) -> Spec:
             _price_tokens.add(f"{_v:.0f}")
             _price_tokens.add(str(_v))
     anchors = [w for w in re.findall(r"[a-z0-9]{2,}", ql)
-               if w not in _STOP and w not in _price_tokens][:6]
+               if w not in _STOP and w not in _price_tokens][:8]
 
     # A bare "list / what products do you sell" with no category and no price
     # bound is an open-ended browse — leave that to normal RAG, don't dump a
@@ -561,7 +565,7 @@ _PRODUCTISH = re.compile(
 
 
 def _anchors_from(text: str) -> list:
-    return [w for w in re.findall(r"[a-z0-9]{2,}", (text or "").lower()) if w not in _STOP][:6]
+    return [w for w in re.findall(r"[a-z0-9]{2,}", (text or "").lower()) if w not in _STOP][:8]
 
 
 def _plan_to_specs(plan: dict) -> tuple[dict | None, "Spec | None"]:
