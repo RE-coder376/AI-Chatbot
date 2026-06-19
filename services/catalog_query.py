@@ -433,7 +433,11 @@ def _parse_multi(q: str) -> dict | None:
     if len(names) < 2:
         return None
     op = "order" if is_order else ("basket" if is_basket else "compare")
-    return {"op": op, "names": names, "asc": bool(_ASC_RE.search(ql))}
+    # Compare direction: "which costs more / more expensive" names the dearer item;
+    # default ("cheaper / costs less") names the cheaper. Either way both prices and
+    # the exact gap are stated, so the answer carries the fact regardless.
+    cmp_more = bool(re.search(r"\bmore\s+expensive\b|\bcosts?\s+more\b|\bpricier\b|\bdearer\b|\bhigher\s+price", ql))
+    return {"op": op, "names": names, "asc": bool(_ASC_RE.search(ql)), "cmp_more": cmp_more}
 
 
 def _resolve_one(name: str, rows: list[Row]) -> Row | None:
@@ -496,13 +500,16 @@ def _answer_multi(mp: dict, rows: list[Row]) -> tuple[str, list[str]] | None:
         head = "From least to most expensive:" if mp["asc"] else "From most to least expensive:"
         lines = [head] + [f"{i}. {r.title} — {_price_s(r.price, r.currency)}" for i, r in enumerate(ordered, 1)]
         return "\n".join(lines), _dedup(r.source for r in ordered)
-    # compare: state both prices, the cheaper one, and the exact difference.
+    # compare: state both prices and the exact difference; name the product the
+    # question asked about (dearer for "which costs more", else the cheaper).
     pair = sorted(found, key=lambda r: r.price)
     cheaper, dearer = pair[0], pair[-1]
     diff = dearer.price - cheaper.price
+    verdict = (f"{dearer.title} costs more, by {_price_s(diff, cur)}."
+               if mp.get("cmp_more")
+               else f"{cheaper.title} is cheaper, by {_price_s(diff, cur)}.")
     txt = (f"- {cheaper.title}: {_price_s(cheaper.price, cheaper.currency)}\n"
-           f"- {dearer.title}: {_price_s(dearer.price, dearer.currency)}\n\n"
-           f"{cheaper.title} is cheaper by {_price_s(diff, cur)}.")
+           f"- {dearer.title}: {_price_s(dearer.price, dearer.currency)}\n\n{verdict}")
     return txt, srcs
 
 
