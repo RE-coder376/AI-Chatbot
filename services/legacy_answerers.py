@@ -300,6 +300,19 @@ def _deterministic_product_catalog_answer(q: str, kb_context: str, max_items: in
         if (re.search(r"\b(compare|compared|comparison|versus|vs\.?|difference\s+between)\b", ql)
                 and re.search(r"\b(and|or|vs\.?|versus|than)\b", ql)):
             return None
+        # Shipping / delivery / returns / payment / order = POLICY prose, and
+        # "which/what brands|categories" = brand enumeration — neither is a product
+        # lookup. Step aside so the LLM answers from policy/brand-page context (or
+        # says it lacks the info) instead of returning an unrelated product. Mirrors
+        # the guards in services/catalog_query.parse().
+        if re.search(r"\b(shipping|delivery|deliver(?:ed|ing)?|postage|courier|dispatch|"
+                     r"returns?|refunds?|warranty|guarantee|payment\s+method|cod|"
+                     r"cash\s+on\s+delivery|installments?|track(?:ing)?\s+(?:my\s+)?order|"
+                     r"order\s+status|cancel(?:lation|\s+(?:my\s+)?order)?)\b", ql):
+            return None
+        if re.search(r"\b(which|what|list|name|tell\s+me\s+(?:the|your))\b[\w\s]*\b"
+                     r"(brands?|designers?|makes?|labels?|categor(?:y|ies)|collections?)\b", ql):
+            return None
         rank_mode = None
         if re.search(r"\b(cheapest|lowest\s+price|lowest\s+priced|least\s+expensive|most\s+affordable|budget)\b", ql, re.I):
             rank_mode = "asc"

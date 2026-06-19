@@ -148,6 +148,25 @@ def parse(q: str) -> Spec:
             and re.search(r"\b(and|or|vs\.?|versus|than)\b", ql)):
         return Spec("none", structured=False)
 
+    # Shipping / delivery / returns / payment / order questions are POLICY prose,
+    # not product-catalog lookups — but "how much is delivery" trips the price-of
+    # detector and "shipping charges" trips the list path, dumping a random product.
+    # Hand to normal RAG so it answers from the policy page (or says it doesn't have
+    # the info) rather than returning an unrelated product.
+    if re.search(r"\b(shipping|delivery|deliver(?:ed|ing)?|postage|courier|dispatch|"
+                 r"returns?|refunds?|warranty|guarantee|"
+                 r"payment\s+method|cod|cash\s+on\s+delivery|installments?|"
+                 r"track(?:ing)?\s+(?:my\s+)?order|order\s+status|cancel(?:lation|\s+(?:my\s+)?order)?)\b", ql):
+        return Spec("none", structured=False)
+
+    # "which/what brands do you carry", "list the categories" = ENUMERATION of
+    # brands/categories, not a product lookup — "do you carry" trips the existence
+    # branch and would dump products as if they were brands. Hand to RAG so it
+    # answers from the store's brands/category page.
+    if re.search(r"\b(which|what|list|name|tell\s+me\s+(?:the|your))\b[\w\s]*\b"
+                 r"(brands?|designers?|makes?|labels?|categor(?:y|ies)|collections?)\b", ql):
+        return Spec("none", structured=False)
+
     pmin = pmax = None
     m = re.search(r"between\s+" + _NUM + r"\s*(?:and|to|-|–)\s*" + _NUM, ql)
     if m:
