@@ -1575,10 +1575,20 @@
     const res = await authFetch(`${API}/admin/databases/set-active`, { method:"POST", headers: authHeaders(), body:f });
     const d = await res.json();
     showStatus('db', d.success ? `✅ Switched to ${name}. Backend loading (~30s) — refresh chat after 30s.` : (d.message || d.detail), d.success ? 'success' : 'error');
+    if (d.success) {
+      // Owner's admin view follows the active DB: repoint X-Admin-DB so every
+      // panel (branding, contacts/ops, widget key, analytics, knowledge) reloads
+      // from the newly-active DB. Clients can't reach this path.
+      localStorage.setItem('adminDb', name);
+      await refreshCsrf();
+    }
     clearBrandingFields();
-    // Reload branding from the new active DB
+    // Reload branding + ops from the now-active DB (authHeaders carries new X-Admin-DB)
     const br = await fetch(`${API}/admin/branding`, { headers: authHeaders() });
-    if (br.ok) { const bd = await br.json(); loadServerData(bd); loadOpsData(bd); }
+    if (br.ok) { const bd = await br.json(); loadServerData(bd); loadOpsData(bd.config_full || bd); }
+    loadEmbedCode();
+    loadCharts();
+    loadKnowledgeGaps();
     loadDatabases();
     updateHealthStatus();
   }

@@ -1493,13 +1493,21 @@ def admin_auth(password: str, cfg: dict):
         return "owner"
     if _password_matches(password, db_pw):
         return "client"
+    # Default per-DB client password == the DB's own name (always a valid alias),
+    # so each client logs into their panel with db_name / db_name.
+    db_name = str(cfg.get("db_name", "") or "").strip()
+    if db_name and _password_matches(password, db_name):
+        return "client"
     raise HTTPException(status_code=401, detail="Unauthorized")
 
 
 def _client_password_matches_db(password: str, cfg: dict) -> bool:
-    """Allow client access only when the explicit DB password matches."""
+    """Allow client access when the explicit DB password OR the DB name matches."""
     db_pw = str(cfg.get("admin_password", "") or "").strip()
     if _password_matches(password, db_pw):
+        return True
+    db_name = str(cfg.get("db_name", "") or "").strip()
+    if db_name and _password_matches(password, db_name):
         return True
     return False
 
