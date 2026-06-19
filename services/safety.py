@@ -190,11 +190,18 @@ _NAV_CONTROL_RE = re.compile(
 def _canonical_product_title(text: str) -> str:
     text = re.sub(r'(?i)^product:\s*', "", text or "").strip()
     text = re.sub(r"\s+", " ", text)
-    # Strip variant tails ("Shirt - Color Red") but only past the title head:
-    # "A Piece of Sky" must not be truncated to "A" because 'piece' ~ 'pieces?'.
-    _m = re.search(r'(?i)\b(?:size|color|colour|variant|pack of|pcs?|pieces?)\b.*$', text)
-    if _m and _m.start() >= 12 and len(text[:_m.start()].strip(" -,:")) >= 4:
-        text = text[:_m.start()].strip(" -,:")
+    # Strip a trailing VARIANT clause ONLY when it is explicitly delimited
+    # ("Shirt - Color: Red", "Mug / Size Large", "Tee | Variant Blue"). A bare
+    # keyword inside the real product name must never truncate it — many genuine
+    # titles contain color/size/pcs/pack/set/pieces ("M&G Water Soluble Color
+    # Pencil Set of 48", "Crayola Classic Color Crayons Set Of 24", "(83 Pcs)",
+    # "Olfa Cutting Mats Size 620 x 450mm"). Over-stripping these collapsed distinct
+    # SKUs to a shared prefix and broke price/compare/basket lookups everywhere.
+    _m = re.search(r'(?i)\s+[-/|]\s*(?:size|colou?r|variant)\b\s*:?.*$', text)
+    if _m and _m.start() >= 4:
+        head = text[:_m.start()].strip(" -,:/|")
+        if len(head) >= 4:
+            text = head
     return text
 
 
