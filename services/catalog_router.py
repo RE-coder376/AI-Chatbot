@@ -108,6 +108,42 @@ def _extract_json(text: str) -> dict | None:
         return None
 
 
+def _plan(kind, names, cdir=None, odir=None, in_stock=False):
+    return {"kind": kind, "products": names[:6], "compare_dir": cdir, "order_dir": odir,
+            "price_min": None, "price_max": None, "in_stock": in_stock, "category": None}
+
+
+def heuristic_plan(q: str) -> dict | None:
+    """Deterministic backstop used when the LLM is unavailable (all free keys cooled
+    down) or returns nothing. Extracts quoted product names + rule-based intent so a
+    structured product question (price/exists/compare/order/basket) still answers
+    from the catalog with ZERO LLM dependency. Conservative: needs a quoted name."""
+    try:
+        ql = (q or "").lower()
+        names = [re.sub(r"\s+", " ", n).strip()
+                 for n in re.findall(r'["“”]([^"“”]{3,})["“”]', q or "") if n.strip()]
+        if not names:
+            return None
+        if len(names) >= 2 and re.search(
+                r"cheaper|more\s+expensive|pricier|dearer|which\s+(?:one\s+)?(?:is|costs?)|"
+                r"costs?\s+(?:more|less)|difference\s+between|price\s+gap|by\s+how\s+much|"
+                r"\bvs\.?\b|versus", ql):
+            cdir = "more" if re.search(r"more\s+expensive|costs?\s+more|pricier|dearer", ql) else "cheaper"
+            return _plan("compare", names, cdir=cdir)
+        if len(names) >= 2 and re.search(r"\b(order|rank|sort|arrange)\b", ql):
+            odir = "asc" if re.search(r"low(?:est)?\s+to\s+high|cheap(?:est)?\s+first|ascending|least\s+to\s+most", ql) else "desc"
+            return _plan("order", names, odir=odir)
+        if len(names) >= 2 and re.search(
+                r"\b(total|combined|altogether|sum|together|buy|buys|buying|bought|plus|tally|both|pay|spend|owe)\b", ql):
+            return _plan("basket", names)
+        if re.search(r"\b(got|carry|carries|stock|stocked|have|having|sell|sells|offer|"
+                     r"looking\s+for|searching\s+for|in\s+stock|available)\b", ql):
+            return _plan("exists", names[:1])
+        return _plan("lookup", names[:1])
+    except Exception:
+        return None
+
+
 def extract_plan(q: str, llm=None) -> dict | None:
     """One structured LLM call → normalized plan, or None on any failure.
     `llm` must be a LangChain-style object with .invoke([...]); when omitted we
@@ -116,18 +152,30 @@ def extract_plan(q: str, llm=None) -> dict | None:
         q = (q or "").strip()
         if not q or len(q) > 600:
             return None
-        if llm is None:
-            from services.llm_keys import get_fresh_llm
-            llm = get_fresh_llm()
-        if llm is None:
-            return None
         msgs = [{"role": "system", "content": _SYS}]
         for ex_q, ex_a in _FEWSHOT:
             msgs.append({"role": "user", "content": ex_q})
             msgs.append({"role": "assistant", "content": json.dumps(ex_a, ensure_ascii=False)})
         msgs.append({"role": "user", "content": q})
-        resp = llm.invoke(msgs)
-        text = getattr(resp, "content", None) or (resp if isinstance(resp, str) else str(resp))
-        return _coerce(_extract_json(text))
+        # Try a couple of key-rotated LLMs so a single cooled-down provider doesn't
+        # drop the call; caller still has heuristic_plan as a zero-LLM backstop.
+        attempts = [llm] if llm is not None else []
+        if not attempts:
+            from services.llm_keys import get_fresh_llm
+            for _ in range(2):
+                got = get_fresh_llm()
+                if got is None:
+                    break
+                attempts.append(got)
+        for cand in attempts:
+            try:
+                resp = cand.invoke(msgs)
+                text = getattr(resp, "content", None) or (resp if isinstance(resp, str) else str(resp))
+                plan = _coerce(_extract_json(text))
+                if plan:
+                    return plan
+            except Exception:
+                continue
+        return None
     except Exception:
         return None

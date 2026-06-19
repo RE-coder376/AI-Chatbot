@@ -70,8 +70,14 @@ def nums(s):
 def has(ans, v):
     return any(abs(x - v) <= 0.5 for x in nums(ans))
 
+def _ws(s):
+    return re.sub(r"\s+", " ", (s or "").lower()).strip()
+
 def short(name):
-    return name.lower()[:22]
+    return _ws(name)[:22]
+
+def _find(ans, name):
+    return _ws(ans).find(short(name))
 
 # many paraphrasings per type — stresses the router/parser
 P_PRICE = ['What is the price of "{a}"?', 'How much does "{a}" cost?', 'How much is "{a}"?',
@@ -103,7 +109,7 @@ def lst(ps):
 def order_ok(ans, ps, asc):
     seq = sorted(ps, key=lambda r: (r["price"] if asc else -r["price"]))
     # group equal prices — any order within a tie group is valid
-    idx = [ans.lower().find(short(p["title"])) for p in seq]
+    idx = [_find(ans, p["title"]) for p in seq]
     if any(i < 0 for i in idx):
         return False
     groups, i = [], 0
@@ -152,7 +158,7 @@ def grade(kind, payload, ans):
         lo, hi = (a, b) if a["price"] <= b["price"] else (b, a)
         who = lo if kind == "cheaper" else hi
         diff = round(abs(a["price"] - b["price"]), 2)
-        return short(who["title"]) in ans.lower() and has(ans, diff)
+        return short(who["title"]) in _ws(ans) and has(ans, diff)
     if kind == "order_desc":
         return order_ok(ans, payload, asc=False)
     if kind == "order_asc":

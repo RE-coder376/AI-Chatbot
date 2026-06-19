@@ -620,8 +620,10 @@ def answer_catalog_query(q: str, db, cfg: dict | None = None, max_list: int = 12
             if not rows or not is_catalog_db(db, rows, cfg):
                 return None, []
             try:
-                from services.catalog_router import extract_plan
-                plan = extract_plan(q)
+                from services.catalog_router import extract_plan, heuristic_plan
+                # LLM extractor first; deterministic backstop if the LLM is unavailable
+                # so structured product questions answer even during an LLM outage.
+                plan = extract_plan(q) or heuristic_plan(q)
             except Exception:
                 plan = None
             if not plan or plan.get("kind") in (None, "browse", "other"):
