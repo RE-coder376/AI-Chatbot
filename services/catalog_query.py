@@ -676,6 +676,7 @@ def _execute_spec(spec: "Spec", rows: list[Row], cfg: dict | None, max_list: int
             _top = _ranked[0][0] if _ranked else 0.0
             _base = [r for c, r in _ranked if c >= 0.85 and c >= _top - 1e-9]
         sel = []
+        _oos = []  # matched the query but excluded only by the in-stock filter
         for r in _base:
             if excl and excl.search(r.title):
                 continue
@@ -683,6 +684,7 @@ def _execute_spec(spec: "Spec", rows: list[Row], cfg: dict | None, max_list: int
             # source ("available", "in stock", ""), so treat anything not explicitly
             # out-of-stock as in stock rather than demanding an exact "available".
             if spec.in_stock and re.search(r"out\s+of\s+stock|sold\s+out|unavailable|not\s+available", r.availability):
+                _oos.append(r)
                 continue
             sel.append(r)
         # Price bounds apply to every aggregation when present (count of X under Y,
@@ -708,6 +710,13 @@ def _execute_spec(spec: "Spec", rows: list[Row], cfg: dict | None, max_list: int
                         sel = _tag_sel
             n = len(sel)
             if n == 0:
+                # Found it, but the "in stock" filter removed it → it IS carried, just
+                # out of stock. Don't mislead the customer into thinking we never have it.
+                if spec.in_stock and _oos:
+                    o = _oos[0]
+                    pr = f" (normally {_price_s(o.price, o.currency)})" if o.price is not None else ""
+                    return (f"We do carry {o.title}{pr}, but it's currently out of stock. "
+                            f"Would you like me to suggest similar in-stock options?"), _dedup(r.source for r in _oos)[:max_list]
                 if spec.agg == "exists":
                     return (f"No — we don't currently carry any {label}. I couldn't find any "
                             f"in our catalog. Is there something else I can help you find?"), []

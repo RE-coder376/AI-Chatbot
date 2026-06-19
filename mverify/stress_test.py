@@ -10,7 +10,8 @@ Usage: python mverify/stress_test.py [N_per_type_per_db] [db ...]
 import json, re, sys, time, random, urllib.request, urllib.error
 
 SERVE = "https://re-coder376--ai-chatbot-serve.modal.run"
-random.seed(7)
+random.seed()  # fresh sampling every run (no fixed seed = different products each time)
+GT_JSON = r"C:\Users\User\Documents\Codex\2026-05-06\hi\product_round2_25q_ground_truth.json"
 
 def http(url, data=None, headers=None, timeout=120):
     last = None
@@ -126,8 +127,38 @@ def order_ok(ans, ps, asc):
         pos = max(block)
     return True
 
+def prior_titles():
+    """Every product title used in ANY previous test (all stress runs + the round-2
+    GT), so a re-run shares ZERO products with prior runs — it tests generalization,
+    not memorization."""
+    import glob, os
+    seen = set()
+    base = os.path.dirname(os.path.abspath(__file__))
+    for f in glob.glob(os.path.join(base, "stress*.txt")) + glob.glob(os.path.join(base, "round2*.txt")):
+        try:
+            txt = open(f, encoding="utf-8", errors="ignore").read()
+            for m in re.findall(r'"([^"]{4,})"', txt):
+                seen.add(_ws(m))
+        except Exception:
+            pass
+    try:
+        d = json.load(open(GT_JSON, encoding="utf-8"))
+        for db in d.get("databases", {}).values():
+            for q in db.get("questions", []):
+                e = q.get("expected", {})
+                if "product" in e:
+                    seen.add(_ws(e["product"]["name"]))
+                for k in ("products", "ordered"):
+                    for p in e.get(k, []) or []:
+                        seen.add(_ws(p["name"]))
+    except Exception:
+        pass
+    return seen
+
+_PRIOR = prior_titles()
+
 def gen(cat, n):
-    priced = [r for r in cat if r["price"]]
+    priced = [r for r in cat if r["price"] and _ws(r["title"]) not in _PRIOR]
     qs = []
     def pk(k):
         return random.sample(priced, k)
