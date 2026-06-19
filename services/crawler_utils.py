@@ -21,6 +21,7 @@ from services.safety import (
     _looks_structural_page,
     _looks_like_product_page,
     _looks_like_catalog_page,
+    _url_never_product,
     _strip_storefront_boilerplate,
     _dedupe_repeated_lines,
     _canonical_product_title,
@@ -959,10 +960,13 @@ def _prepare_crawl_page(text: str, url: str, title_hint: str = "", authority_tit
         if product.get("title") and (product.get("price_label") or product.get("description") or meta["used_structured_fields"]):
             meta["page_type"] = "product"
             meta["page_title"] = _derive_page_title(_dt_hint, cleaned, product, prefer_title_hint=docs_like)
-    elif not docs_like and meta["page_type"] in {"policy", "unknown", "category", "article"}:
+    elif not docs_like and meta["page_type"] in {"policy", "unknown", "category", "article"} and not _url_never_product(url):
         # Product/catalog pages often carry policy/footer boilerplate that can
         # overwhelm the classifier. If structured product signals are present,
         # promote them even when the URL path itself is generic.
+        # GUARD: never promote the site root or info/account/policy pages — on
+        # WooCommerce/WordPress the global cart+price chrome makes _extract_product_summary
+        # find a "title+price" on About/Contact/Policy pages, mis-tagging them product.
         product = _extract_product_summary(cleaned, url, title_hint=title_hint, authority_title=authority_title, authority_price=authority_price, authority_currency=authority_currency)
         multiple_price_hits = len(_PRODUCT_PRICE_CAPTURE_RE.findall(cleaned)) + len(_PRODUCT_PRICE_LINE_RE.findall(cleaned))
         if product.get("title") and multiple_price_hits >= 2:
@@ -1261,6 +1265,28 @@ def _smart_chunk_page(text: str, url: str, chunk_size: int = 400, chunk_step: in
                 _body1 = re.sub(r"[ \t]{2,}", " ", _CHROME_RE.sub(" ", _body0))
                 if _body1.strip():
                     _doc.page_content = _body1
+            # Universal HTML-entity scrub (last chokepoint): "## {title}" heading lines
+            # and titles are assembled from fields that unescape only ONCE, so
+            # double-encoded source ("&amp;ndash;" → "&ndash;" after one pass) leaves a
+            # literal entity in the body that crawl_gate flags as junk → quarantine.
+            # Loop-unescape body + title fields until stable so none survives.
+            def _unescape_stable(_s: str) -> str:
+                for _ in range(4):
+                    _u = _html_mod.unescape(_s)
+                    if _u == _s:
+                        return _s
+                    _s = _u
+                return _s
+            _eb = str(getattr(_doc, "page_content", "") or "")
+            _eu = _unescape_stable(_eb)
+            if _eu != _eb:
+                _doc.page_content = _eu
+            for _tk in ("product_title", "canonical_product_title", "page_title"):
+                _tv = _m.get(_tk)
+                if _tv:
+                    _ts = _unescape_stable(str(_tv))
+                    if _ts != str(_tv):
+                        _m[_tk] = _ts
             _sample = str(getattr(_doc, "page_content", "") or "")
             _m["chunk_hash"] = hashlib.sha256(_sample.encode("utf-8", errors="ignore")).hexdigest()
             _doc.metadata = _m

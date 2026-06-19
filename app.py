@@ -1826,6 +1826,17 @@ async def _auto_crawl_db(db_name: str, url: str, max_pages: int = 0, clear: bool
             logger.info(f"[AUTO-CRAWL] clear=True: wiped {len(_all_ids)} chunks from '{db_name}' before rebuild")
         except Exception as _clr_e:
             logger.warning(f"[AUTO-CRAWL] clear failed for '{db_name}': {type(_clr_e).__name__}: {_clr_e}")
+        # A full rebuild must also reset the seen-URL cache, else the incremental
+        # discovery treats every prior URL as "already crawled" and re-fetches
+        # nothing — producing a near-empty DB (only changed pages). clear=True means
+        # "re-crawl the whole site from scratch", so drop crawled_urls.txt too.
+        try:
+            _seen_f = DATABASES_DIR / db_name / "crawled_urls.txt"
+            if _seen_f.exists():
+                _seen_f.unlink()
+                logger.info(f"[AUTO-CRAWL] clear=True: reset seen-URL cache for '{db_name}'")
+        except Exception as _sc_e:
+            logger.warning(f"[AUTO-CRAWL] clear seen-cache failed for '{db_name}': {_sc_e}")
 
     # Per-DB docs path hints — same config-driven detection as the manual crawler.
     _ac_cfg = get_config(db_name) or {}

@@ -275,7 +275,15 @@ def scrub(db_name: str):
     doc_fixes = 0
     for _id, sv in c.fetchall():
         if sv and _REAL_ENTITY_RE.search(sv):
-            new = _html.unescape(sv)
+            # Loop until stable: Shopify text is often double-encoded
+            # ("&amp;ndash;" -> "&ndash;" after one pass), so a single unescape
+            # leaves a real entity the gate still flags.
+            new = sv
+            for _ in range(4):
+                _u = _html.unescape(new)
+                if _u == new:
+                    break
+                new = _u
             if new != sv:
                 c.execute("UPDATE embedding_metadata SET string_value=? "
                           "WHERE id=? AND key='chroma:document'", (new, _id))

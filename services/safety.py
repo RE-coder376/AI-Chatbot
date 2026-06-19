@@ -317,9 +317,28 @@ def _looks_structural_page(url: str, text: str) -> bool:
 
 
 _NEVER_PRODUCT_SEGMENT_RE = re.compile(
-    r"(?:/|^)(?:checkout|cart|basket|account|login|register|sign-?in|sign-?up|wishlist|search|"
-    r"blogs?|news|pages?|policies|privacy(?:-policy)?|terms(?:-and-conditions)?|contact(?:-us)?|"
-    r"about(?:-us)?|faqs?|help|support|track(?:ing)?|order-status)(?:/|$|[?#])", re.I)
+    r"(?:/|^)(?:checkout|cart|basket|my-?account|account|login|log-?in|register|sign-?in|sign-?up|"
+    r"wishlist|compare|search|blogs?|news|pages?|policies|privacy(?:-policy)?|"
+    r"terms(?:-and-conditions|-of-service|-of-use)?|contact(?:-us)?|about(?:-us)?|faqs?|help|support|"
+    r"track(?:ing)?|order-status|returns?(?:-policy)?|return-policy|refunds?(?:-policy)?|"
+    r"exchange(?:-policy)?|shipping(?:-policy|-info)?|delivery(?:-policy)?|store-locator|"
+    r"docs|documentation)(?:/|$|[?#])", re.I)
+
+
+def _url_never_product(url: str) -> bool:
+    """True for URLs that structurally cannot be a product/catalog page — the site
+    root and informational/account/policy pages. Universal guard used by both the
+    product classifier and the crawler's structured-promotion step so global
+    storefront chrome (cart/price markup on every page) can't mis-promote an
+    About/Contact/Policy/Account page into a product."""
+    source = (url or "").lower()
+    try:
+        path = urllib.parse.urlparse(source).path or ""
+    except Exception:
+        path = source
+    if path.rstrip("/") == "":  # site root / homepage
+        return True
+    return bool(_NEVER_PRODUCT_SEGMENT_RE.search(path))
 
 
 def _looks_like_product_page(url: str, text: str) -> bool:
@@ -347,7 +366,7 @@ def _looks_like_product_page(url: str, text: str) -> bool:
     # A listing URL (/collections/, /category/) without a product segment is a
     # catalog page no matter how product-ish its body looks (Shopify listings
     # contain prices + the word "product" on every card).
-    if re.search(r"(?:/|#)(?:collections?|categor(?:y|ies)|shop|browse|listing)(?:/|$|#)", source):
+    if re.search(r"(?:/|#)(?:collections?|categor(?:y|ies)|product-categor(?:y|ies)|product-tags?|shop|browse|listing)(?:/|$|#)", source):
         return False
     if re.search(r"(?i)\b@type\b.*\bproduct\b", body):
         return True
@@ -364,7 +383,7 @@ def _looks_like_catalog_page(url: str, text: str) -> bool:
     # This guard exists so detail pages like /product/104 stay product-shaped end to end.
     if _looks_like_product_page(source, body):
         return False
-    if re.search(r"(?i)(?:/|#)(?:catalog|category|categories|collection|collections|shop|store|listing|browse|products)(?:/|$|#)", source):
+    if re.search(r"(?i)(?:/|#)(?:catalog|category|categories|product-category|product-tag|collection|collections|shop|store|listing|browse|products)(?:/|$|#)", source):
         return True
     price_hits = len(_PRODUCT_PRICE_CAPTURE_RE.findall(body)) + len(_PRODUCT_PRICE_LINE_RE.findall(body))
     if price_hits >= 2:
