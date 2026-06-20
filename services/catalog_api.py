@@ -24,6 +24,50 @@ from langchain_core.documents import Document
 UA = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/122.0 Safari/537.36"}
 _TAG_RE = re.compile(r"<[^>]+>")
 
+# Currency code → display symbol. The generic JSON-LD/microdata path reads an ISO
+# currency CODE (USD/GBP/PKR), but _emit_doc renders a symbol prefix. Unknown codes
+# fall back to the caller's default so we never invent the wrong currency.
+_CUR_SYM = {"USD": "$", "EUR": "€", "GBP": "£", "PKR": "Rs.", "INR": "₹",
+            "AED": "AED ", "SAR": "SAR ", "CAD": "$", "AUD": "$", "JPY": "¥"}
+# URL path tokens that mark a product-detail page across platforms (Shopify
+# /products/, Woo/Magento /product/, BigCommerce flat, generic /p/, /item/, /dp/).
+# Used only to PREFER likely product URLs from the sitemap; the authoritative test
+# is still "does the page carry schema.org Product structured data".
+_PRODUCT_URL_RE = re.compile(r"/(?:products?|item|items|dp|shop|buy|p)/[^/]", re.I)
+_ASSET_RE = re.compile(r"\.(?:jpg|jpeg|png|gif|webp|svg|css|js|pdf|xml|ico|woff2?|ttf|mp4|zip)(?:\?|$)", re.I)
+
+# ── Per-run feed snapshot ──────────────────────────────────────────────────
+# Ingest (build_catalog_docs) and the gate (catalog_ground_truth) resolve the
+# catalog independently, so each fetches the store feed seconds apart. Any product
+# the store publishes between those two fetches lands in the gate's ground truth
+# but not in the stored DB → a phantom "missing" that fails the gate on a perfectly
+# ingested DB. When primed (one paired ingest+gate run, same process), every
+# fetch_all_products* call returns the ONE captured snapshot per base URL, so the
+# gate verifies against exactly the catalog that was ingested. Off by default —
+# standalone callers keep live-fetch behaviour.
+_FEED_SNAPSHOT: dict[str, list | None] = {}
+_FEED_SNAPSHOT_ON = False
+
+
+def prime_feed_snapshot(on: bool = True) -> None:
+    """Enable/disable per-run feed caching. Call prime_feed_snapshot(True) before a
+    paired ingest+gate run and prime_feed_snapshot(False) after (clears the cache)."""
+    global _FEED_SNAPSHOT_ON
+    _FEED_SNAPSHOT_ON = on
+    if not on:
+        _FEED_SNAPSHOT.clear()
+
+
+def _snapshot(kind: str, base_url: str, fetch):
+    """Return a single cached feed per (kind, base_url) when priming is on, else
+    fetch live. `fetch` is the uncached implementation called at most once."""
+    if not _FEED_SNAPSHOT_ON:
+        return fetch()
+    key = f"{kind}::{(base_url or '').rstrip('/').lower()}"
+    if key not in _FEED_SNAPSHOT:
+        _FEED_SNAPSHOT[key] = fetch()
+    return _FEED_SNAPSHOT[key]
+
 
 def _html_to_text(s: str) -> str:
     if not s:
@@ -46,7 +90,12 @@ def _html_to_text(s: str) -> str:
 
 
 def fetch_all_products(base_url: str, max_pages: int = 80) -> list[dict] | None:
-    """Every product from the store catalog API. None = not Shopify/blocked."""
+    """Every product from the store catalog API. None = not Shopify/blocked.
+    Returns the per-run snapshot when priming is on (see prime_feed_snapshot)."""
+    return _snapshot("shopify", base_url, lambda: _fetch_all_products_impl(base_url, max_pages))
+
+
+def _fetch_all_products_impl(base_url: str, max_pages: int = 80) -> list[dict] | None:
     base = (base_url or "").rstrip("/")
     if not base:
         return None
@@ -136,7 +185,12 @@ def _woo_price(prices: dict):
 
 def fetch_all_products_woo(base_url: str, max_pages: int = 80) -> list[dict] | None:
     """Every product from the WooCommerce Store API — the WordPress equivalent of
-    Shopify /products.json. None = not WooCommerce / blocked."""
+    Shopify /products.json. None = not WooCommerce / blocked.
+    Returns the per-run snapshot when priming is on (see prime_feed_snapshot)."""
+    return _snapshot("woo", base_url, lambda: _fetch_all_products_woo_impl(base_url, max_pages))
+
+
+def _fetch_all_products_woo_impl(base_url: str, max_pages: int = 80) -> list[dict] | None:
     base = (base_url or "").rstrip("/")
     if not base:
         return None
@@ -166,6 +220,138 @@ def fetch_all_products_woo(base_url: str, max_pages: int = 80) -> list[dict] | N
         page += 1
         time.sleep(0.3)
     return out or None
+
+
+def _sitemap_product_urls(base_url: str, cap: int = 6000) -> list[str]:
+    """Enumerate candidate product URLs from the site's sitemap(s). Universal —
+    every serious cart (Shopify, Woo, Magento, BigCommerce, Wix, Squarespace,
+    hand-rolled) publishes sitemap.xml. Recurses one level of <sitemapindex>,
+    preferring child sitemaps whose URL mentions 'product'. Returns deduped,
+    asset-filtered URLs, product-path URLs first so the cap keeps the real ones."""
+    base = (base_url or "").rstrip("/")
+    if not base:
+        return []
+    roots: list[str] = []
+    # robots.txt Sitemap: lines are authoritative; fall back to conventional paths.
+    try:
+        rb = requests.get(f"{base}/robots.txt", headers=UA, timeout=20)
+        if rb.status_code == 200:
+            roots += re.findall(r"(?im)^\s*sitemap:\s*(\S+)", rb.text)
+    except Exception:
+        pass
+    roots += [f"{base}/sitemap.xml", f"{base}/sitemap_index.xml", f"{base}/sitemap-index.xml"]
+    seen_sm, locs, q = set(), [], list(dict.fromkeys(roots))
+    fetched = 0
+    while q and fetched < 60:
+        sm = q.pop(0)
+        if sm in seen_sm:
+            continue
+        seen_sm.add(sm)
+        try:
+            r = requests.get(sm, headers=UA, timeout=30)
+            if r.status_code != 200 or "<" not in r.text:
+                continue
+        except Exception:
+            continue
+        fetched += 1
+        body = r.text
+        child = re.findall(r"<sitemap>.*?<loc>\s*([^<\s]+)\s*</loc>", body, re.S | re.I)
+        if child:
+            # sitemap index — enqueue children, product sitemaps first.
+            child = sorted(set(child), key=lambda u: (0 if "product" in u.lower() else 1, u))
+            q[:0] = child
+            continue
+        locs += re.findall(r"<url>.*?<loc>\s*([^<\s]+)\s*</loc>", body, re.S | re.I) \
+            or re.findall(r"<loc>\s*([^<\s]+)\s*</loc>", body, re.I)
+    # Same-host, non-asset, deduped; product-path URLs first so the cap keeps them.
+    host = urllib.parse.urlparse(base).netloc.lower()
+    out, seen = [], set()
+    for u in locs:
+        u = _html.unescape(u.strip())
+        if not u or u in seen or _ASSET_RE.search(u):
+            continue
+        if urllib.parse.urlparse(u).netloc.lower() not in (host, ""):
+            continue
+        seen.add(u)
+        out.append(u)
+    out.sort(key=lambda u: 0 if _PRODUCT_URL_RE.search(u) else 1)
+    return out[:cap]
+
+
+def _extract_product_from_html(html: str, url: str) -> dict | None:
+    """One product from a detail page via schema.org Product structured data
+    (JSON-LD first, microdata fallback) — the universal, platform-agnostic signal.
+    Returns None when the page carries no Product price (category/blog/policy)."""
+    from services.page_extract import _jsonld_text, _microdata_product
+    name = price = 0
+    cur_code = ""
+    try:
+        ld_text, ld_name, ld_price = _jsonld_text(html)
+    except Exception:
+        ld_text, ld_name, ld_price = "", "", 0.0
+    if ld_name and ld_price and ld_price > 0:
+        name, price = ld_name, float(ld_price)
+        m = re.search(r"priceCurrency[\"'\s:]+([A-Z]{3})", ld_text) or re.search(r"\b([A-Z]{3})\b", ld_text)
+        cur_code = m.group(1) if m else ""
+    if not (name and price):
+        try:
+            md_name, md_price, md_cur = _microdata_product(html)
+        except Exception:
+            md_name, md_price, md_cur = "", 0.0, ""
+        if md_name and md_price and md_price > 0:
+            name, price, cur_code = md_name, float(md_price), (md_cur or "")
+    if not name or not price or price <= 0:
+        return None
+    avail = "available"
+    if re.search(r"(?i)(out\s*of\s*stock|sold\s*out|OutOfStock|currently\s+unavailable)", html):
+        avail = "out of stock"
+    return {"title": re.sub(r"\s+", " ", name).strip(), "price": price,
+            "availability": avail, "currency_code": (cur_code or "").upper(),
+            "source": url.split("#")[0]}
+
+
+def fetch_all_products_generic(base_url: str, cap: int = 6000, workers: int = 8) -> list[dict] | None:
+    """Deterministic full-catalog fetch for ANY site emitting schema.org Product
+    data — Magento, BigCommerce, Wix, Squarespace, hand-rolled carts (no Shopify
+    /products.json, no WC Store API). Returns the per-run snapshot when priming is on."""
+    return _snapshot("generic", base_url, lambda: _fetch_all_products_generic_impl(base_url, cap, workers))
+
+
+def _fetch_all_products_generic_impl(base_url: str, cap: int = 6000, workers: int = 8) -> list[dict] | None:
+    """Enumerates products from the sitemap and extracts each via JSON-LD/microdata.
+    None = no sitemap / no structured products."""
+    import concurrent.futures as _cf
+    urls = _sitemap_product_urls(base_url, cap=cap)
+    if not urls:
+        return None
+
+    def _one(u: str) -> dict | None:
+        for attempt in range(2):
+            try:
+                r = requests.get(u, headers=UA, timeout=30)
+                if r.status_code == 200 and r.text:
+                    return _extract_product_from_html(r.text, u)
+                return None
+            except Exception:
+                if attempt == 1:
+                    return None
+                time.sleep(2)
+        return None
+
+    out: list[dict] = []
+    with _cf.ThreadPoolExecutor(max_workers=workers) as ex:
+        for res in ex.map(_one, urls):
+            if res:
+                out.append(res)
+    # Dedup by normalized title (variant pages collapse to one product), keep cheapest.
+    best: dict[str, dict] = {}
+    for p in out:
+        k = re.sub(r"[^a-z0-9]+", " ", p["title"].lower()).strip()
+        if not k:
+            continue
+        if k not in best or p["price"] < best[k]["price"]:
+            best[k] = p
+    return sorted(best.values(), key=lambda x: x["source"]) or None
 
 
 def build_catalog_docs(base_url: str, canonicalize=None, currency: str = "Rs.") -> list[Document]:
@@ -220,4 +406,74 @@ def build_catalog_docs(base_url: str, canonicalize=None, currency: str = "Rs.") 
                 desc=_html_to_text(str(p.get("description") or p.get("short_description") or ""))[:1200],
                 source=source, canonicalize=canonicalize, currency=currency))
         return docs
+    # Generic fallback — sitemap + schema.org Product (JSON-LD/microdata). Covers
+    # Magento, BigCommerce, Wix, Squarespace, and hand-rolled carts. [[junk-fix-structured-ingest-not-regex]]
+    generic = fetch_all_products_generic(base_url)
+    if generic:
+        for p in generic:
+            title = p["title"]
+            if len(title) < 2:
+                continue
+            cur = _CUR_SYM.get(p.get("currency_code") or "", currency)
+            docs.append(_emit_doc(
+                title=title, price=p.get("price"), availability=p.get("availability") or "available",
+                ptype="", categories="", desc="",
+                source=p["source"], canonicalize=canonicalize, currency=cur))
+        return docs
     return []
+
+
+def catalog_ground_truth(base_url: str) -> list[dict] | None:
+    """Authoritative product universe for the GATE — the SAME source build_catalog_docs
+    ingests from, so ingest and verification can never diverge. Platform-agnostic
+    normalized items: {title, prices:[..], available, source}. None = no structured
+    catalog (gate then skips layer-2 rather than failing a docs/structureless site)."""
+    base = base_url.rstrip("/")
+    shop = fetch_all_products(base_url)
+    if shop:
+        gt = []
+        for p in shop:
+            handle = str(p.get("handle") or "").strip()
+            title = re.sub(r"\s+", " ", str(p.get("title") or "")).strip()
+            if not handle or len(title) < 2:
+                continue
+            prices = sorted({round(float(v.get("price")), 2) for v in (p.get("variants") or [])
+                             if _safe_pos(v.get("price"))})
+            vs = p.get("variants") or []
+            ptype = str(p.get("product_type") or "").strip()
+            tags = p.get("tags") or []
+            if isinstance(tags, str):
+                tags = [t.strip() for t in tags.split(",") if t.strip()]
+            gt.append({"title": _unescape_stable(title), "prices": prices,
+                       "available": (any(v.get("available") for v in vs) if vs and "available" in vs[0] else None),
+                       "categories": _unescape_stable(", ".join([t for t in ([ptype] + list(tags)) if t])),
+                       "source": f"{base}/products/{urllib.parse.quote(handle)}"})
+        return gt
+    woo = fetch_all_products_woo(base_url)
+    if woo:
+        gt = []
+        for p in woo:
+            title = re.sub(r"\s+", " ", str(p.get("name") or "")).strip()
+            if len(title) < 2:
+                continue
+            pv = _woo_price(p.get("prices") or {})
+            src = str(p.get("permalink") or f"{base}/product/{urllib.parse.quote(str(p.get('slug') or ''))}")
+            cats = [str(c.get("name") or "").strip() for c in (p.get("categories") or []) if c.get("name")]
+            gt.append({"title": _unescape_stable(title), "prices": ([round(pv, 2)] if pv else []),
+                       "available": bool(p.get("is_in_stock")),
+                       "categories": _unescape_stable(", ".join(cats)), "source": src})
+        return gt
+    generic = fetch_all_products_generic(base_url)
+    if generic:
+        return [{"title": p["title"], "prices": ([round(p["price"], 2)] if p.get("price") else []),
+                 "available": (p.get("availability") != "out of stock"),
+                 "categories": "", "source": p["source"]}
+                for p in generic]
+    return None
+
+
+def _safe_pos(v) -> bool:
+    try:
+        return float(v) > 0
+    except (TypeError, ValueError):
+        return False

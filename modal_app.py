@@ -209,12 +209,63 @@ def gate(db_name: str, crawl_url: str = ""):
     from crawl_gate import run_gate_for_db
 
     db_dir = "/root/app/databases/" + db_name
+    # Fall back to the DB's configured crawl_url so layer-2 (coverage + price diff
+    # vs the live structured feed — the deterministic truth) always runs, not just
+    # when a URL is passed on the CLI. Mirrors catalog_ingest's config fallback.
+    if not crawl_url:
+        try:
+            import app as chatbot
+            os.environ["SKIP_STARTUP_GITHUB_RESTORE"] = "1"
+            chatbot.init_systems()
+            crawl_url = (chatbot.get_config(db_name) or {}).get("crawl_url") or ""
+        except Exception as _e:
+            print(f"[GATE] crawl_url config lookup failed: {_e}")
     web_base = os.environ.get("MODAL_WEB_BASE_URL", "https://re-coder376--ai-chatbot-serve.modal.run").rstrip("/")
     password = os.environ.get("ADMIN_PASSWORD", "")
     rep = run_gate_for_db(db_name, db_dir, crawl_url, quiz_base=web_base, password=password)
     vol.commit()  # persist gate_report.json
     print("[GATE] verdict:\n" + _json.dumps(rep, indent=2, ensure_ascii=False)[:6000])
     return rep
+
+
+@app.function(
+    image=image,
+    cpu=2.0,
+    memory=8192,
+    timeout=3600,
+    volumes={"/root/app/databases": vol},
+    secrets=SECRETS,
+)
+def ingest_and_gate(db_name: str, url: str = ""):
+    """Re-ingest then gate in ONE container against a SINGLE feed snapshot, so the
+    gate's ground truth is exactly the catalog that was ingested. Eliminates the
+    ingest↔gate live-store race (a product published between the two separate feed
+    fetches showed up as a phantom 'missing' and failed an otherwise-perfect DB).
+      modal run modal_app.py::ingest_and_gate --db-name stationery_studio
+    """
+    _enter_app_dir()
+    import json as _json
+    import app as chatbot
+    from services import catalog_api
+    from crawl_gate import run_gate_for_db
+
+    os.environ["SKIP_STARTUP_GITHUB_RESTORE"] = "1"
+    chatbot.init_systems()
+    if not url:
+        url = (chatbot.get_config(db_name) or {}).get("crawl_url") or ""
+    web_base = os.environ.get("MODAL_WEB_BASE_URL", "https://re-coder376--ai-chatbot-serve.modal.run").rstrip("/")
+    password = os.environ.get("ADMIN_PASSWORD", "")
+    db_dir = "/root/app/databases/" + db_name
+    catalog_api.prime_feed_snapshot(True)  # ingest + gate share one feed fetch
+    try:
+        ing = chatbot.catalog_reingest_products(db_name, url, clear_products=True)
+        rep = run_gate_for_db(db_name, db_dir, url, quiz_base=web_base, password=password)
+    finally:
+        catalog_api.prime_feed_snapshot(False)
+    vol.commit()  # persist ingested chunks + gate_report.json
+    print(f"[INGEST] {ing}")
+    print("[GATE] verdict:\n" + _json.dumps(rep, indent=2, ensure_ascii=False)[:6000])
+    return {"ingest": ing, "gate": rep}
 
 
 @app.function(
@@ -337,3 +388,62 @@ def scrub(db_name: str):
     vol.commit()
     print(f"[SCRUB] {db_name}: {doc_fixes} entity docs, {title_fixes} short titles, {chrome_fixes} chrome strips fixed")
     return {"entity_docs": doc_fixes, "short_titles": title_fixes, "chrome_strips": chrome_fixes}
+
+
+# Default product-catalog DBs (mal=API-only, agentfactory=docs, book=structureless
+# → excluded). catalog_ingest/gate read each DB's config crawl_url; _DB_URLS supplies
+# the structured-feed base URL for DBs whose config omits crawl_url (perfumeshop was
+# onboarded via WooCommerce ingest with no crawl_url, so auto-crawl never touches it).
+PRODUCT_DBS = ["babyfy", "perfumeshop", "tsc_pk", "stationery_studio", "store"]
+_DB_URLS = {"perfumeshop": "https://theperfumeshop.pk"}
+
+
+@app.local_entrypoint()
+def reingest_all(dbs: str = "", gate_only: bool = False):
+    """Batch: re-ingest each product DB from its authoritative structured feed
+    (Shopify /products.json, WooCommerce Store API, or generic sitemap+JSON-LD),
+    then run the universal gate and print a PASS/FAIL verdict table. The gate —
+    coverage + price accuracy vs the live feed — is the only authority that may
+    declare a DB correct.
+      modal run modal_app.py::reingest_all
+      modal run modal_app.py::reingest_all --dbs tsc_pk,babyfy
+      modal run modal_app.py::reingest_all --gate-only   # skip ingest, just verify
+    """
+    names = [d.strip() for d in (dbs.split(",") if dbs else PRODUCT_DBS) if d.strip()]
+    rows = []
+    for db in names:
+        url = _DB_URLS.get(db, "")
+        ing = {}
+        if gate_only:
+            try:
+                rep = gate.remote(db, url)
+            except Exception as e:
+                rep = {"verdict": "ERROR", "failures": [f"{type(e).__name__}: {e}"]}
+        else:
+            # Ingest + gate in one container off a single feed snapshot (no race).
+            try:
+                res = ingest_and_gate.remote(db, url)
+                ing, rep = res.get("ingest") or {}, res.get("gate") or {}
+            except Exception as e:
+                ing = {"error": f"{type(e).__name__}: {e}"}
+                rep = {"verdict": "ERROR", "failures": [f"{type(e).__name__}: {e}"]}
+            print(f"[REINGEST] {db}: {ing}")
+        l2 = (rep or {}).get("layer2") or {}
+        rows.append({
+            "db": db,
+            "verdict": (rep or {}).get("verdict"),
+            "products": (ing or {}).get("products_ingested"),
+            "coverage": None if l2.get("skipped") else l2.get("coverage"),
+            "price_acc": None if l2.get("skipped") else l2.get("price_accuracy"),
+            "fails": "; ".join((rep or {}).get("failures") or [])[:140],
+        })
+    print("\n================ REINGEST + GATE SUMMARY ================")
+    print(f"{'DB':<18}{'VERDICT':<9}{'PROD':>6}{'COV':>8}{'PRICE':>8}  FAILS")
+    for r in rows:
+        cov = "" if r["coverage"] is None else f"{r['coverage']:.1%}"
+        pa = "" if r["price_acc"] is None else f"{r['price_acc']:.1%}"
+        prod = "" if r["products"] is None else str(r["products"])
+        print(f"{r['db']:<18}{str(r['verdict']):<9}{prod:>6}{cov:>8}{pa:>8}  {r['fails']}")
+    passed = sum(1 for r in rows if r["verdict"] == "PASS")
+    print(f"\n{passed}/{len(rows)} PASS")
+    return rows

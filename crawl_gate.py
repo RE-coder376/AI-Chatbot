@@ -172,23 +172,51 @@ def fetch_shopify_gt(base_url: str) -> list[dict] | None:
     return products
 
 
+def _norm_url(u: str) -> str:
+    """Canonical product-URL key: unquote, drop scheme/query/fragment, lowercase,
+    strip trailing slash. Universal across platforms (Shopify /products/<h>, Woo
+    /product/<s>, generic flat URLs) so ingest and GT match on the same key."""
+    u = urllib.parse.unquote(str(u or "")).split("#")[0].split("?")[0].strip().lower()
+    u = re.sub(r"^https?://", "", u).rstrip("/")
+    return u
+
+
+def _norm_title(t: str) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", str(t or "").lower()).strip()
+
+
 def layer2(chunks: list[dict], crawl_url: str) -> dict:
-    gt = fetch_shopify_gt(crawl_url)
+    """Ground-truth diff against the store's own structured catalog — Shopify,
+    WooCommerce, or generic JSON-LD/microdata (the SAME source catalog_api ingests
+    from). Platform-agnostic match: by canonical product URL first, then normalized
+    title, so non-Shopify stores are verified for coverage + price, not skipped."""
+    from services.catalog_api import catalog_ground_truth
+    gt = catalog_ground_truth(crawl_url)
     if not gt:
-        return {"skipped": "no Shopify /products.json — GT diff unavailable for this site"}
-    by_handle: dict = {}
+        return {"skipped": "no structured catalog (Shopify/Woo/JSON-LD) — GT diff unavailable for this site"}
+    by_url: dict = {}
+    by_title: dict = {}
     for ch in chunks:
         if str(ch.get("chunk_kind") or "") != "product":
             continue
-        m = _HANDLE_RE.search(str(ch.get("source") or ""))
-        if m:
-            by_handle.setdefault(urllib.parse.unquote(m.group(1)).lower(), []).append(ch)
+        u = _norm_url(ch.get("source"))
+        if u:
+            by_url.setdefault(u, []).append(ch)
+        t = _norm_title(ch.get("canonical_product_title") or ch.get("product_title"))
+        if t:
+            by_title.setdefault(t, []).append(ch)
+    used = set()
     missing, mismatch, matched, price_ok = [], [], 0, 0
     for p in gt:
-        chs = by_handle.pop(p["handle"].lower(), None)
+        label = p.get("title") or p.get("source") or ""
+        chs = by_url.get(_norm_url(p.get("source")))
         if not chs:
-            missing.append(p["handle"])
+            chs = by_title.get(_norm_title(p.get("title")))
+        chs = [c for c in (chs or []) if id(c) not in used] or None
+        if not chs:
+            missing.append(label)
             continue
+        used.add(id(chs[0]))
         matched += 1
         pvs = [float(ch["price"]) for ch in chs if ch.get("price") is not None]
         if not p["prices"] or not pvs:
@@ -196,15 +224,15 @@ def layer2(chunks: list[dict], crawl_url: str) -> dict:
         elif any(abs(pv - g) <= 0.011 for pv in pvs for g in p["prices"]):
             price_ok += 1
         else:
-            mismatch.append({"handle": p["handle"], "crawled": pvs[:3], "live": p["prices"][:5]})
-    extras = sorted(by_handle.keys())  # crawled product pages absent from live catalog
+            mismatch.append({"title": label[:60], "crawled": pvs[:3], "live": p["prices"][:5]})
+    extra = sum(len(v) for v in by_title.values()) - matched
     return {
         "gt_products": len(gt), "matched": matched,
         "coverage": round(matched / len(gt), 4) if gt else None,
         "price_accuracy": round(price_ok / matched, 4) if matched else None,
         "missing_count": len(missing), "missing": missing[:25],
         "price_mismatch_count": len(mismatch), "price_mismatch": mismatch[:25],
-        "extra_handles_count": len(extras), "extra_handles": extras[:15],
+        "extra_handles_count": max(0, extra), "extra_handles": [],
         "_gt": gt,  # consumed by layer 3, stripped before saving
     }
 
@@ -246,14 +274,15 @@ def gen_quiz(gt: list[dict] | None, chunks: list[dict], exclude_terms: tuple = (
     exclude_terms (per-DB count_exclude_terms): accessory/refill words dropped from
     category groups so the count GT matches the engine's count_exclude logic."""
     if gt:
-        items = [{"title": p["title"], "price": p["prices"][0]} for p in gt if p["prices"] and p["prices"][0] > 0]
+        items = [{"title": p["title"], "price": p["prices"][0], "cats": str(p.get("categories") or "").lower()}
+                 for p in gt if p["prices"] and p["prices"][0] > 0]
     else:
         seen, items = set(), []
         for ch in chunks:
             t = str(ch.get("canonical_product_title") or ch.get("product_title") or "")
             if str(ch.get("chunk_kind") or "") == "product" and t and ch.get("price") and t not in seen:
                 seen.add(t)
-                items.append({"title": t, "price": float(ch["price"])})
+                items.append({"title": t, "price": float(ch["price"]), "cats": str(ch.get("categories") or "").lower()})
     if len(items) < 3:
         return []
     rng = random.Random(42)  # deterministic across reruns
@@ -269,17 +298,41 @@ def gen_quiz(gt: list[dict] | None, chunks: list[dict], exclude_terms: tuple = (
     under = [x for x in items if x["price"] <= cap]
     qs.append({"q": f"Which products do you have under {cap + 1:.0f}?", "label": "bounds",
                "expect_any_num": [x["price"] for x in under]})
-    # per-category: counts, scoped extremes, full-set bounds (catches pollution/recall/count bugs)
+    # per-category: counts, scoped extremes, full-set bounds (catches pollution/recall/count bugs).
+    # Category membership MUST mirror the engine (catalog_query._execute_spec count
+    # branch): when ≥50% of products are tagged, the engine counts by the STRUCTURED
+    # categories field (singular/plural word match), NOT the title — so a title-word
+    # GT systematically disagreed and false-failed. Match that exactly here.
     from collections import Counter
+    tagged = sum(1 for it in items if it.get("cats", "").strip())
+    is_tagged = bool(items) and (tagged / len(items)) >= 0.5
+
+    def _cat_variants(a: str) -> set:
+        vs = {a}
+        if a.endswith("s") and len(a) > 3:
+            vs.add(a[:-1])
+        elif len(a) > 3:
+            vs.add(a + "s")
+        return vs
+
+    def _field(it: dict) -> str:
+        # tagged catalog → categories field only (mirrors _cats_hit); else title+cats (_hit hay).
+        return it.get("cats", "") if is_tagged else (it["title"].lower() + " " + it.get("cats", ""))
+
+    def _cat_match(it: dict, cat: str) -> bool:
+        hay = _field(it)
+        return any(re.search(rf"\b{re.escape(v)}\b", hay) for v in _cat_variants(cat))
+
     cnt = Counter()
     for it in items:
-        for w in set(re.findall(r"[A-Za-z]{4,}", it["title"].lower())):
+        toks = re.findall(r"[A-Za-z]{4,}", _field(it))
+        for w in set(toks):
             if w not in _CAT_STOP:
                 cnt[w] += 1
     # mid-size buckets only: skip giant buckets (367 notebooks) + brand/adjective noise; lands on clean categories
     _excl_re = re.compile(r"\b(?:" + "|".join(re.escape(str(t)) for t in exclude_terms) + r")\b", re.I) if exclude_terms else None
     for cat in [c for c, n in cnt.most_common() if 3 <= n <= 40][:4]:
-        grp = [x for x in items if re.search(rf"\b{re.escape(cat)}", x["title"].lower())
+        grp = [x for x in items if _cat_match(x, cat)
                and not (_excl_re and cat not in str(_excl_re.pattern).lower() and _excl_re.search(x["title"]))]
         if not 3 <= len(grp) <= 40:
             continue
