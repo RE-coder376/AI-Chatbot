@@ -81,6 +81,8 @@ class Spec:
     price_max: float | None = None
     in_stock: bool = False
     structured: bool = True
+    strict_min: bool = False  # "strictly above/over X" → exclude p == X
+    strict_max: bool = False  # "strictly below/under X" → exclude p == X
 
 
 def _variants(a: str) -> set[str]:
@@ -165,8 +167,12 @@ def parse(q: str) -> Spec:
     # detector and "shipping charges" trips the list path, dumping a random product.
     # Hand to normal RAG so it answers from the policy page (or says it doesn't have
     # the info) rather than returning an unrelated product.
+    # NB: "return" alone is excluded — the catalog verb ("return every available
+    # item under 500") must not read as a returns-policy question; only plural
+    # "returns", "return policy", or "return an item/order" count as policy.
     if re.search(r"\b(shipping|delivery|deliver(?:ed|ing)?|postage|courier|dispatch|"
-                 r"returns?|refunds?|warranty|guarantee|"
+                 r"returns\b|return\s+polic(?:y|ies)|return\s+(?:an?\s+)?(?:item|product|order|purchase)s?\b|"
+                 r"refunds?|warranty|guarantee|"
                  r"payment\s+method|cod|cash\s+on\s+delivery|installments?|"
                  r"track(?:ing)?\s+(?:my\s+)?order|order\s+status|cancel(?:lation|\s+(?:my\s+)?order)?)\b", ql):
         return Spec("none", structured=False)
@@ -195,6 +201,15 @@ def parse(q: str) -> Spec:
             pmin = _num(m.group(1))
 
     in_stock = bool(re.search(r"\b(in[\s-]?stock|in\s+stock|available)\b", ql)) and not re.search(r"\bout\s+of\s+stock\b", ql)
+
+    # Exclusive bounds: "strictly below/under" and "more/greater than", "below",
+    # "under", "above", "over" exclude the boundary value. Inclusive operators
+    # ("up to", "no more than", "at most", "at least", "within", "max") keep it.
+    _strict = bool(re.search(r"\bstrict(?:ly)?\b", ql))
+    strict_max = pmax is not None and (_strict or bool(
+        re.search(r"\b(below|under|less\s+than|cheaper\s+than|fewer\s+than)\b", ql)))
+    strict_min = pmin is not None and (_strict or bool(
+        re.search(r"\b(above|over|more\s+than|greater\s+than)\b", ql)))
 
     count_q = bool(re.search(r"\b(how\s+many|number\s+of|count\s+of|count)\b", ql))
     exist_q = bool(re.search(
@@ -244,8 +259,22 @@ def parse(q: str) -> Spec:
             # ("025") that survived the bare integer filter and leaked as an anchor.
             for _part in f"{_v:,.0f}".split(","):
                 _price_tokens.add(_part)
-    anchors = [w for w in re.findall(r"[a-z0-9]{2,}", ql)
-               if w not in _STOP and w not in _price_tokens][:8]
+    # A quoted span is the reliable discriminator: the user (and the hard quiz)
+    # quote the exact category / name-substring being asked about ("Ball Point"
+    # category, name contains "fresh"). Anchor on the quoted content so question
+    # scaffolding ("Using the full current catalog, count all items in …") can
+    # never leak into the filter — the stop-word treadmill never catches every
+    # phrasing ("using"/"full"/"current"/"across"/"enumerate"/…). Inside explicit
+    # quotes we trust the user and skip _STOP (drop only price-bound fragments).
+    # No quotes → fall back to stop-word subtraction over the whole question.
+    _quoted = re.findall(r'["“”]([^"“”]{1,80})["“”]', q or "")
+    if _quoted:
+        _qtext = " ".join(_quoted).lower()
+        anchors = [w for w in re.findall(r"[a-z0-9]{2,}", _qtext)
+                   if w not in _price_tokens][:8]
+    else:
+        anchors = [w for w in re.findall(r"[a-z0-9]{2,}", ql)
+                   if w not in _STOP and w not in _price_tokens][:8]
 
     # A bare "list / what products do you sell" with no category and no price
     # bound is an open-ended browse — leave that to normal RAG, don't dump a
@@ -256,7 +285,7 @@ def parse(q: str) -> Spec:
     if agg == "exists" and not anchors:
         return Spec("none", structured=False)
 
-    return Spec(agg, anchors, pmin, pmax, in_stock)
+    return Spec(agg, anchors, pmin, pmax, in_stock, strict_min=strict_min, strict_max=strict_max)
 
 
 def load_rows(db, limit: int = 12000) -> list[Row]:
@@ -721,9 +750,17 @@ def _execute_spec(spec: "Spec", rows: list[Row], cfg: dict | None, max_list: int
         # Price bounds apply to every aggregation when present (count of X under Y,
         # cheapest X over Y, …) and require a known price.
         if spec.price_min is not None or spec.price_max is not None:
-            sel = [r for r in sel if r.price is not None
-                   and (spec.price_min is None or r.price >= spec.price_min)
-                   and (spec.price_max is None or r.price <= spec.price_max)]
+            def _in_bounds(p):
+                if p is None:
+                    return False
+                if spec.price_min is not None:
+                    if (p <= spec.price_min) if spec.strict_min else (p < spec.price_min):
+                        return False
+                if spec.price_max is not None:
+                    if (p >= spec.price_max) if spec.strict_max else (p > spec.price_max):
+                        return False
+                return True
+            sel = [r for r in sel if _in_bounds(r.price)]
 
         # Category precision (shared by count/min/max/list): in a tag-bearing catalog,
         # narrow to rows whose STRUCTURED categories match the anchor (GT/attribute
