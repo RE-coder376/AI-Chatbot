@@ -83,23 +83,38 @@ class Spec:
     structured: bool = True
     strict_min: bool = False  # "strictly above/over X" → exclude p == X
     strict_max: bool = False  # "strictly below/under X" → exclude p == X
+    title_only: bool = False  # "whose product NAME contains X" → match title, not body
 
 
 def _variants(a: str) -> set[str]:
-    """Singular<->plural so 'pens' matches 'pen'. (rc is handled in _hit.)"""
+    """Singular<->plural so 'pens'~'pen' and 'battery'~'batteries'. Covers the
+    -y/-ies and -s/-es forms (the bare -s rule missed 'batteries', 'boxes').
+    (rc is handled in _hit.)"""
     vs = {a}
-    if a.endswith("s") and len(a) > 3:
-        vs.add(a[:-1])
-    elif len(a) > 3:
-        vs.add(a + "s")
+    if len(a) <= 3:
+        return vs
+    if a.endswith("ies"):
+        vs.add(a[:-3] + "y")          # batteries -> battery
+    elif a.endswith("y"):
+        vs.add(a[:-1] + "ies")        # battery -> batteries
+    if a.endswith("es") and len(a) > 4:
+        vs.add(a[:-2])                # boxes -> box
+    if a.endswith("s"):
+        vs.add(a[:-1])                # pens -> pen
+    else:
+        vs.add(a + "s")               # pen -> pens
+        vs.add(a + "es")              # box -> boxes
     return vs
 
 
-def _hit(row: Row, anchors: list[str]) -> bool:
-    """ALL anchors must appear in the row (a 'gel pen' query needs both words)."""
+def _hit(row: Row, anchors: list[str], title_only: bool = False) -> bool:
+    """ALL anchors must appear in the row (a 'gel pen' query needs both words).
+    title_only restricts the match to the product title — a "whose name contains
+    X" query must not match a product whose body/description merely mentions X
+    (e.g. a swim ring whose description cross-sells a 'vest')."""
     if not anchors:
         return True
-    h = row.hay
+    h = row.title.lower() if title_only else row.hay
     for a in anchors:
         if a == "rc":
             if re.search(r"\brc\b", h) or "remote control" in h or (
@@ -285,7 +300,14 @@ def parse(q: str) -> Spec:
     if agg == "exists" and not anchors:
         return Spec("none", structured=False)
 
-    return Spec(agg, anchors, pmin, pmax, in_stock, strict_min=strict_min, strict_max=strict_max)
+    # "whose product name contains/includes X", "named X", "titled X" → the user
+    # is filtering on the TITLE, so don't let a body mention of X pull in an
+    # unrelated product. (Plain category / general queries keep body matching.)
+    title_only = bool(re.search(
+        r"\b(?:product\s+)?name[ds]?\b|\bwhose\s+name\b|\btitled?\b|\bnamed\b|\bcalled\b", ql))
+
+    return Spec(agg, anchors, pmin, pmax, in_stock,
+                strict_min=strict_min, strict_max=strict_max, title_only=title_only)
 
 
 def load_rows(db, limit: int = 12000) -> list[Row]:
@@ -585,6 +607,18 @@ def _answer_multi(mp: dict, rows: list[Row]) -> tuple[str, list[str]] | None:
         if r is None or r.price is None:
             return None
         found.append(r)
+    # Dedup by product URL: a name containing embedded quotes (e.g. a pool sized
+    # 9'8"X6'3") mis-splits into fragments that resolve to the SAME row, which
+    # would otherwise double-count it in the basket total. Genuine multi-product
+    # questions name distinct products → distinct sources, so this is lossless.
+    _seen, _uniq = set(), []
+    for r in found:
+        k = r.source or r.title
+        if k in _seen:
+            continue
+        _seen.add(k)
+        _uniq.append(r)
+    found = _uniq
     if len(found) < 2:
         return None
     cur = found[0].currency
@@ -718,7 +752,7 @@ def _execute_spec(spec: "Spec", rows: list[Row], cfg: dict | None, max_list: int
     try:
         excl = _excl_re(cfg, spec.anchors)
 
-        _base = [r for r in rows if _hit(r, spec.anchors)]
+        _base = [r for r in rows if _hit(r, spec.anchors, spec.title_only)]
         if not _base and spec.anchors:
             # Strict all-anchor match found nothing — fall back to title-coverage so
             # a fully-named product still resolves. Only triggers when strict yields
