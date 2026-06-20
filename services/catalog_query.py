@@ -42,6 +42,14 @@ _STOP = {
     # for X" makes going/rate junk anchors that crowd out X's distinctive words)
     "going", "rate", "rates", "run", "runs", "damage", "charge", "charges", "charged",
     "worth", "value", "asking", "ask", "pay", "paying", "spend", "deal", "going-rate",
+    # query scaffolding for category / name-substring / list filters — never anchors
+    # ("most expensive in the Models CATEGORY", "products WHOSE name CONTAINS scale",
+    # "include EVERY EXACT price"). Without these the engine matches rows against
+    # 'category'/'contains'/'exact' and finds nothing → false "no such category".
+    "category", "categories", "categorized", "categorised", "section", "department",
+    "whose", "contains", "contain", "containing", "include", "includes", "including",
+    "included", "exact", "exactly", "every", "each", "named", "calling", "called",
+    "answer", "yes", "no",  # "...carry X? answer yes or no" — keep X, drop the rest
 }
 
 _NUM = r"(?:rs\.?\s*|pkr\s*|[\$£€])?\s*([\d][\d,]*(?:\.\d{1,2})?)"
@@ -232,6 +240,10 @@ def parse(q: str) -> Spec:
         if _v is not None:
             _price_tokens.add(f"{_v:.0f}")
             _price_tokens.add(str(_v))
+            # Thousands-separated prices ("Rs.3,025") tokenize to a digit fragment
+            # ("025") that survived the bare integer filter and leaked as an anchor.
+            for _part in f"{_v:,.0f}".split(","):
+                _price_tokens.add(_part)
     anchors = [w for w in re.findall(r"[a-z0-9]{2,}", ql)
                if w not in _STOP and w not in _price_tokens][:8]
 
@@ -446,7 +458,10 @@ _CMP_RE = re.compile(
     r"|\bdifference\s+between\b|\bby\s+how\s+much\b|\bhow\s+much\s+(?:more|less|cheaper)\b"
     r"|\bwhich\s+(?:one\s+)?(?:is|costs?)\b|\bversus\b|\bvs\.?\b|\bcosts?\s+(?:less|more)\b", re.I)
 _ORDER_RE = re.compile(r"\b(order|rank|sort|arrange|list\s+these)\b", re.I)
-_PRICE_DIM_RE = re.compile(r"\b(expensive|cheap(?:er|est)?|price[ds]?|cost(?:s|ly)?|least|most)\b", re.I)
+_PRICE_DIM_RE = re.compile(
+    r"\b(expensive|cheap(?:er|est)?|price[ds]?|cost(?:s|ly)?|least|most|"
+    r"low(?:est)?\s+to\s+high(?:est)?|high(?:est)?\s+to\s+low(?:est)?|"
+    r"ascending|descending|increasing|decreasing)\b", re.I)
 # Basket = "buy/total/combined" of several named items. Broad on purpose: customers
 # phrase it many ways ("total cost of buying X and Y", "buys one X plus one Y, what
 # combined amount should they pay", "X together with Y"). Compare/order are detected
@@ -455,7 +470,23 @@ _PRICE_DIM_RE = re.compile(r"\b(expensive|cheap(?:er|est)?|price[ds]?|cost(?:s|l
 _BASKET_RE = re.compile(
     r"\b(total|sum|altogether|combined|basket|plus|together|spend|spends|owe|"
     r"purchas\w*|buy|buys|buying|bought|pay|pays|paying)\b", re.I)
-_ASC_RE = re.compile(r"least\s+to\s+most|cheap(?:est)?\s+first|low(?:est)?\s+to\s+high|ascending", re.I)
+# Ascending = cheapest-first. Catch every natural phrasing: a cheap/low pole word
+# appearing before an expensive/high pole word across a "to" ("cheapest to most
+# expensive", "low to high", "least to most expensive"), plus the explicit single
+# forms. "most expensive to cheapest" can't match (poles reversed) → descending.
+_ASC_RE = re.compile(
+    r"\b(?:cheap(?:est)?|low(?:est)?|least|lower)\b[^.?!]*?\bto\b[^.?!]*?"
+    r"\b(?:most|expensive|high(?:est)?|pric\w*|dear\w*|cost\w*)"
+    r"|\b(?:cheap(?:est)?|low(?:est)?)\s+first\b"
+    r"|\bleast\s+to\s+most\b|\blow(?:est)?\s+to\s+high(?:est)?\b"
+    r"|\b(?:ascending|increasing)\b", re.I)
+# Descending = priciest-first, stated explicitly. Used to disambiguate the order
+# op when no ascending cue is present (default stays descending either way).
+_DESC_RE = re.compile(
+    r"\b(?:most\s+expensive|priciest|dearest|highest|expensive)\b[^.?!]*?\bto\b[^.?!]*?"
+    r"\b(?:cheap\w*|low\w*|least)"
+    r"|\b(?:most\s+expensive|priciest|dearest|highest)\s+first\b"
+    r"|\bhigh(?:est)?\s+to\s+low(?:est)?\b|\b(?:descending|decreasing)\b", re.I)
 
 
 def _parse_multi(q: str) -> dict | None:
@@ -694,20 +725,23 @@ def _execute_spec(spec: "Spec", rows: list[Row], cfg: dict | None, max_list: int
                    and (spec.price_min is None or r.price >= spec.price_min)
                    and (spec.price_max is None or r.price <= spec.price_max)]
 
+        # Category precision (shared by count/min/max/list): in a tag-bearing catalog,
+        # narrow to rows whose STRUCTURED categories match the anchor (GT/attribute
+        # semantics) so "most expensive in the Models category" / "how many in Nautica"
+        # rank the real category, not every title that happens to contain the word.
+        # Auto-skips for name-substring queries ("name contains scale" — no row is
+        # tagged with the substring → _tag_sel empty → title/hay match kept) and for
+        # untagged/HTML-crawl DBs (tagged ratio < 50%).
+        if spec.anchors and spec.agg in ("count", "min", "max", "list"):
+            _tagged = sum(1 for r in rows if r.cats.strip())
+            if rows and (_tagged / len(rows)) >= 0.5:
+                _tag_sel = [r for r in sel if _cats_hit(r, spec.anchors)]
+                if _tag_sel:
+                    sel = _tag_sel
+
         label = " ".join(spec.anchors) if spec.anchors else "products"
 
         if spec.agg in ("count", "exists"):
-            # Count precision: in a tag-bearing catalog, count only rows whose
-            # STRUCTURED categories match the anchor (GT/attribute semantics).
-            # A free title-substring match over-counts ("claw" leaks into unrelated
-            # titles). Falls back to the title/hay match when the catalog has no
-            # tags or no row is tagged with the anchor (untagged/HTML-crawl DBs).
-            if spec.agg == "count" and spec.anchors:
-                _tagged = sum(1 for r in rows if r.cats.strip())
-                if rows and (_tagged / len(rows)) >= 0.5:
-                    _tag_sel = [r for r in sel if _cats_hit(r, spec.anchors)]
-                    if _tag_sel:
-                        sel = _tag_sel
             n = len(sel)
             if n == 0:
                 # Found it, but the "in stock" filter removed it → it IS carried, just
