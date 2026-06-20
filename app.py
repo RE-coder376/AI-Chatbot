@@ -13520,6 +13520,19 @@ async def crawl_site(data: dict, request: Request):
                                         const ogEl = document.querySelector('meta[property="og:title"], meta[name="og:title"]');
                                         const ogPriceEl = document.querySelector('meta[property="og:price:amount"], meta[name="og:price:amount"]');
                                         const ogCurEl = document.querySelector('meta[property="og:price:currency"], meta[name="og:price:currency"]');
+                                        // schema.org microdata fallback (universal — itemprop within the
+                                        // Product scope; covers stores with no JSON-LD/og:price).
+                                        let mdName = '', mdPrice = '', mdCur = '';
+                                        try {
+                                            const pScope = document.querySelector('[itemtype*="schema.org/Product"]') || document;
+                                            const mv = (el) => el ? ((el.getAttribute('content') || el.getAttribute('href') || el.innerText || '').trim()) : '';
+                                            const pe = pScope.querySelector('[itemprop="price"]');
+                                            if (pe) { const m = mv(pe).match(/[\\d,]+\\.?\\d*/); mdPrice = m ? m[0].replace(/,/g,'') : ''; }
+                                            if (mdPrice && parseFloat(mdPrice) > 0) {
+                                                mdName = mv(pScope.querySelector('[itemprop="name"]'));
+                                                mdCur = mv(pScope.querySelector('[itemprop="priceCurrency"]'));
+                                            } else { mdPrice = ''; }
+                                        } catch (e) {}
                                         let ldPrice = '';
                                         try {
                                             document.querySelectorAll('script[type="application/ld+json"]').forEach(s => {
@@ -13538,9 +13551,9 @@ async def crawl_site(data: dict, request: Request):
                                         return JSON.stringify({
                                             sidebar: sidebarText,
                                             body: (jsonLdText + '\\n' + bodyText).trim(),
-                                            ogTitle: (ogEl && ogEl.getAttribute('content')) || '',
-                                            ogPrice: (ogPriceEl && ogPriceEl.getAttribute('content')) || ldPrice || '',
-                                            ogCur: (ogCurEl && ogCurEl.getAttribute('content')) || ''
+                                            ogTitle: (ogEl && ogEl.getAttribute('content')) || mdName || '',
+                                            ogPrice: (ogPriceEl && ogPriceEl.getAttribute('content')) || ldPrice || mdPrice || '',
+                                            ogCur: (ogCurEl && ogCurEl.getAttribute('content')) || mdCur || ''
                                         });
                                     }""")
                                     sidebar_raw = ""

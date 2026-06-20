@@ -100,6 +100,47 @@ def _jsonld_text(html: str) -> tuple[str, str, float]:
             (min(product_prices) if product_prices else 0.0))
 
 
+def _microdata_product(html: str) -> tuple[str, float, str]:
+    """schema.org MICRODATA fallback (itemprop=name/price/priceCurrency).
+
+    Universal — not site-specific. Many stores (Magento, BigCommerce, and most
+    hand-rolled carts) emit microdata but no JSON-LD or og:price. Returns
+    (name, price, currency_code). itemprops are read INSIDE the itemtype=Product
+    scope so breadcrumb/site-name/category itemprops can't masquerade as the
+    product title; name only trusted when a product price is also present.
+    """
+    import html as _h
+    try:
+        from bs4 import BeautifulSoup as _BS
+    except Exception:
+        return '', 0.0, ''
+
+    def _val(el) -> str:
+        if not el:
+            return ''
+        v = el.get('content') or el.get('href') or el.get_text(" ", strip=True) or ''
+        return v.strip()
+
+    soup = _BS(html, "html.parser")
+    # Scope to the Product itemscope; fall back to the whole doc only if absent.
+    scope = soup.find(attrs={"itemtype": re.compile(r"schema\.org/Product", re.I)}) or soup
+
+    def _prop(prop: str) -> str:
+        return _val(scope.find(attrs={"itemprop": prop}))
+
+    raw_price = _prop('price')
+    price = 0.0
+    if raw_price:
+        pm = re.search(r'[\d,]+\.?\d*', raw_price)
+        if pm:
+            try:
+                price = float(pm.group(0).replace(',', ''))
+            except Exception:
+                price = 0.0
+    name = _h.unescape(_prop('name')) if price > 0 else ''
+    return name, price, _prop('priceCurrency')
+
+
 def extract_page_text(html: str, page_url: str, docs_like: bool = False):
     """Transform server-rendered HTML into crawl-ready text + page metadata.
 
@@ -110,6 +151,7 @@ def extract_page_text(html: str, page_url: str, docs_like: bool = False):
     try:
         import html as _html_mod
         ld_text, ld_product_name, ld_product_price = _jsonld_text(html)
+        md_name, md_price, md_cur_code = _microdata_product(html)
         title_m = re.search(r'<title[^>]*>(.*?)</title>', html, re.DOTALL | re.I)
         # Unescape NOW: title_text feeds _prepare_crawl_page's title_hint and the
         # chunker's "## {page_title}" headings, which run after the combined-text
@@ -121,7 +163,9 @@ def extract_page_text(html: str, page_url: str, docs_like: bool = False):
         # authoritative source beats them). Mirror of the og:price authority.
         og_t = re.search(r'<meta[^>]+(?:property|name)=["\']og:title["\'][^>]+content=["\']([^"\']{3,300})["\']', html, re.I) \
             or re.search(r'<meta[^>]+content=["\']([^"\']{3,300})["\'][^>]+(?:property|name)=["\']og:title["\']', html, re.I)
-        authority_title = _html_mod.unescape((ld_product_name or (og_t.group(1) if og_t else '')).strip())
+        # JSON-LD Product.name and microdata Product-scope name are the storefront's
+        # own product declaration — authoritative over og:title (often site chrome).
+        authority_title = _html_mod.unescape((ld_product_name or md_name or (og_t.group(1) if og_t else '')).strip())
         # og:price:amount is the storefront's own declaration of the CURRENT
         # selling price. Body text orders compare-at first ("Rs.2,000 Rs.1,200")
         # and regex-first extraction picks the crossed-out price — the og meta
@@ -160,6 +204,13 @@ def extract_page_text(html: str, page_url: str, docs_like: bool = False):
             _ldc = re.search(r'"priceCurrency"\s*:\s*"([A-Za-z]{3})"', html)
             if _ldc:
                 authority_currency = _CUR_PREFIX_MAP.get(_ldc.group(1).upper(), authority_currency)
+        # schema.org microdata — last structured fallback (no og:price/JSON-LD).
+        if authority_price <= 0 and md_price > 0:
+            authority_price = md_price
+            authority_currency = _CUR_PREFIX_MAP.get((md_cur_code or "").upper(), authority_currency)
+            if not og_price_line:
+                _mc = _CUR_PREFIX_MAP.get((md_cur_code or "").upper(), "")
+                og_price_line = f"Price: {_mc}{md_price:,.2f}\n" if _mc else f"Price: {md_price:,.2f}\n"
         if authority_price <= 0 and og_amt and _og_amt_val <= 0:
             # The storefront DECLARES price 0 (out-of-stock placeholder) and no
             # other source has a real price: suppress body-derived prices too —

@@ -63,11 +63,12 @@ def store_catalog(_base):
                 html = _get(url).read().decode("utf-8", "replace")
             except Exception:
                 break
-            # each card: title attr + a price like $295.99
-            cards = re.findall(r'class="title"[^>]*title="([^"]+)"[\s\S]*?\$([0-9.,]+)', html)
+            # price h4 precedes its own title anchor in each card; capture price→title
+            # (matching on the title first grabs the NEXT card's price — off-by-one).
+            cards = re.findall(r'itemprop="price">\$([0-9.,]+)<[\s\S]*?class="title" title="([^"]+)"', html)
             if not cards:
                 break
-            for t, p in cards:
+            for p, t in cards:
                 t = __import__("html").unescape(t).strip()
                 if t and t.lower() not in seen:
                     seen.add(t.lower()); out.append({"title": t, "price": float(p.replace(",", ""))})
