@@ -177,6 +177,24 @@ def parse(q: str) -> Spec:
             and re.search(r"\b(and|or|vs\.?|versus|than)\b", ql)):
         return Spec("none", structured=False)
 
+    # Advisory / recommendation intent ("which toy is best for a 2 year old",
+    # "recommend a gift for a toddler", "what's good for sensitive skin") is a
+    # SUBJECTIVE judgement, not a table filter — let RAG/LLM answer. Without this
+    # the structured path fires on incidental tokens ("2 year" matched a mic's
+    # "2 Year warranty") and dumps an irrelevant product as a confident answer.
+    # Excludes the structured superlatives (cheapest/most expensive) — those have
+    # their own price words and never carry these advisory cues.
+    if re.search(
+        r"\b(recommend\w*|suggest\w*|advise|advice)\b"
+        # "best/good/ideal … for <recipient/use>" — recipient list avoids catching
+        # the structured "best PRICE for this pen" (→ stays a price lookup).
+        r"|\b(?:best|good|ideal|suitable|appropriate|perfect|great|right)\s+(?:\w+\s+){0,2}?for\s+"
+        r"(?:a\b|an\b|my\b|your\b|kids?|children|child|toddler|baby|babies|boys?|girls?|teens?|"
+        r"men|women|him|her|sensitive|oily|dry|daily|everyday|beginners?|gift|travel|school|office)"
+        r"|\bgift\s+for\b|\bfor\s+(?:a|an|my)\s+\d+[\s-]*(?:year|yr|month|mo)s?[\s-]*old\b"
+        r"|\bwhich\s+(?:one\s+)?(?:should|would|do)\s+(?:i|you)\b", ql):
+        return Spec("none", structured=False)
+
     # Shipping / delivery / returns / payment / order questions are POLICY prose,
     # not product-catalog lookups — but "how much is delivery" trips the price-of
     # detector and "shipping charges" trips the list path, dumping a random product.
