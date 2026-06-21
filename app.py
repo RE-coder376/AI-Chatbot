@@ -5709,6 +5709,18 @@ async def chat(request: Request):
         for m in (data.get("history", []) or [])[-10:]
         if isinstance(m, dict) and m.get("role") in ("user", "assistant")
     ]
+    # Resolve bare follow-ups ("how much is it?", "is it in stock?", "which is
+    # cheaper?") against THIS request's history so every downstream engine (the
+    # structured catalog engine, retrieval, the LLM) receives a self-contained
+    # subject. Strictly request-scoped (history only) → cannot leak across tenants.
+    try:
+        from services.coref import resolve_followup
+        _q_resolved = resolve_followup(q, hist)
+        if _q_resolved != q:
+            logger.info(f"[COREF] '{q}' -> '{_q_resolved}'")
+            q = _q_resolved
+    except Exception:
+        pass
     stream = data.get("stream", True)
     page_url   = str(data.get("page_url", ""))[:200]
     page_title = str(data.get("page_title", ""))[:100]

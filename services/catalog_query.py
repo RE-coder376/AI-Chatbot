@@ -28,7 +28,8 @@ _STOP = {
     "offer", "offers", "offered", "got", "keep", "keeps", "any", "some", "are", "is", "was",
     "were", "there", "here", "available", "availability", "in", "on", "at", "for", "with", "and",
     "or", "to", "us", "me", "my", "mine", "it", "its", "this", "that", "these", "those", "all",
-    "products", "product", "items", "item", "different", "types", "type", "kinds", "kind",
+    "products", "product", "items", "item", "thing", "things", "stuff", "one", "ones",
+    "ok", "okay", "different", "types", "type", "kinds", "kind",
     "total", "catalog", "catalogue", "inventory", "range", "selection", "what", "whats", "which",
     "show", "list", "tell", "give", "display", "price", "prices", "priced", "pricing", "cost",
     "costs", "costing", "much", "cheap", "cheaper", "cheapest", "lowest", "least", "expensive",
@@ -50,6 +51,9 @@ _STOP = {
     "whose", "contains", "contain", "containing", "include", "includes", "including",
     "included", "exact", "exactly", "every", "each", "named", "calling", "called",
     "answer", "yes", "no",  # "...carry X? answer yes or no" — keep X, drop the rest
+    # conversational greeting/filler — "hi, do you guys have the X" must anchor on X,
+    # not echo "hi guys" into the product ("we carry hi guys wall climbing car").
+    "hi", "hey", "hello", "hiya", "guys", "oh", "um", "umm", "hmm", "thanks", "thank",
 }
 
 _NUM = r"(?:rs\.?\s*|pkr\s*|[\$£€])?\s*([\d][\d,]*(?:\.\d{1,2})?)"

@@ -1,0 +1,138 @@
+"""Request-scoped follow-up resolution (coreference).
+
+Bare follow-ups — "how much is it?", "is it in stock?", "which one's cheaper?" —
+are unanswerable on their own: every downstream engine (the structured catalog
+engine, retrieval, the LLM) re-reads `q` and sees no subject. This module rewrites
+such a follow-up into a self-contained question by pulling the antecedent product
+name(s) out of the CONVERSATION HISTORY of THIS request only.
+
+Strictly request-scoped (history is per-request) → it can never leak across users
+or tenants. Conservative: it rewrites only when q clearly lacks its own subject AND
+a confident antecedent is found; otherwise it returns q unchanged.
+"""
+from __future__ import annotations
+import re
+
+# words that are scaffolding/cues, never a product subject on their own
+_CUE = {
+    "how", "much", "is", "it", "its", "it's", "this", "that", "these", "those", "the",
+    "a", "an", "they", "them", "one", "ones", "same", "price", "cost", "costs", "costing",
+    "pricing", "rate", "in", "stock", "available", "availability", "do", "you", "have",
+    "got", "carry", "sell", "and", "of", "for", "what", "whats", "what's", "which", "are",
+    "currently", "right", "now", "oh", "nice", "ok", "okay", "so", "um", "umm", "hey", "hi",
+    "cheaper", "expensive", "pricier", "dearer", "more", "less", "better", "cheapest",
+    "than", "or", "vs", "versus", "compare", "between", "difference", "about", "tell", "me",
+    "still", "yeah", "please", "thanks", "thx", "to", "buy", "get", "want", "wanna",
+}
+
+# global aggregates ("the cheapest", "most expensive one", "how many") are
+# self-contained catalog queries even when short — they must NOT be coref-rewritten
+# onto a single prior product (e.g. "most expensive one" is not "it").
+_GLOBAL_AGG = re.compile(r"\b(cheapest|most expensive|least expensive|priciest|costliest|"
+                         r"dearest|how many|number of|\bcount\b|lowest[\s-]?priced?|highest[\s-]?priced?)\b", re.I)
+_PRICE = re.compile(r"\b(how much|price|cost|costs?|pricing|rate|expensive|cheaper|cheap)\b", re.I)
+_STOCK = re.compile(r"\b(in[\s-]?stock|available|availability|stock|got (?:it|any)|have it)\b", re.I)
+_CMP = re.compile(r"\b(cheaper|more expensive|pricier|dearer|costs? (?:more|less)|"
+                  r"which (?:one|is|costs?)|better|difference|vs\.?|versus|compare)\b", re.I)
+# a referential signal: a pronoun, OR an opener that dangles off a prior turn
+_REFERENTIAL = re.compile(r"\b(it|its|it's|this|that|these|those|them|they|one|ones|the same)\b", re.I)
+_QUOTED = re.compile(r'["“”]([^"“”]{2,90})["“”]')
+
+
+def _content_tokens(q: str) -> list[str]:
+    return [w for w in re.findall(r"[a-z0-9]{3,}", (q or "").lower()) if w not in _CUE]
+
+
+def _names_from_answer(text: str) -> list[str]:
+    """Pull product names a prior bot answer stated, most-prominent first. The bot's
+    answers carry the canonical resolved title next to a price marker."""
+    out: list[str] = []
+    # list rows: "- Name — Rs.X" / "1. Name - Rs.X"
+    for m in re.finditer(r"(?m)^\s*(?:\d+[.)]|[-•*])\s*(.+?)\s+[-–—]\s*(?:Rs|PKR|\$|€|£)", text):
+        out.append(m.group(1))
+    # inline: "Name is Rs/priced/cheaper/currently/available..."
+    for m in re.finditer(r"(?:^|[.!]\s+|\bthe\b\s+)([A-Z0-9][^.!?\n]{3,80}?)\s+is\s+"
+                         r"(?:priced|currently|available|cheaper|Rs|PKR|\$)", text):
+        out.append(m.group(1))
+    # "we carry NAME." (existence affirmations)
+    for m in re.finditer(r"we (?:carry|have|stock)\s+([^.!?\n]{3,80}?)[.!?\n]", text, re.I):
+        out.append(m.group(1))
+    cleaned = []
+    for n in out:
+        n = re.sub(r"\s+", " ", n).strip(" -:|—–\"“”")
+        # drop generic leads the patterns can catch
+        if n and n.lower() not in ("yes", "no") and len(_content_tokens(n)) >= 1:
+            cleaned.append(n)
+    return cleaned
+
+
+def _antecedents(history: list, want: int) -> list[str]:
+    """Most-recent-first product names from history. User-quoted names are the most
+    reliable (the customer typed them); then bot-stated names."""
+    names: list[str] = []
+
+    def _add(n: str):
+        n = re.sub(r"\s+", " ", (n or "")).strip(" -:|—–\"“”")
+        if n and not any(n.lower() == x.lower() for x in names):
+            names.append(n)
+
+    for m in reversed(history or []):
+        content = str(m.get("content", "") or "")
+        role = m.get("role")
+        if role == "user":
+            for q in _QUOTED.findall(content):
+                _add(q)
+        else:
+            for n in _names_from_answer(content):
+                _add(n)
+        if len(names) >= want:
+            break
+    # second pass: if comparison needs 2 and the most-recent user turn quoted both
+    if len(names) < want:
+        for m in reversed(history or []):
+            if m.get("role") == "user":
+                qs = _QUOTED.findall(str(m.get("content", "") or ""))
+                if len(qs) >= want:
+                    return [re.sub(r"\s+", " ", x).strip() for x in qs[:want]]
+    return names[:want]
+
+
+def resolve_followup(q: str, history: list) -> str:
+    """Return a self-contained version of q when it's a bare follow-up referencing a
+    prior product; otherwise return q unchanged."""
+    try:
+        if not q or not history:
+            return q
+        ql = q.lower()
+        # A global aggregate is self-contained — never bind it to a single prior item.
+        if _GLOBAL_AGG.search(ql):
+            return q
+        # Already self-contained: names its own product (quoted or 2+ content tokens).
+        if _QUOTED.search(q) or len(_content_tokens(q)) >= 2:
+            return q
+        is_ref = bool(_REFERENTIAL.search(ql))
+        is_cmp = bool(_CMP.search(ql))
+        is_price = bool(_PRICE.search(ql))
+        is_stock = bool(_STOCK.search(ql))
+        # Only act on a genuine dangling follow-up: referential, or a bare price/stock/
+        # comparison ask with no subject of its own.
+        if not (is_ref or is_cmp or is_price or is_stock):
+            return q
+        if is_cmp:
+            names = _antecedents(history, 2)
+            if len(names) >= 2:
+                direction = "more expensive" if re.search(r"\b(more expensive|pricier|dearer|costs? more|higher)\b", ql) else "cheaper"
+                return f'which is {direction}, "{names[0]}" or "{names[1]}"?'
+            return q
+        names = _antecedents(history, 1)
+        if not names:
+            return q
+        name = names[0]
+        if is_stock:
+            return f'is "{name}" in stock?'
+        if is_price:
+            return f'how much is "{name}"?'
+        # referential, non-price/stock → keep intent, bind the subject
+        return f'{q.rstrip(" ?.!")} — about "{name}"'
+    except Exception:
+        return q
