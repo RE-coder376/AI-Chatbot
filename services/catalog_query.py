@@ -301,10 +301,16 @@ def parse(q: str) -> Spec:
         return Spec("none", structured=False)
 
     # "whose product name contains/includes X", "named X", "titled X" → the user
-    # is filtering on the TITLE, so don't let a body mention of X pull in an
-    # unrelated product. (Plain category / general queries keep body matching.)
+    # is FILTERING on the title, so don't let a body mention of X pull in an
+    # unrelated product. Must require a filter verb after "name": the bare phrase
+    # "include each complete product name and exact price" is an OUTPUT instruction
+    # (it appears in every list template, including category queries) and must NOT
+    # flip a category query to title matching. (Plain category queries keep body
+    # matching + category-tag precision.)
     title_only = bool(re.search(
-        r"\b(?:product\s+)?name[ds]?\b|\bwhose\s+name\b|\btitled?\b|\bnamed\b|\bcalled\b", ql))
+        r"\b(?:whose\s+)?(?:product\s+)?name\s+(?:contain\w*|includ\w*|has\b|having\b|with\b|matching\b|"
+        r"that\s+(?:contain\w*|includ\w*|has\b))"
+        r"|\bnamed\b|\btitled?\b|\bcalled\b", ql))
 
     return Spec(agg, anchors, pmin, pmax, in_stock,
                 strict_min=strict_min, strict_max=strict_max, title_only=title_only)
@@ -489,11 +495,27 @@ def _norm(s: str) -> str:
     return re.sub(r"[^a-z0-9]+", " ", (s or "").lower()).strip()
 
 
+_NAME_BOUNDARY = re.compile(r'["“”]\s*(?:and|with|or|versus|vs\.?|plus|,)\s*["“”]', re.I)
+
+
 def _extract_names(q: str) -> list[str]:
     """Pull the individual product names a multi-product question references.
     Quoted names are the reliable signal (the hard quiz quotes each product, and
     real users naming a specific product tend to quote/capitalise it). Falls back
     to splitting on connectors only when there are no quotes."""
+    # A product name can itself contain quotes (inch marks: a pool sized
+    # 9'8"X6'3"), which defeats naive "([^"]+)" pairing and mis-splits the names
+    # → a basket resolves the wrong product. Split instead on the QUOTE-delimited
+    # connector BETWEEN names ('" and "', '", "'): inner inch-quotes never form
+    # that boundary, so each name survives intact.
+    if _NAME_BOUNDARY.search(q):
+        tmp = _NAME_BOUNDARY.sub("\x00", q)
+        m = re.search(r'["“”](.+)["“”]', tmp, re.S)  # first quote … last quote
+        if m:
+            names = [n.strip(" .\"'“”") for n in m.group(1).split("\x00")]
+            names = [n for n in names if len(n) >= 3]
+            if len(names) >= 2:
+                return names[:5]
     names = [n.strip() for n in re.findall(r'[\"“”]([^\"“”]{3,})[\"“”]', q) if n.strip()]
     if len(names) >= 2:
         return names[:5]
