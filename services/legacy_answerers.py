@@ -14,6 +14,19 @@ Shapes:
 """
 import re
 
+# Advisory / recommendation intent — a subjective judgement, not a table lookup.
+# Mirrors services.catalog_query.parse(); these legacy answerers run as fallbacks
+# AFTER the engine returns None, so the guard must live here too or an advisory
+# question ("which toy is best for a 2 year old") dumps an unrelated product whose
+# text incidentally matched ("2 Year warranty").
+_ADVISORY_RE = re.compile(
+    r"\b(recommend\w*|suggest\w*|advise|advice)\b"
+    r"|\b(?:best|good|ideal|suitable|appropriate|perfect|great|right)\s+(?:\w+\s+){0,2}?for\s+"
+    r"(?:a\b|an\b|my\b|your\b|kids?|children|child|toddler|baby|babies|boys?|girls?|teens?|"
+    r"men|women|him|her|sensitive|oily|dry|daily|everyday|beginners?|gift|travel|school|office)"
+    r"|\bgift\s+for\b|\bfor\s+(?:a|an|my)\s+\d+[\s-]*(?:year|yr|month|mo)s?[\s-]*old\b"
+    r"|\bwhich\s+(?:one\s+)?(?:should|would|do)\s+(?:i|you)\b", re.I)
+
 
 def _extract_product_name_phrase(q: str) -> str:
     # Late import: app imports this module at load; this resolves at call time.
@@ -299,6 +312,9 @@ def _deterministic_product_catalog_answer(q: str, kb_context: str, max_items: in
         # LLM path (which already places both products in context) handles it.
         if (re.search(r"\b(compare|compared|comparison|versus|vs\.?|difference\s+between)\b", ql)
                 and re.search(r"\b(and|or|vs\.?|versus|than)\b", ql)):
+            return None
+        # Advisory / recommendation intent → LLM judgement, not a product dump.
+        if _ADVISORY_RE.search(ql):
             return None
         # Shipping / delivery / returns / payment / order = POLICY prose, and
         # "which/what brands|categories" = brand enumeration — neither is a product
