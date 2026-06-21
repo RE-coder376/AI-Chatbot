@@ -585,25 +585,43 @@ def _parse_multi(q: str) -> dict | None:
     return {"op": op, "names": names, "asc": bool(_ASC_RE.search(ql)), "cmp_more": cmp_more}
 
 
-def _resolve_one(name: str, rows: list[Row]) -> Row | None:
-    """Resolve ONE named product to its row. Exact normalized-title match wins;
-    otherwise a bidirectional coverage match (the query names the whole stored
-    title, e.g. a superset, OR the stored title contains the whole query) with a
-    high floor so same-category siblings are rejected (→ None, graceful)."""
+def _raw(s: str) -> str:
+    return re.sub(r"\s+", " ", (s or "").strip().lower())
+
+
+def _tie_break_key(r: Row, raw_name: str):
+    """Deterministic ranking among rows that resolve EQUALLY well to a name, so a
+    duplicate/near-duplicate listing never gets picked at random. Prefer the row
+    whose raw title (punctuation+case) matches the query — e.g. a query naming
+    'Pool ( 34" X 10" )' picks that exact listing over the 'Pool 34" x 10"' twin —
+    then an in-stock row, then the closest title length, then a stable URL."""
+    raw = _raw(r.title)
+    in_stock = 1 if re.search(r"out\s+of\s+stock|sold\s+out|unavailable|not\s+available", r.availability or "") else 0
+    return (0 if raw == _raw(raw_name) else 1, in_stock, abs(len(raw) - len(_raw(raw_name))), r.source or "")
+
+
+def _resolve_detail(name: str, rows: list[Row]) -> tuple[Row | None, list[Row]]:
+    """Resolve ONE named product. Returns (chosen_row, equally-good candidates).
+    Exact normalized-title matches win; otherwise a bidirectional coverage match
+    with a high floor so same-category siblings are rejected. When several rows
+    tie, _tie_break_key chooses deterministically and `candidates` exposes the
+    tie so the caller can clarify a genuine ambiguity (identical listings)."""
     key = _norm(name)
     qtoks = [t for t in key.split() if len(t) > 1]
     if not qtoks:
-        return None
+        return None, []
     qset: set[str] = set()
     for t in qtoks:
         qset |= _variants(t)
+    exact = [r for r in rows if _norm(r.title) == key]
+    if exact:
+        best = min(exact, key=lambda r: _tie_break_key(r, name))
+        return best, exact
     best = None
     best_key = (-1.0, -1.0, -1e9)
+    tied: list[Row] = []
     for r in rows:
-        rt = _norm(r.title)
-        if rt == key:
-            return r
-        rtoks = [t for t in rt.split() if len(t) > 1]
+        rtoks = [t for t in _norm(r.title).split() if len(t) > 1]
         if not rtoks:
             continue
         rset: set[str] = set()
@@ -615,8 +633,34 @@ def _resolve_one(name: str, rows: list[Row]) -> Row | None:
             continue
         sk = (max(cover, qcover), min(cover, qcover), -abs(len(rtoks) - len(qtoks)))
         if sk > best_key:
-            best_key, best = sk, r
-    return best
+            best_key, best, tied = sk, r, [r]
+        elif sk == best_key:
+            tied.append(r)
+    if best is not None and len(tied) > 1:
+        best = min(tied, key=lambda r: _tie_break_key(r, name))
+    return best, (tied if best is not None else [])
+
+
+def _resolve_one(name: str, rows: list[Row]) -> Row | None:
+    return _resolve_detail(name, rows)[0]
+
+
+def _ambiguous_alts(name: str, rows: list[Row]) -> list[Row]:
+    """Return the price-distinct candidates when a name resolves to TWO listings
+    that the tie-break cannot separate (same rank key) — a genuine ambiguity the
+    bot must surface rather than guess between (e.g. two identical product
+    listings at different prices). Empty when resolution is unambiguous."""
+    best, cands = _resolve_detail(name, rows)
+    if best is None or len(cands) < 2:
+        return []
+    # Compare on the MEANINGFUL rank fields (raw title, stock, length), not the
+    # URL tiebreaker — two identical listings differ only by URL, so including it
+    # would make them look distinguishable and suppress the clarification.
+    bk = _tie_break_key(best, name)[:-1]
+    top = [c for c in cands if _tie_break_key(c, name)[:-1] == bk and c.price is not None]
+    if len({c.price for c in top}) > 1:
+        return top
+    return []
 
 
 def _answer_multi(mp: dict, rows: list[Row]) -> tuple[str, list[str]] | None:
@@ -625,6 +669,14 @@ def _answer_multi(mp: dict, rows: list[Row]) -> tuple[str, list[str]] | None:
     partial resolution never produces a confidently-wrong half-answer."""
     found = []
     for name in mp["names"]:
+        # Genuine ambiguity: the name matches two indistinguishable listings at
+        # different prices. Don't guess one into a basket/comparison — surface the
+        # choice so the answer is never confidently wrong.
+        alts = _ambiguous_alts(name, rows)
+        if len(alts) > 1:
+            opts = "; ".join(f"{_price_s(a.price, a.currency)}" for a in sorted(alts, key=lambda r: r.price))
+            return (f'There are {len(alts)} listings for "{name}" at different prices ({opts}). '
+                    f"Which one did you mean?"), _dedup(a.source for a in alts)
         r = _resolve_one(name, rows)
         if r is None or r.price is None:
             return None
