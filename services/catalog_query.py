@@ -154,16 +154,19 @@ def _anchor_set(anchors: list[str]) -> set[str]:
     return s
 
 
-def _title_cover(title: str, anchor_set: set[str]) -> float:
+def _title_cover(title: str, anchor_set: set[str], anchor_toks: list[str] | None = None) -> float:
     """How much of THIS product's title the query names. Catches a query that adds
     descriptor words beyond the stored (canonical) title — e.g. asking for
     'Pop N Play - Quick Push Pop Game' when the row title is just 'Pop N Play'.
     The strict all-anchor _hit fails there (extra words absent from the title);
-    title-coverage resolves it by measuring the other direction."""
+    title-coverage resolves it by measuring the other direction. A title word also
+    counts when it only fuzzy-matches a query word (typo tolerance: 'leanring' names
+    'learning'), so one misspelling can't sink an otherwise fully-named product."""
     tt = [t for t in re.findall(r"[a-z0-9]+", (title or "").lower()) if len(t) > 1]
     if len(tt) < 2:
         return 0.0
-    return sum(1 for t in tt if t in anchor_set) / len(tt)
+    return sum(1 for t in tt if t in anchor_set
+               or (anchor_toks and _fuzzy_in(t, anchor_toks))) / len(tt)
 
 
 def parse(q: str) -> Spec:
@@ -611,6 +614,40 @@ def _raw(s: str) -> str:
     return re.sub(r"\s+", " ", (s or "").strip().lower())
 
 
+def _edit_le(a: str, b: str, k: int) -> bool:
+    """True if a within k edits of b, counting an adjacent transposition as ONE
+    (Damerau) so 'leanring'~'learning'. Bounded DP — tokens are short."""
+    la, lb = len(a), len(b)
+    if abs(la - lb) > k:
+        return False
+    prev2 = None
+    prev = list(range(lb + 1))
+    for i in range(1, la + 1):
+        cur = [i] + [0] * lb
+        for j in range(1, lb + 1):
+            cost = 0 if a[i - 1] == b[j - 1] else 1
+            cur[j] = min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + cost)
+            if i > 1 and j > 1 and a[i - 1] == b[j - 2] and a[i - 2] == b[j - 1]:
+                cur[j] = min(cur[j], prev2[j - 2] + 1)
+        prev2, prev = prev, cur
+    return prev[lb] <= k
+
+
+def _fuzzy_in(tok: str, toks: list[str]) -> bool:
+    """tok matches some word in toks within a length-scaled edit budget. Conservative
+    on short words (where one edit flips a different real word, card↔cart): exact only
+    under 5 chars, 1 edit for 5-7, 2 for 8+. Used only as a fallback when the exact /
+    singular-plural match already failed, so the 0.85 coverage floor still guards."""
+    for u in toks:
+        if u == tok:
+            return True
+        n = min(len(tok), len(u))
+        k = 0 if n < 5 else (1 if n < 8 else 2)
+        if k and _edit_le(tok, u, k):
+            return True
+    return False
+
+
 def _tie_break_key(r: Row, raw_name: str):
     """Deterministic ranking among rows that resolve EQUALLY well to a name, so a
     duplicate/near-duplicate listing never gets picked at random. Prefer the row
@@ -649,8 +686,11 @@ def _resolve_detail(name: str, rows: list[Row]) -> tuple[Row | None, list[Row]]:
         rset: set[str] = set()
         for t in rtoks:
             rset |= _variants(t)
-        cover = sum(1 for t in rtoks if t in qset) / len(rtoks)    # stored title named by query
-        qcover = sum(1 for t in qtoks if t in rset) / len(qtoks)   # query named by stored title
+        # Fuzzy fallback (only when the exact/variant match misses) tolerates a typo'd
+        # query word — "leanring" still names "learning" — so a misspelling can't drop
+        # the right product below a clean sibling.
+        cover = sum(1 for t in rtoks if t in qset or _fuzzy_in(t, qtoks)) / len(rtoks)    # stored title named by query
+        qcover = sum(1 for t in qtoks if t in rset or _fuzzy_in(t, rtoks)) / len(qtoks)   # query named by stored title
         if not (cover >= 0.85 or qcover >= 0.85) or (cover + qcover) / 2 < 0.5:
             continue
         sk = (max(cover, qcover), min(cover, qcover), -abs(len(rtoks) - len(qtoks)))
@@ -903,7 +943,7 @@ def _execute_spec(spec: "Spec", rows: list[Row], cfg: dict | None, max_list: int
             # best-covered rows, so an exact superset wins outright and a query for an
             # absent product yields nothing (→ graceful RAG/IDK, not a wrong sibling).
             _aset = _anchor_set(spec.anchors)
-            _ranked = sorted(((_title_cover(r.title, _aset), r) for r in rows), key=lambda x: -x[0])
+            _ranked = sorted(((_title_cover(r.title, _aset, spec.anchors), r) for r in rows), key=lambda x: -x[0])
             _top = _ranked[0][0] if _ranked else 0.0
             _base = [r for c, r in _ranked if c >= 0.85 and c >= _top - 1e-9]
         sel = []
@@ -986,6 +1026,14 @@ def _execute_spec(spec: "Spec", rows: list[Row], cfg: dict | None, max_list: int
                 body = "\n".join(f"- {r.title}" for r in sel[:max_list])
                 return f"Here are matching products from the catalog:\n{body}", _dedup(r.source for r in sel)[:max_list]
             return None, []
+        # Extremes (cheapest / most expensive) should name something a customer can
+        # actually buy: prefer in-stock rows, falling back to all only if EVERY priced
+        # match is out of stock (so we still answer rather than claim absence).
+        if spec.agg in ("min", "max"):
+            _avail = [r for r in priced if not re.search(
+                r"out\s+of\s+stock|sold\s+out|unavailable|not\s+available", r.availability or "")]
+            if _avail:
+                priced = _avail
         priced.sort(key=lambda r: (-r.price if spec.agg == "max" else r.price, r.title.lower()))
         n_show = max_list if spec.agg == "list" else 5
         items = priced[:n_show]
