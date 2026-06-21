@@ -800,10 +800,12 @@ def _execute_spec(spec: "Spec", rows: list[Row], cfg: dict | None, max_list: int
         # narrow to rows whose STRUCTURED categories match the anchor (GT/attribute
         # semantics) so "most expensive in the Models category" / "how many in Nautica"
         # rank the real category, not every title that happens to contain the word.
-        # Auto-skips for name-substring queries ("name contains scale" — no row is
-        # tagged with the substring → _tag_sel empty → title/hay match kept) and for
-        # untagged/HTML-crawl DBs (tagged ratio < 50%).
-        if spec.anchors and spec.agg in ("count", "min", "max", "list"):
+        # SKIPPED for name-substring queries (title_only): "every item whose NAME
+        # contains monochrome" must keep ALL title matches — narrowing to the rows
+        # that happen to also carry a coincidental "monochrome" category tag (e.g.
+        # one marker set) silently drops the products the user actually asked for.
+        # Also skipped for untagged/HTML-crawl DBs (tagged ratio < 50%).
+        if spec.anchors and not spec.title_only and spec.agg in ("count", "min", "max", "list"):
             _tagged = sum(1 for r in rows if r.cats.strip())
             if rows and (_tagged / len(rows)) >= 0.5:
                 _tag_sel = [r for r in sel if _cats_hit(r, spec.anchors)]
