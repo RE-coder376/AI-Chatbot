@@ -754,6 +754,44 @@ def _anchors_from(text: str) -> list:
     return [w for w in re.findall(r"[a-z0-9]{2,}", (text or "").lower()) if w not in _STOP][:8]
 
 
+def _grounded_in_q(name: str, q: str) -> bool:
+    """A router-extracted product/category must actually appear in the question.
+    The LLM router is instructed to copy names the customer *literally wrote*, but
+    a weak model sometimes echoes a few-shot EXAMPLE product instead — e.g. for a
+    content-free follow-up ("is it in stock?", "how much is it?") it copies the
+    prompt's sample item. Un-grounded, that becomes a confidently-wrong "we don't
+    carry X" for an X the customer never named (and, across tenants, masquerades as
+    a data leak). Require at least one distinctive (3+ char, non-stop) token of the
+    name to be present in the query."""
+    qtoks = {w for w in re.findall(r"[a-z0-9]{3,}", (q or "").lower()) if w not in _STOP}
+    ntoks = [w for w in re.findall(r"[a-z0-9]{3,}", (name or "").lower()) if w not in _STOP]
+    return bool(ntoks) and any(t in qtoks for t in ntoks)
+
+
+def _ground_plan(plan: dict | None, q: str) -> dict | None:
+    """Keep only the parts of an LLM-extracted plan that are grounded in q, so a
+    few-shot echo can never drive execution. Returns the cleaned plan, or None when
+    the intent needed named products / a category and none survived (→ hand to RAG)."""
+    if not plan:
+        return plan
+    plan = dict(plan)
+    plan["products"] = [p for p in (plan.get("products") or []) if _grounded_in_q(p, q)]
+    cat = plan.get("category")
+    if cat and not _grounded_in_q(cat, q):
+        plan["category"] = None
+    kind = plan.get("kind")
+    prods, cat = plan["products"], plan.get("category")
+    if kind in ("lookup", "exists") and not prods:
+        return None
+    if kind in ("compare", "order", "basket") and len(prods) < 2:
+        return None
+    if (kind in ("count", "cheapest", "priciest", "filter")
+            and not prods and not cat
+            and plan.get("price_min") is None and plan.get("price_max") is None):
+        return None
+    return plan
+
+
 def _plan_to_specs(plan: dict) -> tuple[dict | None, "Spec | None"]:
     """Map an LLM-extracted plan onto the engine's existing (mp | Spec) execution.
     Returns (mp, spec) with at most one non-None. None,None = not executable here."""
@@ -813,7 +851,10 @@ def answer_catalog_query(q: str, db, cfg: dict | None = None, max_list: int = 12
                 from services.catalog_router import extract_plan, heuristic_plan
                 # LLM extractor first; deterministic backstop if the LLM is unavailable
                 # so structured product questions answer even during an LLM outage.
-                plan = extract_plan(q) or heuristic_plan(q)
+                # Ground the result in q: a weak model can echo a few-shot example
+                # product for a content-free follow-up — drop anything the customer
+                # didn't actually name so it never becomes a wrong/cross-tenant anchor.
+                plan = _ground_plan(extract_plan(q) or heuristic_plan(q), q)
             except Exception:
                 plan = None
             if not plan or plan.get("kind") in (None, "browse", "other"):
