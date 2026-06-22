@@ -56,6 +56,10 @@ _STOP = {
     # conversational greeting/filler — "hi, do you guys have the X" must anchor on X,
     # not echo "hi guys" into the product ("we carry hi guys wall climbing car").
     "hi", "hey", "hello", "hiya", "guys", "oh", "um", "umm", "hmm", "thanks", "thank",
+    # follow-up adverbs — "do you ALSO stock X", "have X TOO" must anchor on X, not
+    # fold "also"/"too" into the name ("also wish women by chopard" → false absence,
+    # which then breaks a pronoun follow-up that has no antecedent to bind).
+    "also", "too", "aswell", "additionally", "again", "cool", "nice", "great", "wow",
 }
 
 _NUM = r"(?:rs\.?\s*|pkr\s*|[\$£€])?\s*([\d][\d,]*(?:\.\d{1,2})?)"

@@ -113,3 +113,26 @@ def test_absent_typoed_name_does_not_dump_siblings():
     spec = parse("do you have kwaai and whats the price?")
     answer, _ = _execute_spec(spec, rows, None, 5)
     assert "Today To Do" not in answer and "Revolution" not in answer
+
+
+@pytest.mark.parametrize(
+    "question",
+    [
+        "and do you also stock the Wish For Women By Chopard?",
+        "do you have the Wish For Women By Chopard too?",
+    ],
+)
+def test_followup_adverb_does_not_pollute_anchor(question):
+    """"also"/"too" in a follow-up ("do you ALSO stock X") must not fold into the
+    product name — that produced "also wish ..." → a false absence that then broke
+    a pronoun follow-up with no antecedent to bind."""
+    rows = [
+        _row("Wish For Women By Chopard EDP", 9250),
+        _row("Ajayeb Dubai By Lattafa For Men", 3000),
+    ]
+    spec = parse(question)
+    answer, _ = _execute_spec(spec, rows, None, 5)
+    assert spec.agg == "exists"
+    assert "also" not in spec.anchors and "too" not in spec.anchors
+    assert "Wish For Women By Chopard EDP" in answer
+    assert "don't" not in answer.lower()

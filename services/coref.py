@@ -23,6 +23,7 @@ _CUE = {
     "cheaper", "expensive", "pricier", "dearer", "more", "less", "better", "cheapest",
     "than", "or", "vs", "versus", "compare", "between", "difference", "about", "tell", "me",
     "still", "yeah", "please", "thanks", "thx", "to", "buy", "get", "want", "wanna",
+    "cool", "great", "wow", "also", "too", "aswell", "awesome", "perfect", "good",
 }
 
 # global aggregates ("the cheapest", "most expensive one", "how many") are
