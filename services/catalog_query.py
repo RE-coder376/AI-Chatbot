@@ -969,26 +969,26 @@ def _execute_spec(spec: "Spec", rows: list[Row], cfg: dict | None, max_list: int
             # confidently-wrong product. Require near-full coverage AND keep only the
             # best-covered rows, so an exact superset wins outright and a query for an
             # absent product yields nothing (→ graceful RAG/IDK, not a wrong sibling).
+            # Match BIDIRECTIONALLY (this fallback only fires when the strict all-anchor
+            # _hit found nothing, i.e. a specific NAMED product that didn't exact-match):
+            #  - title-coverage catches a query that NAMES a stored title plus extras;
+            #  - query-coverage catches a query that is a SUBSET of a long SEO title
+            #    ("Rasha For Women By Al" → "...Rehab EDP") and, crucially, prefers a
+            #    typo'd DISTINCTIVE token ("mgahribi"→"Maghribi") over a generic one
+            #    ("by al"), so a misspelled brand resolves to its products instead of an
+            #    unrelated sibling — and a truly absent name ("kawaii") matches nothing.
+            # The avg-coverage floor rejects siblings sharing only generic words. Applies
+            # to every aggregation: category queries match via _hit and never reach here.
             _aset = _anchor_set(spec.anchors)
-            if spec.agg == "exists":
-                # Named-product lookup ("do you have X"): match BIDIRECTIONALLY so a
-                # query that is a SUBSET of a long SEO title still resolves (the title's
-                # extra descriptors otherwise sink one-directional coverage → a false
-                # "we don't carry that"). Accept either direction ≥0.85, with an
-                # avg-coverage floor so a sibling sharing only generic words is rejected.
-                _scored = []
-                for r in rows:
-                    tc = _title_cover(r.title, _aset, spec.anchors)
-                    qc = _query_cover(r.title, spec.anchors)
-                    if (tc >= 0.85 or qc >= 0.85) and (tc + qc) / 2 >= 0.5:
-                        _scored.append((max(tc, qc), r))
-                _scored.sort(key=lambda x: -x[0])
-                _top = _scored[0][0] if _scored else 0.0
-                _base = [r for c, r in _scored if c >= _top - 1e-9]
-            else:
-                _ranked = sorted(((_title_cover(r.title, _aset, spec.anchors), r) for r in rows), key=lambda x: -x[0])
-                _top = _ranked[0][0] if _ranked else 0.0
-                _base = [r for c, r in _ranked if c >= 0.85 and c >= _top - 1e-9]
+            _scored = []
+            for r in rows:
+                tc = _title_cover(r.title, _aset, spec.anchors)
+                qc = _query_cover(r.title, spec.anchors)
+                if (tc >= 0.85 or qc >= 0.85) and (tc + qc) / 2 >= 0.5:
+                    _scored.append((max(tc, qc), r))
+            _scored.sort(key=lambda x: -x[0])
+            _top = _scored[0][0] if _scored else 0.0
+            _base = [r for c, r in _scored if c >= _top - 1e-9]
         sel = []
         _oos = []  # matched the query but excluded only by the in-stock filter
         for r in _base:

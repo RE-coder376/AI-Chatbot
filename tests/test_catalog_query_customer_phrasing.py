@@ -1,0 +1,115 @@
+import pytest
+
+from services.catalog_query import Row, _execute_spec, parse
+
+
+def _row(title, price, availability="available"):
+    return Row(
+        title=title,
+        price=price,
+        availability=availability,
+        source=f"https://example.test/{title.lower().replace(' ', '-')}",
+        hay=title.lower(),
+    )
+
+
+@pytest.mark.parametrize(
+    ("question", "aggregation", "expected"),
+    [
+        ("Ignoring sold-out items, which product costs the least?", "min", "Available Cheap - Rs.20"),
+        ("Among available products only, what costs the most?", "max", "Available Expensive - Rs.981,000"),
+        ("Show me the priciest product I can actually buy right now.", "max", "Available Expensive - Rs.981,000"),
+    ],
+)
+def test_customer_extreme_phrasings_use_full_available_catalog(question, aggregation, expected):
+    rows = [
+        _row("Sold Out Cheap", 5, "out of stock"),
+        _row("Available Cheap", 20),
+        _row("Available Expensive", 981000),
+        _row("Sold Out Expensive", 2000000, "sold out"),
+    ]
+
+    spec = parse(question)
+    answer, _ = _execute_spec(spec, rows, None, 5)
+
+    assert spec.agg == aggregation
+    assert spec.anchors == []
+    assert expected in answer
+    assert "Sold Out" not in answer
+
+
+@pytest.mark.parametrize(
+    "question",
+    [
+        "Do you stock the Talkng Flash Card Lernning Toy?",
+        "im looking for a talking flash crad learning toy, do u have it?",
+        "Got any Talking Flash Cards Learnng Toy?",
+    ],
+)
+def test_typoed_inventory_questions_resolve_the_named_product(question):
+    rows = [
+        _row("Talking Flash Card Learning Toy", 1350),
+        _row("Talking Flash Cards Early Educational Device 224 Cards Rechargeable", 1500),
+    ]
+
+    spec = parse(question)
+    answer, _ = _execute_spec(spec, rows, None, 5)
+
+    assert spec.agg == "exists"
+    assert "Talking Flash Card Learning Toy" in answer
+    assert "Rs.1,350" in answer
+    assert "Early Educational Device" not in answer
+
+
+@pytest.mark.parametrize(
+    "question",
+    [
+        "do u have Rasha For Women By Al?",   # subset of the long SEO title
+        "do you have Rsaha For Women By Al?",  # + a typo in the distinctive word
+    ],
+)
+def test_subset_of_seo_title_resolves_named_product(question):
+    """A customer types part of a long SEO title (and maybe a typo); the title's
+    extra trailing words must not sink the match into a false 'not carried'."""
+    rows = [
+        _row("Rasha For Women By Al Rehab EDP", 990),
+        _row("Sultan For Men & Women Attar By Al Haramain", 2499),
+        _row("CR7 For Men By Cristiano Ronaldo EDT", 3500),
+    ]
+
+    spec = parse(question)
+    answer, _ = _execute_spec(spec, rows, None, 5)
+
+    assert spec.agg == "exists"
+    assert "Rasha For Women By Al Rehab EDP" in answer
+    assert "don't" not in answer.lower() and "not carry" not in answer.lower()
+    # generic-word siblings must NOT be dumped as matches
+    assert "Sultan" not in answer and "CR7" not in answer
+
+
+def test_typoed_distinctive_token_beats_generic_sibling():
+    """A typo on the DISTINCTIVE word ("mgahribi"→"Maghribi") must resolve to that
+    brand's products, not fall through to a sibling sharing only generic words
+    ("by al"). Applies to the price/list path, not just exists."""
+    rows = [
+        _row("Rasha For Women By Al Rehab EDP", 990),
+        _row("Rawdha By Ahmed Al Maghribi", 10750),
+        _row("Zeleny For Unisex By Ahmed Al Maghribi", 4999),
+        _row("Sultan For Men & Women By Al Haramain", 2499),
+    ]
+    spec = parse("how much is the mgahribi by al?")
+    answer, _ = _execute_spec(spec, rows, None, 5)
+    assert "Maghribi" in answer
+    assert "Rasha" not in answer and "Sultan" not in answer
+
+
+def test_absent_typoed_name_does_not_dump_siblings():
+    """A query for a product that simply isn't carried ("kwaai") must not dump
+    unrelated products — say it's absent (exists) or hand off to RAG (price)."""
+    rows = [
+        _row("Today To Do Spiral Gold Rings Notepad", 695),
+        _row("Revolution Gel Pen Set", 450),
+    ]
+    spec = parse("do you have kwaai and whats the price?")
+    answer, _ = _execute_spec(spec, rows, None, 5)
+    assert "Today To Do" not in answer and "Revolution" not in answer
