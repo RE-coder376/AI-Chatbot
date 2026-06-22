@@ -38,6 +38,10 @@ _CMP = re.compile(r"\b(cheaper|more expensive|pricier|dearer|costs? (?:more|less
 # a referential signal: a pronoun, OR an opener that dangles off a prior turn
 _REFERENTIAL = re.compile(r"\b(it|its|it's|this|that|these|those|them|they|one|ones|the same)\b", re.I)
 _QUOTED = re.compile(r'["“”]([^"“”]{2,90})["“”]')
+# logistics/policy prose that an answer-name pattern can catch but is NEVER a product
+# the customer's pronoun refers to ("is it in stock?" must not bind to "return policy").
+_NON_PRODUCT = re.compile(r"(?i)\b(?:return|refund|shipping|delivery|exchange|privacy|"
+                          r"warranty|cancellation|payment|terms?|policy|policies)\b")
 
 
 def _content_tokens(q: str) -> list[str]:
@@ -51,9 +55,12 @@ def _names_from_answer(text: str) -> list[str]:
     # list rows: "- Name — Rs.X" / "1. Name - Rs.X"
     for m in re.finditer(r"(?m)^\s*(?:\d+[.)]|[-•*])\s*(.+?)\s+[-–—]\s*(?:Rs|PKR|\$|€|£)", text):
         out.append(m.group(1))
-    # inline: "Name is Rs/priced/cheaper/currently/available..."
+    # inline: "Name is Rs/priced/cheaper..." — require a real PRODUCT signal (price or
+    # comparison), NOT a bare "is available"/"currently": a policy answer ("Our return
+    # policy is available at: ...") otherwise gets mis-read as a product and a following
+    # "is it in stock?" binds the pronoun to "return policy".
     for m in re.finditer(r"(?:^|[.!]\s+|\bthe\b\s+)([A-Z0-9][^.!?\n]{3,80}?)\s+is\s+"
-                         r"(?:priced|currently|available|cheaper|Rs|PKR|\$)", text):
+                         r"(?:priced|cheaper|costs?|Rs|PKR|\$|€|£)", text):
         out.append(m.group(1))
     # "we carry NAME." (existence affirmations)
     for m in re.finditer(r"we (?:carry|have|stock)\s+([^.!?\n]{3,80}?)[.!?\n]", text, re.I):
@@ -61,8 +68,9 @@ def _names_from_answer(text: str) -> list[str]:
     cleaned = []
     for n in out:
         n = re.sub(r"\s+", " ", n).strip(" -:|—–\"“”")
-        # drop generic leads the patterns can catch
-        if n and n.lower() not in ("yes", "no") and len(_content_tokens(n)) >= 1:
+        # drop generic leads + non-product prose (policy/logistics) the patterns catch
+        if n and n.lower() not in ("yes", "no") and len(_content_tokens(n)) >= 1 \
+                and not _NON_PRODUCT.search(n):
             cleaned.append(n)
     return cleaned
 
