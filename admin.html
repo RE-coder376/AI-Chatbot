@@ -1319,7 +1319,7 @@
       const hasCrawl = st.auto_crawl_enabled && st.crawl_url;
       const hasApi = st.api_sources?.length > 0;
       const intervalM = st.crawl_interval_minutes || 60;
-      const intervalLabel = intervalM < 60 ? `${intervalM}min` : `${intervalM/60}h`;
+      const intervalLabel = intervalM < 60 ? `${intervalM}min` : `${Number((intervalM/60).toFixed(1))}h`;
       const health = st.health || {level:'empty', label:'Unknown', reason:'No data'};
       const lastErr = st.last_crawl_error || '';
       const retryAfter = st.last_crawl_retry_after || '';
