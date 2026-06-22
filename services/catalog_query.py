@@ -60,6 +60,9 @@ _STOP = {
     # fold "also"/"too" into the name ("also wish women by chopard" → false absence,
     # which then breaks a pronoun follow-up that has no antecedent to bind).
     "also", "too", "aswell", "additionally", "again", "cool", "nice", "great", "wow",
+    # texting abbreviations of stop-words — "do u HV mgahribi" must not keep "hv" as a
+    # junk anchor (it dragged query-coverage below the floor and sank the real match).
+    "hv", "hav", "ur", "pls", "plz", "thru", "abt", "coz", "cuz", "wanna", "gimme", "lemme",
 }
 
 _NUM = r"(?:rs\.?\s*|pkr\s*|[\$£€])?\s*([\d][\d,]*(?:\.\d{1,2})?)"
