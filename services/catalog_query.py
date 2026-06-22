@@ -171,6 +171,20 @@ def _title_cover(title: str, anchor_set: set[str], anchor_toks: list[str] | None
                or (anchor_toks and _fuzzy_in(t, anchor_toks))) / len(tt)
 
 
+def _query_cover(title: str, anchor_toks: list[str] | None) -> float:
+    """Reverse of _title_cover: fraction of the QUERY's anchor words this title names.
+    High when the customer typed a SUBSET of a long SEO title — "Rasha For Women By
+    Al" for stored "Rasha For Women By Al Rehab EDP" — where the title's extra words
+    sink one-directional title-coverage below the floor. Fuzzy so a typo'd query word
+    ("Rsaha") still counts. Anchors are already stop-stripped (distinctive tokens),
+    so a sibling sharing only generic words can't reach the floor."""
+    aw = [t for t in (anchor_toks or []) if len(t) > 1]
+    if not aw:
+        return 0.0
+    tt = list({t for t in re.findall(r"[a-z0-9]+", (title or "").lower()) if len(t) > 1})
+    return sum(1 for a in aw if a in tt or _fuzzy_in(a, tt)) / len(aw)
+
+
 def parse(q: str) -> Spec:
     """Extract orthogonal dimensions (aggregation + price bounds + stock + anchors)
     from the question. Each dimension is detected independently, so any
@@ -956,9 +970,25 @@ def _execute_spec(spec: "Spec", rows: list[Row], cfg: dict | None, max_list: int
             # best-covered rows, so an exact superset wins outright and a query for an
             # absent product yields nothing (→ graceful RAG/IDK, not a wrong sibling).
             _aset = _anchor_set(spec.anchors)
-            _ranked = sorted(((_title_cover(r.title, _aset, spec.anchors), r) for r in rows), key=lambda x: -x[0])
-            _top = _ranked[0][0] if _ranked else 0.0
-            _base = [r for c, r in _ranked if c >= 0.85 and c >= _top - 1e-9]
+            if spec.agg == "exists":
+                # Named-product lookup ("do you have X"): match BIDIRECTIONALLY so a
+                # query that is a SUBSET of a long SEO title still resolves (the title's
+                # extra descriptors otherwise sink one-directional coverage → a false
+                # "we don't carry that"). Accept either direction ≥0.85, with an
+                # avg-coverage floor so a sibling sharing only generic words is rejected.
+                _scored = []
+                for r in rows:
+                    tc = _title_cover(r.title, _aset, spec.anchors)
+                    qc = _query_cover(r.title, spec.anchors)
+                    if (tc >= 0.85 or qc >= 0.85) and (tc + qc) / 2 >= 0.5:
+                        _scored.append((max(tc, qc), r))
+                _scored.sort(key=lambda x: -x[0])
+                _top = _scored[0][0] if _scored else 0.0
+                _base = [r for c, r in _scored if c >= _top - 1e-9]
+            else:
+                _ranked = sorted(((_title_cover(r.title, _aset, spec.anchors), r) for r in rows), key=lambda x: -x[0])
+                _top = _ranked[0][0] if _ranked else 0.0
+                _base = [r for c, r in _ranked if c >= 0.85 and c >= _top - 1e-9]
         sel = []
         _oos = []  # matched the query but excluded only by the in-stock filter
         for r in _base:
