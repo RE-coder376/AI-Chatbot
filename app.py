@@ -3383,6 +3383,81 @@ def _context_addresses_query(context: str, q: str) -> bool:
     return False
 
 
+# Generic product-query scaffolding — never a distinctive product-NAME token.
+# _context_addresses_query lets a question through when ANY of these overlap a
+# policy/returns chunk, so a fake product asked as "warranty + colors for your X"
+# passes and the LLM confabulates. The named-product gate below ignores them and
+# grounds on the distinctive name tokens only.
+_PROD_NAME_STOP = {
+    "the", "your", "you", "our", "this", "that", "these", "those", "and", "for",
+    "with", "any", "some", "all", "have", "has", "had", "sell", "sells", "carry",
+    "carries", "stock", "stocks", "offer", "offers", "got", "get", "want", "need",
+    "looking", "find", "show", "list", "give", "tell", "does", "did", "can",
+    "could", "would", "will", "what", "whats", "which", "where", "when", "how",
+    "much", "many", "price", "prices", "priced", "pricing", "cost", "costs",
+    "available", "availability", "stocked", "instock", "warranty", "warranties",
+    "guarantee", "period", "color", "colors", "colour", "colours", "size", "sizes",
+    "variant", "variants", "option", "options", "model", "models", "version",
+    "return", "returns", "refund", "policy", "shipping", "delivery", "discount",
+    "sale", "deal", "product", "products", "item", "items", "thing", "stuff",
+    "are", "there", "about", "please", "buy", "purchase", "order", "from",
+}
+
+
+def _query_name_tokens(q: str) -> list:
+    """Distinctive product-NAME tokens the customer literally wrote (drop generic
+    catalog/spec/scaffolding words). 4+ chars to avoid noise."""
+    return [w for w in re.findall(r"[a-z0-9]{4,}", (q or "").lower())
+            if w not in _PROD_NAME_STOP]
+
+
+_AFFIRM_SIGS = ("we have", "we carry", "we offer", "we stock", "we do have",
+                "we sell", "in stock", "priced at", "it costs", "the price is",
+                "is available", "comes in", "available in", "yes,", "yes we",
+                "this product", "features", "made of", "made from")
+_ABSENCE_SIGS = ("don't have", "do not have", "not have", "couldn't find",
+                 "could not find", "can't find", "cannot find", "not carry",
+                 "don't carry", "do not carry", "not available", "not in our",
+                 "unable to find", "we don't", "we do not", "not something we",
+                 "no record", "not find", "not listed", "not offer", "not sell",
+                 "don't sell", "do not sell", "not currently", "doesn't appear",
+                 "does not appear", "not part of", "no matching", "not stock")
+
+
+def _looks_like_named_lookup(q: str) -> bool:
+    """True only for SPECIFIC-product lookups ('do you have X', 'price/warranty of
+    X', a capitalized brand/model). Advisory/recommendation queries ('best gift for
+    a 2 year old') are excluded so the grounding gate never suppresses them."""
+    ql = q or ""
+    if re.search(r"(?i)\b(do|does|have|got|is|are)\b.{0,40}\b(have|sell|sells|carry|carries|stock|stocks|offer|offers|got|available|in stock)\b", ql):
+        return True
+    if re.search(r"(?i)\b(price|cost|how much|warranty|guarantee|colou?rs?|sizes?|variants?|stock)\b.{0,30}\bfor\b", ql):
+        return True
+    # Capitalized multi-word proper noun (brand/model the customer named verbatim).
+    if re.search(r"\b[A-Z][A-Za-z0-9'&.-]+(?:\s+[A-Z0-9][A-Za-z0-9'&.-]+){1,}", ql):
+        return True
+    return False
+
+
+def _confabulates_named_product(q: str, context: str, ans: str) -> bool:
+    """#2 universal abstention: True when the answer affirms/describes a SPECIFIC
+    product the customer named whose distinctive name tokens are wholly absent
+    from retrieved context — the confident-wrong class. Conservative: fires only
+    when ZERO named tokens are grounded AND the answer is not already an absence."""
+    if not _looks_like_named_lookup(q):
+        return False
+    names = _query_name_tokens(q)
+    if not names:
+        return False
+    al = (ans or "").lower()
+    if any(s in al for s in _ABSENCE_SIGS):
+        return False  # already declined — leave it
+    cl = (context or "").lower()
+    if any(t in cl for t in names):
+        return False  # at least one named token grounded — let it stand
+    return any(s in al for s in _AFFIRM_SIGS)
+
+
 def _oos_override_ok(context: str, q: str) -> bool:
     """Stricter than _context_addresses_query — used ONLY to decide whether to override a
     pre-retrieval OOS redirect (math/trivia/"calculate X"/"definition of X"). A query flagged
@@ -4344,7 +4419,12 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
         r'\b(system\s*prompt|your\s*instructions|your\s*rules|ignore\s*(all\s*)?(previous|prior|above)\s*instructions?'
         r'|what\s*are\s*your\s*instructions|reveal\s*your|show\s*your\s*(prompt|instructions|rules)'
         r'|pretend\s*(you\s*are|to\s*be)|act\s*as\s*(if|though)|you\s*are\s*now\s*(a\s*)?(different|new)'
-        r'|forget\s*(your|all)|override\s*(your|all)|jailbreak)\b',
+        r'|forget\s*(your|all)|override\s*(your|all)|jailbreak'
+        r'|repeat\s+(everything|all|the\s+(text|words|above|system|prompt)|your)'
+        r'|context\s*window|verbatim|word\s*for\s*word'
+        r'|(everything|text|content|instructions|words)\s+above'
+        r'|starting\s+with\s+the\s+word'
+        r'|print\s+(everything|your\s+(prompt|instructions|context|system)))\b',
         re.IGNORECASE
     )
     if _PROMPT_RE.search(q):
@@ -5215,6 +5295,15 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
                     _trace_event(workflow_trace, "validator_rewrite", reason="price_hallucination")
                     _trace_decision(workflow_debug, "price_validator_rewrite", "price_hallucination")
                     cleaned = _det
+        # ── #2 Universal named-product grounding gate (parity with non-stream) ──
+        if is_product_db and _confabulates_named_product(q, context or "", cleaned):
+            _biz_ng = cfg.get("business_name", "the store")
+            cleaned = (f"I couldn't find that item in our catalog. It may not be something "
+                       f"{_biz_ng} carries, or it might be listed under a different name — "
+                       f"could you share more detail or check the spelling?")
+            logger.warning("[Validator] named_product_ungrounded — overriding with honest decline")
+            _trace_event(workflow_trace, "validator_rewrite", reason="named_product_ungrounded")
+            _trace_decision(workflow_debug, "named_product_grounding_override", True)
 
         # ? Learning/goals extractor (universal): when KB contains an explicit outcomes list, use it verbatim.
         if context:
@@ -5883,7 +5972,10 @@ async def chat(request: Request):
         # Prompt injection
         _PROMPT_RE_NS = re.compile(
             r'(system prompt|your instructions|ignore previous|jailbreak|'
-            r'disregard|forget your|reveal your|print your|show your instructions)',
+            r'disregard|forget your|reveal your|print your|show your instructions|'
+            r'repeat (everything|all|the text|the words|your|the above)|context window|'
+            r'verbatim|word for word|(everything|text|content|instructions|words) above|'
+            r'starting with the word)',
             re.IGNORECASE
         )
         if _PROMPT_RE_NS.search(q):
@@ -6552,6 +6644,20 @@ async def chat(request: Request):
                                 _trace_event(workflow_trace, "validator_rewrite", reason="scope_idk_rescue")
                             except Exception:
                                 pass
+                # ── #2 Universal named-product grounding gate ────────────────
+                # Kill the confident-wrong class: if the model affirms/describes a
+                # specific product the customer named but whose name tokens are
+                # absent from context, override to an honest decline.
+                if _is_product_db_local and _confabulates_named_product(q, context or "", _ans):
+                    _biz_ng = cfg.get("business_name", "the store")
+                    _ans = (f"I couldn't find that item in our catalog. It may not be something "
+                            f"{_biz_ng} carries, or it might be listed under a different name — "
+                            f"could you share more detail or check the spelling?")
+                    try:
+                        workflow_debug["guard_decisions"]["named_product_grounding_override"] = True
+                        _trace_event(workflow_trace, "validator_rewrite", reason="named_product_ungrounded")
+                    except Exception:
+                        pass
                 payload = {
                     "answer": _ans,
                     "sources": (sources or [])[:5],

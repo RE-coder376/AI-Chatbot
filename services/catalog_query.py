@@ -39,6 +39,8 @@ _STOP = {
     "dollars", "currently", "entire", "whole", "absolute", "absolutely", "overall", "anything",
     "everything", "sale", "best", "top", "good", "quality", "options", "option", "can", "could",
     "would", "buy", "get", "from", "want", "need", "needed", "looking", "find", "please", "name",
+    "actually", "right", "now", "among", "only", "ignoring", "ignore", "excluding", "exclude", "except",
+    "out", "im",
     # price/value filler — never product-name anchors (else "what's the going RATE
     # for X" makes going/rate junk anchors that crowd out X's distinctive words)
     "going", "rate", "rates", "run", "runs", "damage", "charge", "charges", "charged",
@@ -255,9 +257,15 @@ def parse(q: str) -> Spec:
     exist_q = bool(re.search(
         r"\bdo(?:es)?\s+(?:you|we|they|the\s+store)\b.*\b(?:sell|stock|carry|carries|have|has|offer|got|keep)\b"
         r"|\b(?:are|is)\s+there\s+(?:any|some)\b"
-        r"|\bdo\s+you\s+(?:sell|stock|carry|have|offer|got)\b", ql))
-    cheapest = bool(re.search(r"\b(cheapest|lowest[\s-]+priced?|least\s+expensive|most\s+affordable|lowest\s+cost)\b", ql))
-    priciest = bool(re.search(r"\b(most\s+expensive|highest[\s-]+priced?|priciest|costliest|most\s+costly|dearest|highest\s+cost)\b", ql))
+        r"|\bdo\s+(?:you|u)\s+(?:sell|stock|carry|have|offer|got)\b"
+        r"|\b(?:have\s+(?:you|we)|(?:you|we)\s+have)\s+got\b"
+        r"|\bgot\s+(?:any|some)\b", ql))
+    cheapest = bool(re.search(
+        r"\b(cheapest|lowest[\s-]+priced?|least\s+expensive|most\s+affordable|lowest\s+cost|"
+        r"costs?\s+the\s+least)\b", ql))
+    priciest = bool(re.search(
+        r"\b(most\s+expensive|highest[\s-]+priced?|priciest|costliest|most\s+costly|dearest|"
+        r"highest\s+cost|costs?\s+the\s+most)\b", ql))
     list_q = bool(re.search(r"\b(show|list|which|what'?s?|give|display|products?|items?|sell|have|available)\b", ql))
     # Single-product price/availability lookup ("price of X", "how much is X",
     # "is X available"). Routed to the list path so the full-catalog scan (with the
@@ -642,6 +650,11 @@ def _fuzzy_in(tok: str, toks: list[str]) -> bool:
         if u == tok:
             return True
         n = min(len(tok), len(u))
+        # Keep four-letter substitutions exact (card/cart), but allow a single
+        # adjacent transposition with stable outer letters (crad/card).
+        if (n == 4 and len(tok) == len(u) and tok[0] == u[0] and tok[-1] == u[-1]
+                and _edit_le(tok, u, 1)):
+            return True
         k = 0 if n < 5 else (1 if n < 8 else 2)
         if k and _edit_le(tok, u, k):
             return True

@@ -3013,6 +3013,7 @@ async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansio
     _bm25_title_raw: list = []
     _vector_raw: list = []
     _outcomes_title_results: list = []
+    _rrf_scores: dict = {}
     if not _skip_chromadb and db is not None:
         loop = asyncio.get_running_loop()
         # Run vector searches + BM25 ALL IN PARALLEL
@@ -3200,6 +3201,25 @@ async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansio
             logger.error(f"Vector retrieval error(s): {_vector_exc_count} task(s) failed; sample={type(_vector_exc_sample).__name__}: {_vector_exc_sample}")
         if isinstance(_bm25_result, Exception):
             logger.error(f"BM25 retrieval error: {_bm25_result}")
+
+        # ── Reciprocal Rank Fusion (recall booster, docs DBs) ────────────────
+        # Group-priority concatenation (below) lets a chunk ANY single retriever
+        # ranks high lead, even if every OTHER retriever buries it — so a one-list
+        # outlier can crowd the answer-bearing chunk out of the pool cap. RRF
+        # rewards CROSS-retriever agreement: a chunk that several per-query vector
+        # lists + BM25 + title search all rank decently scores above an outlier.
+        # Used ONLY to guarantee high-consensus chunks survive the cap into the
+        # cross-encoder (never to drop anything). C=60 is the canonical constant.
+        try:
+            _rrf_lists = [r for r in _main_results[:_bm25_idx] if not isinstance(r, Exception)]
+            _rrf_lists += [_bm25_raw, _bm25_title_raw, _outcomes_title_results]
+            for _lst in _rrf_lists:
+                for _rank, _d in enumerate(_lst or []):
+                    _kk = str(getattr(_d, "page_content", "") or "")[:100]
+                    if _kk:
+                        _rrf_scores[_kk] = _rrf_scores.get(_kk, 0.0) + 1.0 / (60 + _rank + 1)
+        except Exception:
+            pass
 
     # ── Product catalog: build combined list in priority order ────────────────
     # policy → BM25 (lexical exact match) → rescue (term-contains) → vector
@@ -3574,6 +3594,20 @@ async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansio
     else:
         _top_cap = (min(_cnt, 100) if _small_db_full_retrieval else 40)
         top = _combined_before_cap[:_top_cap]
+        # RRF recall guard (docs DBs): the heuristic sort can bury a chunk that
+        # every retriever agreed on past the cap. Splice the highest-consensus
+        # spilled chunks back in so the cross-encoder gets to judge them.
+        if (not (_has_product_meta or _is_product_db) and _rrf_scores
+                and len(_combined_before_cap) > _top_cap):
+            def _rk(d):
+                return _rrf_scores.get(str(getattr(d, "page_content", "") or "")[:100], 0.0)
+            _in_top = {str(getattr(d, "page_content", "") or "")[:100] for d in top}
+            _spill = sorted(_combined_before_cap[_top_cap:], key=_rk, reverse=True)
+            _add = [d for d in _spill
+                    if _rk(d) > 0 and str(getattr(d, "page_content", "") or "")[:100] not in _in_top][:8]
+            if _add:
+                top = top + _add
+                logger.info(f"[RRF] spliced {len(_add)} high-consensus docs into rerank pool")
         # Universal de-junk pass for docs/RAG queries: remove low-value chunk
         # CLASSES (flashcard/quiz scaffolds, 'Try With AI' exercises, intro hooks,
         # TOC listings) so the LLM grounds on the answer-bearing body chunk instead
