@@ -668,13 +668,27 @@ def _run_crawl_gate(db_name: str) -> dict:
             crawl_url = (get_config(db_name).get("crawl_url") or "").strip()
         except Exception:
             crawl_url = ""
-        rep = run_gate_for_db(db_name, str(DATABASES_DIR / db_name), crawl_url)
+        # Layer-3 (answer-quality quiz vs the live /chat) is the publish THRESHOLD:
+        # productionizes the customer-journey gate so a DB that crawls clean but
+        # answers wrong is QUARANTINED, not served. Self-query the serve app; layer3
+        # fail-opens (verdict only FAILs on a real <90% quiz, not infra/transient —
+        # see crawl_gate QUIZ_PASS_MIN + _ask retry). Skip if creds absent or opted out.
+        quiz_base, quiz_pw = "", ""
+        if not os.environ.get("GATE_SKIP_QUIZ"):
+            quiz_base = (os.environ.get("MODAL_WEB_BASE_URL", "") or "").rstrip("/")
+            quiz_pw = os.environ.get("ADMIN_PASSWORD", "") or ""
+            if not (quiz_base and quiz_pw):
+                quiz_base = ""  # no reachable self URL / creds → layer3 auto-skips
+        rep = run_gate_for_db(db_name, str(DATABASES_DIR / db_name), crawl_url,
+                              quiz_base=quiz_base, password=quiz_pw)
         l2 = rep.get("layer2") or {}
         gt = "" if l2.get("skipped") else f", coverage {(l2.get('coverage') or 0):.1%}, price_acc {(l2.get('price_accuracy') or 0):.1%}"
+        l3 = rep.get("layer3") or {}
+        qz = f", quiz {l3['passed']}/{l3['asked']}" if l3.get("asked") else ""
         if rep.get("verdict") == "PASS":
-            logger.info(f"[GATE] {db_name}: PASS ({rep['layer1']['chunks']} chunks{gt})")
+            logger.info(f"[GATE] {db_name}: PASS ({rep['layer1']['chunks']} chunks{gt}{qz})")
         else:
-            logger.warning(f"[GATE] {db_name}: {rep.get('verdict')}{gt} — " + "; ".join(rep.get("failures") or []))
+            logger.warning(f"[GATE] {db_name}: {rep.get('verdict')}{gt}{qz} — " + "; ".join(rep.get("failures") or []))
         return rep
     except Exception as e:
         logger.warning(f"[GATE] {db_name}: gate error: {e}")

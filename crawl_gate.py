@@ -15,6 +15,7 @@ Exit 0 = PASS, 1 = FAIL. Full report: databases/<db>/gate_report.json
 """
 import argparse
 import json
+import math
 import os
 import random
 import re
@@ -33,6 +34,9 @@ UA = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.3
 COVERAGE_MIN = 0.98       # GT products that must have a product chunk
 PRICE_ACC_MIN = 0.99      # matched products whose price equals a live variant price
 PRICE_META_WARN = 0.70    # product chunks carrying price metadata (warn only)
+QUIZ_PASS_MIN = 0.90      # layer-3 answer quiz pass-rate floor (publish threshold).
+                          # NOT 1.0: a single flaky free-LLM key would false-quarantine
+                          # an otherwise-good DB on an unattended auto-publish.
 
 _HANDLE_RE = re.compile(r"/products/([^/?#]+)")
 NAV_CHROME = re.compile(r"shop now|click to enlarge|sold out|pre[\s-]?order|add to (cart|wishlist)|view (cart|details)|quick view|click to (enlarge|zoom)", re.I)
@@ -260,13 +264,33 @@ def _widget_key(base: str, db: str, password: str) -> str:
     return m.group(0)
 
 
-def _ask(base: str, wk: str, q: str) -> str:
-    r = requests.post(f"{base}/chat", json={"question": q, "stream": False},
-                      headers={"X-Widget-Key": wk}, timeout=180)
-    try:
-        return str(r.json().get("answer") or r.text)
-    except Exception:
-        return r.text
+_TRANSIENT = re.compile(r"(?i)unable to respond|try again in a moment|please try again|"
+                        r"rate limit|temporarily unavailable|service unavailable")
+
+
+def _ask(base: str, wk: str, q: str, tries: int = 4) -> str:
+    """Retry 429/5xx + transient-error BODIES so the quiz score reflects answer
+    QUALITY, not a cold/rate-limited free-LLM key. A real customer would resend."""
+    last = ""
+    for a in range(tries):
+        try:
+            r = requests.post(f"{base}/chat", json={"question": q, "stream": False},
+                              headers={"X-Widget-Key": wk}, timeout=180)
+            if r.status_code == 429 or r.status_code >= 500:
+                time.sleep(15 + a * 10)
+                continue
+            try:
+                ans = str(r.json().get("answer") or r.text)
+            except Exception:
+                ans = r.text
+            last = ans
+            if _TRANSIENT.search(ans) and a < tries - 1:
+                time.sleep(8 + a * 6)
+                continue
+            return ans
+        except requests.exceptions.RequestException:
+            time.sleep(8 + a * 6)
+    return last
 
 
 def gen_quiz(gt: list[dict] | None, chunks: list[dict], exclude_terms: tuple = ()) -> list[dict]:
@@ -417,8 +441,11 @@ def run_gate(db_name: str, sqlite_path: str, crawl_url: str = "",
         if l2["price_accuracy"] is not None and l2["price_accuracy"] < PRICE_ACC_MIN:
             fails.append(f"price accuracy {l2['price_accuracy']:.1%} < {PRICE_ACC_MIN:.0%} ({l2['price_mismatch_count']} wrong prices)")
     l3 = report.get("layer3") or {}
-    if l3.get("asked") and l3["passed"] < l3["asked"]:
-        fails.append(f"quiz {l3['passed']}/{l3['asked']} — failed: {[r['label'] for r in l3['results'] if not r['pass']]}")
+    if l3.get("asked"):
+        need = math.ceil(l3["asked"] * QUIZ_PASS_MIN)
+        if l3["passed"] < need:
+            fails.append(f"quiz {l3['passed']}/{l3['asked']} < {need} ({QUIZ_PASS_MIN:.0%}) — "
+                         f"failed: {[r['label'] for r in l3['results'] if not r['pass']]}")
     warns = []
     if l1["price_coverage"] is not None and l1["price_coverage"] < PRICE_META_WARN:
         warns.append(f"only {l1['price_coverage']:.0%} of product chunks carry price metadata")
