@@ -662,6 +662,18 @@ def _edit_le(a: str, b: str, k: int) -> bool:
     return prev[lb] <= k
 
 
+def _one_transpose(a: str, b: str) -> bool:
+    """True iff b differs from a by exactly ONE adjacent transposition (same length).
+    Distinct from a substitution: 'cute'~'cuet' (swap) is True, 'card'~'cart' (sub) is
+    False — so short-word fuzz can recover an end-transposition typo without collapsing
+    two different real words."""
+    if len(a) != len(b) or a == b:
+        return False
+    diff = [i for i in range(len(a)) if a[i] != b[i]]
+    return (len(diff) == 2 and diff[1] == diff[0] + 1
+            and a[diff[0]] == b[diff[1]] and a[diff[1]] == b[diff[0]])
+
+
 def _fuzzy_in(tok: str, toks: list[str]) -> bool:
     """tok matches some word in toks within a length-scaled edit budget. Conservative
     on short words (where one edit flips a different real word, card↔cart): exact only
@@ -672,9 +684,10 @@ def _fuzzy_in(tok: str, toks: list[str]) -> bool:
             return True
         n = min(len(tok), len(u))
         # Keep four-letter substitutions exact (card/cart), but allow a single
-        # adjacent transposition with stable outer letters (crad/card).
-        if (n == 4 and len(tok) == len(u) and tok[0] == u[0] and tok[-1] == u[-1]
-                and _edit_le(tok, u, 1)):
+        # adjacent transposition anywhere — including the end (cute/cuet), which the
+        # old outer-stable rule rejected. _one_transpose excludes substitutions, so
+        # card/cart stay distinct.
+        if n == 4 and len(tok) == len(u) and _one_transpose(tok, u):
             return True
         k = 0 if n < 5 else (1 if n < 8 else 2)
         if k and _edit_le(tok, u, k):
