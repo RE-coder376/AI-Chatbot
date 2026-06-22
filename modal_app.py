@@ -242,9 +242,21 @@ def ingest_and_gate(db_name: str, url: str = ""):
     ingest↔gate live-store race (a product published between the two separate feed
     fetches showed up as a phantom 'missing' and failed an otherwise-perfect DB).
       modal run modal_app.py::ingest_and_gate --db-name stationery_studio
+
+    ENFORCED publish threshold: a FAIL verdict is ROLLED BACK — the pre-ingest DB
+    is restored (or a bad first ingest removed) and THAT good state is committed, so
+    a re-ingest that breaks chunk invariants / coverage / prices is never served.
+    Layer-3 (answer quiz) is intentionally NOT run here: it self-queries the SERVE
+    container, which cannot see THIS batch container's UNCOMMITTED ingest, so it
+    would grade stale data and could block a good re-ingest. Layer-1 (chunk
+    invariants) + layer-2 (coverage + live price diff) read the fresh local files
+    and are the meaningful, deterministic gate for an ingest. (The in-serve
+    auto-crawl path runs layer-3 because there the gate self-queries fresh data.)
     """
     _enter_app_dir()
     import json as _json
+    import shutil
+    import time as _time
     import app as chatbot
     from services import catalog_api
     from crawl_gate import run_gate_for_db
@@ -253,16 +265,32 @@ def ingest_and_gate(db_name: str, url: str = ""):
     chatbot.init_systems()
     if not url:
         url = (chatbot.get_config(db_name) or {}).get("crawl_url") or ""
-    web_base = os.environ.get("MODAL_WEB_BASE_URL", "https://re-coder376--ai-chatbot-serve.modal.run").rstrip("/")
-    password = os.environ.get("ADMIN_PASSWORD", "")
     db_dir = "/root/app/databases/" + db_name
+    backup_dir = f"{db_dir}_pregate_{int(_time.time())}"
+    had_prior = os.path.isdir(db_dir)
+    restored = False
+    ing = rep = None
     catalog_api.prime_feed_snapshot(True)  # ingest + gate share one feed fetch
     try:
+        if had_prior:
+            shutil.copytree(db_dir, backup_dir)  # snapshot last-good DB for rollback
         ing = chatbot.catalog_reingest_products(db_name, url, clear_products=True)
-        rep = run_gate_for_db(db_name, db_dir, url, quiz_base=web_base, password=password)
+        rep = run_gate_for_db(db_name, db_dir, url)  # layer1+2 on the FRESH local files
+        if rep.get("verdict") == "FAIL":
+            reasons = "; ".join(rep.get("failures") or [])[:300]
+            shutil.rmtree(db_dir, ignore_errors=True)
+            if had_prior:
+                shutil.move(backup_dir, db_dir)  # restore last-good DB
+                restored = True
+                print(f"[INGEST] {db_name} QUARANTINED — rolled back to pre-ingest DB, NOT published. {reasons}")
+            else:
+                print(f"[INGEST] {db_name} QUARANTINED — bad first ingest removed, NOT published. {reasons}")
+            rep["enforced"] = "quarantined"
+        vol.commit()  # persist: PASS=new ingest; FAIL=restored/removed (never the bad data)
     finally:
         catalog_api.prime_feed_snapshot(False)
-    vol.commit()  # persist ingested chunks + gate_report.json
+        if not restored and os.path.isdir(backup_dir):
+            shutil.rmtree(backup_dir, ignore_errors=True)
     print(f"[INGEST] {ing}")
     print("[GATE] verdict:\n" + _json.dumps(rep, indent=2, ensure_ascii=False)[:6000])
     return {"ingest": ing, "gate": rep}
