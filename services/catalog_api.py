@@ -285,12 +285,13 @@ def _extract_product_from_html(html: str, url: str) -> dict | None:
     from services.page_extract import _jsonld_text, _microdata_product
     name = price = 0
     cur_code = ""
+    struct_text = ""  # the structured block (JSON-LD/microdata) that carried the price
     try:
         ld_text, ld_name, ld_price = _jsonld_text(html)
     except Exception:
         ld_text, ld_name, ld_price = "", "", 0.0
     if ld_name and ld_price and ld_price > 0:
-        name, price = ld_name, float(ld_price)
+        name, price, struct_text = ld_name, float(ld_price), ld_text
         m = re.search(r"priceCurrency[\"'\s:]+([A-Z]{3})", ld_text) or re.search(r"\b([A-Z]{3})\b", ld_text)
         cur_code = m.group(1) if m else ""
     if not (name and price):
@@ -302,8 +303,13 @@ def _extract_product_from_html(html: str, url: str) -> dict | None:
             name, price, cur_code = md_name, float(md_price), (md_cur or "")
     if not name or not price or price <= 0:
         return None
+    # Prefer the product's OWN structured availability (schema.org/InStock|OutOfStock|
+    # SoldOut|PreOrder|BackOrder) over a page-wide text scan, which false-matches
+    # hidden JS toggle labels and related-product cards (marked an in-stock item OOS).
     avail = "available"
-    if re.search(r"(?i)(out\s*of\s*stock|sold\s*out|OutOfStock|currently\s+unavailable)", html):
+    if struct_text and re.search(r"(?i)(out\s*of\s*stock|sold\s*out|backorder|discontinued)", struct_text):
+        avail = "out of stock"
+    elif not struct_text and re.search(r"(?i)(out\s*of\s*stock|sold\s*out|OutOfStock|currently\s+unavailable)", html):
         avail = "out of stock"
     return {"title": re.sub(r"\s+", " ", name).strip(), "price": price,
             "availability": avail, "currency_code": (cur_code or "").upper(),
