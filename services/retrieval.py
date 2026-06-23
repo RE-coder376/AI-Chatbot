@@ -2351,6 +2351,18 @@ def _cap_keep_query(queries: list, n: int, original: str) -> list:
 
 
 async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansion_task=None, history: list = None) -> tuple:
+    """Timing wrapper over the retrieval impl. Logs [RETRIEVE_MS] per call so the
+    chat-latency split (local CPU retrieval vs LLM wait) is observable in production:
+    llm_ms ≈ ACCESS total_ms − Σ[RETRIEVE_MS]. Confirms whether latency is CPU- or
+    LLM-bound without guessing (the #3 'compute cost' decision)."""
+    _t0 = time.perf_counter()
+    try:
+        return await _retrieve_context_impl(q, db, k=k, fast=fast, expansion_task=expansion_task, history=history)
+    finally:
+        logger.info(f"[RETRIEVE_MS] {int((time.perf_counter() - _t0) * 1000)}ms fast={fast} q={(q or '')[:40]!r}")
+
+
+async def _retrieve_context_impl(q: str, db, k: int = 25, fast: bool = False, expansion_task=None, history: list = None) -> tuple:
     """Multilingual Retrieval: Handles English and Urdu in the same vector space.
     Returns (context_text, doc_count, sources) so callers can cite sources.
     fast=True skips the LLM expansion step (used for sub-queries in multi-part decomposition)."""
