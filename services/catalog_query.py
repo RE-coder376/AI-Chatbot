@@ -203,6 +203,17 @@ def parse(q: str) -> Spec:
     from the question. Each dimension is detected independently, so any
     combination composes — that is what makes the engine universal."""
     ql = (q or "").lower()
+    # Normalize texting abbreviations BEFORE intent detection. These were only in
+    # _STOP (anchor removal), so "do u hv X" kept the right anchors but the intent
+    # regexes (which look for literal "have"/"you") never fired → the whole query
+    # fell through to RAG. Expanding the verbs here routes SMS-speak ("do u hv",
+    # "wat do u sell", "u got any") to the catalog engine like its spelled-out twin.
+    ql = re.sub(r"\b(u|ur|hv|hav|pls|plz|wat|wats|abt|thru|coz|cuz|wanna|gimme|lemme|gud|gng)\b",
+                lambda m: {"u": "you", "ur": "your", "hv": "have", "hav": "have",
+                           "pls": "please", "plz": "please", "wat": "what", "wats": "whats",
+                           "abt": "about", "thru": "through", "coz": "because", "cuz": "because",
+                           "wanna": "want to", "gimme": "give me", "lemme": "let me",
+                           "gud": "good", "gng": "going"}[m.group(0)], ql)
 
     # Comparisons ("compare A and B", "X vs Y") are NOT a single structured
     # aggregation — they need the retrieval fan-out (which matches each named
