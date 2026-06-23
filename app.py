@@ -839,14 +839,64 @@ def _db_chat_limits(db_name: str) -> tuple[int, int]:
     return rpm, daily
 
 
+_global_daily_handle = None   # None=untried, False=unavailable, else a modal.Dict
+_global_daily_pruned_day = ""  # last UTC day this container pruned the global Dict
+
+def _global_daily_dict():
+    """Shared cross-container daily-budget store (modal.Dict), or False if unavailable
+    (local dev / HF / no Modal runtime). Resolved once and cached for the container's life.
+    Backs check_daily_budget so the per-client ceiling is enforced GLOBALLY across all
+    autoscaled containers, not per-container."""
+    global _global_daily_handle
+    if _global_daily_handle is None:
+        # MODAL_TASK_ID is set in every Modal container; absent on HF/local, where we
+        # skip the lookup entirely so non-Modal runtimes don't retry a failing import per request.
+        if not os.environ.get("MODAL_TASK_ID"):
+            _global_daily_handle = False
+            return _global_daily_handle
+        try:
+            import modal
+            _global_daily_handle = modal.Dict.from_name(
+                "ai-chatbot-daily-budget", create_if_missing=True)
+        except Exception:
+            _global_daily_handle = False  # tried, unavailable — use in-memory fallback
+    return _global_daily_handle
+
+
+def _prune_global_daily(gd, day: str) -> None:
+    """Drop stale day-keys from the global Dict — once per UTC day per container."""
+    global _global_daily_pruned_day
+    if _global_daily_pruned_day == day:
+        return
+    _global_daily_pruned_day = day
+    try:
+        for kk in list(gd.keys()):
+            if not str(kk).startswith(day):
+                gd.pop(kk, None)
+    except Exception:
+        pass
+
+
 def check_daily_budget(db_name: str) -> bool:
     """Per-client daily request ceiling — the fairness guard protecting the shared
-    LLM pool. True if under budget. NOTE: in-memory per-container; under Modal
-    autoscale a flood spread across N containers gets ~N× this. For hard global
-    enforcement, back this with modal.Dict (see SCALING_NOTES)."""
+    LLM pool. True if under budget. Backed by modal.Dict for GLOBAL enforcement across
+    autoscaled containers; falls back to an in-memory per-container counter when Modal
+    is unavailable. The get→put increment is intentionally non-atomic: a tiny race under
+    heavy concurrency lets a few extra through, acceptable for an abuse ceiling (not billing)."""
     _, daily = _db_chat_limits(db_name)
     day = time.strftime("%Y%m%d", time.gmtime())
     k = f"{day}:{db_name}"
+    gd = _global_daily_dict()
+    if gd:
+        try:
+            n = int(gd.get(k, 0) or 0)
+            if n >= daily:
+                return False
+            gd[k] = n + 1
+            _prune_global_daily(gd, day)
+            return True
+        except Exception:
+            pass  # Modal hiccup — fail open to the local counter below (still bounded per container)
     with _rate_lock:
         if len(_db_chat_daily) > 5000:
             for kk in [x for x in _db_chat_daily if not x.startswith(day)]:
