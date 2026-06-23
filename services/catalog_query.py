@@ -37,7 +37,13 @@ _STOP = {
     "below", "less", "than", "within", "max", "maximum", "minimum", "min", "over", "above",
     "more", "greater", "between", "up", "starting", "rs", "pkr", "rupees", "rupee", "dollar",
     "dollars", "currently", "entire", "whole", "absolute", "absolutely", "overall", "anything",
-    "everything", "sale", "best", "top", "good", "quality", "options", "option", "can", "could",
+    "everything",
+    # indefinite pronouns — a closed grammatical class, never a product anchor
+    # ("show me SOMETHING between 600-800" must list the range, not search for a
+    # product literally named "something"). anything/everything were here; the rest
+    # of the class (something/nothing/someone/...) were the gap.
+    "something", "somethin", "sumthin", "nothing", "someone", "anyone", "everyone", "none",
+    "sale", "best", "top", "good", "quality", "options", "option", "can", "could",
     "would", "buy", "get", "from", "want", "need", "needed", "looking", "find", "please", "name",
     "actually", "right", "now", "among", "only", "ignoring", "ignore", "excluding", "exclude", "except",
     "out", "im",
@@ -694,11 +700,12 @@ def _fuzzy_in(tok: str, toks: list[str]) -> bool:
         if u == tok:
             return True
         n = min(len(tok), len(u))
-        # Keep four-letter substitutions exact (card/cart), but allow a single
-        # adjacent transposition anywhere — including the end (cute/cuet), which the
-        # old outer-stable rule rejected. _one_transpose excludes substitutions, so
-        # card/cart stay distinct.
-        if n == 4 and len(tok) == len(u) and _one_transpose(tok, u):
+        # A single adjacent transposition is the most common typo ("cuet"→"cute",
+        # "Candels"→"Candles", "Hamzasotrepk"→"Hamzastorepk") and counts as ONE edit
+        # at ANY length — plain Levenshtein scores it as 2, so the k-budget (1 for
+        # 5-7 chars) would wrongly reject mid-length transpositions. _one_transpose
+        # excludes substitutions, so 4-char near-pairs (card/cart) stay distinct.
+        if len(tok) == len(u) and _one_transpose(tok, u):
             return True
         k = 0 if n < 5 else (1 if n < 8 else 2)
         if k and _edit_le(tok, u, k):
