@@ -841,6 +841,7 @@ def _db_chat_limits(db_name: str) -> tuple[int, int]:
 
 _global_daily_handle = None   # None=untried, False=unavailable, else a modal.Dict
 _global_daily_pruned_day = ""  # last UTC day this container pruned the global Dict
+_self_cid = os.environ.get("MODAL_TASK_ID", "local")  # this container's stable shard id
 
 def _global_daily_dict():
     """Shared cross-container daily-budget store (modal.Dict), or False if unavailable
@@ -863,48 +864,55 @@ def _global_daily_dict():
     return _global_daily_handle
 
 
-def _prune_global_daily(gd, day: str) -> None:
-    """Drop stale day-keys from the global Dict — once per UTC day per container."""
-    global _global_daily_pruned_day
-    if _global_daily_pruned_day == day:
-        return
-    _global_daily_pruned_day = day
-    try:
-        for kk in list(gd.keys()):
-            if not str(kk).startswith(day):
-                gd.pop(kk, None)
-    except Exception:
-        pass
-
-
 def check_daily_budget(db_name: str) -> bool:
-    """Per-client daily request ceiling — the fairness guard protecting the shared
-    LLM pool. True if under budget. Backed by modal.Dict for GLOBAL enforcement across
-    autoscaled containers; falls back to an in-memory per-container counter when Modal
-    is unavailable. The get→put increment is intentionally non-atomic: a tiny race under
-    heavy concurrency lets a few extra through, acceptable for an abuse ceiling (not billing)."""
+    """Per-client daily request ceiling — the fairness guard protecting the shared LLM pool.
+    True if under budget.
+
+    GLOBAL across autoscaled containers via a SHARDED (G-Counter) modal.Dict: each container
+    owns exactly one key per client/day ("day:db:container_id") that ONLY IT writes, so no
+    increment is ever lost to a cross-container race (the flaw of a single shared counter —
+    concurrent get→put collapse it and the cap never trips). The budget = SUM of all shards.
+    Overshoot is bounded by the live container count (each may slip ~1 between summing and
+    writing), never the unbounded leak of per-container counting or a raced single counter.
+    Falls back to an in-memory per-container counter when Modal is unavailable."""
     _, daily = _db_chat_limits(db_name)
     day = time.strftime("%Y%m%d", time.gmtime())
-    k = f"{day}:{db_name}"
     gd = _global_daily_dict()
     if gd:
         try:
-            n = int(gd.get(k, 0) or 0)
-            if n >= daily:
-                return False
-            gd[k] = n + 1
-            _prune_global_daily(gd, day)
+            prefix = f"{day}:{db_name}:"    # all shards for this client today
+            own_key = prefix + _self_cid
+            others, stale = 0, []           # sum of OTHER containers' shards (read-only here)
+            for kk, vv in gd.items():
+                ks = str(kk)
+                if ks.startswith(prefix):
+                    if ks != own_key:
+                        others += int(vv or 0)
+                elif not ks.startswith(day):
+                    stale.append(kk)        # opportunistic prune of other days
+            # Own shard is kept EXACT in lock-protected local memory so the many
+            # concurrent requests inside THIS container can't lose increments either.
+            with _rate_lock:
+                own = _db_chat_daily.get(own_key, 0)
+                if others + own >= daily:
+                    return False
+                own += 1
+                _db_chat_daily[own_key] = own
+            gd[own_key] = own               # single-writer key — publish our exact count
+            for kk in stale:
+                gd.pop(kk, None)
             return True
         except Exception:
             pass  # Modal hiccup — fail open to the local counter below (still bounded per container)
+    day_db = f"{day}:{db_name}"
     with _rate_lock:
         if len(_db_chat_daily) > 5000:
             for kk in [x for x in _db_chat_daily if not x.startswith(day)]:
                 _db_chat_daily.pop(kk, None)
-        n = _db_chat_daily.get(k, 0)
+        n = _db_chat_daily.get(day_db, 0)
         if n >= daily:
             return False
-        _db_chat_daily[k] = n + 1
+        _db_chat_daily[day_db] = n + 1
         return True
 
 
