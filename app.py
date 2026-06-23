@@ -798,6 +798,17 @@ _queued_crawls: set = set()  # DBs that have been scheduled but not yet started 
 _manual_crawl_active: str = ""  # db_name of the currently running manual crawl, if any
 _tenant_restore_inflight: set = set()  # db_names where self-heal restore has been triggered
 _source_alive_cache: dict = {}  # url -> (alive:bool, ts:float)
+_db_chat_daily: dict = {}   # "YYYYMMDD:db" -> count — per-client daily request budget
+_db_limit_cache: dict = {}  # db -> (rpm, daily, cached_at) — avoids a disk read per request
+
+# Multi-tenant chat throughput. The per-DB *minute* limit must be high enough that
+# many real users of ONE client messaging at once aren't wrongly rejected; the per-DB
+# *daily* budget is the fairness/abuse ceiling that stops a single client (or a flood)
+# from draining the SHARED free-tier LLM key pool and starving every other client.
+# Both are overridable per client via config (chat_rpm_limit / chat_daily_limit) so a
+# premium tenant can be raised without touching code.
+DEFAULT_CHAT_RPM = 60      # was a flat 10 — collapsed under concurrent users
+DEFAULT_CHAT_DAILY = 5000  # generous for a pilot; the abuse ceiling per client
 
 def check_rate_limit(ip: str, store: dict, limit: int, window: int = 60) -> bool:
     now = time.time()
@@ -808,6 +819,42 @@ def check_rate_limit(ip: str, store: dict, limit: int, window: int = 60) -> bool
         if len(dq) >= limit:
             return False
         dq.append(now)
+        return True
+
+
+def _db_chat_limits(db_name: str) -> tuple[int, int]:
+    """Per-client (req/min, req/day) chat limits from DB config, cached 60s."""
+    now = time.time()
+    c = _db_limit_cache.get(db_name)
+    if c and now - c[2] < 60:
+        return c[0], c[1]
+    rpm, daily = DEFAULT_CHAT_RPM, DEFAULT_CHAT_DAILY
+    try:
+        cfg = get_config(db_name) or {}
+        rpm = int(cfg.get("chat_rpm_limit") or DEFAULT_CHAT_RPM)
+        daily = int(cfg.get("chat_daily_limit") or DEFAULT_CHAT_DAILY)
+    except Exception:
+        pass
+    _db_limit_cache[db_name] = (rpm, daily, now)
+    return rpm, daily
+
+
+def check_daily_budget(db_name: str) -> bool:
+    """Per-client daily request ceiling — the fairness guard protecting the shared
+    LLM pool. True if under budget. NOTE: in-memory per-container; under Modal
+    autoscale a flood spread across N containers gets ~N× this. For hard global
+    enforcement, back this with modal.Dict (see SCALING_NOTES)."""
+    _, daily = _db_chat_limits(db_name)
+    day = time.strftime("%Y%m%d", time.gmtime())
+    k = f"{day}:{db_name}"
+    with _rate_lock:
+        if len(_db_chat_daily) > 5000:
+            for kk in [x for x in _db_chat_daily if not x.startswith(day)]:
+                _db_chat_daily.pop(kk, None)
+        n = _db_chat_daily.get(k, 0)
+        if n >= daily:
+            return False
+        _db_chat_daily[k] = n + 1
         return True
 
 
@@ -3228,8 +3275,10 @@ async def rate_and_error_middleware(request: Request, call_next):
     path = request.url.path
     try:
         if path == "/chat":
-            if not check_rate_limit(ip, _chat_rate, limit=20):
-                return JSONResponse({"detail": "Too many requests. Slow down."}, status_code=429)
+            # Per-IP guard = anti-spam from ONE user (a human won't send 30/min).
+            if not check_rate_limit(ip, _chat_rate, limit=30):
+                return JSONResponse({"detail": "Too many requests. Slow down."},
+                                    status_code=429, headers={"Retry-After": "10"})
             try:
                 wk = (request.headers.get("X-Widget-Key", "") or "").strip()
                 if wk and wk not in ("null", "undefined"):
@@ -3239,10 +3288,19 @@ async def rate_and_error_middleware(request: Request, call_next):
                     db_bucket = _get_active_db() or "default"
             except Exception:
                 db_bucket = "default"
-            if not check_rate_limit(f"db:{db_bucket}", _db_chat_rate, limit=10):
+            _rpm, _ = _db_chat_limits(db_bucket)
+            # Per-client minute limit — sized so many concurrent users of one client
+            # pass; client-configurable. Retry-After lets the widget back off + retry.
+            if not check_rate_limit(f"db:{db_bucket}", _db_chat_rate, limit=_rpm):
                 return JSONResponse(
-                    {"answer": "Too many questions right now for this assistant. Please try again in one minute."},
-                    status_code=429,
+                    {"answer": "We're getting a lot of messages at once — please resend in a few seconds."},
+                    status_code=429, headers={"Retry-After": "5"},
+                )
+            # Per-client DAILY budget — fairness/abuse ceiling for the shared LLM pool.
+            if not check_daily_budget(db_bucket):
+                return JSONResponse(
+                    {"answer": "This assistant has reached its message limit for today. Please try again tomorrow."},
+                    status_code=429, headers={"Retry-After": "3600"},
                 )
         elif path.startswith("/admin") or path.startswith("/debug"):
             if not check_rate_limit(ip, _admin_rate, limit=30):  # 30 req/min per IP

@@ -18,6 +18,14 @@ term is only excluded when the user did not explicitly ask for it.
 from __future__ import annotations
 
 import re
+import time
+
+# Per-DB parsed-row cache. load_rows() does a FULL Chroma scan + parse on every
+# query, which serializes badly under concurrent multi-user load. Cache the parsed
+# rows keyed on (collection, row-count): a re-ingest changes the count → auto-refresh;
+# otherwise reuse for _ROW_CACHE_TTL. Rows are read-only downstream, so sharing is safe.
+_ROW_CACHE: dict = {}
+_ROW_CACHE_TTL = 300.0
 from dataclasses import dataclass, field
 
 # Universal question scaffolding — these words are never product-category anchors.
@@ -390,10 +398,19 @@ def parse(q: str) -> Spec:
 def load_rows(db, limit: int = 12000) -> list[Row]:
     """One full scan of the product rows — deduped by normalized title. Prices come
     from structured metadata or a labeled 'Price:' line only (never a body-text
-    scan, which manufactures phantom prices from model numbers)."""
+    scan, which manufactures phantom prices from model numbers). Result is cached
+    per-DB keyed on row count (auto-invalidates after a re-ingest)."""
     try:
         total = min(int(db._collection.count() or 0), limit)
-        raw = db._collection.get(limit=total, include=["documents", "metadatas"])
+    except Exception:
+        total = -1
+    _ck = getattr(getattr(db, "_collection", None), "name", None) or id(db)
+    _now = time.time()
+    _hit = _ROW_CACHE.get(_ck)
+    if _hit is not None and _hit[1] == total and (_now - _hit[2]) < _ROW_CACHE_TTL:
+        return _hit[0]
+    try:
+        raw = db._collection.get(limit=max(total, 0), include=["documents", "metadatas"])
     except Exception:
         return []
     rows: list[Row] = []
@@ -503,6 +520,7 @@ def load_rows(db, limit: int = 12000) -> list[Row]:
             if not prev.cats and cats_l:
                 prev.cats = cats_l
                 prev.hay = " ".join([prev.title.lower(), cats_l])
+    _ROW_CACHE[_ck] = (rows, total, _now)
     return rows
 
 
