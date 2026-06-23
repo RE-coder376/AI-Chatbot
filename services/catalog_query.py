@@ -869,6 +869,17 @@ _PRODUCTISH = re.compile(
     r'carry|carries|available|availability|sell|sells|which|compare|versus|vs\.?|'
     r'than|set\s+of|pack\s+of|do\s+you\s+have|in\s+stock)\b', re.I)
 
+# Greeting / smalltalk that is never a catalog question — used to skip the LLM
+# router for trivial turns so the understanding layer fires on everything ELSE
+# without us hand-coding a surface regex per new phrasing (SMS-speak, pronouns,
+# price-ranges). The router itself returns "other" for any non-catalog question,
+# so a missed skip is harmless (falls through to RAG), just one wasted call.
+_ROUTER_SKIP = re.compile(
+    r'^\s*(hi|hey+|hello|yo|sup|as?salaa?m\w*|salaa?m\w*|'
+    r'thanks?|thank\s+you|thx|ty|ok(?:ay)?|cool|nice|great|'
+    r'good\s+(?:morning|evening|afternoon|day)|bye|goodbye|see\s+ya|'
+    r'how\s+are\s+you|who\s+are\s+you|what\s+can\s+you\s+do)\b[\s!.?]*$', re.I)
+
 
 def _anchors_from(text: str) -> list:
     return [w for w in re.findall(r"[a-z0-9]{2,}", (text or "").lower()) if w not in _STOP][:8]
@@ -934,7 +945,7 @@ def _plan_to_specs(plan: dict) -> tuple[dict | None, "Spec | None"]:
         if not names:
             return None, None
         return None, Spec("exists", _anchors_from(names[0]), pmin, pmax, in_stock)
-    if kind in ("lookup", "filter"):
+    if kind in ("lookup", "filter", "browse"):
         anch = _anchors_from(names[0] if names else (plan.get("category") or ""))
         if not anch and pmin is None and pmax is None:
             return None, None
@@ -957,12 +968,16 @@ def answer_catalog_query(q: str, db, cfg: dict | None = None, max_list: int = 12
         spec = parse(q)
         mp = _parse_multi(q)
         rows = None
+        _from_router = False
         if not spec.structured and not mp:
-            # Deterministic router declined. Fire the LLM extractor only when the
-            # question is plausibly about products (coarse signal — the LLM still does
-            # the precise classification), so policy/greeting questions don't pay for
-            # an extra call.
-            if not _PRODUCTISH.search(q):
+            # Deterministic router declined. Fire the LLM extractor on ANY non-trivial
+            # question (not just ones matching a surface product-keyword regex) so
+            # unusual phrasings — SMS-speak, pronoun ranges, paraphrase — are understood
+            # by the LLM instead of needing a new hand-coded regex per phrasing. The
+            # router returns "other" for genuine non-catalog questions (safe → RAG), so
+            # we only skip the obvious greetings/smalltalk to avoid a wasted call.
+            _wc = len((q or "").split())
+            if not _PRODUCTISH.search(q) and (_wc < 2 or _wc > 30 or _ROUTER_SKIP.match(q)):
                 return None, []
             rows = load_rows(db)
             if not rows or not is_catalog_db(db, rows, cfg):
@@ -977,11 +992,18 @@ def answer_catalog_query(q: str, db, cfg: dict | None = None, max_list: int = 12
                 plan = _ground_plan(extract_plan(q) or heuristic_plan(q), q)
             except Exception:
                 plan = None
-            if not plan or plan.get("kind") in (None, "browse", "other"):
+            # "browse" ("what do you sell") falls through to RAG UNLESS it carries a
+            # price bound ("something under 2000") — then it's a real filter the engine
+            # can answer deterministically, so a price-range phrasing no longer needs a
+            # bespoke regex.
+            _k = plan.get("kind") if plan else None
+            _has_bound = bool(plan) and (plan.get("price_min") is not None or plan.get("price_max") is not None)
+            if not plan or _k in (None, "other") or (_k == "browse" and not _has_bound):
                 return None, []
             mp, spec = _plan_to_specs(plan)
             if mp is None and (spec is None or not getattr(spec, "structured", False)):
                 return None, []
+            _from_router = True
         if rows is None:
             rows = load_rows(db)
             if not rows:
@@ -995,12 +1017,13 @@ def answer_catalog_query(q: str, db, cfg: dict | None = None, max_list: int = 12
         # or hand to RAG; never a single-product dump masquerading as a comparison.
         if mp:
             return _answer_multi(mp, rows) or (None, [])
-        return _execute_spec(spec, rows, cfg, max_list)
+        return _execute_spec(spec, rows, cfg, max_list, from_router=_from_router)
     except Exception:
         return None, []
 
 
-def _execute_spec(spec: "Spec", rows: list[Row], cfg: dict | None, max_list: int) -> tuple[str | None, list[str]]:
+def _execute_spec(spec: "Spec", rows: list[Row], cfg: dict | None, max_list: int,
+                  from_router: bool = False) -> tuple[str | None, list[str]]:
     """Deterministic execution of a (filter + aggregation) spec against the rows."""
     try:
         excl = _excl_re(cfg, spec.anchors)
@@ -1093,6 +1116,13 @@ def _execute_spec(spec: "Spec", rows: list[Row], cfg: dict | None, max_list: int
                     pr = f" (normally {_price_s(o.price, o.currency)})" if o.price is not None else ""
                     return (f"We do carry {o.title}{pr}, but it's currently out of stock. "
                             f"Would you like me to suggest similar in-stock options?"), _dedup(r.source for r in _oos)[:max_list]
+                # Router-sourced plan that resolved to nothing = LOW CONFIDENCE (a weak
+                # LLM may have mis-classified a policy/shipping/smalltalk question as a
+                # product existence query). Abstain to RAG instead of asserting a
+                # hardcoded "we don't carry X" — never confidently wrong on a guess.
+                # The high-precision regex parser keeps its crisp negative.
+                if from_router:
+                    return None, []
                 if spec.agg == "exists":
                     return (f"No — we don't currently carry any {label}. I couldn't find any "
                             f"in our catalog. Is there something else I can help you find?"), []
