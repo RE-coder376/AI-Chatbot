@@ -450,7 +450,18 @@ def load_rows(db, limit: int = 12000) -> list[Row]:
             cur = sym if sym in ("$", "£", "€") else "Rs."
         avail = str(meta.get("availability") or "").strip().lower()
         if not avail:
-            avail = "out of stock" if re.search(r"(?i)\b(out of stock|sold out|currently unavailable)\b", doc) else "available"
+            # Prefer the chunk's structured schema.org marker ("Avail: InStock/
+            # OutOfStock") over a loose body scan, which false-flags a product OOS
+            # on any stray "out of stock" (variant badge / related-product card).
+            am = re.search(r"(?i)\bavail(?:ability)?:\s*(\S+)", doc)
+            if am:
+                tok = am.group(1).lower()
+                if re.search(r"outofstock|out[_\s]?of[_\s]?stock|soldout|sold[_\s]?out|discontinued|backorder", tok):
+                    avail = "out of stock"
+                elif re.search(r"instock|in[_\s]?stock|preorder|pre[_\s-]?order|available", tok):
+                    avail = "available"
+            if not avail:
+                avail = "out of stock" if re.search(r"(?i)\b(out of stock|sold out|currently unavailable)\b", doc) else "available"
         # Membership matches title + curated categories only — NOT the body
         # description. A prose mention ("pairs well with our sharpener") must not
         # count an unrelated product into the "sharpener" category.

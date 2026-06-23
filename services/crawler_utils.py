@@ -689,10 +689,25 @@ def _extract_product_summary(text: str, url: str, title_hint: str = "", authorit
                 price_num = None
                 used_structured_fields.remove("price")
     avail = ""
-    am = _PRODUCT_AVAIL_RE.search(body)
-    if am:
-        avail = am.group(1).strip()
-        used_structured_fields.append("availability")
+    # Authoritative: the product's OWN schema.org availability emitted by structured
+    # extraction ("Avail: .../InStock", "Availability: .../OutOfStock"). camelCase
+    # InStock has no space, so the loose phrase scan below can't see it — and would
+    # otherwise grab the FIRST stray "Out of Stock" on the page (a variant badge or a
+    # JS-rendered related-product card), mis-flagging an in-stock product as OOS.
+    sm = re.search(r'(?i)\bavail(?:ability)?:\s*(\S+)', body)
+    if sm:
+        tok = sm.group(1).lower()
+        if re.search(r'outofstock|out[_\s]?of[_\s]?stock|soldout|sold[_\s]?out|discontinued|backorder', tok):
+            avail = "out of stock"
+        elif re.search(r'instock|in[_\s]?stock|preorder|pre[_\s-]?order|available', tok):
+            avail = "available"
+        if avail:
+            used_structured_fields.append("availability")
+    if not avail:
+        am = _PRODUCT_AVAIL_RE.search(body)
+        if am:
+            avail = am.group(1).strip()
+            used_structured_fields.append("availability")
     desc = ""
     dm = re.search(r'(?i)\bdescription:\s*([^\n]{20,600})', body)
     if not dm:

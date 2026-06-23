@@ -81,7 +81,7 @@ def _jsonld_text(html: str) -> tuple[str, str, float]:
                         if _opv > 0:
                             parts.append('Price: ' + str(o['price']) + ' ' + str(o.get('priceCurrency', '')))
                     if o.get('availability'):
-                        parts.append('Avail: ' + str(o['availability']).replace('http://schema.org/', ''))
+                        parts.append('Avail: ' + re.sub(r'(?i)https?://schema\.org/', '', str(o['availability'])))
                 if obj.get('brand') and isinstance(obj['brand'], dict):
                     if obj['brand'].get('name'):
                         parts.append('Brand: ' + obj['brand']['name'])
