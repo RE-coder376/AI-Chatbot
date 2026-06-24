@@ -314,6 +314,12 @@
           let data;
           try { data = JSON.parse(line.substring(6)); } catch { continue; }
 
+          if (data.type === 'reset') {
+            // Server replacing live-streamed text (validator rewrite or LLM retry).
+            fullAnswer = '';
+            if (bubble) bubble.innerHTML = '';
+            continue;
+          }
           if (data.type === 'chunk') {
             if (!bubble) {
               document.getElementById(typingId)?.remove();

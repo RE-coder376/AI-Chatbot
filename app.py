@@ -5329,6 +5329,13 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
     response_buffer = []
     success = False
     _tried_providers = set()
+    # Live token streaming: emit LLM tokens to the client as they generate so the
+    # first word appears in ~1-2s instead of after the full answer + validators.
+    # ONLY for non-product DBs — product answers (price/stock/named-product) pass
+    # through rewriting validators where a flashed-then-corrected wrong price would
+    # be worse than a short wait, so those keep buffering. If a validator rewrites a
+    # streamed answer, we emit a `reset` then the corrected text (see final emit).
+    _stream_live = not is_product_db
     for attempt in range(max_retries):
         llm = get_fresh_llm(avoid_providers=_tried_providers)
         if not llm:
@@ -5346,12 +5353,17 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
             _prov_name = str(getattr(llm, "_provider_name", "") or getattr(llm, "provider", "") or "")
             _model_name = str(getattr(llm, "_model_name", "") or getattr(llm, "model_name", "") or "")
             _trace_event(workflow_trace, "llm_attempt", attempt=attempt + 1, provider=_prov_name, model=_model_name, timeout_s=_attempt_timeout_s)
+            # Clear any partial text streamed by a prior failed attempt before re-streaming.
+            if _stream_live and attempt > 0:
+                yield "data: {\"type\": \"reset\"}\n\n"
             async with asyncio.timeout(_attempt_timeout_s):  # Hard kill — faster failover on strict scoped queries
                 async for chunk in llm.astream(messages):
                     if request and await request.is_disconnected():
                         logger.info("Client disconnected mid-stream — aborting LLM call")
                         return
                     response_buffer.append(chunk.content)
+                    if _stream_live and chunk.content:
+                        yield f"data: {json.dumps({'type': 'chunk', 'content': chunk.content})}\n\n"
             success = True
             _trace_event(workflow_trace, "llm_attempt_result", attempt=attempt + 1, success=True)
             _trace_decision(workflow_debug, "llm_attempt_count", attempt + 1)
@@ -5499,7 +5511,15 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
                     cleaned = _resc
 
         if visitor_id: _run_in_bg(save_visitor_turn, visitor_id, "assistant", cleaned, db_name)
-        yield f"data: {json.dumps({'type': 'chunk', 'content': cleaned})}\n\n"
+        # If we streamed tokens live and no validator rewrote the answer, the client
+        # already has the full text — don't re-emit. If a validator DID change it,
+        # reset the streamed text and send the corrected version.
+        if _stream_live and cleaned == "".join(response_buffer):
+            pass
+        else:
+            if _stream_live:
+                yield "data: {\"type\": \"reset\"}\n\n"
+            yield f"data: {json.dumps({'type': 'chunk', 'content': cleaned})}\n\n"
         # Suppress sources and log gap if LLM indicated it doesn't have the info.
         # Only classify IDK if the signal appears early (< 80 chars) or answer is very short.
         # Avoids collapsing grounded answers that mention one missing detail at the end.
@@ -5557,6 +5577,9 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
         _trace_event(workflow_trace, "guard_exit", guard="llm_all_attempts_failed")
         _trace_decision(workflow_debug, "exit_guard", "llm_all_attempts_failed")
         _trace_decision(workflow_debug, "llm_success", False)
+        # Clear any partial tokens streamed live before all attempts failed.
+        if _stream_live and response_buffer:
+            yield "data: {\"type\": \"reset\"}\n\n"
         if _is_strict_scope_query(q) and context:
             try:
                 _det_scoped = try_extract_outcomes_answer(q, context, debug=workflow_debug.get("answer_artifacts"))
@@ -9642,7 +9665,10 @@ async def _runtime_chunk_seed_items(tenant_db, db_name: str, desired_count: int,
             topic = _eval_v1._extract_chunk_topic(preview, source)
             if not topic:
                 continue
-            question = _eval_v1._make_chunk_question(topic, preview)
+            if _re.search(r"(?i)\bproduct:\s*", preview[:500]) and _re.search(r"(?i)\b(price|pricing|rs\.?|pkr|[$£€])\b", preview[:800]):
+                question = f"What is the pricing for {topic}?"
+            else:
+                question = _eval_v1._make_chunk_question(topic, preview)
             if not question:
                 continue
             if runtime_scope_tokens and not (
@@ -9797,7 +9823,10 @@ async def _eval_answer_via_stream(q: str, cfg: dict, tenant_db, db_name: str) ->
                     obj = json.loads(payload)
                 except Exception:
                     continue
-                if obj.get("type") == "chunk":
+                if obj.get("type") == "reset":
+                    # Live-streamed text was superseded (validator rewrite / LLM retry).
+                    answer_parts.clear()
+                elif obj.get("type") == "chunk":
                     answer_parts.append(str(obj.get("content", "")))
                 elif obj.get("type") == "metadata":
                     srcs = obj.get("sources") or []
@@ -10259,7 +10288,11 @@ async def admin_run_evals(request: Request):
                 row["answer_status"] = "PASS" if row["checks"]["answer"] else "FAIL"
 
         if row["checks"].get("retrieval") is False:
-            row["diagnosis"] = "retrieval_incomplete" if row["retrieve"].get("metrics", {}).get("context_recall", 1) < 0.5 else "weak_top_k"
+            try:
+                _context_recall = float(row["retrieve"].get("metrics", {}).get("context_recall") or 0.0)
+            except (TypeError, ValueError):
+                _context_recall = 0.0
+            row["diagnosis"] = "retrieval_incomplete" if _context_recall < 0.5 else "weak_top_k"
         elif row["checks"].get("answer") is False and "Expected an in-domain answer, got IDK" in str(row["answer"].get("reason") or ""):
             row["diagnosis"] = "grounded_but_answered_idk"
         elif row["checks"].get("answer") is False and "Expected an in-domain answer, got REFUSE" in str(row["answer"].get("reason") or ""):
@@ -10317,6 +10350,8 @@ async def admin_run_evals(request: Request):
         "counts": {"total": len(rows), "retrieval_total": retrieval_total, "answer_total": answer_total, "idk_total": idk_total},
         "summary": {
             "tenant_audit": tenant_audit or {},
+            "judge_key_configured": bool(judge_key),
+            "judge_mode": "llm" if judge_key else "deterministic_fallback",
             "diagnosis_counts": diagnosis_counts,
             "likely_cause_counts": likely_cause_counts,
             "question_type_counts": question_type_counts,

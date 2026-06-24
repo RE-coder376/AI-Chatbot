@@ -436,6 +436,13 @@
           let data;
           try { data = JSON.parse(line.substring(6)); } catch { continue; }
 
+          if (data.type === "reset") {
+            // Server is replacing live-streamed text (a validator rewrote the answer,
+            // or a failed LLM attempt is being retried) — clear and rebuild from next chunk.
+            fullAnswer = "";
+            if (bubble) bubble.innerHTML = "";
+            continue;
+          }
           if (data.type === "chunk") {
             // Remove typing indicator on first chunk
             if (!bubble) {
