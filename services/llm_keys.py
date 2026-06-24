@@ -150,8 +150,12 @@ def _mark_key_failed(api_key: str, error_str: str):
         if not org_group:
             logger.warning(f"Key ...{api_key[-4:]} daily quota exhausted (no account group) — per-key cooldown only")
         _save_key_health()
-    elif "invalid_api_key" in err_lower or "invalid api key" in err_lower or "authentication" in err_lower:
-        # Key is permanently invalid — disable it in keys.json
+    elif ("invalid_api_key" in err_lower or "invalid api key" in err_lower or "authentication" in err_lower
+          or "does not exist" in err_lower or "model_not_found" in err_lower
+          or "balance_units" in err_lower or "insufficient balance" in err_lower or "payment required" in err_lower):
+        # Permanently broken key: bad/dead credential, model unavailable (404), or
+        # account out of balance (402). None recover on their own, so retrying every
+        # 65s just pads request latency — sideline it for the container's life.
         cooldown_until = now + 86400 * 365  # 1 year = effectively permanent
         try:
             if KEYS_FILE.exists():
@@ -262,7 +266,12 @@ def get_fresh_llm(avoid_providers=None):
 
         now = time.time()
 
-        _PROV_TIER = {'groq': 4, 'gemini': 4, 'sambanova': 3, 'mistral': 3, 'openai': 3, 'cerebras': 1}
+        # Tier = selection priority (higher first). Ordered by MEASURED latency +
+        # working state: groq ~300-500ms and the largest key pool → primary; mistral
+        # fast → next; gemini works but is multi-second → high-quota fallback only;
+        # cerebras/sambanova are currently dead (404 invalid key / 402 no balance) so
+        # they sit last and self-disable on first failure (see _mark_key_failed).
+        _PROV_TIER = {'groq': 5, 'mistral': 4, 'gemini': 3, 'openai': 3, 'sambanova': 1, 'cerebras': 1}
 
         def key_health_score(k):
             s = _key_status.get(k['key'], {})
