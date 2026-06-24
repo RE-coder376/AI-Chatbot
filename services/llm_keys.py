@@ -84,6 +84,9 @@ def _load_key_health():
                 _key_status = data  # legacy format
         except Exception as e:
             logger.warning(f"_load_key_health: could not parse {KEY_HEALTH_FILE}: {e}")
+    # Seed from the shared cross-container store so a fresh container immediately
+    # honors org daily-quota cooldowns + dead keys other containers already found.
+    _sync_key_health_from_shared(force=True)
 
 
 def _save_key_health():
@@ -96,6 +99,74 @@ def _save_key_health():
         })
     except Exception as e:
         logger.warning(f"_save_key_health: could not write {KEY_HEALTH_FILE}: {e}")
+
+
+# ── Shared cross-container key health (modal.Dict) ──────────────────────────
+# key_health.json is per-container/ephemeral: an autoscaled fresh container would
+# re-burn a live customer request to re-discover an org that's already daily-
+# exhausted, or retry a permanently-dead key. We publish the two durable signals —
+# org daily-quota (TPD) cooldowns and permanent key disables — to a shared modal.Dict
+# so every container honors them immediately. Short-lived TPM/RPM cooldowns (~65s)
+# stay local (they expire before sharing helps). No-ops on HF/local (no MODAL_TASK_ID).
+_key_health_handle = None
+_key_health_last_sync = 0.0
+
+def _key_health_dict():
+    global _key_health_handle
+    if _key_health_handle is None:
+        if not os.environ.get("MODAL_TASK_ID"):
+            _key_health_handle = False
+            return _key_health_handle
+        try:
+            import modal
+            _key_health_handle = modal.Dict.from_name("ai-chatbot-key-health", create_if_missing=True)
+        except Exception:
+            _key_health_handle = False
+    return _key_health_handle
+
+def _publish_cooldown(entry_key: str, cooldown_until: float):
+    """Best-effort publish of an org/key cooldown to the shared store (max wins)."""
+    gd = _key_health_dict()
+    if not gd:
+        return
+    try:
+        if cooldown_until > float(gd.get(entry_key, 0) or 0):
+            gd[entry_key] = float(cooldown_until)
+    except Exception:
+        pass
+
+def _sync_key_health_from_shared(force: bool = False):
+    """Merge shared org/key cooldowns into local state (later expiry wins). Throttled
+    to once / 45s so key selection stays fast (no Dict read per request)."""
+    global _key_health_last_sync
+    gd = _key_health_dict()
+    if not gd:
+        return
+    now = time.time()
+    if not force and (now - _key_health_last_sync) < 45:
+        return
+    _key_health_last_sync = now
+    try:
+        for kk, vv in list(gd.items()):
+            ks = str(kk)
+            try: until = float(vv or 0)
+            except Exception: continue
+            if until <= now:
+                try: gd.pop(kk, None)            # opportunistically prune expired
+                except Exception: pass
+                continue
+            if ks.startswith("org:"):
+                org = ks[4:]
+                if until > _org_cooldown.get(org, 0):
+                    _org_cooldown[org] = until
+            elif ks.startswith("key:"):
+                k = ks[4:]
+                s = _key_status.get(k, {})
+                if until > s.get("cooldown_until", 0):
+                    s["cooldown_until"] = until
+                    _key_status[k] = s
+    except Exception:
+        pass
 
 
 def _mark_key_failed(api_key: str, error_str: str):
@@ -129,6 +200,7 @@ def _mark_key_failed(api_key: str, error_str: str):
                         break
                 if org_group:
                     _org_cooldown[org_group] = cooldown_until
+                    _publish_cooldown(f"org:{org_group}", cooldown_until)  # share TPD across containers
                     cascaded = 0
                     for entry in all_keys:
                         k = entry.get("key", "")
@@ -146,6 +218,7 @@ def _mark_key_failed(api_key: str, error_str: str):
             org_id = org_match.group(1)
             _key_org_map[api_key] = org_id
             _org_cooldown[org_id] = cooldown_until
+            _publish_cooldown(f"org:{org_id}", cooldown_until)
 
         if not org_group:
             logger.warning(f"Key ...{api_key[-4:]} daily quota exhausted (no account group) — per-key cooldown only")
@@ -157,6 +230,7 @@ def _mark_key_failed(api_key: str, error_str: str):
         # account out of balance (402). None recover on their own, so retrying every
         # 65s just pads request latency — sideline it for the container's life.
         cooldown_until = now + 86400 * 365  # 1 year = effectively permanent
+        _publish_cooldown(f"key:{api_key}", cooldown_until)  # share dead key across containers
         try:
             if KEYS_FILE.exists():
                 all_keys = json.loads(KEYS_FILE.read_text(encoding="utf-8"))
@@ -246,6 +320,7 @@ def get_fresh_llm(avoid_providers=None):
     skipped on the very next retry instead of burning the budget on its sibling
     keys. Avoided-but-healthy still outrank cooled-down keys (usable last resort)."""
     avoid = {str(p).lower() for p in (avoid_providers or [])}
+    _sync_key_health_from_shared()  # throttled (≤1/45s): pull cooldowns other containers found
     try:
         actives = []
         if KEYS_FILE.exists():

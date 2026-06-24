@@ -59,6 +59,38 @@ def test_set_embedding_model_does_not_crash_for_valid_admin(app_module, client, 
     assert r.json()["embedding_model"] == "bge"
 
 
+def test_shared_key_health_publishes_merges_and_prunes(monkeypatch):
+    import time as _t
+    import services.llm_keys as L
+
+    class _FakeDict(dict):
+        def __bool__(self):  # a real modal.Dict handle is truthy even when empty
+            return True
+
+    fake = _FakeDict()
+    monkeypatch.setattr(L, "_key_health_handle", fake, raising=False)
+    monkeypatch.setattr(L, "_key_health_last_sync", 0.0, raising=False)
+    L._org_cooldown.clear(); L._key_status.clear()
+    now = _t.time()
+
+    L._publish_cooldown("org:groq_acct1", now + 3600)
+    L._publish_cooldown("key:deadkey", now + 86400)
+    L._publish_cooldown("org:groq_acct1", now + 10)   # lower value must NOT override (max wins)
+    assert abs(fake["org:groq_acct1"] - (now + 3600)) < 1
+    fake["org:expired"] = now - 10                    # must be pruned on sync
+
+    L._key_health_last_sync = 0.0
+    L._sync_key_health_from_shared(force=True)
+    assert abs(L._org_cooldown.get("groq_acct1", 0) - (now + 3600)) < 1
+    assert abs(L._key_status.get("deadkey", {}).get("cooldown_until", 0) - (now + 86400)) < 1
+    assert "org:expired" not in fake
+
+    # No-Modal runtime (HF/local): handle False => everything no-ops, no crash.
+    monkeypatch.setattr(L, "_key_health_handle", False, raising=False)
+    L._publish_cooldown("org:x", now + 1)
+    L._sync_key_health_from_shared(force=True)
+
+
 def test_config_invalid_widget_key_401(client, two_tenants):
     # Supplied-but-invalid key must not silently serve the active tenant's branding.
     r = client.get("/config", headers={"X-Widget-Key": "totally-bogus"})
