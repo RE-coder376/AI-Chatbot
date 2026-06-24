@@ -654,6 +654,9 @@
       <p style="font-size:12px; color:var(--text-muted); margin-bottom:14px;">
         One-click quality checks for a tenant DB. Scores are split into Retrieval, Answer, and IDK/Refusal so you can see what broke.
       </p>
+      <p style="font-size:12px; color:var(--text-muted); margin-bottom:14px;">
+        LLM judging uses a separate judge key from Owner Ops. If no judge key is configured, evals still run with deterministic fallback diagnosis, but confidence is lower.
+      </p>
 
       <div class="grid-2" style="align-items:end;">
         <div>
@@ -1095,7 +1098,7 @@
       if (window._healthInterval) clearInterval(window._healthInterval);
       // Poll only while the tab is actually visible — on scale-to-zero
       // hosting an idle background tab would keep the container billed.
-      window._healthInterval = setInterval(() => { if (!document.hidden) updateHealthStatus(); }, 300000);
+      window._healthInterval = setInterval(() => { if (!document.hidden && _adminActive()) updateHealthStatus(); }, 300000);
       document.addEventListener("visibilitychange", () => { if (!document.hidden) updateHealthStatus(); });
     }).catch(() => showStatus('auth', 'Failed.', 'error'));
   }
@@ -1398,6 +1401,18 @@
     startCrawlCountdowns();
   }
 
+  // ── Idle-sleep ────────────────────────────────────────────────────────────
+  // The admin panel can stay open forever, but it must only talk to the Modal
+  // backend when the user is actively working (clicked, changed a field, typed,
+  // submitted) or a crawl is live. Otherwise every background poll resets Modal's
+  // scaledown window and keeps the serve container awake 24/7 — which burned
+  // compute credits with zero real clients. With this, an idle open tab makes
+  // ZERO requests after ~2 min, so Modal scales down and sleeps.
+  window._lastAdminInteraction = Date.now();
+  function _adminActive() { return (Date.now() - (window._lastAdminInteraction || 0)) < 120000; }
+  ['click', 'change', 'submit', 'keydown'].forEach(ev =>
+    document.addEventListener(ev, () => { window._lastAdminInteraction = Date.now(); }, true));
+
   let _crawlCountdownTimer = null;
   let _crawlStatsRefreshTimer = null;
   function startCrawlCountdowns() {
@@ -1420,6 +1435,10 @@
     // Re-fetch db-stats every 30s — updates chunks, health, last crawl, countdown live
     if (_crawlStatsRefreshTimer) clearInterval(_crawlStatsRefreshTimer);
     _crawlStatsRefreshTimer = setInterval(async () => {
+      // Sleep unless actively working: skip the poll when the tab is hidden OR the
+      // user hasn't interacted recently. An idle open panel makes no requests, so
+      // Modal scales down. A click/change/keypress wakes it again immediately.
+      if (document.hidden || !_adminActive()) return;
       try {
         const res = await fetch(`${API}/admin/db-stats`, { headers: authHeaders() });
         if (!res.ok) return;
@@ -2666,10 +2685,28 @@
     const diag = summary?.diagnosis_counts || {};
     const causes = summary?.likely_cause_counts || {};
     const qtypes = summary?.question_type_counts || {};
+    const sources = summary?.failure_source_mix || {};
+    const steps = summary?.failure_step_mix || {};
+    const rootCauses = summary?.root_cause_mix || {};
+    const fixHints = summary?.fix_hint_mix || {};
+    const judgeMode = summary?.judge_mode || (summary?.judge_key_configured ? 'llm' : 'deterministic_fallback');
+    const judgeRows = [
+      `<div class="eval-fact">Mode: ${escapeHtml(judgeMode === 'llm' ? 'LLM judge key configured' : 'Deterministic fallback')}</div>`,
+      `<div class="eval-fact">Judge unavailable rows: ${Number(summary?.judge_unavailable_rows || 0)}</div>`,
+      `<div class="eval-fact">Mean confidence: ${summary?.judge_confidence_mean != null ? Number(summary.judge_confidence_mean).toFixed(2) : '—'}</div>`,
+    ].join('');
     const diagRows = Object.entries(diag).sort((a,b)=>b[1]-a[1]).map(([k,v]) => `<div class="eval-fact">${escapeHtml(k)}: ${Number(v)}</div>`).join('') || '<div class="eval-fact">No diagnostics yet.</div>';
     const causeRows = Object.entries(causes).sort((a,b)=>b[1]-a[1]).map(([k,v]) => `<div class="eval-fact">${escapeHtml(k)} (${Number(v)})</div>`).join('') || '<div class="eval-fact">No likely-cause hints yet.</div>';
     const typeRows = Object.entries(qtypes).sort((a,b)=>b[1]-a[1]).map(([k,v]) => `<div class="eval-fact">${escapeHtml(k)}: ${Number(v)}</div>`).join('') || '<div class="eval-fact">No question mix yet.</div>';
+    const sourceRows = Object.entries(sources).sort((a,b)=>b[1]-a[1]).map(([k,v]) => `<div class="eval-fact">${escapeHtml(k)}: ${Number(v)}</div>`).join('') || '<div class="eval-fact">No failed source mix.</div>';
+    const stepRows = Object.entries(steps).sort((a,b)=>b[1]-a[1]).map(([k,v]) => `<div class="eval-fact">${escapeHtml(k)}: ${Number(v)}</div>`).join('') || '<div class="eval-fact">No failed step mix.</div>';
+    const rootRows = Object.entries(rootCauses).sort((a,b)=>b[1]-a[1]).slice(0, 4).map(([k,v]) => `<div class="eval-fact">${escapeHtml(k)} (${Number(v)})</div>`).join('') || '<div class="eval-fact">No root-cause notes yet.</div>';
+    const fixRows = Object.entries(fixHints).sort((a,b)=>b[1]-a[1]).slice(0, 4).map(([k,v]) => `<div class="eval-fact">${escapeHtml(k)} (${Number(v)})</div>`).join('') || '<div class="eval-fact">No fix hints yet.</div>';
     wrap.innerHTML = `
+      <div class="eval-summary-panel">
+        <h4>Judge Mode</h4>
+        ${judgeRows}
+      </div>
       <div class="eval-summary-panel">
         <h4>Failure Mix</h4>
         ${diagRows}
@@ -2682,8 +2719,36 @@
         <h4>Question Mix</h4>
         ${typeRows}
       </div>
+      <div class="eval-summary-panel">
+        <h4>Failure Source</h4>
+        ${sourceRows}
+      </div>
+      <div class="eval-summary-panel">
+        <h4>Failure Step</h4>
+        ${stepRows}
+      </div>
+      <div class="eval-summary-panel">
+        <h4>Root Causes</h4>
+        ${rootRows}
+      </div>
+      <div class="eval-summary-panel">
+        <h4>Fix Hints</h4>
+        ${fixRows}
+      </div>
     `;
     wrap.style.display = 'grid';
+  }
+
+  function _evalJudgeKey() {
+    return (document.getElementById('ops-judge-api-key')?.value || '').trim();
+  }
+
+  function _confirmJudgeKeyForEval(mode) {
+    if (!['chat', 'both'].includes(mode)) return true;
+    if (_evalJudgeKey()) return true;
+    return confirm(
+      'Chat evals are much more reliable with a separate judge key. No judge key is configured, so this run will use deterministic fallback and be marked low-confidence. Continue?'
+    );
   }
 
   async function loadHistoryCount(db) {
@@ -2723,6 +2788,8 @@
     const db = document.getElementById('eval-db')?.value || localStorage.getItem('adminDb') || '';
     const mode = document.getElementById('eval-mode')?.value || 'retrieve';
     if (!db) return showStatus('eval', 'Select a DB first.', 'error');
+    if (!_confirmJudgeKeyForEval(mode)) return showStatus('eval', 'Eval cancelled. Add a separate judge key in Owner Ops for higher-confidence chat grading.', 'error', true);
+    const judgeKey = _evalJudgeKey();
     const n = document.getElementById('history-count').textContent;
     showStatus('eval', `Running eval from saved questions (${n} total, mode=${mode})...`, 'loading', true);
     document.getElementById('eval-results').style.display = 'none';
@@ -2732,7 +2799,7 @@
       const r = await authFetch(`${API}/admin/evals/run`, {
         method: 'POST',
         headers: { ...authHeaders(), 'Content-Type': 'application/json' },
-        body: JSON.stringify({ password: sessionStorage.getItem('adminPass') || '', db_name: db, mode, source: 'history' }),
+        body: JSON.stringify({ password: sessionStorage.getItem('adminPass') || '', db_name: db, mode, source: 'history', judge_key: judgeKey }),
       });
       const d = await r.json().catch(() => ({}));
       if (!r.ok) return showStatus('eval', d.detail || 'Eval failed', 'error', true);
@@ -2770,6 +2837,8 @@
     const mode = document.getElementById('eval-mode')?.value || 'retrieve';
     const count = Number(document.getElementById('eval-count')?.value || 12);
     if (!db) return showStatus('eval', 'Select a DB first.', 'error');
+    if (!_confirmJudgeKeyForEval(mode)) return showStatus('eval', 'Eval cancelled. Add a separate judge key in Owner Ops for higher-confidence chat grading.', 'error', true);
+    const judgeKey = _evalJudgeKey();
     showStatus('eval', `Running eval suite (${mode})...`, 'loading', true);
     document.getElementById('eval-results').style.display = 'none';
     document.getElementById('eval-scores').style.display = 'none';
@@ -2778,7 +2847,7 @@
       const r = await authFetch(`${API}/admin/evals/run`, {
         method: 'POST',
         headers: { ...authHeaders(), 'Content-Type': 'application/json' },
-        body: JSON.stringify({ password: sessionStorage.getItem('adminPass') || '', db_name: db, mode, count }),
+        body: JSON.stringify({ password: sessionStorage.getItem('adminPass') || '', db_name: db, mode, count, judge_key: judgeKey }),
       });
       const d = await r.json().catch(() => ({}));
       if (!r.ok) return showStatus('eval', d.detail || 'Eval failed', 'error', true);
