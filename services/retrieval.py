@@ -39,6 +39,24 @@ _CROSS_ENCODER = None
 _CROSS_ENCODER_FAILED = False
 _CROSS_ENCODER_MODEL = os.environ.get("RERANK_CE_MODEL", "Xenova/ms-marco-MiniLM-L-6-v2")
 
+# Latency tuning knobs (env-overridable, no code change needed). Defaults preserve
+# the original behavior (k=25, context cap 24000). MEASURED 2026-06-24 on the local
+# agentfactory index (8 queries, fast=True): lowering k 25->12 gave ~0 retrieval
+# speedup (the ~4s floor is fixed per-query cost — query embedding + N subquery
+# searches + BM25, not k-bound) while shifting retrieved sources (top-5 overlap 62%,
+# top-1 changed 3/8). So k is NOT a safe latency lever. RETRIEVE_MAX_CONTEXT_CHARS
+# trims LLM input tokens (the real lever, latency is LLM-bound) but its TTFT win vs
+# recall cost is still unmeasured end-to-end — tune via env + journey-eval before
+# lowering the default. Knobs kept; defaults unchanged until measured.
+try:
+    _DEFAULT_RETRIEVE_K = int(os.environ.get("RETRIEVE_K", "25") or 25)
+except Exception:
+    _DEFAULT_RETRIEVE_K = 25
+try:
+    _MAX_CONTEXT_CHARS = int(os.environ.get("RETRIEVE_MAX_CONTEXT_CHARS", "24000") or 24000)
+except Exception:
+    _MAX_CONTEXT_CHARS = 24000
+
 
 def _cross_encoder_enabled() -> bool:
     return os.environ.get("RERANK_CROSS_ENCODER", "1").strip().lower() not in ("0", "false", "no", "off")
@@ -2350,7 +2368,7 @@ def _cap_keep_query(queries: list, n: int, original: str) -> list:
     return out
 
 
-async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansion_task=None, history: list = None) -> tuple:
+async def retrieve_context(q: str, db, k: int = _DEFAULT_RETRIEVE_K, fast: bool = False, expansion_task=None, history: list = None) -> tuple:
     """Timing wrapper over the retrieval impl. Logs [RETRIEVE_MS] per call so the
     chat-latency split (local CPU retrieval vs LLM wait) is observable in production:
     llm_ms ≈ ACCESS total_ms − Σ[RETRIEVE_MS]. Confirms whether latency is CPU- or
@@ -2362,7 +2380,7 @@ async def retrieve_context(q: str, db, k: int = 25, fast: bool = False, expansio
         logger.info(f"[RETRIEVE_MS] {int((time.perf_counter() - _t0) * 1000)}ms fast={fast} q={(q or '')[:40]!r}")
 
 
-async def _retrieve_context_impl(q: str, db, k: int = 25, fast: bool = False, expansion_task=None, history: list = None) -> tuple:
+async def _retrieve_context_impl(q: str, db, k: int = _DEFAULT_RETRIEVE_K, fast: bool = False, expansion_task=None, history: list = None) -> tuple:
     """Multilingual Retrieval: Handles English and Urdu in the same vector space.
     Returns (context_text, doc_count, sources) so callers can cite sources.
     fast=True skips the LLM expansion step (used for sub-queries in multi-part decomposition)."""
@@ -4108,7 +4126,7 @@ async def _retrieve_context_impl(q: str, db, k: int = 25, fast: bool = False, ex
                 pass
     # Context cap/compression: keep only the highest-signal slices so unrelated chunks
     # can't dominate the prompt. This improves stability across all DBs.
-    MAX_CONTEXT_CHARS = 24000
+    MAX_CONTEXT_CHARS = _MAX_CONTEXT_CHARS
     MAX_DOC_CHARS = 1800
 
     def _compress_doc(text: str, anchors: list[str]) -> str:
