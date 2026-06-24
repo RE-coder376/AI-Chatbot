@@ -1,6 +1,8 @@
+from types import SimpleNamespace
+
 import pytest
 
-from services.catalog_query import Row, _execute_spec, parse
+from services.catalog_query import Row, _ROW_CACHE, _execute_spec, load_rows, parse
 
 
 def _row(title, price, availability="available"):
@@ -11,6 +13,45 @@ def _row(title, price, availability="available"):
         source=f"https://example.test/{title.lower().replace(' ', '-')}",
         hay=title.lower(),
     )
+
+
+class _FakeCollection:
+    name = "langchain"
+    id = "same-collection-id"
+
+    def __init__(self, title, price):
+        self._title = title
+        self._price = price
+
+    def count(self):
+        return 1
+
+    def get(self, limit, include):
+        return {
+            "documents": [f"Product: {self._title}\nPrice: Rs.{self._price}\nAvail: InStock"],
+            "metadatas": [
+                {
+                    "source": f"https://example.test/products/{self._title.lower().replace(' ', '-')}",
+                    "chunk_kind": "product",
+                    "content_type": "product",
+                    "product_title": self._title,
+                    "price": self._price,
+                    "availability": "available",
+                }
+            ],
+        }
+
+
+def test_load_rows_cache_is_tenant_isolated_for_same_collection_name_and_count():
+    _ROW_CACHE.clear()
+    db_a = SimpleNamespace(_db_name="tenant_a", _collection=_FakeCollection("Tenant A Product", 100))
+    db_b = SimpleNamespace(_db_name="tenant_b", _collection=_FakeCollection("Tenant B Product", 200))
+
+    rows_a = load_rows(db_a)
+    rows_b = load_rows(db_b)
+
+    assert rows_a[0].title == "Tenant A Product"
+    assert rows_b[0].title == "Tenant B Product"
 
 
 @pytest.mark.parametrize(

@@ -26,6 +26,19 @@ import time
 # otherwise reuse for _ROW_CACHE_TTL. Rows are read-only downstream, so sharing is safe.
 _ROW_CACHE: dict = {}
 _ROW_CACHE_TTL = 300.0
+
+
+def _row_cache_key(db, total: int):
+    db_name = (
+        getattr(db, "_db_name", None)
+        or getattr(db, "db_name", None)
+        or getattr(db, "name", None)
+        or getattr(getattr(db, "_client", None), "_db_name", None)
+    )
+    collection = getattr(db, "_collection", None)
+    collection_name = getattr(collection, "name", None)
+    collection_id = getattr(collection, "id", None) or id(collection)
+    return (str(db_name) if db_name else id(db), str(collection_name or ""), str(collection_id), total)
 from dataclasses import dataclass, field
 
 # Universal question scaffolding — these words are never product-category anchors.
@@ -404,7 +417,7 @@ def load_rows(db, limit: int = 12000) -> list[Row]:
         total = min(int(db._collection.count() or 0), limit)
     except Exception:
         total = -1
-    _ck = getattr(getattr(db, "_collection", None), "name", None) or id(db)
+    _ck = _row_cache_key(db, total)
     _now = time.time()
     _hit = _ROW_CACHE.get(_ck)
     if _hit is not None and _hit[1] == total and (_now - _hit[2]) < _ROW_CACHE_TTL:
