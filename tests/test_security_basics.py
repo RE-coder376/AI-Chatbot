@@ -535,6 +535,50 @@ def test_admin_run_evals_respects_requested_count(app_module, client, two_tenant
     assert r.json()["counts"]["total"] == 5
 
 
+def test_admin_run_evals_accepts_live_style_custom_tests(app_module, client, two_tenants, monkeypatch):
+    token_resp = client.get("/admin/csrf-token", headers={"Authorization": "Bearer ownerpw", "X-Admin-DB": "a"})
+    token = token_resp.json()["csrf_token"]
+
+    async def _fake_eval_retrieve_docs(q, tenant_db, k=8):
+        return (
+            1,
+            [{"source": "https://example.com/products/gym", "preview": "Hamzastore sells gym equipment with pricing details."}],
+            ["https://example.com/products/gym"],
+        )
+
+    monkeypatch.setattr(app_module, "_owner_eval_blocker", lambda name: "", raising=True)
+    monkeypatch.setattr(app_module, "_filter_eval_tests_for_tenant", lambda tests, db_name, fingerprint=None: (tests, 0), raising=True)
+    async def _fake_audit(*args, **kwargs):
+        return {}
+    monkeypatch.setattr(app_module, "_safe_runtime_tenant_audit", _fake_audit, raising=True)
+    monkeypatch.setattr(app_module, "_get_or_create_db", lambda name: object(), raising=True)
+    monkeypatch.setattr(app_module, "_eval_retrieve_docs", _fake_eval_retrieve_docs, raising=True)
+
+    r = client.post(
+        "/admin/evals/run",
+        headers={"Authorization": "Bearer ownerpw", "X-Admin-DB": "a", "X-CSRF-Token": token},
+        json={
+            "password": "ownerpw",
+            "db_name": "a",
+            "mode": "retrieve",
+            "tests": [
+                {
+                    "id": "p1",
+                    "source": "analytics",
+                    "difficulty": "medium",
+                    "q": "Does hamzastore sell gym equipment and how much does it cost?",
+                    "expect": {"type": "ANSWER", "expected_source": "", "key_facts": [], "reference_text": ""},
+                }
+            ],
+        },
+    )
+
+    assert r.status_code == 200, r.text
+    data = r.json()
+    assert data["counts"]["total"] == 1
+    assert data["results"][0]["question"] == "Does hamzastore sell gym equipment and how much does it cost?"
+
+
 def test_admin_run_evals_chat_mode_scores_retrieval_even_when_sources_are_suppressed(app_module, client, two_tenants, monkeypatch):
     token_resp = client.get("/admin/csrf-token", headers={"Authorization": "Bearer ownerpw", "X-Admin-DB": "a"})
     token = token_resp.json()["csrf_token"]
@@ -606,6 +650,38 @@ def test_runtime_chunk_seed_items_generates_product_questions(app_module):
     assert items
     assert items[0].q == "What is the pricing for Acer Spin 5 SP513-51 Black?"
     assert items[0].source == "chunk_topic"
+
+
+def test_runtime_chunk_seed_items_prefers_products_over_blog_rows(app_module):
+    class _DummyDB:
+        pass
+
+    async def _run():
+        return await app_module._runtime_chunk_seed_items(_DummyDB(), "store", 3)
+
+    async def _fake_eval_retrieve_docs(q, tenant_db, k=6):
+        return (
+            2,
+            [
+                {
+                    "source": "https://example.com/blog/summer-sale",
+                    "preview": "Blog: Summer sale announcement with fitness tips and general promo copy.",
+                },
+                {
+                    "source": "https://example.com/products/adjustable-dumbbell",
+                    "preview": "Product: Adjustable Dumbbell Set Price: Rs.12,500 Availability: InStock",
+                    "chunk_kind": "product",
+                    "content_type": "product",
+                },
+            ],
+            ["https://example.com/blog/summer-sale", "https://example.com/products/adjustable-dumbbell"],
+        )
+
+    setattr(app_module, "_eval_retrieve_docs", _fake_eval_retrieve_docs)
+    items = asyncio.run(_run())
+
+    assert items
+    assert items[0].q == "What is the pricing for Adjustable Dumbbell Set?"
 
 
 def test_filter_eval_tests_for_tenant_trusts_tenant_local_chunk_sources(app_module, monkeypatch):

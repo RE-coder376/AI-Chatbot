@@ -688,6 +688,9 @@
         <button style="margin:0;flex:1;" onclick="runEvalSuite()">Run Eval Suite</button>
         <button class="secondary" style="margin:0;flex:1;" id="btn-run-history" onclick="runFromHistory()" title="Run all saved questions for this DB">Run from Saved (<span id="history-count">0</span>)</button>
       </div>
+      <div id="eval-judge-warning" class="eval-fact" style="margin-top:10px;background:#fff7ed;border-color:#fed7aa;color:#9a3412;">
+        Chat eval judge: checking Owner Ops judge key...
+      </div>
       <div id="eval-status" class="status-msg"></div>
 
       <div id="eval-scores" style="display:none; margin-top:14px;">
@@ -2751,6 +2754,29 @@
     );
   }
 
+  function refreshEvalJudgeWarning() {
+    const el = document.getElementById('eval-judge-warning');
+    if (!el) return;
+    const mode = document.getElementById('eval-mode')?.value || 'retrieve';
+    const hasJudge = Boolean(_evalJudgeKey());
+    if (mode === 'retrieve') {
+      el.style.background = '#f8fafc';
+      el.style.borderColor = 'var(--border)';
+      el.style.color = 'var(--text-muted)';
+      el.textContent = 'Retrieve-only evals do not need a judge key.';
+    } else if (hasJudge) {
+      el.style.background = '#ecfdf5';
+      el.style.borderColor = '#bbf7d0';
+      el.style.color = '#166534';
+      el.textContent = 'Chat eval judge: separate judge key configured — LLM grading enabled.';
+    } else {
+      el.style.background = '#fff7ed';
+      el.style.borderColor = '#fed7aa';
+      el.style.color = '#9a3412';
+      el.textContent = 'Chat eval judge: no judge key configured — deterministic-only, low-confidence scores.';
+    }
+  }
+
   async function loadHistoryCount(db) {
     if (!db) return;
     try {
@@ -2763,6 +2789,9 @@
   }
 
   document.getElementById('eval-db')?.addEventListener('change', e => loadHistoryCount(e.target.value));
+  document.getElementById('eval-mode')?.addEventListener('change', refreshEvalJudgeWarning);
+  document.getElementById('ops-judge-api-key')?.addEventListener('input', refreshEvalJudgeWarning);
+  refreshEvalJudgeWarning();
 
   async function generateEvalSet(strategy) {
     const db = document.getElementById('eval-db')?.value || localStorage.getItem('adminDb') || '';

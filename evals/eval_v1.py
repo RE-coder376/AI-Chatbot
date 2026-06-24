@@ -16,6 +16,11 @@ from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 from urllib.parse import urlsplit
 
+try:
+    import requests
+except Exception:
+    requests = None
+
 # When this file is executed directly (python evals/eval_v1.py), Python sets sys.path[0]
 # to the evals/ directory, not the repo root. Ensure repo root is importable.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -139,6 +144,23 @@ class EvalAuthError(RuntimeError):
 
 
 def _http_post_json(url: str, payload: dict, headers: dict | None = None, timeout: int = 60) -> tuple[int, dict | None, str]:
+    if requests is not None:
+        try:
+            resp = requests.post(
+                url,
+                json=payload,
+                headers={"Content-Type": "application/json", **(headers or {})},
+                timeout=timeout,
+            )
+            status = int(getattr(resp, "status_code", 0) or 0)
+            text = str(getattr(resp, "text", "") or "")
+            try:
+                body = resp.json()
+            except Exception:
+                body = json.loads(text or "{}") if text else {}
+            return status, body if isinstance(body, dict) else None, text
+        except Exception as exc:
+            return 0, None, f"{type(exc).__name__}: {exc}"
     data = json.dumps(payload, ensure_ascii=True).encode("utf-8")
     req = Request(
         url=url,
@@ -820,15 +842,13 @@ def _make_chunk_question(topic: str, chunk_text: str) -> str:
         # eval set only exercises one retrieval shape.
         _variant_ok = bool(re.search(r"\b(color|colour|size|variant|available in)\b", text))
         _has_avail = bool(re.search(r"\bavailability\b|\bin stock\b|\bout of stock\b", text))
-        _h = int(hashlib.sha1(low_topic.encode("utf-8")).hexdigest()[:8], 16) % 4
-        if _h == 0 and _has_price:
-            question = f"What is the price of {topic}?"
-        elif _h == 1 and _variant_ok:
+        _h = int(hashlib.sha1(low_topic.encode("utf-8")).hexdigest()[:8], 16) % 3
+        if _h == 1 and _variant_ok:
             question = f"What variants does {topic} come in?"
         elif _h == 2 and _has_avail:
             question = f"Is {topic} in stock?"
         elif _has_price:
-            question = f"How much does {topic} cost and what does it offer?"
+            question = f"What is the pricing for {topic}?"
         else:
             question = f"What are the features of {topic}?"
         return question if _looks_like_good_question(question) else ""

@@ -9633,6 +9633,17 @@ async def _build_owner_eval_tests(base_url: str, owner_password: str, db_name: s
 async def _runtime_chunk_seed_items(tenant_db, db_name: str, desired_count: int, evidence_rows: list[dict] | None = None, fingerprint: dict | None = None):
     from evals import eval_v1 as _eval_v1
 
+    def _is_product_eval_row(row: dict) -> bool:
+        preview = str((row or {}).get("preview") or "")
+        source = str((row or {}).get("source") or "").lower()
+        return bool(
+            _re.search(r"(?i)\bproduct:\s*", preview[:500])
+            or _re.search(r"(?i)\b(price|pricing|rs\.?|pkr|[$£€])\b", preview[:800])
+            or _re.search(r"/products?/", source)
+            or str((row or {}).get("chunk_kind") or "").lower() == "product"
+            or str((row or {}).get("content_type") or "").lower() == "product"
+        )
+
     probes = _runtime_eval_probes(db_name)
     items = []
     seen_questions = set()
@@ -9652,6 +9663,7 @@ async def _runtime_chunk_seed_items(tenant_db, db_name: str, desired_count: int,
         doc_rows = grouped_rows.get(probe) or []
         if not doc_rows:
             continue
+        doc_rows = sorted(doc_rows, key=lambda row: 0 if _is_product_eval_row(row) else 1)
         sources = [str((row or {}).get("source") or "").strip() for row in doc_rows if str((row or {}).get("source") or "").strip()]
         doc_count = len(doc_rows)
         for idx, row in enumerate(doc_rows):
