@@ -115,41 +115,40 @@ def _mark_key_failed(api_key: str, error_str: str):
         cooldown_until = midnight.timestamp() + 120  # +2min buffer
         logger.warning(f"Key ...{api_key[-4:]} TPD exhausted — cooldown until midnight UTC")
 
-        # Extract org ID and cascade cooldown to ALL same-provider keys
+        # Daily quota is shared per ACCOUNT (org), so one TPD signal means every sibling
+        # key on that account is also dead until midnight. Cool the whole group at once,
+        # keyed off the synthetic `org` field in keys.json — provider-agnostic, so it
+        # works for Gemini/Cerebras/Sambanova too (they never emit an org id in errors).
+        org_group = None
+        try:
+            if KEYS_FILE.exists():
+                all_keys = json.loads(KEYS_FILE.read_text(encoding="utf-8"))
+                for entry in all_keys:
+                    if entry.get("key") == api_key:
+                        org_group = entry.get("org")
+                        break
+                if org_group:
+                    _org_cooldown[org_group] = cooldown_until
+                    cascaded = 0
+                    for entry in all_keys:
+                        k = entry.get("key", "")
+                        if k and entry.get("org") == org_group:
+                            _key_org_map[k] = org_group
+                            cascaded += 1
+                    logger.warning(f"Account {org_group} TPD exhausted — cooled {cascaded} sibling keys until midnight UTC")
+        except Exception as _ce:
+            logger.warning(f"TPD account cascade failed: {_ce}")
+
+        # Also honor the real org id when Groq returns one (extra safety; groups by the
+        # provider-issued id in addition to our synthetic account group).
         org_match = re.search(r'organization\s+[`\']?(org_\w+)[`\']?', error_str)
         if org_match:
             org_id = org_match.group(1)
             _key_org_map[api_key] = org_id
             _org_cooldown[org_id] = cooldown_until
-            # Cascade: map ALL same-provider keys to this org so they're skipped immediately
-            # (avoids retrying 7 keys one-by-one before reaching Cerebras/Gemini)
-            try:
-                failed_provider = None
-                if KEYS_FILE.exists():
-                    all_keys = json.loads(KEYS_FILE.read_text(encoding="utf-8"))
-                    for entry in all_keys:
-                        if entry.get("key") == api_key:
-                            failed_provider = entry.get("provider", "groq")
-                            break
-                    if failed_provider:
-                        cascaded = 0
-                        for entry in all_keys:
-                            k = entry.get("key", "")
-                            if not k or k == api_key:
-                                continue
-                            # Only cascade to keys explicitly in the same org
-                            if entry.get("org") == org_id:
-                                if not _key_org_map.get(k):
-                                    _key_org_map[k] = org_id
-                                    cascaded += 1
-                        if cascaded:
-                            logger.warning(f"Org {org_id} TPD — cascaded to {cascaded} explicitly same-org keys")
-            except Exception as _ce:
-                logger.warning(f"TPD cascade failed: {_ce}")
-            logger.warning(f"Org {org_id} TPD exhausted — cooldown until midnight UTC")
-        else:
-            # Non-Groq key (Gemini/OpenAI) — only cool this specific key, no org cascade
-            logger.warning(f"Key ...{api_key[-4:]} daily quota exhausted — per-key cooldown until midnight UTC")
+
+        if not org_group:
+            logger.warning(f"Key ...{api_key[-4:]} daily quota exhausted (no account group) — per-key cooldown only")
         _save_key_health()
     elif "invalid_api_key" in err_lower or "invalid api key" in err_lower or "authentication" in err_lower:
         # Key is permanently invalid — disable it in keys.json
