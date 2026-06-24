@@ -40,6 +40,76 @@ def test_widget_key_routing_valid_key_200(app_module, client, two_tenants, monke
     assert "data:" in r.text
 
 
+def test_set_embedding_model_does_not_crash_for_valid_admin(app_module, client, two_tenants):
+    token_resp = client.get("/admin/csrf-token", headers={"Authorization": "Bearer clientA", "X-Admin-DB": "a"})
+    assert token_resp.status_code == 200, token_resp.text
+    token = token_resp.json()["csrf_token"]
+
+    r = client.post(
+        "/admin/embedding-model",
+        headers={"X-Admin-DB": "a", "X-CSRF-Token": token},
+        json={
+            "password": two_tenants["a"]["pw"],
+            "db_name": "a",
+            "embedding_model": "bge",
+        },
+    )
+
+    assert r.status_code == 200, r.text
+    assert r.json()["embedding_model"] == "bge"
+
+
+def test_config_invalid_widget_key_401(client, two_tenants):
+    # Supplied-but-invalid key must not silently serve the active tenant's branding.
+    r = client.get("/config", headers={"X-Widget-Key": "totally-bogus"})
+    assert r.status_code == 401, r.text
+
+
+def test_config_valid_widget_key_200(client, two_tenants):
+    r = client.get("/config", headers={"X-Widget-Key": two_tenants["a"]["wk"]})
+    assert r.status_code == 200, r.text
+
+
+def test_config_no_widget_key_falls_back_ok(client, two_tenants):
+    # No key at all stays the hosted-demo behaviour (active DB) — must not 401.
+    r = client.get("/config")
+    assert r.status_code == 200, r.text
+
+
+def test_history_invalid_widget_key_401(client, two_tenants):
+    r = client.get("/history/visitor123", headers={"X-Widget-Key": "bogus"})
+    assert r.status_code == 401, r.text
+
+
+def test_public_write_rate_limited(app_module, client, two_tenants):
+    app_module._public_write_rate.clear()
+    last = None
+    for _ in range(25):
+        last = client.post("/csat", json={"rating": 5, "session_id": "s"})
+    assert last.status_code == 429, last.text
+
+
+def test_lead_email_html_is_escaped(app_module, monkeypatch):
+    captured = {}
+
+    async def _capture(subject, html_body, cfg, reply_to=""):
+        captured["subject"] = subject
+        captured["html"] = html_body
+        return True
+
+    monkeypatch.setattr(app_module, "send_notification_email", _capture, raising=True)
+    asyncio.run(app_module.send_lead_email(
+        {"name": "<script>alert(1)</script>", "email": "x@y.z",
+         "whatsapp": "<img src=x onerror=alert(2)>", "message": "<b>hi</b>"},
+        {"contact_email": "o@o.o", "smtp_password": "p"},
+    ))
+    assert "<script>" not in captured["html"]
+    assert "&lt;script&gt;" in captured["html"]
+    assert "<img" not in captured["html"]
+    # Subject must not carry raw HTML/newlines either.
+    assert "\n" not in captured["subject"]
+
+
 def test_eval_answer_via_stream_captures_workflow_trace(app_module, monkeypatch):
     async def _fake_stream(*args, **kwargs):
         yield 'data: {"type":"chunk","content":"I do not have details."}\n\n'

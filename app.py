@@ -12,6 +12,7 @@ import time
 import asyncio
 import re
 import re as _re
+import html as _html  # stdlib; aliased because `html` is used as a local var name elsewhere
 import uuid
 import base64
 import hmac
@@ -820,6 +821,16 @@ def check_rate_limit(ip: str, store: dict, limit: int, window: int = 60) -> bool
             return False
         dq.append(now)
         return True
+
+
+def _public_write_guard(request: Request, limit: int = 20):
+    """Per-IP anti-spam for public write endpoints (handoff/csat/feedback/submit-lead).
+    Returns a 429 JSONResponse when the IP exceeds `limit` writes/min, else None."""
+    ip = request.client.host if request and request.client else "unknown"
+    if not check_rate_limit(ip, _public_write_rate, limit=limit):
+        return JSONResponse({"detail": "Too many requests. Slow down."},
+                            status_code=429, headers={"Retry-After": "30"})
+    return None
 
 
 def _db_chat_limits(db_name: str) -> tuple[int, int]:
@@ -3302,11 +3313,14 @@ async def security_and_logging_middleware(request: Request, call_next):
         logger.info(f"ACCESS {ip} {request.method} {request.url.path} {response.status_code} {elapsed_ms}ms")
     # Security headers
     response.headers["X-Content-Type-Options"] = "nosniff"
-    # Allow widget pages to be embedded in client sites; restrict everything else
+    # Allow widget pages to be embedded in client sites; restrict everything else.
+    # `X-Frame-Options: ALLOWALL` is non-standard (silently ignored by browsers),
+    # so framing is controlled by CSP frame-ancestors — the modern, honored header.
     if request.url.path.startswith("/widget"):
-        response.headers["X-Frame-Options"] = "ALLOWALL"
+        response.headers["Content-Security-Policy"] = "frame-ancestors *"
     else:
         response.headers["X-Frame-Options"] = "SAMEORIGIN"
+        response.headers["Content-Security-Policy"] = "frame-ancestors 'self'"
     response.headers["X-XSS-Protection"] = "1; mode=block"
     response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
     response.headers["Permissions-Policy"] = "geolocation=(), microphone=(), camera=()"
@@ -10333,7 +10347,13 @@ def public_config(request: Request):
     Respects X-Widget-Key header or ?key= param so each embed gets its own branding."""
     widget_key = (request.headers.get("X-Widget-Key", "").strip()
                   or request.query_params.get("key", "").strip())
+    if widget_key in ("null", "undefined"):
+        widget_key = ""
     db_name = _get_db_for_widget_key(widget_key) if widget_key else ""
+    # A supplied-but-unresolvable key must not silently fall back to the active
+    # tenant's branding/contact — that leaks the wrong client's identity.
+    if widget_key and not db_name:
+        return JSONResponse({"detail": "Invalid widget key"}, status_code=401)
     cfg = get_config(db_name)
     # Merge branding into root for simpler frontend consumption
     branding = cfg.get("branding", {})
@@ -10460,7 +10480,7 @@ async def set_embedding_model(request: Request, data: dict = None):
     db_name = _extract_admin_db(request, data.get("db_name", ""))
     cfg = get_config(db_name)
     password = _extract_password(request, data.get("password", ""))
-    try: admin_auth(password, cfg)
+    try: role = admin_auth(password, cfg)
     except HTTPException: return JSONResponse({"detail": "Unauthorized"}, status_code=401)
     model = data.get("embedding_model", "bge")
     if model not in ("bge", "minilm"):
@@ -14375,6 +14395,9 @@ async def get_visitor_history(visitor_id: str, request: Request):
     db_name = ""
     if widget_key and widget_key not in ("null", "undefined"):
         db_name = _get_db_for_widget_key(widget_key) or ""
+        # Supplied-but-invalid key must not read the active/global tenant's history.
+        if not db_name:
+            return JSONResponse({"detail": "Invalid widget key"}, status_code=401)
     f = _visitor_dir(db_name) / f"{visitor_id[:64]}.json"
     if not f.exists():
         return JSONResponse([])
@@ -14399,6 +14422,9 @@ async def get_knowledge_gaps(request: Request, password: str = ""):
 
 @app.post("/handoff")
 async def human_handoff(request: Request):
+    _rl = _public_write_guard(request)
+    if _rl is not None:
+        return _rl
     data = await request.json()
     # Use widget_key to resolve correct per-DB config (multi-tenant)
     widget_key = request.headers.get("X-Widget-Key", data.get("widget_key", ""))
@@ -14417,16 +14443,19 @@ async def human_handoff(request: Request):
         lines.append(f"{role}: {m.get('content', '')[:500]}")
     transcript = "\n".join(lines)
 
+    # Escape every visitor-controlled value — these land in an HTML email to the
+    # business owner; unescaped input is a stored-XSS / spoofing vector.
     html_body = f"""<h3>Human Handoff Request</h3>
-<p><b>Name:</b> {name}</p>
-<p><b>Contact:</b> {contact_info or 'Not provided'}</p>
-<p><b>Session:</b> {session_id}</p>
+<p><b>Name:</b> {_html.escape(name)}</p>
+<p><b>Contact:</b> {_html.escape(contact_info) or 'Not provided'}</p>
+<p><b>Session:</b> {_html.escape(session_id)}</p>
 <h4>Conversation Transcript:</h4>
-<pre style="background:#f8fafc;padding:12px;border-radius:8px;font-size:13px;">{transcript}</pre>"""
+<pre style="background:#f8fafc;padding:12px;border-radius:8px;font-size:13px;">{_html.escape(transcript)}</pre>"""
 
     reply_to = contact_info if "@" in contact_info else ""
+    _subj_name = name.replace('\n', ' ').replace('\r', ' ')
     ok = await send_notification_email(
-        subject=f"Handoff Request — {name}",
+        subject=f"Handoff Request — {_subj_name}",
         html_body=html_body,
         cfg=cfg,
         reply_to=reply_to
@@ -14475,6 +14504,9 @@ Context:
 
 @app.post("/csat")
 async def submit_csat(request: Request, data: dict):
+    _rl = _public_write_guard(request)
+    if _rl is not None:
+        return _rl
     rating     = int(data.get("rating", 0))
     session_id = str(data.get("session_id", ""))[:64]
     comment    = str(data.get("comment", ""))[:500]
@@ -14499,6 +14531,9 @@ async def submit_csat(request: Request, data: dict):
 @app.post("/feedback")
 async def feedback(request: Request, data: dict):
     try:
+        _rl = _public_write_guard(request)
+        if _rl is not None:
+            return _rl
         wk = (data.get("widget_key", "") or request.headers.get("X-Widget-Key", "")).strip()
         tenant_db = _get_db_for_widget_key(wk) if wk else ""
         if wk and not tenant_db:
@@ -14564,16 +14599,22 @@ async def send_notification_email(subject: str, html_body: str, cfg: dict, reply
         return False
 
 async def send_lead_email(lead_data: dict, cfg: dict):
+    # Escape visitor-controlled values before embedding in the owner notification email.
+    _name = _html.escape(str(lead_data.get('name', '') or ''))
+    _email = _html.escape(str(lead_data.get('email', '') or ''))
+    _wa = _html.escape(str(lead_data.get('whatsapp', '') or 'N/A'))
+    _msg = _html.escape(str(lead_data.get('message', '') or 'N/A'))
     html_body = f"""
     <h3>🔥 New Lead Captured</h3>
-    <p><b>Name:</b> {lead_data['name']}</p>
-    <p><b>Email:</b> {lead_data['email']}</p>
-    <p><b>WhatsApp:</b> {lead_data.get('whatsapp', 'N/A')}</p>
-    <p><b>Message:</b> {lead_data.get('message', 'N/A')}</p>
+    <p><b>Name:</b> {_name}</p>
+    <p><b>Email:</b> {_email}</p>
+    <p><b>WhatsApp:</b> {_wa}</p>
+    <p><b>Message:</b> {_msg}</p>
     <hr><p><small>Sent from your Digital FTE Platform</small></p>
     """
+    _subj_name = str(lead_data.get('name', '') or '').replace('\n', ' ').replace('\r', ' ')[:100]
     return await send_notification_email(
-        subject=f"New Lead — {lead_data['name']}",
+        subject=f"New Lead — {_subj_name}",
         html_body=html_body,
         cfg=cfg,
         reply_to=lead_data.get("email", "")
@@ -14600,6 +14641,9 @@ async def test_email_endpoint(request: Request, password: str = ""):
 async def submit_lead(request: Request, data: dict):
     """Save lead data to leads.json and send email notification with failover."""
     try:
+        _rl = _public_write_guard(request)
+        if _rl is not None:
+            return _rl
         logger.debug(f"Received /submit-lead request")
         # Resolve per-tenant config via widget_key (or X-Widget-Key header)
         wk = (data.get("widget_key", "") or request.headers.get("X-Widget-Key", "")).strip()
@@ -14608,13 +14652,15 @@ async def submit_lead(request: Request, data: dict):
             return JSONResponse({"detail": "Invalid widget key"}, status_code=401)
         LEADS_FILE = (DATABASES_DIR / tenant_db / "leads.json") if tenant_db else Path("leads.json")
         cfg = get_config(tenant_db) if tenant_db else get_config()
-        
+
+        # Cap every visitor-supplied field — unbounded input bloats leads.json and
+        # can carry injection payloads downstream.
         entry = {
-            "name":      data.get("name", ""),
-            "email":     data.get("email", ""),
-            "whatsapp":  data.get("whatsapp", ""),
-            "message":   data.get("message", ""),
-            "session_id": data.get("session_id", ""),
+            "name":      str(data.get("name", ""))[:100],
+            "email":     str(data.get("email", ""))[:200],
+            "whatsapp":  str(data.get("whatsapp", ""))[:50],
+            "message":   str(data.get("message", ""))[:2000],
+            "session_id": str(data.get("session_id", ""))[:64],
             "timestamp":  datetime.now().isoformat(),
         }
         
@@ -14630,7 +14676,7 @@ async def submit_lead(request: Request, data: dict):
         
         with _analytics_lock:
             existing.append(entry)
-            _atomic_write_json(LEADS_FILE, existing)
+            _atomic_write_json(LEADS_FILE, existing[-5000:])
         # Trigger Email Notification
         asyncio.create_task(send_lead_email(entry, cfg))
         
