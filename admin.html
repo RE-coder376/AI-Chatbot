@@ -361,34 +361,11 @@
       <div class="grid-2" id="owner-only-ops">
         <div><label>Admin Password (set client's login password)</label><input type="password" id="ops-admin-password" placeholder="Leave blank to keep current" autocomplete="off"/></div>
       </div>
-      <label>Async Contact URL (Lead Form/Calendar)</label>
-      <input type="text" id="ops-async-url" placeholder="https://calendly.com/your-team"/>
-
       <h3 style="font-size:12px;font-weight:800;color:var(--text-muted);margin:24px 0 12px;text-transform:uppercase;">📧 Email Notifications (Gmail)</h3>
       <div class="grid-2">
         <div><label>Gmail App Password</label><input type="password" id="ops-smtp-password" placeholder="xxxx xxxx xxxx xxxx" autocomplete="off"/></div>
       </div>
       <p style="font-size:11px;color:var(--text-muted);margin-top:4px;">The contact email above will self-send lead notifications. · <a href="https://myaccount.google.com/apppasswords" target="_blank" style="color:var(--primary)">Get Gmail App Password ↗</a></p>
-
-      <label style="margin-top:24px;">Eval Judge API Keys (owner only)</label>
-      <textarea id="ops-judge-api-key" rows="2" placeholder="gsk_key1,gsk_key2,gsk_key3 — comma-separated Groq keys for LLM judge. Saved to root config, never mixed with bot keys." autocomplete="off" style="font-family:monospace;font-size:11px;resize:vertical;"></textarea>
-      <p style="font-size:11px;color:var(--text-muted);margin-top:4px;">Used only by the eval judge. Rotates on 429. Leave blank to disable LLM judging.</p>
-      
-      <label style="margin-top:24px;">Weekly Business Hours (UTC)</label>
-      <div style="display:flex; align-items:center; gap:10px; margin-bottom:12px;">
-        <input type="checkbox" id="ops-always-open" onchange="toggleAlwaysOpen(this.checked)" style="width:18px; height:18px; cursor:pointer;"/>
-        <label for="ops-always-open" style="margin:0; font-weight:700; cursor:pointer;">Open 24/7 (always available)</label>
-      </div>
-      <div id="ops-hours-fields" style="background:#f8fafc; padding:20px; border-radius:16px; border:1.5px solid var(--border);">
-        <div class="grid-2" style="gap:20px; margin-bottom:15px; align-items:center;">
-          <div style="font-size:12px; font-weight:800; color:var(--text-main);">📅 MONDAY - FRIDAY</div>
-          <div style="display:flex; gap:10px;"><input type="text" id="ops-hours-weekday-start" placeholder="09:00" style="padding:8px;"/><input type="text" id="ops-hours-weekday-end" placeholder="17:00" style="padding:8px;"/></div>
-        </div>
-        <div class="grid-2" style="gap:20px; align-items:center;">
-          <div style="font-size:12px; font-weight:800; color:var(--text-main);">🏖️ SATURDAY - SUNDAY</div>
-          <div style="display:flex; gap:10px;"><input type="text" id="ops-hours-weekend-start" placeholder="Closed" style="padding:8px;"/><input type="text" id="ops-hours-weekend-end" placeholder="Closed" style="padding:8px;"/></div>
-        </div>
-      </div>
 
       <div class="grid-2"><button class="secondary" onclick="loadOps()">🔄 Load Current</button><button onclick="saveOps()">🚀 Save Operational Settings</button></div>
       <div id="ops-status" class="status-msg"></div>
@@ -1388,9 +1365,10 @@
             <div><label>Knowledge Chunks</label><div style="font-weight:700;font-size:15px;">${(st.chunks||db.chunks||0).toLocaleString()}</div></div>
           </div>
           <div style="background:#f8fafc;border-radius:10px;padding:14px;margin-bottom:10px;border:1px solid var(--border);">
-            <div style="font-weight:700;font-size:12px;margin-bottom:8px;color:var(--text-main);">⏰ Auto Re-Crawl Schedule</div>
+            <div id="sched-title-${db.name}" data-ai="${st.auto_ingest?1:0}" style="font-weight:700;font-size:12px;margin-bottom:8px;color:var(--text-main);">${st.auto_ingest ? '⚡ Auto-Ingest (structured catalog)' : '⏰ Auto Re-Crawl Schedule'}</div>
+            <div id="sched-hint-${db.name}" style="font-size:10px;color:var(--text-muted);margin-bottom:6px;">${st.auto_ingest ? 'Product API detected — refreshes catalog (prices/stock/new items) deterministically; no HTML crawl. Prose pages: use manual crawl.' : ''}</div>
             <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
-              <input type="url" id="crawl-url-${db.name}" placeholder="https://yoursite.com" value="${crawlUrl}" oninput="markScheduleDirty('${db.name}')" style="flex:1;min-width:180px;font-size:12px;padding:6px 10px;"/>
+              <input type="url" id="crawl-url-${db.name}" placeholder="https://yoursite.com" value="${crawlUrl}" oninput="markScheduleDirty('${db.name}');scheduleDetect('${db.name}')" style="flex:1;min-width:180px;font-size:12px;padding:6px 10px;"/>
               <label style="font-size:12px;margin:0;display:flex;align-items:center;gap:4px;white-space:nowrap;">Every
                 <input type="number" id="crawl-interval-${db.name}" value="${intervalM}" min="1" max="10080" oninput="markScheduleDirty('${db.name}')" style="width:60px;font-size:12px;padding:4px 6px;text-align:center;"/> min
               </label>
@@ -1509,6 +1487,43 @@
     }, 10000);
   }
 
+  // Auto-Ingest detection: when the crawl URL points at a store with a structured
+  // product API (Shopify/Woo), offer deterministic catalog ingest instead of an
+  // HTML crawl. The detected flag is stored on the schedule-title dataset and sent
+  // with the schedule save.
+  let _detectTimers = {};
+  function scheduleDetect(dbName) {
+    clearTimeout(_detectTimers[dbName]);
+    _detectTimers[dbName] = setTimeout(() => detectPlatform(dbName), 700);
+  }
+  async function detectPlatform(dbName) {
+    const urlEl = document.getElementById(`crawl-url-${dbName}`);
+    const hintEl = document.getElementById(`sched-hint-${dbName}`);
+    if (!urlEl) return;
+    const url = urlEl.value.trim();
+    if (!url || url.length < 6) { applyAutoIngestUI(dbName, false, ''); return; }
+    if (hintEl) hintEl.textContent = 'Checking for product API…';
+    try {
+      const res = await authFetch(`${API}/admin/detect-platform?url=${encodeURIComponent(url)}`, {
+        headers: {...authHeaders(), 'X-Admin-DB': dbName}
+      });
+      const d = await res.json();
+      applyAutoIngestUI(dbName, !!d.has_product_api, d.platform || '');
+    } catch(e) { if (hintEl) hintEl.textContent = ''; }
+  }
+  function applyAutoIngestUI(dbName, on, platform) {
+    const titleEl = document.getElementById(`sched-title-${dbName}`);
+    const hintEl = document.getElementById(`sched-hint-${dbName}`);
+    if (!titleEl) return;
+    titleEl.dataset.ai = on ? '1' : '0';
+    titleEl.textContent = on
+      ? `⚡ Auto-Ingest${platform ? ' ('+platform+')' : ' (structured catalog)'}`
+      : '⏰ Auto Re-Crawl Schedule';
+    if (hintEl) hintEl.textContent = on
+      ? `${platform||'Product API'} detected — refreshes catalog (prices/stock/new items) deterministically; no HTML crawl. Prose pages: use manual crawl.`
+      : '';
+  }
+
   function markScheduleDirty(dbName) {
     const statusEl = document.getElementById(`schedule-status-${dbName}`);
     if (statusEl && statusEl.dataset.saved === '1') {
@@ -1527,12 +1542,14 @@
     const url = urlEl.value.trim();
     const interval = parseFloat(intervalEl.value) || 1;
     const enabled = enabledEl.checked;
+    const titleEl = document.getElementById(`sched-title-${dbName}`);
+    const autoIngest = !!(titleEl && titleEl.dataset.ai === '1');
     statusEl.textContent = 'Saving...';
     statusEl.dataset.saved = '0';
     try {
       const res = await authFetch(`${API}/admin/crawl-schedule`, {
         method: 'POST', headers: {...authHeaders(), 'X-Admin-DB': dbName, 'Content-Type': 'application/json'},
-        body: JSON.stringify({password:pass, db_name:dbName, enabled, interval_minutes:interval, crawl_url:url})
+        body: JSON.stringify({password:pass, db_name:dbName, enabled, interval_minutes:interval, crawl_url:url, auto_ingest:autoIngest})
       });
       const d = await res.json();
       if (d.success) {
@@ -1568,11 +1585,9 @@
      'b-bot-bubble','b-user-bubble'].forEach(id => {
       const el = document.getElementById(id); if (el) el.value = '';
     });
-    ['ops-email','ops-whatsapp','ops-async-url'].forEach(id => {
+    ['ops-email','ops-whatsapp'].forEach(id => {
       const el = document.getElementById(id); if (el) el.value = '';
     });
-    document.getElementById('ops-always-open').checked = false;
-    toggleAlwaysOpen(false);
   }
 
   function updateHealthStatus() {
@@ -1758,14 +1773,8 @@
       admin_password: document.getElementById('ops-admin-password').value || undefined,
       contact_email: document.getElementById('ops-email').value,
       whatsapp_number: document.getElementById('ops-whatsapp').value,
-      async_contact_url: document.getElementById('ops-async-url').value,
       smtp_password: document.getElementById('ops-smtp-password').value,
-      judge_api_key: document.getElementById('ops-judge-api-key').value,
-      always_open: document.getElementById('ops-always-open').checked,
-      hours: {
-        weekday: { start: document.getElementById('ops-hours-weekday-start').value, end: document.getElementById('ops-hours-weekday-end').value },
-        weekend: { start: document.getElementById('ops-hours-weekend-start').value, end: document.getElementById('ops-hours-weekend-end').value }
-      }
+      always_open: true
     };
     showStatus('ops', 'Saving operations...', 'loading');
     const res = await authFetch(`${API}/admin/ops`, {
@@ -1776,24 +1785,10 @@
     showStatus('ops', d.message || d.error, d.success ? 'success' : 'error');
   }
 
-  function toggleAlwaysOpen(checked) {
-    document.getElementById('ops-hours-fields').style.display = checked ? 'none' : 'block';
-  }
-
   function loadOpsData(cfg) {
     document.getElementById('ops-email').value = cfg.contact_email || "";
     document.getElementById('ops-whatsapp').value = cfg.whatsapp_number || "";
-    document.getElementById('ops-async-url').value = cfg.async_contact_url || "";
     document.getElementById('ops-smtp-password').value = cfg.smtp_password || "";
-    document.getElementById('ops-judge-api-key').value = cfg.judge_api_key || "";
-    const always = cfg.always_open || false;
-    document.getElementById('ops-always-open').checked = always;
-    toggleAlwaysOpen(always);
-    const h = cfg.hours || { weekday:{}, weekend:{} };
-    document.getElementById('ops-hours-weekday-start').value = h.weekday?.start || "09:00";
-    document.getElementById('ops-hours-weekday-end').value = h.weekday?.end || "17:00";
-    document.getElementById('ops-hours-weekend-start').value = h.weekend?.start || "Closed";
-    document.getElementById('ops-hours-weekend-end').value = h.weekend?.end || "Closed";
   }
 
   async function loadOps() {
