@@ -14,6 +14,7 @@ transform; the ingestion sink (embeddings, Chroma write) lives in app.py.
 from __future__ import annotations
 
 import html as _html
+import logging
 import os
 import re
 import time
@@ -21,6 +22,8 @@ import urllib.parse
 
 import requests
 from langchain_core.documents import Document
+
+logger = logging.getLogger(__name__)
 
 UA = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/122.0 Safari/537.36"}
 _TAG_RE = re.compile(r"<[^>]+>")
@@ -129,13 +132,81 @@ def _fetch_all_products_impl(base_url: str, max_pages: int = 80) -> list[dict] |
     return out
 
 
-def _fetch_collection_map_impl(base_url: str, max_collections: int = 300, max_pages: int = 40) -> dict[str, list[str]]:
+# Coverage of the most recent collection-map fetch — read by the ingest path so a
+# store that rate-limited us mid-fetch is flagged LOUDLY instead of silently
+# shipping with dropped sidebar categories (the "client DB looks complete but
+# isn't" failure). {"total","fetched","missing":[titles],"complete":bool}.
+_last_collection_coverage: dict = {}
+
+
+def get_last_collection_coverage() -> dict:
+    """Return (a copy of) the coverage of the most recent _fetch_collection_map_impl
+    run. Empty until one runs. The ingest/gate use it to refuse to silently publish
+    a partially-captured catalog."""
+    return dict(_last_collection_coverage)
+
+
+def _fetch_collection_products(base: str, chandle: str, max_pages: int, pace: list) -> "list[str] | None":
+    """Return the product handles in one collection, or None if the fetch FAILED
+    after retries (a transient throttle the caller should retry later). An empty
+    list means the collection is genuinely empty / 404 — not a failure. `pace[0]`
+    is a shared adaptive inter-request delay raised whenever the store throttles us,
+    so the WHOLE fetch slows down instead of repeatedly tripping the rate limiter."""
+    handles: list[str] = []
+    cpage = 1
+    while cpage <= max_pages:
+        r = None
+        for attempt in range(5):
+            try:
+                r = requests.get(f"{base}/collections/{urllib.parse.quote(chandle)}/products.json",
+                                 params={"limit": 250, "page": cpage}, headers=UA, timeout=45)
+            except Exception:
+                r = None
+            if r is not None and r.status_code == 200:
+                break
+            if r is not None and r.status_code not in (429, 500, 502, 503, 504):
+                return []  # genuine 404 / non-retryable → no membership, not a drop
+            # transient: raise the global pace so subsequent requests stop tripping
+            # the limiter, and back off this request honoring Retry-After.
+            pace[0] = min(pace[0] * 1.5, 4.0)
+            _wait = 2.0 * (attempt + 1)
+            if r is not None:
+                try:
+                    _wait = max(_wait, float(r.headers.get("Retry-After") or 0))
+                except (TypeError, ValueError):
+                    pass
+            time.sleep(min(_wait, 25))
+        if r is None or r.status_code != 200:
+            return None  # exhausted retries — transient, caller retries in pass 2
+        try:
+            prods = r.json().get("products") or []
+        except Exception:
+            return None
+        if not prods:
+            break
+        for p in prods:
+            ph = str(p.get("handle") or "").strip()
+            if ph:
+                handles.append(ph)
+        cpage += 1
+        time.sleep(pace[0])
+    return handles
+
+
+def _fetch_collection_map_impl(base_url: str, max_collections: int = 1000, max_pages: int = 40) -> dict[str, list[str]]:
     """Map each product handle -> the Shopify COLLECTION titles it belongs to.
 
     Shopify collections (the storefront sidebar/menu groupings) are NOT present in
     /products.json — they live at /collections.json + /collections/<handle>/products.json.
     Without this, "show all products in <sidebar category>" has nothing to match on.
-    Failure-safe: returns {} on any error so ingest behaves exactly as before."""
+
+    Resilient by design — a store with hundreds of collections rate-limits rapid
+    per-collection requests (429/503). We (a) pace requests and slow the WHOLE fetch
+    down adaptively on any throttle, (b) RETRY every collection that still failed in a
+    second pass after a cooldown, and (c) record coverage so the ingest can flag a
+    partial result. Failure-safe: returns {} on total error so ingest still proceeds."""
+    global _last_collection_coverage
+    _last_collection_coverage = {}
     base = (base_url or "").rstrip("/")
     if not base:
         return {}
@@ -143,7 +214,7 @@ def _fetch_collection_map_impl(base_url: str, max_collections: int = 300, max_pa
     page = 1
     while page <= max_pages and len(cols) < max_collections:
         r = None
-        for attempt in range(4):
+        for attempt in range(5):
             try:
                 r = requests.get(f"{base}/collections.json", params={"limit": 250, "page": page}, headers=UA, timeout=45)
             except Exception:
@@ -152,7 +223,7 @@ def _fetch_collection_map_impl(base_url: str, max_collections: int = 300, max_pa
                 break
             if r is not None and r.status_code not in (429, 500, 502, 503, 504):
                 break
-            time.sleep(min(2.0 * (attempt + 1), 15))
+            time.sleep(min(2.0 * (attempt + 1), 20))
         if r is None or r.status_code != 200:
             break
         try:
@@ -163,55 +234,62 @@ def _fetch_collection_map_impl(base_url: str, max_collections: int = 300, max_pa
             break
         cols.extend(batch)
         page += 1
-        time.sleep(0.3)
-    handle_to_cols: dict[str, list[str]] = {}
+        time.sleep(0.4)
+
+    targets = []
     for c in cols[:max_collections]:
         chandle = str(c.get("handle") or "").strip()
         ctitle = re.sub(r"\s+", " ", str(c.get("title") or "")).strip()
-        if not chandle or not ctitle:
-            continue
-        cpage = 1
-        while cpage <= max_pages:
-            # Retry with backoff — a store with hundreds of collections throttles
-            # rapid per-collection requests (429/503). Giving up on the first non-200
-            # silently DROPS that collection's membership (e.g. "Scissors" survives in
-            # /products.json but its collection page 429s), so the listing falls back
-            # to fuzzy title matching. Honor Retry-After; only skip after real failure.
-            r = None
-            for attempt in range(4):
-                try:
-                    r = requests.get(f"{base}/collections/{urllib.parse.quote(chandle)}/products.json",
-                                     params={"limit": 250, "page": cpage}, headers=UA, timeout=45)
-                except Exception:
-                    r = None
-                if r is not None and r.status_code == 200:
-                    break
-                if r is not None and r.status_code not in (429, 500, 502, 503, 504):
-                    break  # genuine 404/empty — not transient, stop retrying
-                _wait = 2.0 * (attempt + 1)
-                if r is not None:
-                    try:
-                        _wait = max(_wait, float(r.headers.get("Retry-After") or 0))
-                    except (TypeError, ValueError):
-                        pass
-                time.sleep(min(_wait, 15))
-            if r is None or r.status_code != 200:
-                break
-            try:
-                prods = r.json().get("products") or []
-            except Exception:
-                break
-            if not prods:
-                break
-            for p in prods:
-                phandle = str(p.get("handle") or "").strip()
-                if not phandle:
-                    continue
-                lst = handle_to_cols.setdefault(phandle, [])
-                if ctitle not in lst:
-                    lst.append(ctitle)
-            cpage += 1
-            time.sleep(0.2)
+        if chandle and ctitle:
+            targets.append((chandle, ctitle))
+
+    handle_to_cols: dict[str, list[str]] = {}
+    pace = [0.5]  # shared adaptive inter-request delay (seconds)
+
+    def _apply(chandle: str, ctitle: str) -> bool:
+        hs = _fetch_collection_products(base, chandle, max_pages, pace)
+        if hs is None:
+            return False
+        for ph in hs:
+            lst = handle_to_cols.setdefault(ph, [])
+            if ctitle not in lst:
+                lst.append(ctitle)
+        return True
+
+    failed = []
+    for chandle, ctitle in targets:
+        if not _apply(chandle, ctitle):
+            failed.append((chandle, ctitle))
+        time.sleep(pace[0])
+
+    # Pass 2: give a throttled store room to recover, slow right down, retry the
+    # drops. This is what turns "192/234 captured, 42 silently lost" into full
+    # coverage on stores that 429 under the first rapid pass.
+    if failed:
+        logger.warning(f"[COLLECTIONS] {len(failed)}/{len(targets)} collections failed pass 1 — "
+                       f"cooling down, retrying with slower pacing")
+        time.sleep(30)
+        pace[0] = max(pace[0], 1.5)
+        still = []
+        for chandle, ctitle in failed:
+            if not _apply(chandle, ctitle):
+                still.append((chandle, ctitle))
+            time.sleep(pace[0])
+        failed = still
+
+    total = len(targets)
+    missing = [t for _, t in failed]
+    _last_collection_coverage = {
+        "total": total,
+        "fetched": total - len(failed),
+        "missing": missing,
+        "complete": (len(failed) == 0),
+    }
+    if missing:
+        logger.warning(f"[COLLECTIONS] INCOMPLETE for {base}: captured {total - len(missing)}/{total}; "
+                       f"{len(missing)} still missing after retries: {missing[:25]}")
+    else:
+        logger.info(f"[COLLECTIONS] complete for {base}: {total}/{total} collections captured")
     return handle_to_cols
 
 

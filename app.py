@@ -346,8 +346,23 @@ def catalog_reingest_products(db_name: str, url: str, clear_products: bool = Tru
             published = True
         except Exception as _pe:
             logger.warning(f"[CATALOG] publish failed: {_pe}")
+    # Surface storefront-collection coverage so a store that rate-limited us mid-fetch
+    # is VISIBLE (in the run result + logs), never a silent partial catalog. Without
+    # this a client's bot could confidently abstain on whole sidebar categories the
+    # store actually carries, with nothing flagging it.
+    cov = {}
+    try:
+        from services.catalog_api import get_last_collection_coverage
+        cov = get_last_collection_coverage()
+    except Exception:
+        cov = {}
+    if cov.get("total") and not cov.get("complete", True):
+        logger.warning(f"[CATALOG] {db_name}: COLLECTION COVERAGE INCOMPLETE — "
+                       f"{cov.get('fetched')}/{cov.get('total')} captured; "
+                       f"missing {cov.get('missing', [])[:25]} (store throttled; re-ingest to fill)")
     logger.info(f"[CATALOG] {db_name}: ingested {len(docs)} products from {url} (copied_back={copied}, published={published})")
-    return {"db": db_name, "products_ingested": len(docs), "copied_back": copied, "published": published}
+    return {"db": db_name, "products_ingested": len(docs), "copied_back": copied,
+            "published": published, "collection_coverage": cov}
 
 def _catalog_ingest_into_db(db, db_name: str, url: str) -> int:
     """In-place Shopify catalog ingest on an EXISTING db instance — replaces the
