@@ -309,10 +309,11 @@
           <div style="font-size:32px; font-weight:800;" id="stat-total">0</div>
         </div>
         <div class="stat-card" style="background:#10b981; color:white; padding:20px; border-radius:16px;">
-          <div style="font-size:10px; font-weight:800; opacity:0.8;">HEALTH SCORE</div>
-          <div style="font-size:32px; font-weight:800;">100%</div>
+          <div style="font-size:10px; font-weight:800; opacity:0.8;">AVG CSAT</div>
+          <div style="font-size:32px; font-weight:800;" id="stat-csat">—</div>
         </div>
       </div>
+      <div id="stat-extra" style="font-size:12px;color:var(--text-muted);margin-top:-12px;margin-bottom:20px;"></div>
 
       <div class="grid-2">
         <div>
@@ -1091,11 +1092,17 @@
       document.body.classList.remove('locked');
       document.querySelector('.auth-section').style.display = 'none';
       showStatus('auth', `Logged into: ${db}`, 'success');
+      // Reset any prior tenant's widget snippet so the embed card / Preview
+      // never reuse a key baked for the DB you just logged out of.
+      window._widgetKeyReady = false;
+      const _es = document.getElementById('embed-snippet'); if (_es) _es.value = '';
+      const _km = document.getElementById('widget-key-meta'); if (_km) _km.textContent = '';
       loadServerData(data);
       loadOpsData(data.config_full || data);
       loadDatabases();
       loadEmbedCode();
       loadCharts();
+      loadAnalytics();
       updateHealthStatus();
       startDetachedCrawlReconnectLoop(db, pass);
       if (window._healthInterval) clearInterval(window._healthInterval);
@@ -1249,6 +1256,8 @@
       const data = await res.json();
       
       document.getElementById('stat-total').textContent = data.total_queries ?? data.total ?? 0;
+      document.getElementById('stat-csat').textContent = data.avg_csat != null ? `${Number(data.avg_csat).toFixed(1)}/5` : '—';
+      document.getElementById('stat-extra').textContent = `Sessions: ${Number(data.total_sessions || 0)} · Ratings: ${Number(data.total_ratings || 0)}`;
       
       document.getElementById('stat-most-asked').innerHTML = data.most_asked.map(q => `
         <tr><td style="color:var(--primary); font-weight:800; width:40px;">${Number(q.count || 0)}x</td><td>${escapeHtml(q.q)}</td></tr>
@@ -1602,6 +1611,10 @@
       // panel (branding, contacts/ops, widget key, analytics, knowledge) reloads
       // from the newly-active DB. Clients can't reach this path.
       localStorage.setItem('adminDb', name);
+      // Drop the prior DB's widget snippet so Preview opens the new active bot.
+      window._widgetKeyReady = false;
+      const _es = document.getElementById('embed-snippet'); if (_es) _es.value = '';
+      const _km = document.getElementById('widget-key-meta'); if (_km) _km.textContent = '';
       await refreshCsrf();
     }
     clearBrandingFields();
@@ -1610,6 +1623,7 @@
     if (br.ok) { const bd = await br.json(); loadServerData(bd); loadOpsData(bd.config_full || bd); }
     loadEmbedCode();
     loadCharts();
+    loadAnalytics();
     loadKnowledgeGaps();
     loadDatabases();
     updateHealthStatus();
@@ -1990,15 +2004,23 @@
   }
 
   async function previewBot() {
-    let snippet = document.getElementById('embed-snippet').value;
-    if (!snippet.includes('widget-chat')) {
-      showStatus('embed', 'Create widget key first.', 'error');
-      return;
+    // Always preview the DB you are logged into. Mint/reuse a key for the
+    // current X-Admin-DB (authHeaders) instead of a stale snippet from a
+    // previously logged-in tenant — so switching DBs switches the bot.
+    const db = localStorage.getItem('adminDb') || '';
+    if (!db) return showStatus('embed', 'Log in first.', 'error');
+    showStatus('embed', `Opening ${db} bot…`, 'loading');
+    try {
+      const res = await fetch(`${API}/admin/embed-code`, { headers: authHeaders() });
+      const data = await res.json();
+      if (!res.ok) return showStatus('embed', data.detail || 'Could not open bot.', 'error');
+      const m = (data.snippet || '').match(/key=([^'\"&\s>]+)/);
+      if (!m) return showStatus('embed', 'No widget key returned.', 'error');
+      window.open(`${API}/widget-chat?key=${m[1]}`, '_blank');
+      showStatus('embed', `Opened ${db} bot.`, 'success');
+    } catch (e) {
+      showStatus('embed', 'Failed to open bot.', 'error');
     }
-    snippet = document.getElementById('embed-snippet').value;
-    const m = snippet.match(/key=([^'\"&\s>]+)/);
-    if (m) window.open(`${API}/widget-chat?key=${m[1]}`, '_blank');
-    else showStatus('embed', 'Could not find widget key. Try Refresh Snippet first.', 'error');
   }
 
   function copyEmbed() {
