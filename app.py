@@ -334,6 +334,31 @@ def catalog_reingest_products(db_name: str, url: str, clear_products: bool = Tru
             copied = True
         except Exception as _cb:
             logger.warning(f"[CATALOG] copy-back failed: {_cb}")
+    # Compute + PERSIST storefront-collection coverage to the DB config BEFORE we
+    # publish, so the admin panel (/admin/db-stats) and the published zip both carry
+    # it. A store that rate-limited us mid-fetch is then visible ANYTIME, never a
+    # silent partial catalog (otherwise a client's bot abstains on whole sidebar
+    # categories with nothing flagging it). config.json lives in the db dir and is
+    # NOT in the /dev/shm copy, so the copy-back above didn't touch it.
+    cov = {}
+    try:
+        from services.catalog_api import get_last_collection_coverage
+        cov = get_last_collection_coverage()
+    except Exception:
+        cov = {}
+    if cov.get("total"):
+        try:
+            _cfg_path = DATABASES_DIR / db_name / "config.json"
+            _cfg = json.loads(_cfg_path.read_text(encoding="utf-8-sig")) if _cfg_path.exists() else {}
+            _cfg["collection_coverage"] = cov
+            _cfg_path.write_text(json.dumps(_cfg, indent=2, ensure_ascii=False), encoding="utf-8")
+        except Exception as _ce:
+            logger.warning(f"[CATALOG] could not persist coverage to config: {_ce}")
+        if not cov.get("complete", True):
+            logger.warning(f"[CATALOG] {db_name}: COLLECTION COVERAGE INCOMPLETE — "
+                           f"{cov.get('fetched')}/{cov.get('total')} captured; "
+                           f"missing {cov.get('missing', [])[:25]} (store throttled; re-ingest to fill)")
+
     # Publish the refreshed zip to the GitHub DB repo. Without this the volume holds
     # catalog data but the GitHub zip stays old, and serve's startup/tenant-load
     # restore (_github_sync_download / _github_sync_download_one) re-downloads the
@@ -346,20 +371,6 @@ def catalog_reingest_products(db_name: str, url: str, clear_products: bool = Tru
             published = True
         except Exception as _pe:
             logger.warning(f"[CATALOG] publish failed: {_pe}")
-    # Surface storefront-collection coverage so a store that rate-limited us mid-fetch
-    # is VISIBLE (in the run result + logs), never a silent partial catalog. Without
-    # this a client's bot could confidently abstain on whole sidebar categories the
-    # store actually carries, with nothing flagging it.
-    cov = {}
-    try:
-        from services.catalog_api import get_last_collection_coverage
-        cov = get_last_collection_coverage()
-    except Exception:
-        cov = {}
-    if cov.get("total") and not cov.get("complete", True):
-        logger.warning(f"[CATALOG] {db_name}: COLLECTION COVERAGE INCOMPLETE — "
-                       f"{cov.get('fetched')}/{cov.get('total')} captured; "
-                       f"missing {cov.get('missing', [])[:25]} (store throttled; re-ingest to fill)")
     logger.info(f"[CATALOG] {db_name}: ingested {len(docs)} products from {url} (copied_back={copied}, published={published})")
     return {"db": db_name, "products_ingested": len(docs), "copied_back": copied,
             "published": published, "collection_coverage": cov}
@@ -12385,6 +12396,10 @@ def get_db_stats(request: Request, password: str = ""):
             "crawl_interval_minutes": interval_m,
             "crawl_url": db_cfg.get("crawl_url", ""),
             "api_sources": db_cfg.get("api_sources", []),
+            # Storefront-collection coverage from the last catalog ingest — lets the
+            # owner SEE a partial ingest (store throttled → missing sidebar categories)
+            # instead of discovering it via a customer's failed query.
+            "collection_coverage": db_cfg.get("collection_coverage", {}),
             "health": _compute_db_health(chunks, last_crawl, auto_enabled, interval_m, last_crawl_status),
         })
     return {"stats": stats}
