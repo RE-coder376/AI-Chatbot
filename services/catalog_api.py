@@ -14,6 +14,7 @@ transform; the ingestion sink (embeddings, Chroma write) lives in app.py.
 from __future__ import annotations
 
 import html as _html
+import os
 import re
 import time
 import urllib.parse
@@ -445,9 +446,51 @@ def fetch_all_products_generic(base_url: str, cap: int = 6000, workers: int = 8)
     return _snapshot("generic", base_url, lambda: _fetch_all_products_generic_impl(base_url, cap, workers))
 
 
+def _render_generic_products(urls: list[str], max_pages: int = 60,
+                             per_timeout_ms: int = 12000, total_budget_s: float = 90.0) -> list[dict]:
+    """JS-render fallback for SPA sites whose product data is built client-side (so
+    the static HTML has no JSON-LD/microdata). STRICTLY BOUNDED — page cap + total
+    wall-clock budget — so a heavy site degrades to PARTIAL coverage rather than
+    hanging the ingest. Fully isolated: a missing/broken Playwright, or any error,
+    returns whatever was gathered (never raises). Disable with CATALOG_JS_FALLBACK=0.
+    Runs only inside ingest (a background batch), never on a user chat."""
+    if os.getenv("CATALOG_JS_FALLBACK", "1") == "0" or not urls:
+        return []
+    try:
+        from playwright.sync_api import sync_playwright
+    except Exception:
+        return []
+    out: list[dict] = []
+    start = time.time()
+    try:
+        with sync_playwright() as pw:
+            browser = pw.chromium.launch(headless=True, args=["--no-sandbox", "--disable-dev-shm-usage"])
+            try:
+                page = browser.new_page()
+                for u in urls[:max_pages]:
+                    if time.time() - start > total_budget_s:
+                        break
+                    try:
+                        page.goto(u, timeout=per_timeout_ms, wait_until="domcontentloaded")
+                        page.wait_for_timeout(800)  # let client-side JS hydrate
+                        prod = _extract_product_from_html(page.content(), u)
+                        if prod:
+                            out.append(prod)
+                    except Exception:
+                        continue  # one bad page never stops the batch
+            finally:
+                try:
+                    browser.close()
+                except Exception:
+                    pass
+    except Exception:
+        return out
+    return out
+
+
 def _fetch_all_products_generic_impl(base_url: str, cap: int = 6000, workers: int = 8) -> list[dict] | None:
     """Enumerates products from the sitemap and extracts each via JSON-LD/microdata.
-    None = no sitemap / no structured products."""
+    Falls back to a bounded JS render for SPA sites. None = no sitemap / no products."""
     import concurrent.futures as _cf
     urls = _sitemap_product_urls(base_url, cap=cap)
     if not urls:
@@ -471,6 +514,11 @@ def _fetch_all_products_generic_impl(base_url: str, cap: int = 6000, workers: in
         for res in ex.map(_one, urls):
             if res:
                 out.append(res)
+    # Static HTML yielded nothing but the sitemap HAS product URLs → the site likely
+    # renders products client-side (SPA). Try a bounded headless render. Only fires in
+    # this exact case, so Shopify/Woo/static-generic never pay the cost.
+    if not out:
+        out = _render_generic_products(urls)
     # Dedup by normalized title (variant pages collapse to one product), keep cheapest.
     best: dict[str, dict] = {}
     for p in out:
