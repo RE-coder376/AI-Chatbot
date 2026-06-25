@@ -1024,6 +1024,20 @@ _LOCATE_WHERE_RE = re.compile(
     r"(?:find|locate|get|see|buy|browse)\s+(.+?)\s*\??$")
 
 
+_VARIANT_Q_RE = re.compile(
+    r"\b(colou?rs?|sizes?|shades?|variants?|versions?|options?)\b.*"
+    r"(?:\bcome\s+in\b|\bcomes\s+in\b|\bavailable\b|\boffered\b|\bdoes\s+(?:it|this|that|the)\b|\bhave\b)"
+    r"|\bwhat\s+(?:colou?rs?|sizes?|variants?|options?)\b", re.I)
+
+
+def _is_variant_q(q: str) -> bool:
+    """A 'what colours/sizes does X come in' question — answered by RAG from the
+    product chunk's Options/Variants lines, not the structured aggregator (which
+    would return a bare price/stock line). Must short-circuit BEFORE the LLM router,
+    or the router re-resolves it to a catalog listing."""
+    return bool(q) and bool(_VARIANT_Q_RE.search(q))
+
+
 def _locate_target(q: str) -> str | None:
     """Extract the PRODUCT name from a 'which category/section is X in' / 'where do I
     find X' question. Returns None when the question isn't a reverse-location query."""
@@ -1069,6 +1083,11 @@ def answer_catalog_query(q: str, db, cfg: dict | None = None, max_list: int = 12
     a number is never invented; an unresolved entity falls through to RAG."""
     try:
         if not q or db is None:
+            return None, []
+        # Variant questions ("what colours/sizes does X come in") → RAG reads the
+        # chunk's Options/Variants. Must return BEFORE the LLM router, which would
+        # otherwise re-resolve to a bare catalog listing without the colours/sizes.
+        if _is_variant_q(q):
             return None, []
         # Reverse lookup — "which section/category is X in", "where do I find X".
         # The mirror of category listing: name a product, get the storefront
