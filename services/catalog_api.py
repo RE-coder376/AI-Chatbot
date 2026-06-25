@@ -141,11 +141,18 @@ def _fetch_collection_map_impl(base_url: str, max_collections: int = 300, max_pa
     cols: list[dict] = []
     page = 1
     while page <= max_pages and len(cols) < max_collections:
-        try:
-            r = requests.get(f"{base}/collections.json", params={"limit": 250, "page": page}, headers=UA, timeout=45)
-        except Exception:
-            break
-        if r.status_code != 200:
+        r = None
+        for attempt in range(4):
+            try:
+                r = requests.get(f"{base}/collections.json", params={"limit": 250, "page": page}, headers=UA, timeout=45)
+            except Exception:
+                r = None
+            if r is not None and r.status_code == 200:
+                break
+            if r is not None and r.status_code not in (429, 500, 502, 503, 504):
+                break
+            time.sleep(min(2.0 * (attempt + 1), 15))
+        if r is None or r.status_code != 200:
             break
         try:
             batch = r.json().get("collections") or []
@@ -164,12 +171,30 @@ def _fetch_collection_map_impl(base_url: str, max_collections: int = 300, max_pa
             continue
         cpage = 1
         while cpage <= max_pages:
-            try:
-                r = requests.get(f"{base}/collections/{urllib.parse.quote(chandle)}/products.json",
-                                 params={"limit": 250, "page": cpage}, headers=UA, timeout=45)
-            except Exception:
-                break
-            if r.status_code != 200:
+            # Retry with backoff — a store with hundreds of collections throttles
+            # rapid per-collection requests (429/503). Giving up on the first non-200
+            # silently DROPS that collection's membership (e.g. "Scissors" survives in
+            # /products.json but its collection page 429s), so the listing falls back
+            # to fuzzy title matching. Honor Retry-After; only skip after real failure.
+            r = None
+            for attempt in range(4):
+                try:
+                    r = requests.get(f"{base}/collections/{urllib.parse.quote(chandle)}/products.json",
+                                     params={"limit": 250, "page": cpage}, headers=UA, timeout=45)
+                except Exception:
+                    r = None
+                if r is not None and r.status_code == 200:
+                    break
+                if r is not None and r.status_code not in (429, 500, 502, 503, 504):
+                    break  # genuine 404/empty — not transient, stop retrying
+                _wait = 2.0 * (attempt + 1)
+                if r is not None:
+                    try:
+                        _wait = max(_wait, float(r.headers.get("Retry-After") or 0))
+                    except (TypeError, ValueError):
+                        pass
+                time.sleep(min(_wait, 15))
+            if r is None or r.status_code != 200:
                 break
             try:
                 prods = r.json().get("products") or []
