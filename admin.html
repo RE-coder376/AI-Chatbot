@@ -184,7 +184,6 @@
   body.client-mode #card-evals,
   body.client-mode #card-crawl,
   body.client-mode #card-db,
-  body.client-mode #owner-only-ops,
   body.client-mode #owner-only-api,
   body.client-mode #owner-only-create,
   body.client-mode #owner-only-brand,
@@ -357,9 +356,6 @@
       <div class="grid-2">
         <div><label>Primary Contact Email (receives leads)</label><input type="text" id="ops-email" placeholder="support@company.com"/></div>
         <div><label>WhatsApp Number</label><input type="text" id="ops-whatsapp" placeholder="+1234567890"/></div>
-      </div>
-      <div class="grid-2" id="owner-only-ops">
-        <div><label>Admin Password (set client's login password)</label><input type="password" id="ops-admin-password" placeholder="Leave blank to keep current" autocomplete="off"/></div>
       </div>
       <h3 style="font-size:12px;font-weight:800;color:var(--text-muted);margin:24px 0 12px;text-transform:uppercase;">📧 Email Notifications (Gmail)</h3>
       <div class="grid-2">
@@ -1770,7 +1766,6 @@
     const pass = document.getElementById('master-pass').value;
     const payload = {
       password: pass,
-      admin_password: document.getElementById('ops-admin-password').value || undefined,
       contact_email: document.getElementById('ops-email').value,
       whatsapp_number: document.getElementById('ops-whatsapp').value,
       smtp_password: document.getElementById('ops-smtp-password').value,
