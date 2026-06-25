@@ -138,7 +138,53 @@ def audit(url):
     print(f"   present: {found}")
     print(f"   not found at common paths: {missing_pg}")
 
+def _idk(ans):
+    a = (ans or "").lower()
+    return (not a) or any(p in a for p in (
+        "don't have", "do not have", "couldn't find", "could not find", "not sure",
+        "i don't know", "no information", "don't have specific", "reach us at"))
+
+def bot_probe(db_name, url):
+    """Query the DEPLOYED bot to verify prose + variants actually ANSWER (not just
+    exist on the site). GT pulled live, so probes are self-grounding.
+      python evals/coverage_eval.py --bot babyfy https://babyfy.pk/"""
+    import json, urllib.request
+    BASE = "https://re-coder376--ai-chatbot-serve.modal.run"
+    def _ask(key, q):
+        body = json.dumps({"question": q, "stream": False}).encode()
+        r = urllib.request.Request(BASE + "/chat", data=body, method="POST",
+                                   headers={"X-Widget-Key": key, "Content-Type": "application/json"})
+        return json.load(urllib.request.urlopen(r, timeout=120)).get("answer") or ""
+    print(f"\n{'='*72}\nBOT PROBE: {db_name}  ({url})\n{'='*72}")
+    d = json.load(urllib.request.urlopen(urllib.request.Request(
+        BASE + "/admin/embed-code?ttl=1d",
+        headers={"Authorization": f"Bearer {db_name}", "X-Admin-DB": db_name}), timeout=90))
+    m = re.search(r"key=([^\"'&\s>]+)", d.get("snippet", ""))
+    if not m:
+        print("  could not mint widget key"); return
+    key = m.group(1)
+    probes = ["what is your shipping policy?", "do you accept returns or refunds?"]
+    for p in (fetch_all_products(url) or []):
+        vs = [v for v in (p.get("variants") or []) if str(v.get("title") or "").lower() not in ("", "default title")]
+        if len(vs) > 1:
+            title = re.sub(r"\s+", " ", str(p.get("title") or "")).strip()
+            opt = (p.get("options") or [{}])[0].get("name", "options")
+            probes.append(f"what {str(opt).lower()} does the {title} come in?")
+            oos = next((v for v in vs if not v.get("available")), None)
+            if oos:
+                probes.append(f"is the {oos.get('title')} {title} in stock?")
+            break
+    p = f = 0
+    for q in probes:
+        ans = _ask(key, q)
+        ok = not _idk(ans)
+        p += ok; f += (not ok)
+        print(f"  [{'ANSWERED' if ok else 'IDK/abstain'}] {q}\n      -> {ans[:150].strip()}")
+    print(f"\n  {db_name}: {p}/{p+f} probes answered")
+
 if __name__ == "__main__":
+    if len(sys.argv) > 1 and sys.argv[1] == "--bot":
+        bot_probe(sys.argv[2], sys.argv[3]); sys.exit(0)
     sites = sys.argv[1:] or DEFAULT_SITES
     for s in sites:
         try:

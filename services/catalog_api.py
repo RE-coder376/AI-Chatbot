@@ -233,21 +233,46 @@ def _unescape_stable(s: str) -> str:
     return s
 
 
-def _emit_doc(*, title, price, availability, ptype, categories, desc, source, canonicalize, currency, collections="") -> Document:
+def _fmt_price(price, currency) -> str:
+    return (f"{currency}{price:,.0f}" if float(price).is_integer() else f"{currency}{price:,.2f}")
+
+
+def _emit_doc(*, title, price, availability, ptype, categories, desc, source, canonicalize, currency,
+              collections="", options=None, variants=None) -> Document:
     """Build one canonical product Document — identical shape for Shopify + WooCommerce.
     `collections` (pipe-joined storefront collection titles) is stored as its own
     metadata field so "list products in <sidebar category>" can match EXACT collection
-    membership, independent of title/tag words that merely contain the name."""
+    membership, independent of title/tag words that merely contain the name.
+    `options`/`variants` carry per-size/per-colour price + stock so the bot can answer
+    "what colours does X come in", "is the large in stock", "how much is the A4"."""
     title = _unescape_stable(title)
     categories = _unescape_stable(categories)
     collections = _unescape_stable(collections)
     ptype = _unescape_stable(ptype)
     lines = [f"Product: {title}"]
     if price is not None:
-        lines.append(f"Price: {currency}{price:,.0f}" if float(price).is_integer() else f"Price: {currency}{price:,.2f}")
+        lines.append(f"Price: {_fmt_price(price, currency)}")
     lines.append(f"Availability: {availability}")
     if ptype:
         lines.append(f"Category: {ptype}")
+    # Variant breakdown — only when there's real per-variant choice (size/colour),
+    # rendered into the chunk text so retrieval+LLM answer variant questions directly.
+    options = [_unescape_stable(o) for o in (options or []) if o]
+    variants = variants or []
+    if variants:
+        if options:
+            lines.append("Options: " + ", ".join(options))
+        vlines = []
+        for v in variants[:30]:
+            nm = _unescape_stable(str(v.get("name") or "")).strip()
+            if not nm:
+                continue
+            pr = f" — {_fmt_price(v['price'], currency)}" if v.get("price") is not None else ""
+            st = "in stock" if v.get("available") else "out of stock"
+            vlines.append(f"- {nm}{pr} ({st})")
+        if vlines:
+            lines.append("Variants:")
+            lines.extend(vlines)
     if desc:
         lines.append(desc)
     meta = {
@@ -260,6 +285,7 @@ def _emit_doc(*, title, price, availability, ptype, categories, desc, source, ca
         "availability": availability,
         "categories": categories,
         "collections": collections,
+        "variant_options": ", ".join(options),
     }
     if price is not None:
         meta["price"] = float(price)
@@ -486,11 +512,28 @@ def build_catalog_docs(base_url: str, canonicalize=None, currency: str = "Rs.") 
             if isinstance(tags, str):
                 tags = [t.strip() for t in tags.split(",") if t.strip()]
             collections = col_map.get(handle, [])
+            # Per-variant detail (size/colour → price + stock). Skip the single
+            # synthetic "Default Title" variant (no real choice to describe).
+            raw_vars = p.get("variants") or []
+            variants = []
+            if len(raw_vars) > 1 or (raw_vars and str(raw_vars[0].get("title") or "").strip().lower() not in ("", "default title")):
+                for v in raw_vars:
+                    vt = str(v.get("title") or "").strip()
+                    if vt.lower() in ("", "default title"):
+                        continue
+                    try:
+                        vp = float(v.get("price")) if v.get("price") is not None else None
+                    except (TypeError, ValueError):
+                        vp = None
+                    variants.append({"name": vt, "price": vp, "available": bool(v.get("available"))})
+            options = [str(o.get("name") or "").strip() for o in (p.get("options") or [])
+                       if o.get("name") and str(o.get("name")).strip().lower() != "title"]
             docs.append(_emit_doc(
                 title=title, price=(min(prices) if prices else None),
                 availability="available" if any_avail else "out of stock",
                 ptype=ptype, categories=", ".join([t for t in ([ptype] + list(tags) + list(collections)) if t]),
                 collections=" | ".join([c for c in collections if c]),
+                options=options, variants=variants,
                 desc=_html_to_text(str(p.get("body_html") or ""))[:1200],
                 source=f"{base}/products/{urllib.parse.quote(handle)}",
                 canonicalize=canonicalize, currency=currency))
