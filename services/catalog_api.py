@@ -401,13 +401,42 @@ def _sitemap_product_urls(base_url: str, cap: int = 6000) -> list[str]:
     return out[:cap]
 
 
+def _og_meta(html: str, prop: str) -> str:
+    m = (re.search(rf'<meta[^>]+(?:property|name)=["\']{re.escape(prop)}["\'][^>]*content=["\']([^"\']*)["\']', html, re.I)
+         or re.search(rf'<meta[^>]+content=["\']([^"\']*)["\'][^>]*(?:property|name)=["\']{re.escape(prop)}["\']', html, re.I))
+    return (m.group(1).strip() if m else "")
+
+
+def _og_product(html: str) -> dict | None:
+    """Product from OpenGraph / Facebook product meta tags — the third universal
+    signal after JSON-LD and microdata. Requires a price tag (or og:type=product) so
+    a homepage carrying only og:title isn't mistaken for a product."""
+    title = _og_meta(html, "og:title")
+    amount = _og_meta(html, "product:price:amount") or _og_meta(html, "og:price:amount")
+    if not title or not amount:
+        return None
+    if "product" not in _og_meta(html, "og:type").lower() and not _og_meta(html, "product:price:amount"):
+        return None
+    try:
+        price = float(re.sub(r"[^0-9.]", "", amount))
+    except (TypeError, ValueError):
+        return None
+    if price <= 0:
+        return None
+    avail = (_og_meta(html, "product:availability") or _og_meta(html, "og:availability")).lower()
+    return {"name": title, "price": price,
+            "cur": (_og_meta(html, "product:price:currency") or _og_meta(html, "og:price:currency")).upper(),
+            "avail": "out of stock" if re.search(r"out\s*of\s*stock|oos|sold", avail) else ""}
+
+
 def _extract_product_from_html(html: str, url: str) -> dict | None:
-    """One product from a detail page via schema.org Product structured data
-    (JSON-LD first, microdata fallback) — the universal, platform-agnostic signal.
+    """One product from a detail page via schema.org Product structured data (JSON-LD
+    first, microdata, then OpenGraph/product meta) — universal, platform-agnostic.
     Returns None when the page carries no Product price (category/blog/policy)."""
     from services.page_extract import _jsonld_text, _microdata_product
     name = price = 0
     cur_code = ""
+    og_avail = ""
     struct_text = ""  # the structured block (JSON-LD/microdata) that carried the price
     try:
         ld_text, ld_name, ld_price = _jsonld_text(html)
@@ -424,13 +453,19 @@ def _extract_product_from_html(html: str, url: str) -> dict | None:
             md_name, md_price, md_cur = "", 0.0, ""
         if md_name and md_price and md_price > 0:
             name, price, cur_code = md_name, float(md_price), (md_cur or "")
+    if not (name and price):
+        og = _og_product(html)
+        if og:
+            name, price, cur_code, og_avail = og["name"], og["price"], og["cur"], og["avail"]
     if not name or not price or price <= 0:
         return None
     # Prefer the product's OWN structured availability (schema.org/InStock|OutOfStock|
     # SoldOut|PreOrder|BackOrder) over a page-wide text scan, which false-matches
     # hidden JS toggle labels and related-product cards (marked an in-stock item OOS).
     avail = "available"
-    if struct_text and re.search(r"(?i)(out\s*of\s*stock|sold\s*out|backorder|discontinued)", struct_text):
+    if og_avail:                       # explicit OpenGraph product:availability wins
+        avail = og_avail
+    elif struct_text and re.search(r"(?i)(out\s*of\s*stock|sold\s*out|backorder|discontinued)", struct_text):
         avail = "out of stock"
     elif not struct_text and re.search(r"(?i)(out\s*of\s*stock|sold\s*out|OutOfStock|currently\s+unavailable)", html):
         avail = "out of stock"
@@ -446,15 +481,48 @@ def fetch_all_products_generic(base_url: str, cap: int = 6000, workers: int = 8)
     return _snapshot("generic", base_url, lambda: _fetch_all_products_generic_impl(base_url, cap, workers))
 
 
-def _render_generic_products(urls: list[str], max_pages: int = 60,
+_NONPRODUCT_PATH = re.compile(
+    r"/(cart|checkout|account|login|signin|sign-?up|signup|register|wishlist|compare|"
+    r"search|blog|news|reviews?|about|contact|faqs?|privacy|terms|policy|policies|"
+    r"return|shipping|tag|tags|author|feed|rss|sitemap)\b", re.I)
+
+
+def _render_discover_links(page, base_url: str, max_links: int) -> list[str]:
+    """Same-domain candidate product links from the rendered homepage — for SPA sites
+    with NO sitemap. Drops obvious non-product paths; the extractor filters the rest."""
+    def _root(netloc):
+        return (netloc or "").lower().split(":")[0].removeprefix("www.")
+    try:
+        # Compare against the FINAL host (the site may redirect non-www → www).
+        host = _root(urllib.parse.urlparse(getattr(page, "url", "") or base_url).netloc)
+        hrefs = page.eval_on_selector_all("a[href]", "els => els.map(e => e.href)") or []
+    except Exception:
+        return []
+    seen, out = set(), []
+    for h in hrefs:
+        if not h or _root(urllib.parse.urlparse(h).netloc) not in ("", host):
+            continue
+        h = h.split("#")[0].split("?")[0]
+        if h in seen or _NONPRODUCT_PATH.search(h) or len(h.rstrip("/").split("/")) < 4:
+            continue
+        seen.add(h)
+        out.append(h)
+        if len(out) >= max_links:
+            break
+    return out
+
+
+def _render_generic_products(urls: list[str], base_url: str = "", max_pages: int = 60,
                              per_timeout_ms: int = 12000, total_budget_s: float = 90.0) -> list[dict]:
     """JS-render fallback for SPA sites whose product data is built client-side (so
-    the static HTML has no JSON-LD/microdata). STRICTLY BOUNDED — page cap + total
-    wall-clock budget — so a heavy site degrades to PARTIAL coverage rather than
-    hanging the ingest. Fully isolated: a missing/broken Playwright, or any error,
-    returns whatever was gathered (never raises). Disable with CATALOG_JS_FALLBACK=0.
-    Runs only inside ingest (a background batch), never on a user chat."""
-    if os.getenv("CATALOG_JS_FALLBACK", "1") == "0" or not urls:
+    the static HTML has no JSON-LD/microdata). When `urls` is empty but `base_url` is
+    given, first DISCOVERS candidate product links by rendering the homepage (covers
+    SPA stores with no sitemap). STRICTLY BOUNDED — page cap + total wall-clock budget
+    — so a heavy/slow site degrades to PARTIAL coverage rather than hanging. Fully
+    isolated: a missing/broken Playwright, or any error, returns whatever was gathered
+    (never raises). Disable with CATALOG_JS_FALLBACK=0. Runs only inside ingest (a
+    background batch), never on a user chat."""
+    if os.getenv("CATALOG_JS_FALLBACK", "1") == "0" or (not urls and not base_url):
         return []
     try:
         from playwright.sync_api import sync_playwright
@@ -467,17 +535,31 @@ def _render_generic_products(urls: list[str], max_pages: int = 60,
             browser = pw.chromium.launch(headless=True, args=["--no-sandbox", "--disable-dev-shm-usage"])
             try:
                 page = browser.new_page()
-                for u in urls[:max_pages]:
-                    if time.time() - start > total_budget_s:
-                        break
+                # Sitemap mode: render the given product URLs. Discovery mode (no
+                # sitemap): bounded BFS from the homepage — extract a product on every
+                # page AND enqueue child links, so it descends homepage→category→product
+                # within the page+budget caps (a deep tree just yields partial coverage).
+                discover = (not urls) and bool(base_url)
+                queue = list(urls) if urls else ([base_url] if base_url else [])
+                visited, pages = set(), 0
+                while queue and pages < max_pages and (time.time() - start) <= total_budget_s:
+                    u = queue.pop(0)
+                    if u in visited:
+                        continue
+                    visited.add(u)
+                    pages += 1
                     try:
                         page.goto(u, timeout=per_timeout_ms, wait_until="domcontentloaded")
                         page.wait_for_timeout(800)  # let client-side JS hydrate
                         prod = _extract_product_from_html(page.content(), u)
                         if prod:
                             out.append(prod)
+                        elif discover:
+                            for c in _render_discover_links(page, base_url, max_pages):
+                                if c not in visited:
+                                    queue.append(c)
                     except Exception:
-                        continue  # one bad page never stops the batch
+                        continue  # one bad/slow page never stops the batch
             finally:
                 try:
                     browser.close()
@@ -494,7 +576,11 @@ def _fetch_all_products_generic_impl(base_url: str, cap: int = 6000, workers: in
     import concurrent.futures as _cf
     urls = _sitemap_product_urls(base_url, cap=cap)
     if not urls:
-        return None
+        # No sitemap at all — a hand-rolled SPA may still render products. Try a
+        # bounded headless discovery+render before giving up. Returns None if that
+        # also finds nothing (→ falls through to the HTML crawl path upstream).
+        rendered = _render_generic_products([], base_url=base_url)
+        return rendered or None
 
     def _one(u: str) -> dict | None:
         for attempt in range(2):
