@@ -634,7 +634,7 @@
       <p>Would you like to connect with our team?</p>
       <div class="lead-btn-group">
         <button class="lead-btn btn-yes" onclick="showLeadEmailForm('${cardId}')">✅ Yes, connect me</button>
-        <button class="lead-btn btn-no" onclick="document.getElementById('${cardId}').remove()">✕ No thanks</button>
+        <button class="lead-btn btn-no" onclick="dismissLeadBox('${cardId}')">✕ No thanks</button>
       </div>
     `;
   }
@@ -690,7 +690,22 @@
     }
   }
 
+  function leadSessionKey(type) {
+    return `lead_${type}_${sessionId}`;
+  }
+
+  function dismissLeadBox(cardId) {
+    sessionStorage.setItem(leadSessionKey("dismissed"), "1");
+    document.getElementById(cardId)?.remove();
+  }
+
   function showLeadBox() {
+    if (
+      sessionStorage.getItem(leadSessionKey("shown")) === "1" ||
+      sessionStorage.getItem(leadSessionKey("dismissed")) === "1" ||
+      document.querySelector(".lead-card")
+    ) return;
+    sessionStorage.setItem(leadSessionKey("shown"), "1");
     const cardId = "lead-" + Date.now();
     const div    = document.createElement("div");
     div.className = "lead-card";
@@ -699,7 +714,7 @@
       <p>Would you like to connect with our team?</p>
       <div class="lead-btn-group">
         <button class="lead-btn btn-yes" onclick="showLeadEmailForm('${cardId}')">✅ Yes, connect me</button>
-        <button class="lead-btn btn-no" onclick="document.getElementById('${cardId}').remove()">✕ No thanks</button>
+        <button class="lead-btn btn-no" onclick="dismissLeadBox('${cardId}')">✕ No thanks</button>
       </div>
     `;
     messagesEl.appendChild(div);

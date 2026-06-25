@@ -421,12 +421,27 @@
       <div class="lead-btns">
         <button class="lead-btn l-email" onclick="contact('email','${id}')">✉️ Email</button>
         ${contactWhatsApp ? `<button class="lead-btn l-whatsapp" onclick="contact('whatsapp','${id}')">💬 WhatsApp</button>` : ''}
-        <button class="lead-btn l-cancel" onclick="document.getElementById('${id}').remove()">✕ Changed my mind</button>
+        <button class="lead-btn l-cancel" onclick="dismissLeadBox('${id}')">✕ Changed my mind</button>
       </div>
     `;
   }
 
+  function leadSessionKey(type) {
+    return `lead_${type}_${sessionId}`;
+  }
+
+  function dismissLeadBox(id) {
+    sessionStorage.setItem(leadSessionKey('dismissed'), '1');
+    document.getElementById(id)?.remove();
+  }
+
   function showLeadBox() {
+    if (
+      sessionStorage.getItem(leadSessionKey('shown')) === '1' ||
+      sessionStorage.getItem(leadSessionKey('dismissed')) === '1' ||
+      document.querySelector('.lead-card')
+    ) return;
+    sessionStorage.setItem(leadSessionKey('shown'), '1');
     const id  = 'lead-' + Date.now();
     const div = document.createElement('div');
     div.className = 'lead-card';
@@ -435,7 +450,7 @@
       <p>Would you like to connect with our team?</p>
       <div class="lead-btns">
         <button class="lead-btn l-yes" onclick="showLeadOptions('${id}')">✅ Yes, connect me</button>
-        <button class="lead-btn l-no" onclick="document.getElementById('${id}').remove()">✕ No thanks</button>
+        <button class="lead-btn l-no" onclick="dismissLeadBox('${id}')">✕ No thanks</button>
       </div>
     `;
     messagesEl.appendChild(div);
@@ -443,6 +458,7 @@
   }
 
   function contact(type, id) {
+    sessionStorage.setItem(leadSessionKey('dismissed'), '1');
     if (type === 'email') window.open(`mailto:${contactEmail}`, '_blank');
     else window.open(`https://wa.me/${contactWhatsApp.replace(/\D/g,'')}`, '_blank');
     document.getElementById(id).innerHTML = "<p style='color:#16a34a;text-align:center;font-size:13px'>Opening contact link...</p>";
