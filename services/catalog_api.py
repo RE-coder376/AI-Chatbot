@@ -128,6 +128,72 @@ def _fetch_all_products_impl(base_url: str, max_pages: int = 80) -> list[dict] |
     return out
 
 
+def _fetch_collection_map_impl(base_url: str, max_collections: int = 300, max_pages: int = 40) -> dict[str, list[str]]:
+    """Map each product handle -> the Shopify COLLECTION titles it belongs to.
+
+    Shopify collections (the storefront sidebar/menu groupings) are NOT present in
+    /products.json — they live at /collections.json + /collections/<handle>/products.json.
+    Without this, "show all products in <sidebar category>" has nothing to match on.
+    Failure-safe: returns {} on any error so ingest behaves exactly as before."""
+    base = (base_url or "").rstrip("/")
+    if not base:
+        return {}
+    cols: list[dict] = []
+    page = 1
+    while page <= max_pages and len(cols) < max_collections:
+        try:
+            r = requests.get(f"{base}/collections.json", params={"limit": 250, "page": page}, headers=UA, timeout=45)
+        except Exception:
+            break
+        if r.status_code != 200:
+            break
+        try:
+            batch = r.json().get("collections") or []
+        except Exception:
+            break
+        if not batch:
+            break
+        cols.extend(batch)
+        page += 1
+        time.sleep(0.3)
+    handle_to_cols: dict[str, list[str]] = {}
+    for c in cols[:max_collections]:
+        chandle = str(c.get("handle") or "").strip()
+        ctitle = re.sub(r"\s+", " ", str(c.get("title") or "")).strip()
+        if not chandle or not ctitle:
+            continue
+        cpage = 1
+        while cpage <= max_pages:
+            try:
+                r = requests.get(f"{base}/collections/{urllib.parse.quote(chandle)}/products.json",
+                                 params={"limit": 250, "page": cpage}, headers=UA, timeout=45)
+            except Exception:
+                break
+            if r.status_code != 200:
+                break
+            try:
+                prods = r.json().get("products") or []
+            except Exception:
+                break
+            if not prods:
+                break
+            for p in prods:
+                phandle = str(p.get("handle") or "").strip()
+                if not phandle:
+                    continue
+                lst = handle_to_cols.setdefault(phandle, [])
+                if ctitle not in lst:
+                    lst.append(ctitle)
+            cpage += 1
+            time.sleep(0.2)
+    return handle_to_cols
+
+
+def fetch_collection_map(base_url: str) -> dict[str, list[str]]:
+    """Cached per-run product-handle -> collection-titles map (see _fetch_collection_map_impl)."""
+    return _snapshot("shopify_collections", base_url, lambda: _fetch_collection_map_impl(base_url))
+
+
 def _unescape_stable(s: str) -> str:
     """Decode HTML entities until stable — product names/categories arrive
     entity-encoded ("Dolce &amp; Gabbana", "Marc Jacobs &#8211; Daisy") and the
@@ -142,10 +208,14 @@ def _unescape_stable(s: str) -> str:
     return s
 
 
-def _emit_doc(*, title, price, availability, ptype, categories, desc, source, canonicalize, currency) -> Document:
-    """Build one canonical product Document — identical shape for Shopify + WooCommerce."""
+def _emit_doc(*, title, price, availability, ptype, categories, desc, source, canonicalize, currency, collections="") -> Document:
+    """Build one canonical product Document — identical shape for Shopify + WooCommerce.
+    `collections` (pipe-joined storefront collection titles) is stored as its own
+    metadata field so "list products in <sidebar category>" can match EXACT collection
+    membership, independent of title/tag words that merely contain the name."""
     title = _unescape_stable(title)
     categories = _unescape_stable(categories)
+    collections = _unescape_stable(collections)
     ptype = _unescape_stable(ptype)
     lines = [f"Product: {title}"]
     if price is not None:
@@ -164,6 +234,7 @@ def _emit_doc(*, title, price, availability, ptype, categories, desc, source, ca
         "content_type": "product",
         "availability": availability,
         "categories": categories,
+        "collections": collections,
     }
     if price is not None:
         meta["price"] = float(price)
@@ -369,6 +440,7 @@ def build_catalog_docs(base_url: str, canonicalize=None, currency: str = "Rs.") 
     docs: list[Document] = []
     products = fetch_all_products(base_url)
     if products:
+        col_map = fetch_collection_map(base_url)
         for p in sorted(products, key=lambda x: str(x.get("handle") or "")):
             handle = str(p.get("handle") or "").strip()
             title = re.sub(r"\s+", " ", str(p.get("title") or "")).strip()
@@ -388,10 +460,12 @@ def build_catalog_docs(base_url: str, canonicalize=None, currency: str = "Rs.") 
             tags = p.get("tags") or []
             if isinstance(tags, str):
                 tags = [t.strip() for t in tags.split(",") if t.strip()]
+            collections = col_map.get(handle, [])
             docs.append(_emit_doc(
                 title=title, price=(min(prices) if prices else None),
                 availability="available" if any_avail else "out of stock",
-                ptype=ptype, categories=", ".join([t for t in ([ptype] + list(tags)) if t]),
+                ptype=ptype, categories=", ".join([t for t in ([ptype] + list(tags) + list(collections)) if t]),
+                collections=" | ".join([c for c in collections if c]),
                 desc=_html_to_text(str(p.get("body_html") or ""))[:1200],
                 source=f"{base}/products/{urllib.parse.quote(handle)}",
                 canonicalize=canonicalize, currency=currency))
@@ -408,7 +482,7 @@ def build_catalog_docs(base_url: str, canonicalize=None, currency: str = "Rs.") 
             docs.append(_emit_doc(
                 title=title, price=_woo_price(p.get("prices") or {}),
                 availability="available" if p.get("is_in_stock") else "out of stock",
-                ptype="", categories=", ".join(cats),
+                ptype="", categories=", ".join(cats), collections=" | ".join([c for c in cats if c]),
                 desc=_html_to_text(str(p.get("description") or p.get("short_description") or ""))[:1200],
                 source=source, canonicalize=canonicalize, currency=currency))
         return docs
@@ -437,6 +511,7 @@ def catalog_ground_truth(base_url: str) -> list[dict] | None:
     base = base_url.rstrip("/")
     shop = fetch_all_products(base_url)
     if shop:
+        col_map = fetch_collection_map(base_url)
         gt = []
         for p in shop:
             handle = str(p.get("handle") or "").strip()
@@ -450,9 +525,10 @@ def catalog_ground_truth(base_url: str) -> list[dict] | None:
             tags = p.get("tags") or []
             if isinstance(tags, str):
                 tags = [t.strip() for t in tags.split(",") if t.strip()]
+            collections = col_map.get(handle, [])
             gt.append({"title": _unescape_stable(title), "prices": prices,
                        "available": (any(v.get("available") for v in vs) if vs and "available" in vs[0] else None),
-                       "categories": _unescape_stable(", ".join([t for t in ([ptype] + list(tags)) if t])),
+                       "categories": _unescape_stable(", ".join([t for t in ([ptype] + list(tags) + list(collections)) if t])),
                        "source": f"{base}/products/{urllib.parse.quote(handle)}"})
         return gt
     woo = fetch_all_products_woo(base_url)

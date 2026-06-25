@@ -77,6 +77,11 @@ _STOP = {
     # "include EVERY EXACT price"). Without these the engine matches rows against
     # 'category'/'contains'/'exact' and finds nothing → false "no such category".
     "category", "categories", "categorized", "categorised", "section", "department",
+    # list-verb inflections — "products LISTED in", "items LISTING under", "what LISTS
+    # under X" must anchor on X, not keep "listed"/"listing" (which match no category
+    # → false "no such category" and a fall-through to fuzzy RAG). "list" was already
+    # a stop-word; its inflections were the gap that broke "products listed in <cat>".
+    "listed", "listing", "lists",
     "whose", "contains", "contain", "containing", "include", "includes", "including",
     "included", "exact", "exactly", "every", "each", "named", "calling", "called",
     "answer", "yes", "no",  # "...carry X? answer yes or no" — keep X, drop the rest
@@ -111,6 +116,8 @@ class Row:
     hay: str  # lowercased title + categories + body head, for anchor matching
     currency: str = "Rs."  # detected per-row; engine output stays currency-agnostic
     cats: str = ""  # structured categories only (product_type + tags) for tag-precise counting
+    colls: str = ""  # "|name|name|" of EXACT storefront collections (sidebar groups) for membership listing
+    colls_disp: str = ""  # original-case collection titles ("A | B") for "which section is X in" answers
 
 
 @dataclass
@@ -513,8 +520,19 @@ def load_rows(db, limit: int = 12000) -> list[Row]:
         # description. A prose mention ("pairs well with our sharpener") must not
         # count an unrelated product into the "sharpener" category.
         cats_l = str(meta.get("categories") or "").lower()
+        # Exact storefront-collection membership, normalized to "|name|name|" so a
+        # category query can test `|<phrase>|` for precise membership — collection
+        # names often collide with title/tag words ("Scissors", "Fujifilm").
+        _colls_raw = str(meta.get("collections") or "")
+        colls_l = ""
+        if _colls_raw:
+            _parts = [re.sub(r"[^a-z0-9]+", " ", p.lower()).strip() for p in _colls_raw.split("|")]
+            _parts = [p for p in _parts if p]
+            if _parts:
+                colls_l = "|" + "|".join(_parts) + "|"
         hay = " ".join([tl, cats_l])
-        row = Row(title, price, avail, src, hay, cur, cats_l)
+        _colls_disp = " | ".join(p.strip() for p in _colls_raw.split("|") if p.strip())
+        row = Row(title, price, avail, src, hay, cur, cats_l, colls_l, _colls_disp)
         # Dedup by normalized title, but PREFER the priced chunk: a catalog that was
         # both crawled and catalog-ingested has two chunks per product (a crawl chunk
         # often without a structured price + a priced ingest chunk). Keeping whichever
@@ -533,6 +551,9 @@ def load_rows(db, limit: int = 12000) -> list[Row]:
             if not prev.cats and cats_l:
                 prev.cats = cats_l
                 prev.hay = " ".join([prev.title.lower(), cats_l])
+            if not prev.colls and colls_l:
+                prev.colls = colls_l
+                prev.colls_disp = _colls_disp
     _ROW_CACHE[_ck] = (rows, total, _now)
     return rows
 
@@ -984,6 +1005,50 @@ def _plan_to_specs(plan: dict) -> tuple[dict | None, "Spec | None"]:
     return None, None
 
 
+_LOCATE_CAT_RE = re.compile(
+    r"(?i)^\s*(?:which|what|in\s+what|under\s+what)\s+"
+    r"(?:categor(?:y|ies)|section|collection|department|aisle|group)\s+"
+    r"(?:is|are|does|do|would)\s+(.+?)"
+    r"(?:\s+(?:in|under|listed|placed|found|located|belong(?:s)?(?:\s+to)?|part\s+of))?\s*\??$")
+_LOCATE_WHERE_RE = re.compile(
+    r"(?i)^\s*where\s+(?:can|do|would|should|will|might)?\s*(?:i|you|we|one)?\s*"
+    r"(?:find|locate|get|see|buy|browse)\s+(.+?)\s*\??$")
+
+
+def _locate_target(q: str) -> str | None:
+    """Extract the PRODUCT name from a 'which category/section is X in' / 'where do I
+    find X' question. Returns None when the question isn't a reverse-location query."""
+    if not q:
+        return None
+    m = _LOCATE_CAT_RE.match(q.strip()) or _LOCATE_WHERE_RE.match(q.strip())
+    return m.group(1).strip() if m else None
+
+
+def _answer_locate(target: str, rows: list[Row]) -> tuple[str, list[str]] | None:
+    """Resolve `target` to a product and report the storefront collection(s) it sits in."""
+    anchors = [t for t in re.sub(r"[^a-z0-9 ]", " ", target.lower()).split()
+               if t not in _STOP and len(t) > 1]
+    if not anchors:
+        return None
+    cand = [r for r in rows if _hit(r, anchors, title_only=True)]
+    if not cand:
+        aset = _anchor_set(anchors)
+        scored = [(_title_cover(r.title, aset, anchors), r) for r in rows]
+        scored = sorted([(c, r) for c, r in scored if c >= 0.85], key=lambda x: -x[0])
+        cand = [scored[0][1]] if scored else []
+    if not cand:
+        return None
+    # Prefer a resolved product that actually carries collection membership.
+    r = next((x for x in cand if x.colls_disp), cand[0])
+    cols = [c for c in r.colls_disp.split(" | ") if c]
+    if not cols:
+        return (f"{r.title} is in our catalog, but I don't have a specific category "
+                f"listed for it."), ([r.source] if r.source else [])
+    joined = ", ".join(cols)
+    word = "category" if len(cols) == 1 else "categories"
+    return (f"{r.title} is listed under the {joined} {word}.", [r.source] if r.source else [])
+
+
 def answer_catalog_query(q: str, db, cfg: dict | None = None, max_list: int = 12) -> tuple[str | None, list[str]]:
     """Single front-door for structured catalog questions. Returns (text, sources),
     or (None, []) when the question is not a structured-catalog question (caller
@@ -996,6 +1061,16 @@ def answer_catalog_query(q: str, db, cfg: dict | None = None, max_list: int = 12
     try:
         if not q or db is None:
             return None, []
+        # Reverse lookup — "which section/category is X in", "where do I find X".
+        # The mirror of category listing: name a product, get the storefront
+        # collection(s) it lives under (answers the customer browsing the sidebar).
+        _loc = _locate_target(q)
+        if _loc:
+            _lrows = load_rows(db)
+            if _lrows and is_catalog_db(db, _lrows, cfg):
+                _ans = _answer_locate(_loc, _lrows)
+                if _ans:
+                    return _ans
         spec = parse(q)
         mp = _parse_multi(q)
         rows = None
@@ -1092,6 +1167,29 @@ def _execute_spec(spec: "Spec", rows: list[Row], cfg: dict | None, max_list: int
             _scored.sort(key=lambda x: -x[0])
             _top = _scored[0][0] if _scored else 0.0
             _base = [r for c, r in _scored if c >= _top - 1e-9]
+        # Collection-exact override: when the anchor names a STOREFRONT COLLECTION
+        # (sidebar/menu group) verbatim, the authoritative member set is that
+        # collection — never title/tag substring matches. "Fujifilm" the collection
+        # is 2 cameras; "fujifilm" as a brand tag is on every film. Exact membership
+        # returns the real group the customer is browsing, not coincidental name hits.
+        _coll_locked = False
+        if spec.anchors and spec.agg in ("count", "exists", "list"):
+            def _sig(toks):
+                return frozenset(t for t in toks if len(t) >= 2 and t not in _STOP)
+            _A = _sig(re.sub(r"[^a-z0-9]+", " ", " ".join(spec.anchors).lower()).split())
+            if _A:
+                # A row is a collection member iff one of its collection names has the
+                # SAME significant-token set as the query (order-free, ignoring 1-char
+                # tokens like the "z" in "Cra-Z-Art" and scaffolding words like "in").
+                def _coll_match(r):
+                    for el in r.colls.split("|"):
+                        if el and _sig(el.split()) == _A:
+                            return True
+                    return False
+                _members = [r for r in rows if _coll_match(r)]
+                if _members:
+                    _base = _members
+                    _coll_locked = True
         sel = []
         _oos = []  # matched the query but excluded only by the in-stock filter
         for r in _base:
@@ -1128,7 +1226,7 @@ def _execute_spec(spec: "Spec", rows: list[Row], cfg: dict | None, max_list: int
         # that happen to also carry a coincidental "monochrome" category tag (e.g.
         # one marker set) silently drops the products the user actually asked for.
         # Also skipped for untagged/HTML-crawl DBs (tagged ratio < 50%).
-        if spec.anchors and not spec.title_only and spec.agg in ("count", "min", "max", "list"):
+        if not _coll_locked and spec.anchors and not spec.title_only and spec.agg in ("count", "min", "max", "list"):
             _tagged = sum(1 for r in rows if r.cats.strip())
             if rows and (_tagged / len(rows)) >= 0.5:
                 _tag_sel = [r for r in sel if _cats_hit(r, spec.anchors)]
