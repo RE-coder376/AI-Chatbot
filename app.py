@@ -875,6 +875,42 @@ def _global_daily_dict():
     return _global_daily_handle
 
 
+_vol_handle = None            # cached modal.Volume handle for the DB volume
+_last_vol_reload = 0.0        # monotonic ts of this container's last volume reload
+_VOL_RELOAD_TTL = 20.0        # seconds — bound on how long a commit can stay invisible
+
+def _maybe_reload_volume():
+    """Refresh this container's view of the shared DB volume.
+
+    Modal mounts a volume at the state it had when the container started; a commit
+    made by ANOTHER container (e.g. a catalog re-ingest / crawl writing fresh data)
+    is invisible to a long-warm serve container until it calls volume.reload(). That
+    invisibility is exactly what let a warm container keep serving a stale tenant DB
+    after a re-ingest. Reloading surfaces the new files; the on-disk-mtime staleness
+    check in _get_db_instance then rebuilds the tmpfs copy automatically. Bounded to
+    once per _VOL_RELOAD_TTL seconds so it costs at most one cheap round-trip/window.
+    No-op off Modal (local/HF). reload() implicitly commits this container's own
+    writes (only visitor_history — never the read-only DB files, so it can't clobber
+    a fresh DB another container committed). It can fail if a volume file is open at
+    that instant (a visitor_history write); harmless — the except skips and the next
+    window retries. Chroma reads the /dev/shm copy, so the DB sqlite is never open
+    on the volume."""
+    global _vol_handle, _last_vol_reload
+    if not os.environ.get("MODAL_TASK_ID"):
+        return
+    now = time.monotonic()
+    if now - _last_vol_reload < _VOL_RELOAD_TTL:
+        return
+    _last_vol_reload = now
+    try:
+        import modal
+        if _vol_handle is None:
+            _vol_handle = modal.Volume.from_name("ai-chatbot-databases")
+        _vol_handle.reload()
+    except Exception as e:
+        logger.debug(f"[VOL] reload skipped: {e}")
+
+
 def check_daily_budget(db_name: str) -> bool:
     """Per-client daily request ceiling — the fairness guard protecting the shared LLM pool.
     True if under budget.
@@ -1518,19 +1554,53 @@ _ANALYTICS_SKIP_RE = re.compile(
     r'|[<>]|javascript:|base64'
 )
 
+def _normalise_analytics_data(raw) -> dict:
+    data = {"total_queries": 0, "total_sessions": 0, "sessions": [], "history": [], "questions": {}}
+    if isinstance(raw, dict):
+        if "total" in raw and "total_queries" not in raw:
+            raw = {**raw, "total_queries": raw.get("total", 0)}
+        data.update(raw)
+    try:
+        data["total_queries"] = int(data.get("total_queries") or 0)
+    except (TypeError, ValueError):
+        data["total_queries"] = 0
+    sessions = data.get("sessions")
+    data["sessions"] = sessions if isinstance(sessions, list) else []
+    try:
+        data["total_sessions"] = int(data.get("total_sessions") or len(data["sessions"]) or 0)
+    except (TypeError, ValueError):
+        data["total_sessions"] = len(data["sessions"])
+    history = data.get("history")
+    data["history"] = history if isinstance(history, list) else []
+    questions = data.get("questions")
+    if not isinstance(questions, dict):
+        questions = {}
+    clean_questions = {}
+    for q, count in questions.items():
+        try:
+            clean_questions[str(q)] = int(count)
+        except (TypeError, ValueError):
+            continue
+    data["questions"] = clean_questions
+    return data
+
+
+def _load_analytics_data(db_name: str) -> dict:
+    af = _analytics_file(db_name)
+    if not af.exists():
+        return _normalise_analytics_data({})
+    try:
+        return _normalise_analytics_data(json.loads(af.read_text(encoding="utf-8")))
+    except Exception as e:
+        logger.warning(f"Analytics read failed ({db_name}): {e}")
+        return _normalise_analytics_data({})
+
+
 def log_interaction(q: str, session_id: str = "", db_name: str = ""):
     with _analytics_lock:
         try:
             af = _analytics_file(db_name or _get_active_db())
-            data = {"total_queries": 0, "total_sessions": 0, "sessions": [], "history": [], "questions": {}}
-            if af.exists():
-                try:
-                    raw = json.loads(af.read_text(encoding="utf-8"))
-                    if "total" in raw and "total_queries" not in raw:
-                        raw["total_queries"] = raw.pop("total")
-                    data.update(raw)
-                except Exception as e:
-                    logger.warning(f"Analytics file corrupt, resetting: {e}")
+            data = _load_analytics_data(db_name or _get_active_db())
 
             data["total_queries"] = data.get("total_queries", 0) + 1
             data["history"].insert(0, {"q": q, "t": datetime.now().isoformat()})
@@ -1544,7 +1614,7 @@ def log_interaction(q: str, session_id: str = "", db_name: str = ""):
                 data["sessions"] = data["sessions"][-500:]
                 data["total_sessions"] = len(data["sessions"])
 
-            af.write_text(json.dumps(data, indent=2), encoding="utf-8")
+            _atomic_write_json(af, data)
         except Exception as e:
             logger.error(f"Analytics Error: {e}")
 
@@ -1987,6 +2057,12 @@ async def _auto_crawl_db(db_name: str, url: str, max_pages: int = 0, clear: bool
     _ac_docs_only = bool(_ac_docs_hints) or str(_ac_cfg.get("db_type", "")).lower() in ("docs", "documentation")
     _ac_has_product = bool(_ac_cfg.get("is_product_db")) or ("smart_search" in set(_ac_cfg.get("features", []) or []))
     set_docs_only_db(_ac_docs_only and not _ac_has_product)
+    # Auto-Ingest mode: the store exposes a structured product API (Shopify/Woo/
+    # generic JSON-LD), so the scheduled job runs deterministic catalog ingest only
+    # and SKIPS the BFS HTML discovery/crawl (cheap, junk-free, constant counts).
+    # Prose pages (FAQ/policy) are refreshed via a manual crawl. This replaces the
+    # removed global daily reingest cron with per-DB, owner-controlled freshness.
+    _ac_auto_ingest = bool(_ac_cfg.get("auto_ingest"))
 
     # Admin UI wants "new chunks" as net growth, not "chunks processed".
     # Some Chroma versions don't support count(where=...), so track net via total count.
@@ -2421,7 +2497,7 @@ async def _auto_crawl_db(db_name: str, url: str, max_pages: int = 0, clear: bool
                             if sitemap_urls:
                                 break
                 except Exception: pass
-            if sitemap_urls:
+            if sitemap_urls and not _ac_auto_ingest:
                 crawl_urls = sitemap_urls if max_pages == 0 else sitemap_urls[:max_pages]
                 _disc_sitemap = len(crawl_urls)
                 for u in crawl_urls: _url_layer.setdefault(u, []).append("sitemap")
@@ -2429,7 +2505,7 @@ async def _auto_crawl_db(db_name: str, url: str, max_pages: int = 0, clear: bool
                 logger.info(f"[AUTO-CRAWL] '{db_name}': {len(sitemap_urls)} sitemap URLs — refreshing {len(crawl_urls)} ({new_count} new)")
 
         # Fallback: no sitemap — multi-level BFS from homepage
-        if not crawl_urls:
+        if not crawl_urls and not _ac_auto_ingest:
             logger.info(f"[AUTO-CRAWL] '{db_name}': no sitemap — falling back to multi-level BFS from {url}")
             try:
                 _bfs_limit = min(max_pages, 500) if max_pages else 500
@@ -2561,7 +2637,7 @@ async def _auto_crawl_db(db_name: str, url: str, max_pages: int = 0, clear: bool
                 except Exception: pass
 
         try:
-            _nav_extras = await _discover_nav_entrypoints()
+            _nav_extras = [] if _ac_auto_ingest else await _discover_nav_entrypoints()
             if _nav_extras:
                 crawl_urls = list(dict.fromkeys(crawl_urls + _nav_extras))
                 _disc_nav = len(_nav_extras)
@@ -4508,6 +4584,51 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
         if include_debug_artifacts:
             payload["workflow_debug"] = workflow_debug
         return payload
+    def _should_capture_lead(reason: str = "", *, context_miss: bool = False) -> bool:
+        if cfg and cfg.get("disable_lead_box", False):
+            return False
+        q_l = (q or "").lower()
+        direct_contact = re.search(
+            r"\b(contact|call me|email|whatsapp|speak to (?:a |an |someone|agent|human|team)|"
+            r"talk to (?:a |an |someone|agent|human|team)|human support|support team|connect me|get in touch|reach out)\b",
+            q_l,
+            re.IGNORECASE,
+        )
+        sales_intent = re.search(
+            r"\b(quote|quotation|bulk order|wholesale|custom order|customize|enterprise|business order|"
+            r"discount for quantity|volume discount|sales|pricing plan|subscription)\b",
+            q_l,
+            re.IGNORECASE,
+        )
+        booking_intent = re.search(
+            r"\b(book\s+(?:a|an|demo|appointment|consultation|meeting)|booking|schedule|demo|appointment|consultation|meeting)\b",
+            q_l,
+            re.IGNORECASE,
+        )
+        support_issue = re.search(
+            r"\b(complaint|refund|want to return|return my|want to exchange|exchange my|cancel order|order issue|delivery issue|late delivery|"
+            r"payment issue|damaged|broken|wrong item|not received|angry|frustrated|not happy|bad service)\b",
+            q_l,
+            re.IGNORECASE,
+        )
+        purchase_friction = re.search(
+            r"\b(available|availability|in stock|out of stock|delivery|shipping|payment|cod|cash on delivery|"
+            r"size|color|variant|custom requirement|can i order|how to order)\b",
+            q_l,
+            re.IGNORECASE,
+        )
+        explicitly_unresolved = re.search(
+            r"\b(that did(?:n't| not) help|wrong|not understanding|you don't understand|still confused|need help)\b",
+            q_l,
+            re.IGNORECASE,
+        )
+        if direct_contact or sales_intent or booking_intent or support_issue or explicitly_unresolved:
+            return True
+        if reason == "complaint":
+            return True
+        if context_miss and (purchase_friction or sales_intent or support_issue or direct_contact or booking_intent):
+            return True
+        return False
     yield ": keep-alive\n\n"
     # Lazy-load model on first request — but don't block the stream (model download ~2min on Render)
     if local_db is None and _status not in ("ready_no_db",):
@@ -4762,7 +4883,7 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
                      f"If you'd prefer to speak with someone directly, our team is happy to assist.{contact_str}")
         if visitor_id: _run_in_bg(save_visitor_turn, visitor_id, "assistant", reply, db_name)
         yield f"data: {json.dumps({'type': 'chunk', 'content': reply})}\n\n"
-        _lead_on = not cfg.get("disable_lead_box", False)
+        _lead_on = _should_capture_lead("complaint")
         yield f"data: {json.dumps({'type': 'metadata', 'capture_lead': _lead_on, 'sources': [], 'workflow_trace': workflow_trace})}\n\n"
         yield "data: {\"type\": \"done\"}\n\n"
         return
@@ -4927,7 +5048,7 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
         _trace_decision(workflow_debug, "exit_guard", "deterministic_outcomes_extractor")
         if visitor_id: _run_in_bg(save_visitor_turn, visitor_id, "assistant", _outcomes_ans, db_name)
         yield f"data: {json.dumps({'type': 'chunk', 'content': _outcomes_ans})}\n\n"
-        _lead_on = not cfg.get("disable_lead_box", False)
+        _lead_on = _should_capture_lead()
         _trace_artifact(workflow_debug, "final_answer", _outcomes_ans[:4000])
         yield f"data: {json.dumps(_metadata_payload(_lead_on, _preferred_sources_for_product_answer(q, sources, 5)))}\n\n"
         yield "data: {\"type\": \"done\"}\n\n"
@@ -4945,7 +5066,7 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
                 if visitor_id:
                     _run_in_bg(save_visitor_turn, visitor_id, "assistant", _direct_probe, db_name)
                 yield f"data: {json.dumps({'type': 'chunk', 'content': _direct_probe})}\n\n"
-                _lead_on = not cfg.get("disable_lead_box", False)
+                _lead_on = _should_capture_lead()
                 _trace_artifact(workflow_debug, "final_answer", _direct_probe[:4000])
                 yield f"data: {json.dumps(_metadata_payload(_lead_on, sources[:5]))}\n\n"
                 yield "data: {\"type\": \"done\"}\n\n"
@@ -4957,7 +5078,7 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
                 if visitor_id:
                     _run_in_bg(save_visitor_turn, visitor_id, "assistant", _live_outcomes, db_name)
                 yield f"data: {json.dumps({'type': 'chunk', 'content': _live_outcomes})}\n\n"
-                _lead_on = not cfg.get("disable_lead_box", False)
+                _lead_on = _should_capture_lead()
                 _trace_artifact(workflow_debug, "final_answer", _live_outcomes[:4000])
                 yield f"data: {json.dumps(_metadata_payload(_lead_on, sources[:5]))}\n\n"
                 yield "data: {\"type\": \"done\"}\n\n"
@@ -4970,7 +5091,7 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
                 if visitor_id:
                     _run_in_bg(save_visitor_turn, visitor_id, "assistant", _probe2, db_name)
                 yield f"data: {json.dumps({'type': 'chunk', 'content': _probe2})}\n\n"
-                _lead_on = not cfg.get("disable_lead_box", False)
+                _lead_on = _should_capture_lead()
                 yield f"data: {json.dumps(_metadata_payload(_lead_on, sources[:5]))}\n\n"
                 yield "data: {\"type\": \"done\"}\n\n"
                 return
@@ -4978,7 +5099,7 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
             if visitor_id:
                 _run_in_bg(save_visitor_turn, visitor_id, "assistant", _msg, db_name)
             yield f"data: {json.dumps({'type': 'chunk', 'content': _msg})}\n\n"
-            _lead_on = not cfg.get("disable_lead_box", False)
+            _lead_on = _should_capture_lead()
             yield f"data: {json.dumps(_metadata_payload(_lead_on, []))}\n\n"
             yield "data: {\"type\": \"done\"}\n\n"
             return
@@ -4989,7 +5110,7 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
                 if visitor_id:
                     _run_in_bg(save_visitor_turn, visitor_id, "assistant", _probe3, db_name)
                 yield f"data: {json.dumps({'type': 'chunk', 'content': _probe3})}\n\n"
-                _lead_on = not cfg.get("disable_lead_box", False)
+                _lead_on = _should_capture_lead()
                 yield f"data: {json.dumps(_metadata_payload(_lead_on, sources[:5]))}\n\n"
                 yield "data: {\"type\": \"done\"}\n\n"
                 return
@@ -4998,7 +5119,7 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
                 if visitor_id:
                     _run_in_bg(save_visitor_turn, visitor_id, "assistant", _ctx_fb, db_name)
                 yield f"data: {json.dumps({'type': 'chunk', 'content': _ctx_fb})}\n\n"
-                _lead_on = not cfg.get("disable_lead_box", False)
+                _lead_on = _should_capture_lead()
                 yield f"data: {json.dumps(_metadata_payload(_lead_on, sources[:5]))}\n\n"
                 yield "data: {\"type\": \"done\"}\n\n"
                 return
@@ -5007,7 +5128,7 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
                 if visitor_id:
                     _run_in_bg(save_visitor_turn, visitor_id, "assistant", _ctx_syn, db_name)
                 yield f"data: {json.dumps({'type': 'chunk', 'content': _ctx_syn})}\n\n"
-                _lead_on = not cfg.get("disable_lead_box", False)
+                _lead_on = _should_capture_lead()
                 yield f"data: {json.dumps(_metadata_payload(_lead_on, sources[:5]))}\n\n"
                 yield "data: {\"type\": \"done\"}\n\n"
                 return
@@ -5015,7 +5136,7 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
             if visitor_id:
                 _run_in_bg(save_visitor_turn, visitor_id, "assistant", _msg2, db_name)
             yield f"data: {json.dumps({'type': 'chunk', 'content': _msg2})}\n\n"
-            _lead_on = not cfg.get("disable_lead_box", False)
+            _lead_on = _should_capture_lead()
             yield f"data: {json.dumps(_metadata_payload(_lead_on, sources[:5]))}\n\n"
             yield "data: {\"type\": \"done\"}\n\n"
             return
@@ -5033,7 +5154,7 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
                     if visitor_id:
                         _run_in_bg(save_visitor_turn, visitor_id, "assistant", _probe_fact, db_name)
                     yield f"data: {json.dumps({'type': 'chunk', 'content': _probe_fact})}\n\n"
-                    _lead_on = not cfg.get("disable_lead_box", False)
+                    _lead_on = _should_capture_lead()
                     _trace_artifact(workflow_debug, "final_answer", _probe_fact[:4000])
                     yield f"data: {json.dumps(_metadata_payload(_lead_on, (sources or [])[:5]))}\n\n"
                     yield "data: {\"type\": \"done\"}\n\n"
@@ -5054,7 +5175,7 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
                         if visitor_id:
                             _run_in_bg(save_visitor_turn, visitor_id, "assistant", _probe_fact, db_name)
                         yield f"data: {json.dumps({'type': 'chunk', 'content': _probe_fact})}\n\n"
-                        _lead_on = not cfg.get("disable_lead_box", False)
+                        _lead_on = _should_capture_lead()
                         _trace_artifact(workflow_debug, "final_answer", _probe_fact[:4000])
                         yield f"data: {json.dumps(_metadata_payload(_lead_on, (sources or [])[:5]))}\n\n"
                         yield "data: {\"type\": \"done\"}\n\n"
@@ -5100,7 +5221,7 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
             if visitor_id:
                 _run_in_bg(save_visitor_turn, visitor_id, "assistant", _sf, db_name)
             yield f"data: {json.dumps({'type': 'chunk', 'content': _sf})}\n\n"
-            _lead_on = not cfg.get("disable_lead_box", False)
+            _lead_on = _should_capture_lead()
             _trace_artifact(workflow_debug, "final_answer", _sf[:4000])
             yield f"data: {json.dumps(_metadata_payload(_lead_on, sources[:5]))}\n\n"
             yield "data: {\"type\": \"done\"}\n\n"
@@ -5137,7 +5258,7 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
         if visitor_id:
             _run_in_bg(save_visitor_turn, visitor_id, "assistant", _prod_det, db_name)
         yield f"data: {json.dumps({'type': 'chunk', 'content': _prod_det})}\n\n"
-        _lead_on = not cfg.get("disable_lead_box", False)
+        _lead_on = _should_capture_lead()
         _trace_artifact(workflow_debug, "final_answer", _prod_det[:4000])
         yield f"data: {json.dumps(_metadata_payload(_lead_on, _preferred_sources_for_product_answer(q, sources, 5)))}\n\n"
         yield "data: {\"type\": \"done\"}\n\n"
@@ -5169,7 +5290,7 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
                 if visitor_id:
                     _run_in_bg(save_visitor_turn, visitor_id, "assistant", _exact_ans, db_name)
                 yield f"data: {json.dumps({'type': 'chunk', 'content': _exact_ans})}\n\n"
-                _lead_on = not cfg.get("disable_lead_box", False)
+                _lead_on = _should_capture_lead()
                 _trace_artifact(workflow_debug, "final_answer", _exact_ans[:4000])
                 yield f"data: {json.dumps(_metadata_payload(_lead_on, (sources or [])[:5]))}\n\n"
                 yield "data: {\"type\": \"done\"}\n\n"
@@ -5195,7 +5316,7 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
                    f"Is there something specific within that scope I can help with?")
         if visitor_id: _run_in_bg(save_visitor_turn, visitor_id, "assistant", idk, db_name)
         yield f"data: {json.dumps({'type': 'chunk', 'content': idk})}\n\n"
-        _lead_on = not cfg.get("disable_lead_box", False)
+        _lead_on = _should_capture_lead(context_miss=True)
         quick_opts_idk = await _get_intro_questions(db_name or _get_active_db(), _local_db, cfg)
         _trace_artifact(workflow_debug, "final_answer", idk[:4000])
         _trace_decision(workflow_debug, "cleaned_answer_class", "IDK")
@@ -5210,7 +5331,7 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
             _trace_decision(workflow_debug, "exit_guard", "fast_response_formatter")
             if visitor_id: _run_in_bg(save_visitor_turn, visitor_id, "assistant", _fast_resp, db_name)
             yield f"data: {json.dumps({'type': 'chunk', 'content': _fast_resp})}\n\n"
-            _lead_on = not cfg.get("disable_lead_box", False)
+            _lead_on = _should_capture_lead()
             _trace_artifact(workflow_debug, "final_answer", _fast_resp[:4000])
             yield f"data: {json.dumps(_metadata_payload(_lead_on, sources[:3]))}\n\n"
             yield "data: {\"type\": \"done\"}\n\n"
@@ -5241,7 +5362,7 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
         if visitor_id:
             _run_in_bg(save_visitor_turn, visitor_id, "assistant", _prod_det, db_name)
         yield f"data: {json.dumps({'type': 'chunk', 'content': _prod_det})}\n\n"
-        _lead_on = not cfg.get("disable_lead_box", False)
+        _lead_on = _should_capture_lead()
         _trace_artifact(workflow_debug, "final_answer", _prod_det[:4000])
         yield f"data: {json.dumps(_metadata_payload(_lead_on, _preferred_sources_for_product_answer(q, sources, 5)))}\n\n"
         yield "data: {\"type\": \"done\"}\n\n"
@@ -5410,8 +5531,7 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
                 break
             continue
 
-    lead_keywords = ["contact", "hire", "appointment", "book a", "book an", "demo", "sales", "consultation", "quote", "enterprise", "get in touch", "reach out", "speak to someone", "talk to someone"]
-    is_lead = any(kw in q.lower() for kw in lead_keywords)
+    is_lead = _should_capture_lead()
 
     if success:
         raw_answer = "".join(response_buffer)
@@ -5571,7 +5691,7 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
             _trace_event(workflow_trace, "source_suppression", reason="scope_declined")
             _trace_decision(workflow_debug, "source_suppressed_reason", "scope_declined")
         quick_opts = await _get_intro_questions(db_name or _get_active_db(), _local_db, cfg)
-        _lead_on = is_lead and not cfg.get("disable_lead_box", False)
+        _lead_on = is_lead
         yield f"data: {json.dumps(_metadata_payload(_lead_on, show_sources, quick_opts))}\n\n"
     else:
         _trace_event(workflow_trace, "guard_exit", guard="llm_all_attempts_failed")
@@ -6001,11 +6121,14 @@ async def chat(request: Request):
         # If widget key resolves to the active DB, reuse pre-loaded global (avoid reloading BGE)
         if tenant_db_name == _get_active_db() and local_db is not None:
             tenant_db_instance = local_db
-        elif tenant_db_name in _db_instance_cache:
-            tenant_db_instance = _db_instance_cache[tenant_db_name]
         else:
-            _db_instance_cache[tenant_db_name] = _get_db_instance(tenant_db_name)
-            tenant_db_instance = _db_instance_cache[tenant_db_name]
+            # Surface any commit another container made (re-ingest/crawl), then resolve
+            # via _get_db_instance — which returns the cached instance only when it is
+            # NOT stale and otherwise rebuilds from the refreshed volume. (Returning the
+            # raw cache here bypassed that staleness check and was how a warm container
+            # kept serving a stale tenant DB after a re-ingest.)
+            _maybe_reload_volume()
+            tenant_db_instance = _get_db_instance(tenant_db_name)
         # Transient-recovery retry: DB may appear moments after sync/crawl writes.
         if tenant_db_instance is None:
             try:
@@ -10851,11 +10974,7 @@ def get_analytics(request: Request, password: str = ""):
     try: admin_auth(password, cfg)
     except HTTPException: return JSONResponse({"detail": "Unauthorized"}, status_code=401)
 
-    data = {"total": 0, "history": [], "questions": {}}
-    af = _analytics_file(db_name)
-    if af.exists():
-        try: data = json.loads(af.read_text(encoding="utf-8"))
-        except Exception as e: logger.warning(f"Analytics read failed ({db_name}): {e}")
+    data = _load_analytics_data(db_name)
 
     # Sort questions by frequency
     sorted_q = sorted(data["questions"].items(), key=lambda x: x[1], reverse=True)[:5]
@@ -10909,26 +11028,36 @@ def analytics_charts(request: Request, password: str = ""):
     dates = [(today - timedelta(days=i)).isoformat() for i in range(13, -1, -1)]
 
     daily_q: dict = defaultdict(int)
-    af = _analytics_file(db_name)
-    if af.exists():
-        try:
-            adata = json.loads(af.read_text(encoding="utf-8"))
-            for entry in adata.get("history", []):
-                d = entry.get("t", "")[:10]
-                if d in dates:
-                    daily_q[d] += 1
-        except Exception:
-            pass
+    adata = _load_analytics_data(db_name)
+    for entry in adata.get("history", []):
+        if not isinstance(entry, dict):
+            continue
+        d = str(entry.get("t", ""))[:10]
+        if d in dates:
+            daily_q[d] += 1
 
     daily_csat: dict = defaultdict(list)
+    cf = _csat_file(db_name)
+    if cf.exists():
+        try:
+            for entry in json.loads(cf.read_text(encoding="utf-8")):
+                d = str(entry.get("timestamp", ""))[:10]
+                rating = entry.get("rating")
+                if d in dates and isinstance(rating, (int, float)):
+                    daily_csat[d].append(float(rating))
+        except Exception:
+            pass
     ff = _feedback_file(db_name)
     if ff.exists():
         try:
             for fb in json.loads(ff.read_text(encoding="utf-8")):
-                d = fb.get("timestamp", "")[:10]
+                d = str(fb.get("timestamp", ""))[:10]
                 r = fb.get("rating")
-                if d in dates and r:
-                    daily_csat[d].append(int(r))
+                if d in dates:
+                    if r == 1:
+                        daily_csat[d].append(5.0)
+                    elif r == -1:
+                        daily_csat[d].append(1.0)
         except Exception:
             pass
 
@@ -12237,6 +12366,7 @@ def get_db_stats(request: Request, password: str = ""):
             "next_crawl_ts": next_crawl_ts,
             "is_crawling": db_dir.name in _crawling_dbs,
             "auto_crawl_enabled": auto_enabled,
+            "auto_ingest": bool(db_cfg.get("auto_ingest")),
             "crawl_interval_minutes": interval_m,
             "crawl_url": db_cfg.get("crawl_url", ""),
             "api_sources": db_cfg.get("api_sources", []),
@@ -12330,6 +12460,11 @@ async def set_crawl_schedule(request: Request, data: dict = None):
         "crawl_interval_minutes": float(data.get("interval_minutes", 60)),
         "crawl_url": data.get("crawl_url", existing.get("crawl_url", "")),
     })
+    # auto_ingest: when the store exposes a structured product API (Shopify/Woo/
+    # generic JSON-LD), the scheduled job runs deterministic catalog ingest instead
+    # of a BFS HTML crawl. The UI sets this from the /admin/detect-platform probe.
+    if "auto_ingest" in data:
+        existing["auto_ingest"] = bool(data.get("auto_ingest"))
     new_enabled = bool(existing.get("auto_crawl_enabled", False))
     try:
         new_interval_m = float(existing.get("crawl_interval_minutes", 60) or 60)
@@ -12358,6 +12493,38 @@ async def set_crawl_schedule(request: Request, data: dict = None):
 
     threading.Thread(target=_github_sync_upload, args=(db_name,), daemon=True).start()
     return {"success": True, "message": f"Schedule saved for '{db_name}'"}
+
+@app.get("/admin/detect-platform")
+async def detect_platform(request: Request, url: str = "", password: str = ""):
+    """Cheap probe: does the store expose a structured product API? Drives the admin
+    UI to offer Auto-Ingest (deterministic catalog) vs Auto-Crawl (BFS HTML). One
+    small request per platform — Shopify /products.json then WooCommerce Store API."""
+    _db = _extract_admin_db(request, "").strip()
+    admin_auth(_extract_password(request, password), get_config(_db) if _db else {})
+    base = (url or "").strip().rstrip("/")
+    if not base:
+        return {"has_product_api": False, "platform": ""}
+    if not base.startswith("http"):
+        base = "https://" + base
+    import httpx as _hx
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/122.0 Safari/537.36"}
+    async with _hx.AsyncClient(timeout=10.0, follow_redirects=True, headers=headers) as c:
+        # Shopify: /products.json returns {"products":[...]}
+        for ep in (f"{base}/products.json?limit=1", f"{base}/collections/all/products.json?limit=1"):
+            try:
+                r = await c.get(ep)
+                if r.status_code == 200 and isinstance(r.json().get("products"), list):
+                    return {"has_product_api": True, "platform": "Shopify"}
+            except Exception:
+                pass
+        # WooCommerce Store API: /wp-json/wc/store/products returns a JSON array
+        try:
+            r = await c.get(f"{base}/wp-json/wc/store/products?per_page=1")
+            if r.status_code == 200 and isinstance(r.json(), list):
+                return {"has_product_api": True, "platform": "WooCommerce"}
+        except Exception:
+            pass
+    return {"has_product_api": False, "platform": ""}
 
 @app.get("/admin/api-sources")
 def get_api_sources(request: Request, password: str = "", db_name: str = ""):
@@ -14736,3 +14903,4 @@ if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", 8000))
     uvicorn.run(app, host="0.0.0.0", port=port, log_level="info", server_header=False)
+
