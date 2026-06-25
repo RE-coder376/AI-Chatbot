@@ -285,6 +285,15 @@ def parse(q: str) -> Spec:
                  r"track(?:ing)?\s+(?:my\s+)?order|order\s+status|cancel(?:lation|\s+(?:my\s+)?order)?)\b", ql):
         return Spec("none", structured=False)
 
+    # Variant questions — "what COLOURS/SIZES/OPTIONS does X come in", "what sizes are
+    # available" — are answered from the product chunk's Options/Variants breakdown by
+    # RAG. The structured aggregator would resolve the product and return a bare
+    # "<name> - Rs.X - available" line without ever naming the colours/sizes.
+    if (re.search(r"\b(colou?rs?|sizes?|shades?|variants?|versions?|options?)\b", ql)
+            and re.search(r"\bcome\s+in\b|\bcomes\s+in\b|\bavailable\s+in\b|\boffered\s+in\b"
+                          r"|\bdoes\s+(?:it|this|that|the)\b|\bwhat\s+(?:colou?rs?|sizes?|variants?|options?)\b", ql)):
+        return Spec("none", structured=False)
+
     # "which/what brands do you carry", "list the categories" = ENUMERATION of
     # brands/categories, not a product lookup — "do you carry" trips the existence
     # branch and would dump products as if they were brands. Hand to RAG so it
