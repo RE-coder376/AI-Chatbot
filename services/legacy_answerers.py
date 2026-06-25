@@ -329,6 +329,13 @@ def _deterministic_product_catalog_answer(q: str, kb_context: str, max_items: in
         if re.search(r"\b(which|what|list|name|tell\s+me\s+(?:the|your))\b[\w\s]*\b"
                      r"(brands?|designers?|makes?|labels?|categor(?:y|ies)|collections?)\b", ql):
             return None
+        # Variant questions ("what colours/sizes does X come in") = answer from the
+        # product chunk's Options/Variants lines via the LLM, not a bare catalog list.
+        # Mirrors services/catalog_query._is_variant_q (this is the fallback path).
+        if (re.search(r"\b(colou?rs?|sizes?|shades?|variants?|versions?|options?)\b.*"
+                      r"(?:\bcome\s+in\b|\bcomes\s+in\b|\bavailable\b|\boffered\b|\bdoes\s+(?:it|this|that|the)\b|\bhave\b)"
+                      r"|\bwhat\s+(?:colou?rs?|sizes?|variants?|options?)\b", ql)):
+            return None
         rank_mode = None
         if re.search(r"\b(cheapest|lowest\s+price|lowest\s+priced|least\s+expensive|most\s+affordable|budget)\b", ql, re.I):
             rank_mode = "asc"
