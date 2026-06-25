@@ -389,6 +389,68 @@ def test_tenant_isolation_db_stats_endpoint(client, two_tenants):
     assert all(s.get("name") == "a" for s in stats)
 
 
+def test_admin_analytics_is_tenant_scoped_and_handles_legacy_shape(app_module, client, two_tenants):
+    (app_module.DATABASES_DIR / "a" / "analytics.json").write_text(
+        app_module.json.dumps(
+            {
+                "total": 2,
+                "history": [{"q": "A recent", "t": "2026-06-25T10:00:00"}],
+                "questions": {"A question": "2"},
+                "sessions": ["sa"],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (app_module.DATABASES_DIR / "b" / "analytics.json").write_text(
+        app_module.json.dumps(
+            {
+                "total_queries": 9,
+                "history": [{"q": "B recent", "t": "2026-06-25T11:00:00"}],
+                "questions": {"B question": 9},
+                "sessions": ["sb"],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    r = client.get("/admin/analytics", headers={"Authorization": "Bearer clientA", "X-Admin-DB": "a"})
+
+    assert r.status_code == 200, r.text
+    data = r.json()
+    assert data["total_queries"] == 2
+    assert data["total_sessions"] == 1
+    assert data["most_asked"] == [{"q": "A question", "count": 2}]
+    assert data["most_recent"][0]["q"] == "A recent"
+    assert "B question" not in app_module.json.dumps(data)
+
+
+def test_admin_analytics_charts_uses_csat_and_feedback_on_same_scale(app_module, client, two_tenants):
+    today = app_module.datetime.now().date().isoformat()
+    (app_module.DATABASES_DIR / "a" / "analytics.json").write_text(
+        app_module.json.dumps({"total_queries": 1, "history": [{"q": "Q", "t": f"{today}T10:00:00"}], "questions": {"Q": 1}}),
+        encoding="utf-8",
+    )
+    (app_module.DATABASES_DIR / "a" / "csat_log.json").write_text(
+        app_module.json.dumps([{"rating": 5, "timestamp": f"{today}T10:01:00"}]),
+        encoding="utf-8",
+    )
+    (app_module.DATABASES_DIR / "a" / "feedback.json").write_text(
+        app_module.json.dumps([{"rating": -1, "timestamp": f"{today}T10:02:00"}]),
+        encoding="utf-8",
+    )
+    (app_module.DATABASES_DIR / "b" / "analytics.json").write_text(
+        app_module.json.dumps({"total_queries": 4, "history": [{"q": "B", "t": f"{today}T10:00:00"}], "questions": {"B": 4}}),
+        encoding="utf-8",
+    )
+
+    r = client.get("/admin/analytics-charts", headers={"Authorization": "Bearer clientA", "X-Admin-DB": "a"})
+
+    assert r.status_code == 200, r.text
+    data = r.json()
+    assert data["daily_queries"][-1] == 1
+    assert data["csat_avg"][-1] == 3.0
+
+
 def test_owner_gates_reject_client_password(app_module, client, two_tenants, monkeypatch):
     # /debug/retrieve should be owner-only.
     monkeypatch.setattr(app_module, "local_db", object(), raising=False)

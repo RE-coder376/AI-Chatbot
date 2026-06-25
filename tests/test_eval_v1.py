@@ -253,7 +253,7 @@ def test_collect_eval_items_keeps_only_grounded_candidates(monkeypatch):
             item.retrieve_context_preview = "The refund policy allows refunds within 7 days and requires proof of purchase."
         elif "shipping" in item.q.lower():
             item.retrieve_doc_count = 2
-            item.retrieve_context_length = 260
+            item.retrieve_context_length = 360
             item.retrieve_context_preview = "Compare standard and express shipping by delivery speed and cost."
         else:
             item.retrieve_doc_count = 0
@@ -289,7 +289,7 @@ def test_is_grounded_accepts_relevant_preview():
         source="analytics",
         retrieve_doc_count=5,
         retrieve_context_length=500,
-        retrieve_context_preview="Refunds are allowed within 7 days for unused items with proof of purchase.",
+        retrieve_context_preview="Refunds work within 7 days for unused items with proof of purchase.",
     )
 
     assert eval_v1._is_grounded(item) is True
@@ -770,16 +770,16 @@ def test_preflight_retrieve_raises_on_owner_auth_failure(monkeypatch):
         assert "Owner auth failed" in str(exc)
 
 
-def test_load_document_rows_prefers_chroma_then_falls_back(monkeypatch):
+def test_load_document_rows_prefers_sqlite_then_falls_back_to_chroma(monkeypatch):
     chroma_rows = [("doc-a", "alpha")]
     sqlite_rows = [("doc-b", "beta")]
 
     monkeypatch.setattr(eval_v1, "_load_document_rows_via_chroma", lambda _db_name: chroma_rows)
     monkeypatch.setattr(eval_v1, "_load_document_rows_via_sqlite", lambda _db_name: sqlite_rows)
-    assert eval_v1._load_document_rows("tenant_x") == chroma_rows
-
-    monkeypatch.setattr(eval_v1, "_load_document_rows_via_chroma", lambda _db_name: [])
     assert eval_v1._load_document_rows("tenant_x") == sqlite_rows
+
+    monkeypatch.setattr(eval_v1, "_load_document_rows_via_sqlite", lambda _db_name: [])
+    assert eval_v1._load_document_rows("tenant_x") == chroma_rows
 
 
 def test_doc_qa_fallback_filters_malformed_prompt_blobs(monkeypatch):
