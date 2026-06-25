@@ -49,6 +49,11 @@ _STOP = {
     "offer", "offers", "offered", "got", "keep", "keeps", "any", "some", "are", "is", "was",
     "were", "there", "here", "available", "availability", "in", "on", "at", "for", "with", "and",
     "or", "to", "us", "me", "my", "mine", "it", "its", "this", "that", "these", "those", "all",
+    # possessive "their/theirs" — "list all the gaming toys and THEIR prices" must
+    # anchor on "gaming toys", not leak "their" into the set and break the EXACT
+    # collection-membership match ({gaming,toys,their} != {gaming,toys}). Deliberately
+    # NOT his/her/hers — those are real product names ("Burberry Her") in other tenants.
+    "their", "theirs",
     "products", "product", "items", "item", "thing", "things", "stuff", "one", "ones",
     "ok", "okay", "different", "types", "type", "kinds", "kind",
     "total", "catalog", "catalogue", "inventory", "range", "selection", "what", "whats", "which",
