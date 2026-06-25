@@ -296,33 +296,10 @@ def ingest_and_gate(db_name: str, url: str = ""):
     return {"ingest": ing, "gate": rep}
 
 
-@app.function(
-    image=image,
-    timeout=7200,
-    secrets=SECRETS,
-    schedule=modal.Cron("0 19 * * *"),  # daily ~00:00 PKT (19:00 UTC), off-peak
-)
-def scheduled_reingest():
-    """Daily auto re-ingest + gate of every product DB from its LIVE structured feed,
-    so new/removed products, price + stock changes, and collection edits stay current
-    WITHOUT a manual run. Answers the freshness half of 'is everything covered from now
-    on'. Each DB goes through ingest_and_gate (rollback-on-fail), so a bad/partial feed
-    never publishes. Sequential to avoid concurrent volume-commit races.
-
-    Override the DB list by editing PRODUCT_DBS. Demos (store) self-skip if their feed
-    is unreachable (gate FAIL → rollback, last-good DB kept)."""
-    results = {}
-    for db in PRODUCT_DBS:
-        try:
-            res = ingest_and_gate.remote(db, _DB_URLS.get(db, ""))
-            results[db] = {
-                "verdict": (res.get("gate") or {}).get("verdict"),
-                "products": (res.get("ingest") or {}).get("products_ingested"),
-            }
-        except Exception as e:
-            results[db] = {"verdict": f"ERROR {type(e).__name__}: {e}"}
-    print(f"[SCHEDULED-REINGEST] {results}")
-    return results
+# NOTE: the global daily `scheduled_reingest` Cron was removed — freshness is now
+# per-DB and owner-controlled via the admin "Auto-Ingest" toggle (catalog_url +
+# interval + enable), which routes product-API stores through structured ingest in
+# _auto_crawl_db. `ingest_and_gate` / `reingest_all` remain callable on demand.
 
 
 @app.function(
