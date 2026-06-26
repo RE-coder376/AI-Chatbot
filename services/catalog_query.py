@@ -143,7 +143,7 @@ def _variants(a: str) -> set[str]:
     -y/-ies and -s/-es forms (the bare -s rule missed 'batteries', 'boxes').
     (rc is handled in _hit.)"""
     vs = {a}
-    if len(a) <= 3:
+    if len(a) < 3:
         return vs
     if a.endswith("ies"):
         vs.add(a[:-3] + "y")          # batteries -> battery
@@ -200,6 +200,40 @@ def _anchor_set(anchors: list[str]) -> set[str]:
     for a in anchors:
         s |= _variants(a)
     return s
+
+
+# A token present in a large share of the catalog is a generic TYPE/category word
+# ("car" in a car store, "pen" in a stationery store) — it carries no selectivity,
+# so demanding it as a HARD anchor wrongly collapses an aggregation set (a "cheapest
+# RC drift car" then ranks only the lone product whose tags literally spell "car").
+_GENERIC_DF = 0.15
+
+
+def _anchor_df(tok: str, rows: list[Row]) -> float:
+    """Document frequency of an anchor across the catalog (fraction of product rows
+    whose hay contains the token or a plural/singular variant)."""
+    if not rows:
+        return 0.0
+    pats = [re.compile(rf"\b{re.escape(v)}\b") for v in _variants(tok)]
+    n = sum(1 for r in rows if any(p.search(r.hay) for p in pats))
+    return n / len(rows)
+
+
+def _selective_anchors(anchors: list[str], rows: list[Row]) -> list[str]:
+    """Drop generic catalog-wide type-nouns from the MATCHING anchor set so they no
+    longer over-constrain count/min/max/list — but only when a more specific (low
+    document-frequency) anchor remains, so a query that is genuinely about the whole
+    type ("cheapest car", "how many models") keeps every anchor. 'rc' is a feature the
+    engine already treats specially everywhere (never a generic type word), so it is
+    never dropped. The display label still uses the full anchor list. Data-driven from
+    THIS catalog's own distribution → no per-store word lists."""
+    if len(anchors) <= 1 or not rows:
+        return anchors
+    df = {a: _anchor_df(a, rows) for a in anchors if a != "rc"}
+    selective = [a for a in df if df[a] < _GENERIC_DF]
+    if not selective:
+        return anchors
+    return [a for a in anchors if a == "rc" or df.get(a, 0.0) < _GENERIC_DF]
 
 
 def _title_cover(title: str, anchor_set: set[str], anchor_toks: list[str] | None = None) -> float:
@@ -1167,7 +1201,11 @@ def _execute_spec(spec: "Spec", rows: list[Row], cfg: dict | None, max_list: int
     try:
         excl = _excl_re(cfg, spec.anchors)
 
-        _base = [r for r in rows if _hit(r, spec.anchors, spec.title_only)]
+        # Generic type-nouns ("car"/"model") demanded as hard anchors collapse an
+        # aggregation set; relax them for matching while the label keeps full anchors.
+        _m_anchors = _selective_anchors(spec.anchors, rows)
+
+        _base = [r for r in rows if _hit(r, _m_anchors, spec.title_only)]
         if not _base and spec.anchors:
             # Strict all-anchor match found nothing — fall back to title-coverage so
             # a fully-named product still resolves. Only triggers when strict yields
@@ -1262,7 +1300,7 @@ def _execute_spec(spec: "Spec", rows: list[Row], cfg: dict | None, max_list: int
         if not _coll_locked and spec.anchors and not spec.title_only and spec.agg in ("count", "min", "max", "list"):
             _tagged = sum(1 for r in rows if r.cats.strip())
             if rows and (_tagged / len(rows)) >= 0.5:
-                _tag_sel = [r for r in sel if _cats_hit(r, spec.anchors)]
+                _tag_sel = [r for r in sel if _cats_hit(r, _m_anchors)]
                 if _tag_sel:
                     sel = _tag_sel
 
