@@ -6226,9 +6226,36 @@ async def chat(request: Request):
                 status_code=503
             )
     else:
-        # No widget key — use pre-loaded global to avoid blocking the event loop
-        tenant_db_name = _get_active_db()
-        tenant_db_instance = local_db
+        # No widget key. An authenticated owner/client previewing a specific DB
+        # (X-Admin-DB) must chat against THAT DB — not the global active DB — so
+        # logging into a client scopes the bot without flipping the global active DB.
+        _adm_db_raw = (request.headers.get("X-Admin-DB", "")
+                       or request.query_params.get("db_name", "") or "").strip()
+        _adm_pw = _extract_password(request, "")
+        _scoped_db = ""
+        if _adm_db_raw and _adm_pw:
+            try:
+                _cdb = _canonical_db_name(_adm_db_raw)
+                admin_auth(_adm_pw, get_config(_cdb))  # raises 401 if not authorized for this DB
+                _scoped_db = _cdb
+            except Exception:
+                _scoped_db = ""
+        if _scoped_db:
+            tenant_db_name = _scoped_db
+            if _scoped_db == _get_active_db() and local_db is not None:
+                tenant_db_instance = local_db
+            else:
+                _maybe_reload_volume()
+                tenant_db_instance = _get_db_instance(_scoped_db)
+            if tenant_db_instance is None:
+                # Don't silently answer from the wrong DB if the scoped one can't load.
+                return JSONResponse(
+                    {"error": f"DB '{_scoped_db}' is unavailable. Please retry shortly."},
+                    status_code=503)
+        else:
+            # No widget key, no admin scope — use pre-loaded global active DB.
+            tenant_db_name = _get_active_db()
+            tenant_db_instance = local_db
     tenant_cfg = get_config(tenant_db_name)
     asyncio.get_running_loop().run_in_executor(None, log_interaction, q, visitor_id, tenant_db_name)
 
