@@ -123,6 +123,7 @@ class Row:
     cats: str = ""  # structured categories only (product_type + tags) for tag-precise counting
     colls: str = ""  # "|name|name|" of EXACT storefront collections (sidebar groups) for membership listing
     colls_disp: str = ""  # original-case collection titles ("A | B") for "which section is X in" answers
+    original_price: float | None = None  # compare-at / regular price when on sale (else None)
 
 
 @dataclass
@@ -561,6 +562,22 @@ def load_rows(db, limit: int = 12000) -> list[Row]:
             if m:
                 v = _num(m.group(1))
                 price = v if (v and v > 0) else None
+        # Original (compare-at) price when the product is on sale — from structured
+        # metadata, else the "(originally Rs.X…)" the ingest renders into the chunk.
+        orig_p = None
+        try:
+            ov = meta.get("original_price")
+            if ov is not None and float(ov) > 0:
+                orig_p = float(ov)
+        except (TypeError, ValueError):
+            orig_p = None
+        if orig_p is None:
+            mo = re.search(r"(?i)originally\s+(?:rs\.?|pkr|[\$£€])?\s*([\d,]+(?:\.\d{1,2})?)", doc)
+            if mo:
+                v = _num(mo.group(1))
+                orig_p = v if (v and v > 0) else None
+        if orig_p is not None and price is not None and orig_p <= price:
+            orig_p = None
         # Currency follows the data, not a hardcoded "Rs." — read the symbol off the
         # labeled Price: line (then any body symbol) so $/£/€ stores render correctly.
         cur = "Rs."
@@ -598,7 +615,7 @@ def load_rows(db, limit: int = 12000) -> list[Row]:
                 colls_l = "|" + "|".join(_parts) + "|"
         hay = " ".join([tl, cats_l])
         _colls_disp = " | ".join(p.strip() for p in _colls_raw.split("|") if p.strip())
-        row = Row(title, price, avail, src, hay, cur, cats_l, colls_l, _colls_disp)
+        row = Row(title, price, avail, src, hay, cur, cats_l, colls_l, _colls_disp, orig_p)
         # Dedup by normalized title, but PREFER the priced chunk: a catalog that was
         # both crawled and catalog-ingested has two chunks per product (a crawl chunk
         # often without a structured price + a priced ingest chunk). Keeping whichever
@@ -612,6 +629,8 @@ def load_rows(db, limit: int = 12000) -> list[Row]:
         elif prev.price is None and price is not None:
             prev.price = price
             prev.currency = cur
+            if prev.original_price is None and orig_p is not None:
+                prev.original_price = orig_p
             if avail and not re.search(r"out\s+of\s+stock|sold\s+out", prev.availability):
                 prev.availability = avail
             if not prev.cats and cats_l:
@@ -640,6 +659,17 @@ def _dedup(xs):
 def _price_s(p: float, cur: str = "Rs.") -> str:
     body = f"{p:,.0f}" if float(p).is_integer() else f"{p:,.2f}"
     return f"{cur}{body}"
+
+
+def _price_disp(r: "Row") -> str:
+    """Price for display — appends the struck-through original when on sale so a
+    structured price/list answer also surfaces the discount ("Rs.3,284 (was Rs.5,120)")."""
+    if r.price is None:
+        return ""
+    s = _price_s(r.price, r.currency)
+    if r.original_price is not None and r.original_price > r.price:
+        s += f" (was {_price_s(r.original_price, r.currency)})"
+    return s
 
 
 # DB-type gate thresholds — a product catalog is a corpus where product rows are a
@@ -1368,7 +1398,7 @@ def _execute_spec(spec: "Spec", rows: list[Row], cfg: dict | None, max_list: int
             # Show the price alongside each item when known — answers the common
             # "do you have X and its price" multi-intent in one shot.
             def _il(r):
-                return f"- {r.title} — {_price_s(r.price, r.currency)}" if r.price is not None else f"- {r.title}"
+                return f"- {r.title} — {_price_disp(r)}" if r.price is not None else f"- {r.title}"
             body = "\n".join(_il(r) for r in sel[:max_list])
             more = f"\n…and {n - max_list} more." if n > max_list else ""
             if spec.agg == "count":
@@ -1398,7 +1428,7 @@ def _execute_spec(spec: "Spec", rows: list[Row], cfg: dict | None, max_list: int
         items = priced[:n_show]
         lines = ["Here are matching products from the catalog:"]
         for i, r in enumerate(items, 1):
-            lines.append(f"{i}. {r.title} - {_price_s(r.price, r.currency)} - {r.availability}")
+            lines.append(f"{i}. {r.title} - {_price_disp(r)} - {r.availability}")
         return "\n".join(lines), _dedup(r.source for r in items)[:max_list]
     except Exception:
         return None, []
