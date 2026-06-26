@@ -236,17 +236,20 @@ def _github_sync_download(load_db_callback=None):
                     logger.info("[GH-SYNC] ✅ restore_allowlist.txt restored")
         except Exception as e:
             logger.warning(f"[GH-SYNC] restore_allowlist.txt restore failed: {e}")
-        # Download active_db.txt early (before zip downloads) so priority logic below uses the saved value
+        # Download active_db.txt early (before zip downloads) so priority logic below uses the saved value.
+        # In Modal the app bundle can contain a stale baked active_db.txt (often
+        # agentfactory). Runtime admin switches are persisted to GitHub Contents,
+        # so startup must prefer that remote value over the baked file.
         try:
             import base64 as _b64
-            if ACTIVE_DB_FILE.exists() and ACTIVE_DB_FILE.stat().st_size > 0:
-                logger.info(f"[GH-SYNC] active_db.txt already present locally — preserving existing file ({ACTIVE_DB_FILE.read_text(encoding='utf-8').strip()})")
-            else:
-                r = _req.get(f"https://api.github.com/repos/{_GITHUB_USERNAME}/{_GITHUB_REPO}/contents/active_db.txt", headers=api_hdr, timeout=10)
-                if r.status_code == 200:
-                    raw = _b64.b64decode(r.json().get("content", "").replace("\n",""))
-                    ACTIVE_DB_FILE.write_bytes(raw)
-                    logger.info(f"[GH-SYNC] ✅ active_db.txt restored ({raw.decode().strip()})")
+            local_active = ACTIVE_DB_FILE.read_text(encoding="utf-8").strip() if ACTIVE_DB_FILE.exists() else ""
+            r = _req.get(f"https://api.github.com/repos/{_GITHUB_USERNAME}/{_GITHUB_REPO}/contents/active_db.txt", headers=api_hdr, timeout=10)
+            if r.status_code == 200:
+                raw = _b64.b64decode(r.json().get("content", "").replace("\n",""))
+                ACTIVE_DB_FILE.write_bytes(raw)
+                logger.info(f"[GH-SYNC] ✅ active_db.txt restored from GitHub ({raw.decode().strip()})")
+            elif local_active:
+                logger.info(f"[GH-SYNC] active_db.txt GitHub restore unavailable ({r.status_code}) — preserving local file ({local_active})")
         except Exception as e:
             logger.warning(f"[GH-SYNC] active_db.txt restore failed: {e}")
         if not zip_assets:
