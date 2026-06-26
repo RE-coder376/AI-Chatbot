@@ -317,7 +317,7 @@ def _fmt_price(price, currency) -> str:
 
 
 def _emit_doc(*, title, price, availability, ptype, categories, desc, source, canonicalize, currency,
-              collections="", options=None, variants=None) -> Document:
+              collections="", options=None, variants=None, original_price=None) -> Document:
     """Build one canonical product Document — identical shape for Shopify + WooCommerce.
     `collections` (pipe-joined storefront collection titles) is stored as its own
     metadata field so "list products in <sidebar category>" can match EXACT collection
@@ -328,9 +328,17 @@ def _emit_doc(*, title, price, availability, ptype, categories, desc, source, ca
     categories = _unescape_stable(categories)
     collections = _unescape_stable(collections)
     ptype = _unescape_stable(ptype)
+    # Only treat compare-at as a discount when it genuinely exceeds the current price.
+    _on_sale = (price is not None and original_price is not None
+                and float(original_price) > float(price))
     lines = [f"Product: {title}"]
     if price is not None:
-        lines.append(f"Price: {_fmt_price(price, currency)}")
+        if _on_sale:
+            # Render BOTH so retrieval/LLM can answer "original vs discounted price".
+            lines.append(f"Price: {_fmt_price(price, currency)} "
+                         f"(originally {_fmt_price(original_price, currency)}, on sale)")
+        else:
+            lines.append(f"Price: {_fmt_price(price, currency)}")
     lines.append(f"Availability: {availability}")
     if ptype:
         lines.append(f"Category: {ptype}")
@@ -368,6 +376,8 @@ def _emit_doc(*, title, price, availability, ptype, categories, desc, source, ca
     }
     if price is not None:
         meta["price"] = float(price)
+    if _on_sale:
+        meta["original_price"] = float(original_price)
     return Document(page_content="\n".join(lines), metadata=meta)
 
 
@@ -380,6 +390,21 @@ def _woo_price(prices: dict):
             return None
         val = float(raw) / (10 ** int(prices.get("currency_minor_unit") or 0))
         return val if val > 0 else None
+    except (TypeError, ValueError, AttributeError):
+        return None
+
+
+def _woo_orig(prices: dict):
+    """WC regular (pre-sale) price, in major units, or None when not discounted."""
+    try:
+        reg = prices.get("regular_price")
+        sale = prices.get("sale_price")
+        if reg in (None, ""):
+            return None
+        mu = 10 ** int(prices.get("currency_minor_unit") or 0)
+        rv = float(reg) / mu
+        sv = float(sale) / mu if sale not in (None, "") else None
+        return rv if (rv > 0 and (sv is None or rv > sv)) else None
     except (TypeError, ValueError, AttributeError):
         return None
 
@@ -710,15 +735,28 @@ def build_catalog_docs(base_url: str, canonicalize=None, currency: str = "Rs.") 
             if not handle or len(title) < 2:
                 continue
             prices, any_avail = [], False
+            _pairs = []  # (price, compare_at) so the original price tracks the chosen variant
             for v in (p.get("variants") or []):
+                pv = None
                 try:
                     pv = float(v.get("price"))
                     if pv > 0:
                         prices.append(pv)
                 except (TypeError, ValueError):
-                    pass
+                    pv = None
+                ca = None
+                try:
+                    _c = float(v.get("compare_at_price"))
+                    ca = _c if _c > 0 else None
+                except (TypeError, ValueError):
+                    ca = None
+                if pv is not None and pv > 0:
+                    _pairs.append((pv, ca))
                 if v.get("available"):
                     any_avail = True
+            # Original price = the compare-at of the lowest-priced variant (the one shown).
+            _min_price = min(prices) if prices else None
+            _orig = next((ca for pv, ca in _pairs if pv == _min_price and ca and ca > pv), None)
             ptype = str(p.get("product_type") or "").strip()
             tags = p.get("tags") or []
             if isinstance(tags, str):
@@ -741,7 +779,7 @@ def build_catalog_docs(base_url: str, canonicalize=None, currency: str = "Rs.") 
             options = [str(o.get("name") or "").strip() for o in (p.get("options") or [])
                        if o.get("name") and str(o.get("name")).strip().lower() != "title"]
             docs.append(_emit_doc(
-                title=title, price=(min(prices) if prices else None),
+                title=title, price=(min(prices) if prices else None), original_price=_orig,
                 availability="available" if any_avail else "out of stock",
                 ptype=ptype, categories=", ".join([t for t in ([ptype] + list(tags) + list(collections)) if t]),
                 collections=" | ".join([c for c in collections if c]),
@@ -761,6 +799,7 @@ def build_catalog_docs(base_url: str, canonicalize=None, currency: str = "Rs.") 
             source = str(p.get("permalink") or f"{base}/product/{urllib.parse.quote(str(p.get('slug') or ''))}")
             docs.append(_emit_doc(
                 title=title, price=_woo_price(p.get("prices") or {}),
+                original_price=_woo_orig(p.get("prices") or {}),
                 availability="available" if p.get("is_in_stock") else "out of stock",
                 ptype="", categories=", ".join(cats), collections=" | ".join([c for c in cats if c]),
                 desc=_html_to_text(str(p.get("description") or p.get("short_description") or ""))[:1200],
