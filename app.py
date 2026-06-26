@@ -404,7 +404,21 @@ def _catalog_ingest_into_db(db, db_name: str, url: str) -> int:
     logger.info(f"[CATALOG] {db_name}: in-place ingest {len(docs)} products from /products.json")
     return len(docs)
 
+_active_db_restore_checked = False
+
+
 def _get_active_db() -> str:
+    global _active_db_restore_checked
+    if (not _active_db_restore_checked
+            and os.environ.get("GITHUB_PAT")
+            and os.environ.get("SKIP_STARTUP_GITHUB_RESTORE") != "1"):
+        _active_db_restore_checked = True
+        try:
+            restored = _github_restore_active_db_file()
+            if restored:
+                return restored
+        except Exception:
+            pass
     if ACTIVE_DB_FILE.exists():
         v = ACTIVE_DB_FILE.read_text(encoding="utf-8").strip()
         if v: return v
@@ -3558,7 +3572,7 @@ def health():
         doc_count = local_db._collection.count() if local_db else 0
     except Exception:
         doc_count = 0
-    active = ACTIVE_DB_FILE.read_text(encoding="utf-8").strip() if ACTIVE_DB_FILE.exists() else "none"
+    active = _get_active_db() or "none"
     try:
         keys_data = json.loads(KEYS_FILE.read_text(encoding="utf-8")) if KEYS_FILE.exists() else []
         active_keys = len([k for k in keys_data if k.get("status") == "active"])
