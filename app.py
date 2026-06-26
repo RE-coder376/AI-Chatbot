@@ -1917,10 +1917,12 @@ def _load_db_now():
         if db_cfg_file.exists():
             try: db_cfg = json.loads(db_cfg_file.read_text(encoding="utf-8-sig"))
             except Exception as e: logger.error(f"DB config unreadable ({db_path.name}): {e}")
-        # API-only DB (no crawl_url) — skip embedding load entirely
-        if not db_cfg.get("crawl_url", "").strip():
+        has_chroma_db = (db_path / "chroma.sqlite3").exists() or (db_path / "chroma" / "chroma.sqlite3").exists()
+        # API-only/shell DBs have no stored Chroma data. Some restored product
+        # DBs intentionally have no crawl_url but still contain valid chunks.
+        if not has_chroma_db:
             _status = "ready_no_db"
-            logger.info(f"✅ API-only DB '{active}' — no crawl_url, skipping embedding load")
+            logger.info(f"✅ DB '{active}' has no Chroma store yet, skipping embedding load")
             return
 
         from langchain_community.embeddings.fastembed import FastEmbedEmbeddings
