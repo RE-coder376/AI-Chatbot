@@ -387,6 +387,14 @@ def parse(q: str) -> Spec:
     # similarity top-N returning same-prefix siblings. Bare price queries with no
     # product fall through the no-anchor guard below to ordinary RAG.
     priceof_q = bool(re.search(r"\b(price|prices|priced|pricing|cost|costs|costing|how\s+much|rate|rates)\b", ql))
+    # Stock-STATUS question about a named product ("is X in stock?", "is X available?",
+    # "do you have X in stock?"). Distinct from the in_stock FILTER ("show in-stock X"):
+    # the answer must REPORT the product's availability, not silently drop it when OOS.
+    stock_status_q = bool(re.search(
+        r"\b(?:is|are|r)\b[^?]*\b(?:in[\s-]?stock|in\s+stock|available|sold\s+out|out\s+of\s+stock)\b"
+        r"|\b(?:do|does)\s+(?:you|we|they)\b[^?]*\bin\s+stock\b"
+        r"|\bavailabilit\w*\b"
+        r"|\bstill\s+(?:available|in\s+stock)\b", ql))
 
     if count_q:
         agg = "count"
@@ -399,6 +407,9 @@ def parse(q: str) -> Spec:
         # have any X under 50" — the incidental "do you have" must not route it to
         # the (subject-less) existence branch.
         agg = "list"
+    elif stock_status_q:
+        # Resolve the named product and report its availability (handles OOS too).
+        agg = "stock"
     elif exist_q:
         agg = "exists"
     elif list_q:
@@ -446,6 +457,13 @@ def parse(q: str) -> Spec:
     # Likewise a bare existence question with no subject is not answerable here.
     if agg == "exists" and not anchors:
         return Spec("none", structured=False)
+    # A stock-status question needs a named product; "what's available" with no
+    # subject is an open browse → RAG. The status report must NOT filter by stock
+    # (it has to surface an OOS product to report it), so clear the in_stock filter.
+    if agg == "stock":
+        if not anchors:
+            return Spec("none", structured=False)
+        in_stock = False
 
     # "whose product name contains/includes X", "named X", "titled X" → the user
     # is FILTERING on the title, so don't let a body mention of X pull in an
@@ -1305,6 +1323,25 @@ def _execute_spec(spec: "Spec", rows: list[Row], cfg: dict | None, max_list: int
                     sel = _tag_sel
 
         label = " ".join(spec.anchors) if spec.anchors else "products"
+
+        if spec.agg == "stock":
+            if not sel:
+                # A stock-status question presupposes the product exists. If our exact
+                # match can't resolve it, abstain to RAG (embeddings / honest "no info")
+                # rather than assert absence — never a confident false "we don't carry".
+                return None, []
+            _oos_re = re.compile(r"out\s+of\s+stock|sold\s+out|unavailable|not\s+available")
+            def _stk(r):
+                st = "out of stock" if _oos_re.search(r.availability or "") else "in stock"
+                pr = f" ({_price_s(r.price, r.currency)})" if r.price is not None else ""
+                return r.title, st, pr
+            if len(sel) == 1:
+                t, st, pr = _stk(sel[0])
+                msg = (f"Yes — {t} is in stock{pr}." if st == "in stock"
+                       else f"{t} is currently out of stock{pr}.")
+                return msg, _dedup([sel[0].source])[:max_list]
+            lines = [f"- {t} — {st}{pr}" for t, st, pr in (_stk(r) for r in sel[:max_list])]
+            return "Here's the current availability:\n" + "\n".join(lines), _dedup(r.source for r in sel)[:max_list]
 
         if spec.agg in ("count", "exists"):
             n = len(sel)
