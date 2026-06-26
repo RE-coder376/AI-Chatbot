@@ -1050,9 +1050,14 @@
       const authModeResp = await fetch(`${API}/admin/auth-mode`, { headers: { 'Authorization': `Bearer ${pass}`, 'X-Admin-DB': db } });
       if (authModeResp.ok) {
         const authMode = await authModeResp.json();
+        // Logging into a DB makes it the one the bot serves. Owners set the global
+        // Active (AWAITED, so it never stays stale on agentfactory). Clients can't and
+        // needn't — their panels are X-Admin-DB scoped and their widget is key-scoped.
         if (authMode.role === 'owner') {
-          const sf = new FormData(); sf.append("password", pass); sf.append("name", db);
-          fetch(`${API}/admin/databases/set-active`, { method:"POST", headers: authHeaders(), body:sf }).catch(()=>{});
+          try {
+            const sf = new FormData(); sf.append("password", pass); sf.append("name", db);
+            await fetch(`${API}/admin/databases/set-active`, { method:"POST", headers: authHeaders(), body:sf });
+          } catch(_) {}
         }
         if (authMode.role === 'client') {
           document.body.classList.add('client-mode');
