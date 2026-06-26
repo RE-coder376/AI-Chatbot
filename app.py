@@ -5318,7 +5318,7 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
         _prod_det, _ucq_src = _answer_catalog_query(q, _local_db, cfg)
         if _prod_det:
             if _ucq_src:
-                sources = list(dict.fromkeys(_ucq_src + (sources or [])))[:8]
+                sources = list(dict.fromkeys(_ucq_src))[:8]
             _trace_decision(workflow_debug, "catalog_query_used", True)
     if not _prod_det:
         _prod_det = _deterministic_product_catalog_answer(q, context or "")
@@ -6816,7 +6816,7 @@ async def chat(request: Request):
             _prod_det, _ucq_src = _answer_catalog_query(q, tenant_db_instance, cfg)
             if _prod_det:
                 if _ucq_src:
-                    sources = list(dict.fromkeys(_ucq_src + (sources or [])))[:8]
+                    sources = list(dict.fromkeys(_ucq_src))[:8]
                 workflow_debug["guard_decisions"]["catalog_query_used"] = True
         if not _prod_det:
             _prod_det = _deterministic_product_catalog_answer(q, context or "")
