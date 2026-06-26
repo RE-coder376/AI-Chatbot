@@ -27,6 +27,36 @@ _GITHUB_CLONE_DIR = Path("/tmp/chatbot-dbs")
 _github_sync_result: dict = {"status": "not_run", "detail": ""}
 
 
+def _github_restore_active_db_file() -> str:
+    """Restore active_db.txt from GitHub Contents, returning the restored DB name.
+
+    This is intentionally tiny and synchronous so container startup can apply the
+    persisted active tenant before health/admin reads the baked app-bundle file.
+    """
+    try:
+        pat = os.environ.get("GITHUB_PAT", "").strip()
+        if not pat:
+            return ""
+        import base64 as _b64
+        import requests as _req
+        api_hdr = {"Authorization": f"token {pat}", "User-Agent": "chatbot-sync"}
+        r = _req.get(
+            f"https://api.github.com/repos/{_GITHUB_USERNAME}/{_GITHUB_REPO}/contents/active_db.txt",
+            headers=api_hdr,
+            timeout=10,
+        )
+        if r.status_code != 200:
+            return ""
+        raw = _b64.b64decode(r.json().get("content", "").replace("\n", ""))
+        ACTIVE_DB_FILE.write_bytes(raw)
+        active = raw.decode(errors="ignore").strip()
+        logger.info(f"[GH-SYNC] ✅ active_db.txt restored from GitHub ({active})")
+        return active
+    except Exception as e:
+        logger.warning(f"[GH-SYNC] active_db.txt restore failed: {e}")
+        return ""
+
+
 def _load_restore_allowlist() -> set[str]:
     """Return DB names allowed to auto-restore from GitHub snapshots."""
     allowed: set[str] = set()
@@ -241,15 +271,9 @@ def _github_sync_download(load_db_callback=None):
         # agentfactory). Runtime admin switches are persisted to GitHub Contents,
         # so startup must prefer that remote value over the baked file.
         try:
-            import base64 as _b64
             local_active = ACTIVE_DB_FILE.read_text(encoding="utf-8").strip() if ACTIVE_DB_FILE.exists() else ""
-            r = _req.get(f"https://api.github.com/repos/{_GITHUB_USERNAME}/{_GITHUB_REPO}/contents/active_db.txt", headers=api_hdr, timeout=10)
-            if r.status_code == 200:
-                raw = _b64.b64decode(r.json().get("content", "").replace("\n",""))
-                ACTIVE_DB_FILE.write_bytes(raw)
-                logger.info(f"[GH-SYNC] ✅ active_db.txt restored from GitHub ({raw.decode().strip()})")
-            elif local_active:
-                logger.info(f"[GH-SYNC] active_db.txt GitHub restore unavailable ({r.status_code}) — preserving local file ({local_active})")
+            if not _github_restore_active_db_file() and local_active:
+                logger.info(f"[GH-SYNC] active_db.txt GitHub restore unavailable — preserving local file ({local_active})")
         except Exception as e:
             logger.warning(f"[GH-SYNC] active_db.txt restore failed: {e}")
         if not zip_assets:

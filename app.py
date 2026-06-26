@@ -719,6 +719,7 @@ from services.github_sync import (
     _github_backup_crawl_times, _github_upload_active_db,
     _github_sync_upload, _github_sync_delete, _github_clear_db_data,
     _github_update_restore_allowlist, _github_sync_publish_missing_allowed_dbs,
+    _github_restore_active_db_file, _load_restore_allowlist,
 )
 
 def _write_crawl_status(db_name: str, status: str):
@@ -1958,6 +1959,7 @@ def init_systems():
     _status = "ready_no_db"
     # Auto-sync from GitHub in background if GITHUB_PAT is set (restores DBs after redeploy)
     if os.environ.get("GITHUB_PAT") and os.environ.get("SKIP_STARTUP_GITHUB_RESTORE") != "1":
+        _github_restore_active_db_file()
         logger.info("🔄 Auto-syncing databases from GitHub in background...")
         threading.Thread(target=_startup_sync, daemon=True).start()
     else:
