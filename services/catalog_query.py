@@ -140,6 +140,7 @@ class Spec:
     strict_min: bool = False  # "strictly above/over X" → exclude p == X
     strict_max: bool = False  # "strictly below/under X" → exclude p == X
     title_only: bool = False  # "whose product NAME contains X" → match title, not body
+    out_of_stock: bool = False
 
 
 def _variants(a: str) -> set[str]:
@@ -360,7 +361,8 @@ def parse(q: str) -> Spec:
         if m:
             pmin = _num(m.group(1))
 
-    in_stock = bool(re.search(r"\b(in[\s-]?stock|in\s+stock|available)\b", ql)) and not re.search(r"\bout\s+of\s+stock\b", ql)
+    out_of_stock = bool(re.search(r"\b(out\s+of\s+stock|sold\s+out|unavailable)\b", ql))
+    in_stock = bool(re.search(r"\b(in[\s-]?stock|in\s+stock|available)\b", ql)) and not out_of_stock
 
     # Exclusive bounds: "strictly below/under" and "more/greater than", "below",
     # "under", "above", "over" exclude the boundary value. Inclusive operators
@@ -384,7 +386,7 @@ def parse(q: str) -> Spec:
     priciest = bool(re.search(
         r"\b(most\s+expensive|highest[\s-]+priced?|priciest|costliest|most\s+costly|dearest|"
         r"highest\s+cost|costs?\s+the\s+most)\b", ql))
-    list_q = bool(re.search(r"\b(show|list|which|what'?s?|give|display|products?|items?|sell|have|available)\b", ql))
+    list_q = bool(re.search(r"\b(show|list|which|what'?s?|give|display|products?|items?|sell|have|available|sold\s+out|out\s+of\s+stock)\b", ql))
     # Single-product price/availability lookup ("price of X", "how much is X",
     # "is X available"). Routed to the list path so the full-catalog scan (with the
     # title-coverage fallback) resolves the EXACT named product instead of the
@@ -469,7 +471,8 @@ def parse(q: str) -> Spec:
             return Spec("none", structured=False)
         if re.search(r"\b(which|what'?s?|list|show|give|display)\b", ql):
             agg = "list"
-            in_stock = True
+            if not out_of_stock:
+                in_stock = True
         else:
             in_stock = False
 
@@ -486,7 +489,8 @@ def parse(q: str) -> Spec:
         r"|\bnamed\b|\btitled?\b|\bcalled\b", ql))
 
     return Spec(agg, anchors, pmin, pmax, in_stock,
-                strict_min=strict_min, strict_max=strict_max, title_only=title_only)
+                strict_min=strict_min, strict_max=strict_max, title_only=title_only,
+                out_of_stock=out_of_stock)
 
 
 def load_rows(db, limit: int = 12000) -> list[Row]:
@@ -756,15 +760,19 @@ def _extract_names(q: str) -> list[str]:
     names = [n.strip() for n in re.findall(r'[\"“”]([^\"“”]{3,})[\"“”]', q) if n.strip()]
     if len(names) >= 2:
         return names[:5]
-    seg = q.split(":", 1)[1] if ":" in q else q
+    colon = re.search(r":\s+", q)
+    seg = q[colon.end():] if colon and not re.search(r"\d\s*:\s*$", q[:colon.start() + 1]) else q
     parts = re.split(r"\s+(?:versus|vs\.?|and|or)\s+|,\s*", seg)
+    parts = [re.sub(r"(?i)^\s*(?:compare|which\s+(?:one\s+)?(?:is|costs?|should\s+i\s+buy)|is)\s+", "", p) for p in parts]
+    parts = [re.sub(r"(?i)^\s*(?:more|less|cheaper|pricier|dearer|expensive)\s+", "", p) for p in parts]
+    parts = [re.sub(r"(?i)\s+(?:on|for)\s+(?:price|prices|cost|stock|availability)(?:\s+and\s+(?:price|prices|cost|stock|availability))*.*$", "", p) for p in parts]
     parts = [re.sub(r"[?.\"]+$", "", p).strip(" .\"") for p in parts]
     parts = [p for p in parts if len(p) >= 4 and len(p.split()) >= 2]
     return parts[:5] if len(parts) >= 2 else names
 
 
 _CMP_RE = re.compile(
-    r"\bcheaper\b|\bpricier\b|\bdearer\b|\bmore\s+expensive\b|\bless\s+expensive\b"
+    r"\bcompare\b|\bcheaper\b|\bpricier\b|\bdearer\b|\bmore\s+expensive\b|\bless\s+expensive\b"
     r"|\bdifference\s+between\b|\bby\s+how\s+much\b|\bhow\s+much\s+(?:more|less|cheaper)\b"
     r"|\bwhich\s+(?:one\s+)?(?:is|costs?)\b|\bversus\b|\bvs\.?\b|\bcosts?\s+(?:less|more)\b", re.I)
 _ORDER_RE = re.compile(r"\b(order|rank|sort|arrange|list\s+these)\b", re.I)
@@ -799,13 +807,17 @@ _DESC_RE = re.compile(
     r"|\bhigh(?:est)?\s+to\s+low(?:est)?\b|\b(?:descending|decreasing)\b", re.I)
 
 
+def _is_oos(r: Row) -> bool:
+    return bool(re.search(r"out\s+of\s+stock|sold\s+out|unavailable|not\s+available", r.availability or ""))
+
+
 def _parse_multi(q: str) -> dict | None:
     """Detect a multi-product reasoning question (compare / order / basket) and the
     product names it spans. Returns None for everything else."""
     ql = (q or "").lower()
     is_order = bool(_ORDER_RE.search(ql) and _PRICE_DIM_RE.search(ql))
-    is_cmp = bool(_CMP_RE.search(ql))
-    is_basket = bool(_BASKET_RE.search(ql))
+    is_cmp = bool(_CMP_RE.search(ql)) or bool(re.search(r"\bwhich\b.*\bbuy\b", ql) and re.search(r"\bor\b|\bvs\b|\bversus\b", ql))
+    is_basket = bool(_BASKET_RE.search(ql)) and not bool(re.search(r"\bwhich\b|\bcompare\b|\bin[\s-]?stock\b|\bavailable\b", ql))
     if not (is_order or is_cmp or is_basket):
         return None
     names = _extract_names(q)
@@ -819,7 +831,8 @@ def _parse_multi(q: str) -> dict | None:
     # default ("cheaper / costs less") names the cheaper. Either way both prices and
     # the exact gap are stated, so the answer carries the fact regardless.
     cmp_more = bool(re.search(r"\bmore\s+expensive\b|\bcosts?\s+more\b|\bpricier\b|\bdearer\b|\bhigher\s+price", ql))
-    return {"op": op, "names": names, "asc": bool(_ASC_RE.search(ql)), "cmp_more": cmp_more}
+    cmp_stock = bool(re.search(r"\bstock\b|\bavailable\b|\bavailability\b|\bbuy\b", ql))
+    return {"op": op, "names": names, "asc": bool(_ASC_RE.search(ql)), "cmp_more": cmp_more, "stock": cmp_stock}
 
 
 def _raw(s: str) -> str:
@@ -886,7 +899,7 @@ def _tie_break_key(r: Row, raw_name: str):
     'Pool ( 34" X 10" )' picks that exact listing over the 'Pool 34" x 10"' twin —
     then an in-stock row, then the closest title length, then a stable URL."""
     raw = _raw(r.title)
-    in_stock = 1 if re.search(r"out\s+of\s+stock|sold\s+out|unavailable|not\s+available", r.availability or "") else 0
+    in_stock = 1 if _is_oos(r) else 0
     return (0 if raw == _raw(raw_name) else 1, in_stock, abs(len(raw) - len(_raw(raw_name))), r.source or "")
 
 
@@ -994,7 +1007,7 @@ def _answer_multi(mp: dict, rows: list[Row]) -> tuple[str, list[str]] | None:
     if op == "basket":
         total = sum(r.price for r in found)
         lines = ["Based on our catalog:"]
-        lines += [f"- {r.title}: {_price_s(r.price, r.currency)}" for r in found]
+        lines += [f"- {r.title}: {_price_s(r.price, r.currency)} ({'out of stock' if _is_oos(r) else 'available'})" for r in found]
         lines.append(f"\nTotal cost: {_price_s(total, cur)}")
         return "\n".join(lines), srcs
     if op == "order":
@@ -1010,8 +1023,11 @@ def _answer_multi(mp: dict, rows: list[Row]) -> tuple[str, list[str]] | None:
     verdict = (f"{dearer.title} is more expensive by {_price_s(diff, cur)}."
                if mp.get("cmp_more")
                else f"{cheaper.title} is cheaper by {_price_s(diff, cur)}.")
-    txt = (f"- {cheaper.title}: {_price_s(cheaper.price, cheaper.currency)}\n"
-           f"- {dearer.title}: {_price_s(dearer.price, dearer.currency)}\n\n{verdict}")
+    def _cmp_line(r):
+        suffix = f" ({'out of stock' if _is_oos(r) else 'available'})" if mp.get("stock") else ""
+        return f"- {r.title}: {_price_s(r.price, r.currency)}{suffix}"
+    txt = (f"{_cmp_line(cheaper)}\n"
+           f"{_cmp_line(dearer)}\n\n{verdict}")
     return txt, srcs
 
 
@@ -1326,6 +1342,8 @@ def _execute_spec(spec: "Spec", rows: list[Row], cfg: dict | None, max_list: int
             # out-of-stock as in stock rather than demanding an exact "available".
             if spec.in_stock and re.search(r"out\s+of\s+stock|sold\s+out|unavailable|not\s+available", r.availability):
                 _oos.append(r)
+                continue
+            if spec.out_of_stock and not _is_oos(r):
                 continue
             sel.append(r)
         # Price bounds apply to every aggregation when present (count of X under Y,
