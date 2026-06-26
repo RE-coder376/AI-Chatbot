@@ -97,6 +97,9 @@ _STOP = {
     # fold "also"/"too" into the name ("also wish women by chopard" → false absence,
     # which then breaks a pronoun follow-up that has no antecedent to bind).
     "also", "too", "aswell", "additionally", "again", "cool", "nice", "great", "wow",
+    # stock/list filler — "which RC construction toys are still in stock" must
+    # anchor on "rc construction", not "still/toys" which are presentation words.
+    "still", "toy", "toys",
     # texting abbreviations of stop-words — "do u HV mgahribi" must not keep "hv" as a
     # junk anchor (it dragged query-coverage below the floor and sank the real match).
     "hv", "hav", "ur", "pls", "plz", "thru", "abt", "coz", "cuz", "wanna", "gimme", "lemme",
@@ -464,7 +467,11 @@ def parse(q: str) -> Spec:
     if agg == "stock":
         if not anchors:
             return Spec("none", structured=False)
-        in_stock = False
+        if re.search(r"\b(which|what'?s?|list|show|give|display)\b", ql):
+            agg = "list"
+            in_stock = True
+        else:
+            in_stock = False
 
     # "whose product name contains/includes X", "named X", "titled X" → the user
     # is FILTERING on the title, so don't let a body mention of X pull in an

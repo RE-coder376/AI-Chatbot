@@ -119,6 +119,14 @@ def resolve_followup(q: str, history: list) -> str:
         # Already self-contained: names its own product (quoted or 2+ content tokens).
         if _QUOTED.search(q) or len(_content_tokens(q)) >= 2:
             return q
+        # Self-contained catalog/category stock browse: "which RC construction are
+        # still in stock" has its own subject even if it is short. Do not bind it
+        # to a product from the previous bot answer.
+        if (re.search(r"\b(which|what'?s?|list|show|give|display)\b", ql)
+                and re.search(r"\b(in[\s-]?stock|available|availability|stock)\b", ql)):
+            subject = [w for w in re.findall(r"[a-z0-9]{2,}", ql) if w not in _CUE]
+            if subject:
+                return q
         is_ref = bool(_REFERENTIAL.search(ql))
         is_cmp = bool(_CMP.search(ql))
         is_price = bool(_PRICE.search(ql))
