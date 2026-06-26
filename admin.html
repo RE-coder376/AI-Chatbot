@@ -1056,8 +1056,16 @@
         if (authMode.role === 'owner') {
           try {
             const sf = new FormData(); sf.append("password", pass); sf.append("name", db);
-            await fetch(`${API}/admin/databases/set-active`, { method:"POST", headers: authHeaders(), body:sf });
-          } catch(_) {}
+            const setResp = await fetch(`${API}/admin/databases/set-active`, { method:"POST", headers: authHeaders(), body:sf });
+            const setData = await setResp.json().catch(() => ({}));
+            if (!setResp.ok || setData.success === false) {
+              showStatus('auth', setData.detail || setData.message || 'Login succeeded, but active DB switch failed.', 'error');
+              return;
+            }
+          } catch(_) {
+            showStatus('auth', 'Login succeeded, but active DB switch failed.', 'error');
+            return;
+          }
         }
         if (authMode.role === 'client') {
           document.body.classList.add('client-mode');
@@ -1606,15 +1614,6 @@
       const sessionDb = localStorage.getItem('adminDb') || '';
       const dbTxt = sessionDb ? `✅ Managing: ${escapeHtml(sessionDb)}` : (h.status === 'ready' ? `✅ Server ready` : `⚠️ ${escapeHtml(h.status)}`);
       el.innerHTML = `<span style="margin-right:16px">${dbTxt}</span><span>${keyTxt}</span>`;
-      // Re-sync active DB only for client mode (clients cannot switch; owners may intentionally switch)
-      const isClientMode = sessionStorage.getItem('clientMode') === '1';
-      if (isClientMode && sessionDb && h.active_db && h.active_db !== sessionDb) {
-        const pass = sessionStorage.getItem('adminPass') || '';
-        if (pass) {
-          const sf = new FormData(); sf.append('password', pass); sf.append('name', sessionDb);
-          fetch(`${API}/admin/databases/set-active`, { method: 'POST', headers: authHeaders(), body: sf }).catch(() => {});
-        }
-      }
     }).catch(() => { el.innerHTML = '⚠️ Server unreachable'; });
   }
 
@@ -1625,6 +1624,7 @@
     const res = await authFetch(`${API}/admin/databases/set-active`, { method:"POST", headers: authHeaders(), body:f });
     const d = await res.json();
     showStatus('db', d.success ? `✅ Switched to ${name}. Backend loading (~30s) — refresh chat after 30s.` : (d.message || d.detail), d.success ? 'success' : 'error');
+    if (!d.success) return;
     if (d.success) {
       // Owner's admin view follows the active DB: repoint X-Admin-DB so every
       // panel (branding, contacts/ops, widget key, analytics, knowledge) reloads

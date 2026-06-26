@@ -102,6 +102,16 @@ def test_config_valid_widget_key_200(client, two_tenants):
     assert r.status_code == 200, r.text
 
 
+def test_widget_key_rotation_rejects_stale_cached_key(app_module, client, two_tenants):
+    app_module._widget_key_cache["old-key"] = {"db": "a", "expires_at": ""}
+    app_module._save_db_secrets("a", {"widget_key": "new-key", "widget_key_expires_at": ""})
+
+    r = client.get("/config", headers={"X-Widget-Key": "old-key"})
+
+    assert r.status_code == 401, r.text
+    assert "old-key" not in app_module._widget_key_cache
+
+
 def test_config_no_widget_key_falls_back_ok(client, two_tenants):
     # No key at all stays the hosted-demo behaviour (active DB) — must not 401.
     r = client.get("/config")

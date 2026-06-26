@@ -515,6 +515,8 @@ def _resolve_widget_key(key: str) -> tuple[str, str]:
         return "", "invalid"
     # Stateless signed token path (preferred): survives restarts/deploys without storage sync.
     _tok_db, _tok_status = _parse_widget_token(key)
+    if _tok_status == "valid" and not _widget_key_matches_current(_tok_db, key):
+        return "", "invalid"
     if _tok_status in ("valid", "expired"):
         return _tok_db, _tok_status
     cached_valid_db = ""
@@ -529,6 +531,9 @@ def _resolve_widget_key(key: str) -> tuple[str, str]:
             if _exp and _widget_key_is_expired(_exp):
                 _widget_key_cache.pop(key, None)
                 return "", "expired"
+            if not _widget_key_matches_current(_db, key):
+                _widget_key_cache.pop(key, None)
+                return "", "invalid"
             # Continue to disk scan below to avoid stale cache when secrets rotate/expire.
             cached_valid_db = _db
     elif isinstance(cached, str) and cached:
@@ -576,7 +581,9 @@ def _resolve_widget_key(key: str) -> tuple[str, str]:
         except Exception:
             pass
     if cached_valid_db:
-        return cached_valid_db, "valid"
+        if _widget_key_matches_current(cached_valid_db, key):
+            return cached_valid_db, "valid"
+        _widget_key_cache.pop(key, None)
     return "", "invalid"
 
 
@@ -622,6 +629,51 @@ def _persist_widget_key_local(db_name: str, widget_key: str, created_at: str, ex
         _save_widget_key_store(data)
     except Exception as e:
         logger.warning(f"Could not persist widget key in local store for {db_name}: {e}")
+
+
+def _stored_widget_key_meta(db_name: str) -> dict:
+    """Return the currently stored widget key metadata for a DB, if any."""
+    if not db_name:
+        return {}
+    try:
+        db_name = _canonical_db_name(db_name)
+    except Exception:
+        db_name = str(db_name or "").strip()
+    try:
+        cfg_path = DATABASES_DIR / db_name / "config.json"
+        cfg = json.loads(cfg_path.read_text(encoding="utf-8-sig")) if cfg_path.exists() else {}
+        if isinstance(cfg, dict):
+            cfg.update(_load_db_secrets(db_name))
+            key = str(cfg.get("widget_key") or "")
+            if key:
+                return {
+                    "widget_key": key,
+                    "widget_key_expires_at": str(cfg.get("widget_key_expires_at") or ""),
+                }
+    except Exception:
+        pass
+    try:
+        meta = (_load_widget_key_store() or {}).get(db_name) or {}
+        if isinstance(meta, dict) and str(meta.get("widget_key") or ""):
+            return {
+                "widget_key": str(meta.get("widget_key") or ""),
+                "widget_key_expires_at": str(meta.get("widget_key_expires_at") or ""),
+            }
+    except Exception:
+        pass
+    return {}
+
+
+def _widget_key_matches_current(db_name: str, key: str) -> bool:
+    """If a current key is stored for this DB, reject stale rotated keys."""
+    meta = _stored_widget_key_meta(db_name)
+    current = str(meta.get("widget_key") or "")
+    if not current:
+        return True
+    exp = str(meta.get("widget_key_expires_at") or "")
+    if exp and _widget_key_is_expired(exp):
+        return False
+    return hmac.compare_digest(current, key or "")
 def _analytics_file(db_name: str = "") -> Path:
     if db_name:
         return DATABASES_DIR / db_name / "analytics.json"
@@ -3556,11 +3608,11 @@ def serve_widget():
 
 @app.get("/widget.js")
 async def serve_widget_js(request: Request):
-    """Serve the embeddable widget loader script. Reads data-key from the script tag."""
+    """Serve the embeddable widget loader script. Reads data-key/data-widget-key from the script tag."""
     host = str(request.base_url).rstrip("/")
     js = f"""(function() {{
   var s = document.currentScript;
-  var key = s ? (s.getAttribute('data-key') || '') : '';
+  var key = s ? (s.getAttribute('data-widget-key') || s.getAttribute('data-key') || '') : '';
   var iframe = document.createElement('iframe');
   iframe.src = '{host}/widget-chat?key=' + encodeURIComponent(key);
   iframe.style.cssText = 'position:fixed;bottom:20px;right:20px;width:380px;height:600px;border:none;border-radius:16px;box-shadow:0 8px 32px rgba(0,0,0,0.18);z-index:999999;';
@@ -10840,9 +10892,10 @@ async def set_active_db(request: Request, password: str = Form(...), name: str =
             return JSONResponse({"detail": "Unauthorized"}, status_code=401)
     current = ACTIVE_DB_FILE.read_text(encoding="utf-8").strip() if ACTIVE_DB_FILE.exists() else ""
     if current == name:
-        return {"success": True, "message": f"{name} is already the active DB."}
+        await asyncio.to_thread(_github_upload_active_db, name)
+        return {"success": True, "message": f"{name} is already the active DB and has been re-persisted."}
     ACTIVE_DB_FILE.write_text(name, encoding="utf-8")
-    threading.Thread(target=_github_upload_active_db, args=(name,), daemon=True).start()
+    await asyncio.to_thread(_github_upload_active_db, name)
     global local_db, embeddings_model
     local_db = None
     embeddings_model = None
@@ -11596,6 +11649,7 @@ def get_embed_code(request: Request, password: str = ""):
         widget_key = ""
 
     if (not widget_key) or rotate:
+        previous_widget_key = widget_key
         created_at = _now_pk().isoformat()
         if ttl_minutes > 0:
             exp = (_now_pk() + timedelta(minutes=ttl_minutes)).isoformat()
@@ -11618,6 +11672,12 @@ def get_embed_code(request: Request, password: str = ""):
                 "widget_key_expires_at": exp,
             })
             _persist_widget_key_local(db_name, widget_key, created_at, exp)
+            if previous_widget_key and previous_widget_key != widget_key:
+                _widget_key_cache.pop(previous_widget_key, None)
+            for _cached_key, _cached_meta in list(_widget_key_cache.items()):
+                _cached_db = (_cached_meta.get("db") if isinstance(_cached_meta, dict) else _cached_meta)
+                if _cached_db == db_name and _cached_key != widget_key:
+                    _widget_key_cache.pop(_cached_key, None)
             _widget_key_cache[widget_key] = {"db": db_name, "expires_at": exp}
             expires_at = exp
         except Exception as _wk_e:

@@ -230,10 +230,28 @@
   const history = [];
   let contactEmail    = '';
   let contactWhatsApp = '';
+  let widgetReady = Boolean(widgetKey);
+
+  function showWidgetSetupError(message) {
+    widgetReady = false;
+    sendBtn.disabled = true;
+    inputEl.disabled = true;
+    inputEl.placeholder = 'Chat widget is not configured';
+    document.getElementById('welcome-msg').textContent = message;
+  }
+
+  if (!widgetKey) {
+    showWidgetSetupError('This chat widget is missing its site key. Please ask the site owner to update the embed code.');
+  }
 
   // Load branding — pass widget key so server returns this DB's config, not the active DB's
   const configUrl = widgetKey ? `${API}/config?key=${encodeURIComponent(widgetKey)}` : `${API}/config`;
   fetch(configUrl).then(r => r.json()).then(cfg => {
+    if (!widgetKey) return;
+    if (cfg.detail || cfg.error) {
+      showWidgetSetupError('This chat widget key is invalid or expired. Please ask the site owner to refresh the embed code.');
+      return;
+    }
     contactEmail    = cfg.contact_email    || '';
     contactWhatsApp = cfg.whatsapp_number  || '';
     const b = cfg.branding || {};
@@ -248,7 +266,9 @@
     document.getElementById('h-sub').textContent      = cfg.header_subtitle || b.header_subtitle || 'Ready to assist';
     document.getElementById('welcome-msg').textContent = cfg.welcome_message || b.welcome_message || 'Hi! How can I help you today?';
     if (cfg.logo_emoji || b.logo_emoji) document.getElementById('h-avatar').textContent = cfg.logo_emoji || b.logo_emoji;
-  }).catch(() => {});
+  }).catch(() => {
+    if (widgetKey) showWidgetSetupError('This chat widget could not load its configuration. Please try again shortly.');
+  });
 
   inputEl.addEventListener('keypress', e => { if (e.key === 'Enter') sendMessage(); });
 
@@ -271,6 +291,10 @@
   resetProactiveTimer();
 
   async function sendMessage() {
+    if (!widgetReady || !widgetKey) {
+      addMessage('This chat widget is not connected to a store yet. Please refresh the embed code with a valid widget key.', 'bot');
+      return;
+    }
     const q = inputEl.value.trim();
     if (!q) return;
     resetProactiveTimer();
@@ -297,6 +321,14 @@
         headers: Object.assign({'Content-Type': 'application/json'}, widgetKey ? {'X-Widget-Key': widgetKey} : {}),
         body:    JSON.stringify({ question: q, history, session_id: sessionId }),
       });
+      if (!res.ok) {
+        let detail = 'The chat widget could not connect to this store. Please try again shortly.';
+        try {
+          const err = await res.json();
+          detail = err.error || err.detail || detail;
+        } catch {}
+        throw new Error(detail);
+      }
 
       const reader  = res.body.getReader();
       const decoder = new TextDecoder();
@@ -350,7 +382,7 @@
 
     } catch (e) {
       document.getElementById(typingId)?.remove();
-      addMessage('Error connecting. Please try again.', 'bot');
+      addMessage(e?.message || 'Error connecting. Please try again.', 'bot');
     }
 
     sendBtn.disabled = false;

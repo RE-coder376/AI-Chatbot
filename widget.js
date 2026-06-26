@@ -1,13 +1,14 @@
 /**
  * AI Chatbot Embeddable Widget
  * Usage: <script src="https://yourserver.com/widget.js" data-widget-key="YOUR_KEY"></script>
+ * Also accepts legacy data-key="YOUR_KEY".
  * Optional: data-color="#6366f1"  data-position="right"
  */
 (function () {
   'use strict';
 
   const SCRIPT   = document.currentScript;
-  const KEY      = SCRIPT.getAttribute('data-widget-key') || '';
+  const KEY      = SCRIPT.getAttribute('data-widget-key') || SCRIPT.getAttribute('data-key') || '';
   const COLOR    = SCRIPT.getAttribute('data-color') || '#6366f1';
   const POSITION = SCRIPT.getAttribute('data-position') || 'right';
   const SERVER   = SCRIPT.src.replace(/\/widget\.js(\?.*)?$/, '');
