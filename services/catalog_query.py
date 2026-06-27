@@ -103,6 +103,15 @@ _STOP = {
     # texting abbreviations of stop-words — "do u HV mgahribi" must not keep "hv" as a
     # junk anchor (it dragged query-coverage below the floor and sank the real match).
     "hv", "hav", "ur", "pls", "plz", "thru", "abt", "coz", "cuz", "wanna", "gimme", "lemme",
+    # availability / buy-intent / negation framing — these express the STOCK dimension
+    # or question scaffolding, never a product NAME, yet they leaked as hard anchors:
+    # "give UNAVAILABLE rc construction", "rc construction WHETHER available or sold
+    # out", "F1 READY to buy", "figures that CANNOT BE BOUGHT" → an all-anchor _hit no
+    # title satisfies → false abstain. Availability is already captured separately
+    # (in_stock / out_of_stock), so the words that voice it must not also filter names.
+    # ("sold"/"out"/"available"/"buy"/"order" were already stops; these were the gaps.)
+    "unavailable", "buyable", "sellable", "purchasable", "orderable", "ready",
+    "whether", "not", "cannot", "cant", "bought", "be", "ship", "ships", "shipped",
 }
 
 _NUM = r"(?:rs\.?\s*|pkr\s*|[\$£€])?\s*([\d][\d,]*(?:\.\d{1,2})?)"
@@ -141,6 +150,8 @@ class Spec:
     strict_max: bool = False  # "strictly below/under X" → exclude p == X
     title_only: bool = False  # "whose product NAME contains X" → match title, not body
     out_of_stock: bool = False
+    include_oos: bool = False  # "list X incl. unavailable / overall / available OR sold out" → no stock filter, show status, true extremes
+    alt_groups: list = field(default_factory=list)  # slash-joined synonyms ("motorcycle/bike") → match EITHER, not both
 
 
 def _variants(a: str) -> set[str]:
@@ -224,7 +235,7 @@ def _anchor_df(tok: str, rows: list[Row]) -> float:
     return n / len(rows)
 
 
-def _selective_anchors(anchors: list[str], rows: list[Row]) -> list[str]:
+def _selective_anchors(anchors: list[str], rows: list[Row], agg: str | None = None) -> list[str]:
     """Drop generic catalog-wide type-nouns from the MATCHING anchor set so they no
     longer over-constrain count/min/max/list — but only when a more specific (low
     document-frequency) anchor remains, so a query that is genuinely about the whole
@@ -235,6 +246,26 @@ def _selective_anchors(anchors: list[str], rows: list[Row]) -> list[str]:
     if len(anchors) <= 1 or not rows:
         return anchors
     df = {a: _anchor_df(a, rows) for a in anchors if a != "rc"}
+    # A token NO product contains (df == 0) can only zero-out an all-anchor match — a
+    # descriptor the catalog doesn't use ("SUPERHERO action figures" where they're
+    # tagged just "action figures"). For a browse LIST, drop it when a matching anchor
+    # remains so the category still resolves instead of abstaining. NOT for count/exists
+    # (a 0 is a meaningful precise answer) and NOT for min/max — there a stray unknown
+    # word ("most COSTLY remote control car") is better left as a safe abstain→RAG than
+    # silently broadened into a wrong extreme over an unintended subset.
+    if agg == "list":
+        positive = [a for a in anchors if a == "rc" or df.get(a, 0.0) > 0.0]
+        # Only drop the unknown when a genuinely SELECTIVE anchor (0 < df < generic)
+        # survives, so "SUPERHERO action figures" resolves to the figures — but a query
+        # of mostly unknown tokens (two typos: "rc CONSTRACTION AVAILBLE") doesn't strip
+        # down to a lone generic ("rc") and dump the whole type; it stays unmatched →
+        # graceful fuzzy/RAG instead of a confidently-wrong list.
+        _surv_selective = any(0.0 < df.get(a, 0.0) < _GENERIC_DF for a in positive)
+        if positive and len(positive) < len(anchors) and _surv_selective:
+            anchors = positive
+            df = {a: v for a, v in df.items() if v > 0.0}
+            if len(anchors) <= 1:
+                return anchors
     selective = [a for a in df if df[a] < _GENERIC_DF]
     if not selective:
         return anchors
@@ -361,8 +392,43 @@ def parse(q: str) -> Spec:
         if m:
             pmin = _num(m.group(1))
 
-    out_of_stock = bool(re.search(r"\b(out\s+of\s+stock|sold\s+out|unavailable)\b", ql))
-    in_stock = bool(re.search(r"\b(in[\s-]?stock|in\s+stock|available)\b", ql)) and not out_of_stock
+    # OUT-OF-STOCK intent, including negated availability ("not available", "isn't in
+    # stock", "can't be bought") — without these "which figures are NOT available"
+    # read as an IN-stock filter and returned the available ones (inverted answer).
+    out_of_stock = bool(re.search(
+        r"\b(out\s+of\s+stock|sold\s+out|unavailable|"
+        r"not\s+(?:available|in\s+stock)|n'?t\s+(?:available|in\s+stock)|"
+        r"no\s+longer\s+(?:available|in\s+stock|sold)|"
+        r"can'?t\s+be\s+(?:bought|purchased|ordered)|cannot\s+be\s+(?:bought|purchased|ordered)|"
+        r"can'?t\s+(?:buy|order|get)|cannot\s+(?:buy|order|get|be\s+bought))\b", ql))
+    # IN-STOCK intent, including buy-readiness phrasings ("ready to buy", "can I buy",
+    # "buyable") that customers use instead of the literal "in stock".
+    in_stock = bool(re.search(
+        r"\b(in[\s-]?stock|in\s+stock|available|buyable|"
+        r"ready\s+to\s+(?:buy|order|ship)|can\s+(?:i|we|you)\s+(?:buy|order|get)|"
+        r"still\s+(?:available|in\s+stock))\b", ql)) and not out_of_stock
+
+    # "include unavailable / overall / available OR sold out / whether … sold out" =
+    # the customer wants the WHOLE set with its status, or the true extreme across all
+    # stock — not an in/out filter. Overrides the stock flags so a "list X including
+    # the sold-out ones" returns every X (with availability), and "highest X overall"
+    # ranks past out-of-stock instead of stopping at the priciest in-stock item.
+    include_oos = bool(re.search(
+        r"\bincl(?:uding|ude|\.|udes)?\s+(?:the\s+)?(?:unavailable|sold[\s-]?out|out[\s-]?of[\s-]?stock|oos)"
+        r"|\bregardless\s+of\s+(?:stock|availability)"
+        r"|\b(?:available|in\s+stock)\b[^.?!]{0,24}\b(?:or|and|/|&|vs\.?)\b[^.?!]{0,24}\b(?:sold[\s-]?out|out\s+of\s+stock|unavailable)"
+        r"|\bwhether\b[^.?!]{0,40}\b(?:available|in\s+stock|sold[\s-]?out)"
+        r"|\b(?:overall|of\s+all|in\s+total|in\s+the\s+(?:whole|entire)\s+(?:catalog|store))\b", ql))
+    if include_oos:
+        out_of_stock = False
+        in_stock = False
+
+    # Slash-joined alternatives ("motorcycle/bike", "F1 / Formula One", "superhero/
+    # action") are SYNONYMS — the customer wants EITHER, but the all-anchor _hit would
+    # demand BOTH and under-return (or abstain). Record the groups; execution keeps
+    # only the catalog's actual term (highest doc-frequency) per group.
+    alt_groups = [tuple(sorted({m.group(1), m.group(2)}))
+                  for m in re.finditer(r"\b([a-z]{2,})\s*/\s*([a-z]{2,})\b", ql)]
 
     # Exclusive bounds: "strictly below/under" and "more/greater than", "below",
     # "under", "above", "over" exclude the boundary value. Inclusive operators
@@ -386,7 +452,7 @@ def parse(q: str) -> Spec:
     priciest = bool(re.search(
         r"\b(most\s+expensive|highest[\s-]+priced?|priciest|costliest|most\s+costly|dearest|"
         r"highest\s+cost|costs?\s+the\s+most)\b", ql))
-    list_q = bool(re.search(r"\b(show|list|which|what'?s?|give|display|products?|items?|sell|have|available|sold\s+out|out\s+of\s+stock)\b", ql))
+    list_q = bool(re.search(r"\b(show|list|which|what'?s?|give|display|products?|items?|sell|have|available|unavailable|sold\s+out|out\s+of\s+stock)\b", ql))
     # Single-product price/availability lookup ("price of X", "how much is X",
     # "is X available"). Routed to the list path so the full-catalog scan (with the
     # title-coverage fallback) resolves the EXACT named product instead of the
@@ -471,7 +537,10 @@ def parse(q: str) -> Spec:
             return Spec("none", structured=False)
         if re.search(r"\b(which|what'?s?|list|show|give|display)\b", ql):
             agg = "list"
-            if not out_of_stock:
+            # "list X" defaults to in-stock — UNLESS the customer asked for the whole
+            # set with its status ("…whether available or sold out"), where include_oos
+            # must keep both states. Don't re-impose the filter it just cleared.
+            if not out_of_stock and not include_oos:
                 in_stock = True
         else:
             in_stock = False
@@ -490,7 +559,7 @@ def parse(q: str) -> Spec:
 
     return Spec(agg, anchors, pmin, pmax, in_stock,
                 strict_min=strict_min, strict_max=strict_max, title_only=title_only,
-                out_of_stock=out_of_stock)
+                out_of_stock=out_of_stock, include_oos=include_oos, alt_groups=alt_groups)
 
 
 def load_rows(db, limit: int = 12000) -> list[Row]:
@@ -1272,9 +1341,19 @@ def _execute_spec(spec: "Spec", rows: list[Row], cfg: dict | None, max_list: int
     try:
         excl = _excl_re(cfg, spec.anchors)
 
+        # Slash-joined synonyms ("motorcycle/bike") mean EITHER, but _hit demands ALL —
+        # collapse each group to the catalog's actual term (highest doc-frequency) so a
+        # synonym the store doesn't tag can't zero the set. Applied before generic relax.
+        _anchors = list(spec.anchors)
+        for grp in getattr(spec, "alt_groups", None) or []:
+            present = [a for a in _anchors if a in grp]
+            if len(present) > 1:
+                keep = max(present, key=lambda a: _anchor_df(a, rows))
+                _anchors = [a for a in _anchors if a == keep or a not in present]
+
         # Generic type-nouns ("car"/"model") demanded as hard anchors collapse an
         # aggregation set; relax them for matching while the label keeps full anchors.
-        _m_anchors = _selective_anchors(spec.anchors, rows)
+        _m_anchors = _selective_anchors(_anchors, rows, spec.agg)
 
         _base = [r for r in rows if _hit(r, _m_anchors, spec.title_only)]
         if not _base and spec.anchors:
@@ -1443,7 +1522,9 @@ def _execute_spec(spec: "Spec", rows: list[Row], cfg: dict | None, max_list: int
         # Extremes (cheapest / most expensive) should name something a customer can
         # actually buy: prefer in-stock rows, falling back to all only if EVERY priced
         # match is out of stock (so we still answer rather than claim absence).
-        if spec.agg in ("min", "max"):
+        # SKIPPED when the question wants the true extreme across all stock ("highest
+        # priced X overall") — then a pricier out-of-stock item is the right answer.
+        if spec.agg in ("min", "max") and not spec.include_oos:
             _avail = [r for r in priced if not re.search(
                 r"out\s+of\s+stock|sold\s+out|unavailable|not\s+available", r.availability or "")]
             if _avail:
