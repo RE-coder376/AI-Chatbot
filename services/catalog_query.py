@@ -1534,6 +1534,27 @@ def _execute_spec(spec: "Spec", rows: list[Row], cfg: dict | None, max_list: int
                 if _tag_sel:
                     sel = _tag_sel
 
+        # Single named-product precision: when the query FULLY NAMES a specific
+        # product (every significant word of a matched title is in the anchor set),
+        # drop same-prefix SIBLINGS that only add descriptors — a lookup for
+        # "BMW M8 1:24" must not also list "RC BMW M8 Diecast 1:24" or the "...Frame".
+        # Parenthetical variant suffixes ("( 12 inches )") are ignored so an exact
+        # name still resolves. Needs >=2 real anchors (a one-word category like
+        # "bikes" must never collapse to a coincidental exact title) and is skipped
+        # for name-substring (title_only) and price-bounded browses where the whole
+        # matched set is the point.
+        _real_anchors = [a for a in spec.anchors if a not in _STOP]
+        if (sel and not spec.title_only and len(_real_anchors) >= 2
+                and spec.price_min is None and spec.price_max is None):
+            _aset_fn = _anchor_set(spec.anchors)
+            def _fully_named(r):
+                _t = re.sub(r"\([^)]*\)", " ", (r.title or "").lower())
+                toks = [t for t in re.findall(r"[a-z0-9]{2,}", _t) if t not in _STOP]
+                return bool(toks) and all(t in _aset_fn for t in toks)
+            _named = [r for r in sel if _fully_named(r)]
+            if _named and len(_named) < len(sel):
+                sel = _named
+
         label = " ".join(spec.anchors) if spec.anchors else "products"
 
         if spec.agg == "stock":
