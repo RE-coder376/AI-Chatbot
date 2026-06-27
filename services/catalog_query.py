@@ -110,7 +110,8 @@ _STOP = {
     # title satisfies → false abstain. Availability is already captured separately
     # (in_stock / out_of_stock), so the words that voice it must not also filter names.
     # ("sold"/"out"/"available"/"buy"/"order" were already stops; these were the gaps.)
-    "unavailable", "buyable", "sellable", "purchasable", "orderable", "ready",
+    "unavailable", "availble", "avilable", "avalable", "availabe", "avaliable",
+    "buyable", "sellable", "purchasable", "orderable", "ready",
     "whether", "not", "cannot", "cant", "bought", "be", "ship", "ships", "shipped",
 }
 
@@ -463,9 +464,10 @@ def parse(q: str) -> Spec:
     # "do you have X in stock?"). Distinct from the in_stock FILTER ("show in-stock X"):
     # the answer must REPORT the product's availability, not silently drop it when OOS.
     stock_status_q = bool(re.search(
-        r"\b(?:is|are|r)\b[^?]*\b(?:in[\s-]?stock|in\s+stock|available|sold\s+out|out\s+of\s+stock)\b"
+        r"\b(?:is|are|r)\b[^?]*\b(?:in[\s-]?stock|in\s+stock|avail\w*|sold\s+out|out\s+of\s+stock)\b"
         r"|\b(?:do|does)\s+(?:you|we|they)\b[^?]*\bin\s+stock\b"
         r"|\bavailabilit\w*\b"
+        r"|\bavail\w*\s*\?\s*$"  # bare "<product> availble?" — a typo'd availability ask
         r"|\bstill\s+(?:available|in\s+stock)\b", ql))
 
     if count_q:
