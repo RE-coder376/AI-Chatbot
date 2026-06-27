@@ -829,21 +829,36 @@ def _extract_names(q: str) -> list[str]:
     names = [n.strip() for n in re.findall(r'[\"“”]([^\"“”]{3,})[\"“”]', q) if n.strip()]
     if len(names) >= 2:
         return names[:5]
+    # A colon can introduce the names ("Compare on price: A vs B") OR trail them with a
+    # question clause ("A vs B: which can I buy?"). Use the post-colon segment ONLY when
+    # the connectors (and therefore the names) are there; otherwise keep the full string
+    # and let the trailing clause be stripped below — so "A vs B: which can I buy?" still
+    # yields [A, B] instead of the question.
     colon = re.search(r":\s+", q)
-    seg = q[colon.end():] if colon and not re.search(r"\d\s*:\s*$", q[:colon.start() + 1]) else q
-    parts = re.split(r"\s+(?:versus|vs\.?|and|or)\s+|,\s*", seg)
-    parts = [re.sub(r"(?i)^\s*(?:compare|which\s+(?:one\s+)?(?:is|costs?|should\s+i\s+buy)|is)\s+", "", p) for p in parts]
+    seg = q
+    if colon and not re.search(r"\d\s*:\s*$", q[:colon.start() + 1]):
+        after = q[colon.end():]
+        if re.search(r"\b(?:versus|vs\.?|and|or|against)\b|,", after):
+            seg = after
+    parts = re.split(r"\s+(?:versus|vs\.?|v\.?|and|or|against|compared\s+(?:to|with))\s+|,\s*", seg)
+    # leading comparison scaffolding the connector-split leaves on the first name
+    # ("availability comparison FOR Aston Martin F1 1/18" → "Aston Martin F1 1/18")
+    parts = [re.sub(r"(?i)^\s*(?:availability|stock|price|cost)?\s*compar(?:e|ing|ison)\s+(?:for|of|between|with)?\s*", "", p) for p in parts]
+    parts = [re.sub(r"(?i)^\s*(?:compare|which\s+(?:one\s+)?(?:is|costs?|should\s+i\s+buy|can\s+i\s+buy)|is)\s+", "", p) for p in parts]
     parts = [re.sub(r"(?i)^\s*(?:more|less|cheaper|pricier|dearer|expensive)\s+", "", p) for p in parts]
     parts = [re.sub(r"(?i)\s+(?:on|for)\s+(?:price|prices|cost|stock|availability)(?:\s+and\s+(?:price|prices|cost|stock|availability))*.*$", "", p) for p in parts]
+    # trailing question/compare clause a name carries when the tail wasn't split off
+    # ("Mini Can RC Drift Cars: which can I buy?", "Iron Man action figure — which costs more")
+    parts = [re.sub(r"(?i)\s*[:—–-]\s*(?:which|what|who|can|should|is|are|do(?:es)?|will|how)\b.*$", "", p) for p in parts]
     parts = [re.sub(r"[?.\"]+$", "", p).strip(" .\"") for p in parts]
     parts = [p for p in parts if len(p) >= 4 and len(p.split()) >= 2]
     return parts[:5] if len(parts) >= 2 else names
 
 
 _CMP_RE = re.compile(
-    r"\bcompare\b|\bcheaper\b|\bpricier\b|\bdearer\b|\bmore\s+expensive\b|\bless\s+expensive\b"
+    r"\bcompar(?:e|es|ing|ison)\b|\bcheaper\b|\bpricier\b|\bdearer\b|\bmore\s+expensive\b|\bless\s+expensive\b"
     r"|\bdifference\s+between\b|\bby\s+how\s+much\b|\bhow\s+much\s+(?:more|less|cheaper)\b"
-    r"|\bwhich\s+(?:one\s+)?(?:is|costs?)\b|\bversus\b|\bvs\.?\b|\bcosts?\s+(?:less|more)\b", re.I)
+    r"|\bwhich\s+(?:one\s+)?(?:is|costs?)\b|\bversus\b|\bvs\.?\b|\bagainst\b|\bcosts?\s+(?:less|more)\b", re.I)
 _ORDER_RE = re.compile(r"\b(order|rank|sort|arrange|list\s+these)\b", re.I)
 _PRICE_DIM_RE = re.compile(
     r"\b(expensive|cheap(?:er|est)?|price[ds]?|cost(?:s|ly)?|least|most|"
