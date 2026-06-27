@@ -455,6 +455,12 @@ def parse(q: str) -> Spec:
         r"|\bregardless\s+of\s+(?:stock|availability)"
         r"|\b(?:available|in\s+stock)\b[^.?!]{0,24}\b(?:or|and|/|&|vs\.?)\b[^.?!]{0,24}\b(?:sold[\s-]?out|out\s+of\s+stock|unavailable)"
         r"|\bwhether\b[^.?!]{0,40}\b(?:available|in\s+stock|sold[\s-]?out)"
+        # "full availability list", "stock status (list)", "availability breakdown/
+        # rundown/status" = report the WHOLE category with each item's status, not an
+        # in/out filter (these read "available" yet want the sold-out ones shown too).
+        r"|\bfull\s+availabilit\w*"
+        r"|\bstock\s+status\b"
+        r"|\bavailabilit\w*\s+(?:list|status|breakdown|overview|rundown)\b"
         r"|\b(?:overall|of\s+all|in\s+total|in\s+the\s+(?:whole|entire)\s+(?:catalog|store))\b", ql))
     if include_oos:
         out_of_stock = False
@@ -528,7 +534,12 @@ def parse(q: str) -> Spec:
         agg = "stock"
     elif exist_q:
         agg = "exists"
-    elif list_q:
+    elif list_q or out_of_stock or in_stock:
+        # A bare stock filter with no list verb ("action figures customers cannot
+        # buy", "available BMWs") is still a filtered-list request — without this it
+        # fell through to RAG and dumped the whole catalog. Single-product stock
+        # lookups ("is X available") are caught earlier by stock_status_q, so this
+        # only fires on category/filter phrasings.
         agg = "list"
     elif priceof_q:
         agg = "list"
