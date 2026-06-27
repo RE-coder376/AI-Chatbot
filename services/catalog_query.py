@@ -82,6 +82,9 @@ _STOP = {
     # "include EVERY EXACT price"). Without these the engine matches rows against
     # 'category'/'contains'/'exact' and finds nothing → false "no such category".
     "category", "categories", "categorized", "categorised", "section", "department",
+    # availability-split scaffolding — "bike availability SUMMARY", "stock BREAKDOWN",
+    # "available VS UNAVAILABLE" must anchor on the category, not these report words.
+    "summary", "breakdown", "overview", "unavailable", "vs", "versus", "status",
     # list-verb inflections — "products LISTED in", "items LISTING under", "what LISTS
     # under X" must anchor on X, not keep "listed"/"listing" (which match no category
     # → false "no such category" and a fall-through to fuzzy RAG). "list" was already
@@ -155,24 +158,44 @@ class Spec:
     alt_groups: list = field(default_factory=list)  # slash-joined synonyms ("motorcycle/bike") → match EITHER, not both
 
 
-def _variants(a: str) -> set[str]:
-    """Singular<->plural so 'pens'~'pen' and 'battery'~'batteries'. Covers the
-    -y/-ies and -s/-es forms (the bare -s rule missed 'batteries', 'boxes').
-    (rc is handled in _hit.)"""
-    vs = {a}
-    if len(a) < 3:
+# Universal ENGLISH category synonyms — a customer's everyday word for a product
+# TYPE vs the merchant's tag for the same thing. This is language knowledge, NOT a
+# per-store word list: it holds in any catalog, so a store that tags its products
+# "Bikes" still resolves a "motorcycle" query (and vice-versa). Bidirectional; each
+# entry is matched as a phrase so multi-word values work. Kept deliberately tiny and
+# only for genuinely universal type-synonyms validated against the live catalogs —
+# brand/model words are never synonyms and must not go here.
+_CAT_SYN: dict[str, set[str]] = {
+    "motorcycle": {"bike"}, "motorbike": {"bike"}, "bike": {"motorcycle", "motorbike"},
+}
+
+
+def _inflect(s: str) -> set[str]:
+    """Singular<->plural forms of one term (the -y/-ies and -s/-es rules)."""
+    vs = {s}
+    if len(s) < 3:
         return vs
-    if a.endswith("ies"):
-        vs.add(a[:-3] + "y")          # batteries -> battery
-    elif a.endswith("y"):
-        vs.add(a[:-1] + "ies")        # battery -> batteries
-    if a.endswith("es") and len(a) > 4:
-        vs.add(a[:-2])                # boxes -> box
-    if a.endswith("s"):
-        vs.add(a[:-1])                # pens -> pen
+    if s.endswith("ies"):
+        vs.add(s[:-3] + "y")          # batteries -> battery
+    elif s.endswith("y"):
+        vs.add(s[:-1] + "ies")        # battery -> batteries
+    if s.endswith("es") and len(s) > 4:
+        vs.add(s[:-2])                # boxes -> box
+    if s.endswith("s"):
+        vs.add(s[:-1])                # pens -> pen
     else:
-        vs.add(a + "s")               # pen -> pens
-        vs.add(a + "es")              # box -> boxes
+        vs.add(s + "s")               # pen -> pens
+        vs.add(s + "es")              # box -> boxes
+    return vs
+
+
+def _variants(a: str) -> set[str]:
+    """Singular<->plural so 'pens'~'pen' and 'battery'~'batteries', PLUS universal
+    category synonyms ('motorcycle'~'bike') so a query word resolves against the
+    merchant's actual tag. (rc is handled in _hit.)"""
+    vs = _inflect(a)
+    for syn in _CAT_SYN.get(a, ()):           # 'motorcycle' -> 'bike(s)'
+        vs |= _inflect(syn)
     return vs
 
 
@@ -319,12 +342,25 @@ def parse(q: str) -> Spec:
                            "wanna": "want to", "gimme": "give me", "lemme": "let me",
                            "gud": "good", "gng": "going"}[m.group(0)], ql)
 
+    # Two DIFFERENT stock states named together ("available AND/OR/VS sold out",
+    # "availability summary … available … unavailable") = the customer wants BOTH
+    # sides reported side-by-side — a split count, not one filtered subset. Computed
+    # up front because "available vs unavailable" must NOT read as a product
+    # comparison (the "vs") nor as a single-product stock lookup.
+    both_states = bool(re.search(
+        r"\b(?:available|in\s+stock)\b[^.?!]{0,40}\b(?:and|or|vs\.?|versus|&)\b[^.?!]{0,40}"
+        r"\b(?:sold[\s-]?out|out\s+of\s+stock|unavailable)\b"
+        r"|\b(?:sold[\s-]?out|out\s+of\s+stock|unavailable)\b[^.?!]{0,40}\b(?:and|or|vs\.?|versus|&)\b"
+        r"[^.?!]{0,40}\b(?:available|in\s+stock)\b", ql))
+
     # Comparisons ("compare A and B", "X vs Y") are NOT a single structured
     # aggregation — they need the retrieval fan-out (which matches each named
     # product in both name directions) + LLM synthesis. Hand them off; otherwise a
     # "compare the price of A and B" would be caught by the price-of list path and
-    # return whichever product's title the query happens to fully name.
-    if (re.search(r"\b(compare|compared|comparison|versus|vs\.?|difference\s+between)\b", ql)
+    # return whichever product's title the query happens to fully name. A stock-state
+    # split ("available vs unavailable") is NOT a product comparison → excluded.
+    if (not both_states
+            and re.search(r"\b(compare|compared|comparison|versus|vs\.?|difference\s+between)\b", ql)
             and re.search(r"\b(and|or|vs\.?|versus|than)\b", ql)):
         return Spec("none", structured=False)
 
@@ -424,6 +460,12 @@ def parse(q: str) -> Spec:
         out_of_stock = False
         in_stock = False
 
+    # both_states (computed up front) wants BOTH stock sides → don't filter to one.
+    if both_states:
+        out_of_stock = False
+        in_stock = False
+        include_oos = True
+
     # Slash-joined alternatives ("motorcycle/bike", "F1 / Formula One", "superhero/
     # action") are SYNONYMS — the customer wants EITHER, but the all-anchor _hit would
     # demand BOTH and under-return (or abstain). Record the groups; execution keeps
@@ -493,6 +535,11 @@ def parse(q: str) -> Spec:
     else:
         return Spec("none", structured=False)
 
+    # A category query naming both stock states → split count (overrides the bare
+    # count/list/stock agg the chain picked). Needs a category anchor (below).
+    if both_states and agg in ("count", "list", "stock"):
+        agg = "count_split"
+
     # Anchors include digit tokens (a model/size/style number disambiguates a
     # specific SKU — "Spiral Notebook Style 43" must not match every style, "Paint
     # 500ml" / "Set of 48" pin the variant). Drop numbers already consumed as price
@@ -530,6 +577,9 @@ def parse(q: str) -> Spec:
         return Spec("none", structured=False)
     # Likewise a bare existence question with no subject is not answerable here.
     if agg == "exists" and not anchors:
+        return Spec("none", structured=False)
+    # A split count needs a category to split — without one it's an open browse → RAG.
+    if agg == "count_split" and not anchors:
         return Spec("none", structured=False)
     # A stock-status question needs a named product; "what's available" with no
     # subject is an open browse → RAG. The status report must NOT filter by stock
@@ -1466,7 +1516,7 @@ def _execute_spec(spec: "Spec", rows: list[Row], cfg: dict | None, max_list: int
         # that happen to also carry a coincidental "monochrome" category tag (e.g.
         # one marker set) silently drops the products the user actually asked for.
         # Also skipped for untagged/HTML-crawl DBs (tagged ratio < 50%).
-        if not _coll_locked and spec.anchors and not spec.title_only and spec.agg in ("count", "min", "max", "list"):
+        if not _coll_locked and spec.anchors and not spec.title_only and spec.agg in ("count", "min", "max", "list", "count_split"):
             _tagged = sum(1 for r in rows if r.cats.strip())
             if rows and (_tagged / len(rows)) >= 0.5:
                 _tag_sel = [r for r in sel if _cats_hit(r, _m_anchors)]
@@ -1493,6 +1543,25 @@ def _execute_spec(spec: "Spec", rows: list[Row], cfg: dict | None, max_list: int
                 return msg, _dedup([sel[0].source])[:max_list]
             lines = [f"- {t} — {st}{pr}" for t, st, pr in (_stk(r) for r in sel[:max_list])]
             return "Here's the current availability:\n" + "\n".join(lines), _dedup(r.source for r in sel)[:max_list]
+
+        if spec.agg == "count_split":
+            if not sel:
+                if from_router:
+                    return None, []
+                return (f"No — we don't currently carry any {label}. Is there something "
+                        f"else I can help you find?"), []
+            _av = [r for r in sel if not _is_oos(r)]
+            _so = [r for r in sel if _is_oos(r)]
+            n = len(sel)
+            def _il(r):
+                return f"- {r.title} — {_price_disp(r)}" if r.price is not None else f"- {r.title}"
+            parts = [f"Of {n} {label} product{'s' if n != 1 else ''}: "
+                     f"{len(_av)} available, {len(_so)} sold out."]
+            if _av:
+                parts.append("**Available:**\n" + "\n".join(_il(r) for r in _av[:max_list]))
+            if _so:
+                parts.append("**Sold out / unavailable:**\n" + "\n".join(_il(r) for r in _so[:max_list]))
+            return "\n\n".join(parts), _dedup(r.source for r in sel)[:max_list]
 
         if spec.agg in ("count", "exists"):
             n = len(sel)
