@@ -114,6 +114,7 @@ _STOP = {
     # (in_stock / out_of_stock), so the words that voice it must not also filter names.
     # ("sold"/"out"/"available"/"buy"/"order" were already stops; these were the gaps.)
     "unavailable", "availble", "avilable", "avalable", "availabe", "avaliable",
+    "soldout", "outofstock",
     "buyable", "sellable", "purchasable", "orderable", "ready",
     "whether", "not", "cannot", "cant", "bought", "be", "ship", "ships", "shipped",
 }
@@ -277,7 +278,11 @@ def _selective_anchors(anchors: list[str], rows: list[Row], agg: str | None = No
     # (a 0 is a meaningful precise answer) and NOT for min/max — there a stray unknown
     # word ("most COSTLY remote control car") is better left as a safe abstain→RAG than
     # silently broadened into a wrong extreme over an unintended subset.
-    if agg == "list":
+    if agg in ("list", "stock"):
+        # "stock" (status of a NAMED product) is included so a hard typo the corrector
+        # can't fix ("hulk action FIGER stock?") drops out when a selective anchor
+        # ("hulk") survives → we still report that product's availability instead of
+        # abstaining. Like "list", never for count/exists/min/max (a 0 is meaningful).
         positive = [a for a in anchors if a == "rc" or df.get(a, 0.0) > 0.0]
         # Only drop the unknown when a genuinely SELECTIVE anchor (0 < df < generic)
         # survives, so "SUPERHERO action figures" resolves to the figures — but a query
@@ -325,6 +330,40 @@ def _query_cover(title: str, anchor_toks: list[str] | None) -> float:
     return sum(1 for a in aw if a in tt or _fuzzy_in(a, tt)) / len(aw)
 
 
+_ONES = {"zero": 0, "one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
+         "six": 6, "seven": 7, "eight": 8, "nine": 9}
+_TEENS = {"ten": 10, "eleven": 11, "twelve": 12, "thirteen": 13, "fourteen": 14,
+          "fifteen": 15, "sixteen": 16, "seventeen": 17, "eighteen": 18, "nineteen": 19}
+_TENS = {"twenty": 20, "thirty": 30, "forty": 40, "fifty": 50, "sixty": 60,
+         "seventy": 70, "eighty": 80, "ninety": 90}
+
+
+def _normalize_numwords(ql: str) -> str:
+    """Spelled-out numbers → digits so a model/scale typed in words resolves like its
+    numeric form: 'm eight one twenty four' → 'm8 1 24' → matches 'BMW M8 1:24'.
+    Universal language normalization (a tens+ones pair combines: 'twenty four'→24),
+    then a single letter glued to a following digit forms a model code ('m 8'→'m8')."""
+    toks = ql.split()
+    out = []
+    i = 0
+    while i < len(toks):
+        t = toks[i]
+        if t in _TENS:
+            v = _TENS[t]
+            if i + 1 < len(toks) and toks[i + 1] in _ONES and _ONES[toks[i + 1]] != 0:
+                v += _ONES[toks[i + 1]]; i += 1
+            out.append(str(v))
+        elif t in _TEENS:
+            out.append(str(_TEENS[t]))
+        elif t in _ONES:
+            out.append(str(_ONES[t]))
+        else:
+            out.append(t)
+        i += 1
+    s = " ".join(out)
+    return re.sub(r"\b([a-z])\s+(\d)", r"\1\2", s)
+
+
 def parse(q: str) -> Spec:
     """Extract orthogonal dimensions (aggregation + price bounds + stock + anchors)
     from the question. Each dimension is detected independently, so any
@@ -341,6 +380,10 @@ def parse(q: str) -> Spec:
                            "abt": "about", "thru": "through", "coz": "because", "cuz": "because",
                            "wanna": "want to", "gimme": "give me", "lemme": "let me",
                            "gud": "good", "gng": "going"}[m.group(0)], ql)
+
+    # Spelled-out numbers → digits ("m eight one twenty four" → "m8 1 24") so a model
+    # or scale typed in words matches its numeric title form. Done before anchoring.
+    ql = _normalize_numwords(ql)
 
     # Two DIFFERENT stock states named together ("available AND/OR/VS sold out",
     # "availability summary … available … unavailable") = the customer wants BOTH
@@ -433,7 +476,7 @@ def parse(q: str) -> Spec:
     # stock", "can't be bought") — without these "which figures are NOT available"
     # read as an IN-stock filter and returned the available ones (inverted answer).
     out_of_stock = bool(re.search(
-        r"\b(out\s+of\s+stock|sold\s+out|unavailable|"
+        r"\b(out\s*of\s*stock|sold\s*out|unavailable|"
         r"not\s+(?:available|in\s+stock)|n'?t\s+(?:available|in\s+stock)|"
         r"no\s+longer\s+(?:available|in\s+stock|sold)|"
         r"can'?t\s+be\s+(?:bought|purchased|ordered)|cannot\s+be\s+(?:bought|purchased|ordered)|"
@@ -516,6 +559,7 @@ def parse(q: str) -> Spec:
         r"|\b(?:do|does)\s+(?:you|we|they)\b[^?]*\bin\s+stock\b"
         r"|\bavailabilit\w*\b"
         r"|\bavail\w*\s*\?\s*$"  # bare "<product> availble?" — a typo'd availability ask
+        r"|\bstock\s*\?\s*$"     # bare "<product> stock?" — elliptical "in stock?" ask
         r"|\bstill\s+(?:available|in\s+stock)\b", ql))
 
     if count_q:
@@ -910,11 +954,24 @@ def _extract_names(q: str) -> list[str]:
     parts = [re.sub(r"(?i)^\s*(?:compare|which\s+(?:one\s+)?(?:is|costs?|should\s+i\s+buy|can\s+i\s+buy)|is)\s+", "", p) for p in parts]
     parts = [re.sub(r"(?i)^\s*(?:more|less|cheaper|pricier|dearer|expensive)\s+", "", p) for p in parts]
     parts = [re.sub(r"(?i)\s+(?:on|for)\s+(?:price|prices|cost|stock|availability)(?:\s+and\s+(?:price|prices|cost|stock|availability))*.*$", "", p) for p in parts]
+    # a bare trailing dimension clause the connector-split couldn't separate from the
+    # LAST name ("Big RC Excavator PRICE AND STOCK", "Iron Man action figure PRICE
+    # DIFFERENCE") — strip the comparison axis words so the product name resolves.
+    parts = [re.sub(r"(?i)\s+(?:price|prices|cost|costs|stock|stock\s+status|availability)"
+                    r"(?:\s+(?:and|&|,|or)\s+(?:price|prices|cost|costs|stock|availability|difference))*"
+                    r"(?:\s+difference)?\s*$", "", p) for p in parts]
     # trailing question/compare clause a name carries when the tail wasn't split off
     # ("Mini Can RC Drift Cars: which can I buy?", "Iron Man action figure — which costs more")
     parts = [re.sub(r"(?i)\s*[:—–-]\s*(?:which|what|who|can|should|is|are|do(?:es)?|will|how)\b.*$", "", p) for p in parts]
     parts = [re.sub(r"[?.\"]+$", "", p).strip(" .\"") for p in parts]
-    parts = [p for p in parts if len(p) >= 4 and len(p.split()) >= 2]
+    # Keep multi-word names; ALSO a lone distinctive word (a one-word product name like
+    # "Deadpool" in "Deadpool vs Iron Man action figure", where the shared type-noun
+    # attaches only to the other side). Single words must be >=5 chars and not stop-words
+    # so connector-split junk ("the", "and") is excluded — and _answer_multi's resolution
+    # floor rejects any one-worder that isn't a real product anyway.
+    parts = [p for p in parts
+             if (len(p) >= 4 and len(p.split()) >= 2)
+             or (len(p.split()) == 1 and len(p) >= 5 and p.lower() not in _STOP)]
     return parts[:5] if len(parts) >= 2 else names
 
 
@@ -964,6 +1021,14 @@ def _parse_multi(q: str) -> dict | None:
     ql = (q or "").lower()
     is_order = bool(_ORDER_RE.search(ql) and _PRICE_DIM_RE.search(ql))
     is_cmp = bool(_CMP_RE.search(ql)) or bool(re.search(r"\bwhich\b.*\bbuy\b", ql) and re.search(r"\bor\b|\bvs\b|\bversus\b", ql))
+    # Buy-choice: two named products joined by or/vs with an availability/buy cue
+    # ("need the available option: X or Y?", "X or Y — which can I get?"). Report each
+    # one's stock and recommend the buyable one. Resolves like a stock comparison; if
+    # the names don't resolve to specific products the caller falls back to the list
+    # spec, so a category "or" query is never hijacked.
+    is_choice = bool(re.search(r"\b(?:or|vs\.?|versus)\b", ql)
+                     and re.search(r"\b(available|availab\w*|in[\s-]?stock|buy|buyable|purchase|order|get)\b", ql))
+    is_cmp = is_cmp or is_choice
     is_basket = bool(_BASKET_RE.search(ql)) and not bool(re.search(r"\bwhich\b|\bcompare\b|\bin[\s-]?stock\b|\bavailable\b", ql))
     if not (is_order or is_cmp or is_basket):
         return None
@@ -978,8 +1043,9 @@ def _parse_multi(q: str) -> dict | None:
     # default ("cheaper / costs less") names the cheaper. Either way both prices and
     # the exact gap are stated, so the answer carries the fact regardless.
     cmp_more = bool(re.search(r"\bmore\s+expensive\b|\bcosts?\s+more\b|\bpricier\b|\bdearer\b|\bhigher\s+price", ql))
-    cmp_stock = bool(re.search(r"\bstock\b|\bavailable\b|\bavailability\b|\bbuy\b", ql))
-    return {"op": op, "names": names, "asc": bool(_ASC_RE.search(ql)), "cmp_more": cmp_more, "stock": cmp_stock}
+    cmp_stock = bool(re.search(r"\bstock\b|\bavailable\b|\bavailability\b|\bbuy\b", ql)) or is_choice
+    return {"op": op, "names": names, "asc": bool(_ASC_RE.search(ql)), "cmp_more": cmp_more,
+            "stock": cmp_stock, "buy_choice": is_choice}
 
 
 def _raw(s: str) -> str:
@@ -1037,6 +1103,58 @@ def _fuzzy_in(tok: str, toks: list[str]) -> bool:
         if k and _edit_le(tok, u, k):
             return True
     return False
+
+
+_VOCAB_CACHE: dict = {}
+
+
+def _catalog_vocab(rows: list[Row]) -> set[str]:
+    """Distinctive words the catalog actually uses (title + structured category
+    tokens, length >= 5). Cached per row-list identity. Used to repair a typo'd
+    anchor against real merchant vocabulary."""
+    key = id(rows)
+    v = _VOCAB_CACHE.get(key)
+    if v is None:
+        v = set()
+        for r in rows:
+            for t in re.findall(r"[a-z]{5,}", (r.title + " " + r.cats).lower()):
+                v.add(t)
+        _VOCAB_CACHE.clear()        # only the current row-list matters
+        _VOCAB_CACHE[key] = v
+    return v
+
+
+def _correct_anchors(anchors: list[str], rows: list[Row]) -> list[str]:
+    """Repair anchors the catalog does NOT contain (document-frequency 0) by mapping
+    each to the nearest real vocabulary word within the SAME edit budget the rest of
+    the engine uses (_fuzzy_in: 1 edit for 5-7 chars, 2 for 8+). Only fires on absent
+    tokens, so it can never alter a query whose words all exist — a misspelled CATEGORY
+    ('construccion'->'construction') resolves while a genuinely absent product still
+    matches nothing. 'rc' is engine-special and never touched."""
+    if not rows:
+        return anchors
+    vocab = None
+    out = []
+    for a in anchors:
+        if a == "rc" or len(a) < 5 or _anchor_df(a, rows) > 0.0:
+            out.append(a)
+            continue
+        if vocab is None:
+            vocab = _catalog_vocab(rows)
+        best, best_k = None, 99
+        for v in vocab:
+            if v[0] != a[0] or abs(len(v) - len(a)) > 2:
+                continue
+            n = min(len(a), len(v))
+            k = 1 if n < 8 else 2
+            if _edit_le(a, v, k):
+                # nearest by edit distance; ties -> the more frequent catalog word
+                d = 0 if _edit_le(a, v, 0) else (1 if _edit_le(a, v, 1) else 2)
+                score = (d, -_anchor_df(v, rows))
+                if best is None or score < best_k:
+                    best, best_k = v, score
+        out.append(best or a)
+    return out
 
 
 def _tie_break_key(r: Row, raw_name: str):
@@ -1167,9 +1285,22 @@ def _answer_multi(mp: dict, rows: list[Row]) -> tuple[str, list[str]] | None:
     pair = sorted(found, key=lambda r: r.price)
     cheaper, dearer = pair[0], pair[-1]
     diff = dearer.price - cheaper.price
-    verdict = (f"{dearer.title} is more expensive by {_price_s(diff, cur)}."
-               if mp.get("cmp_more")
-               else f"{cheaper.title} is cheaper by {_price_s(diff, cur)}.")
+    if mp.get("buy_choice"):
+        # Recommend by availability, not price: name the buyable option(s) and flag the
+        # out-of-stock one explicitly ("X is available; Y is out of stock").
+        _av = [r for r in found if not _is_oos(r)]
+        _so = [r for r in found if _is_oos(r)]
+        if _av and _so:
+            verdict = (f"{', '.join(r.title for r in _av)} is available; "
+                       f"{', '.join(r.title for r in _so)} is out of stock.")
+        elif _av:
+            verdict = f"Both are available — {cheaper.title} is the cheaper at {_price_s(cheaper.price, cur)}."
+        else:
+            verdict = "Both are currently out of stock."
+    else:
+        verdict = (f"{dearer.title} is more expensive by {_price_s(diff, cur)}."
+                   if mp.get("cmp_more")
+                   else f"{cheaper.title} is cheaper by {_price_s(diff, cur)}.")
     def _cmp_line(r):
         suffix = f" ({'out of stock' if _is_oos(r) else 'available'})" if mp.get("stock") else ""
         return f"- {r.title}: {_price_s(r.price, r.currency)}{suffix}"
@@ -1407,7 +1538,14 @@ def answer_catalog_query(q: str, db, cfg: dict | None = None, max_list: int = 12
         # named product, then compute. Owns the question outright — a correct answer
         # or hand to RAG; never a single-product dump masquerading as a comparison.
         if mp:
-            return _answer_multi(mp, rows) or (None, [])
+            _mres = _answer_multi(mp, rows)
+            if _mres:
+                return _mres
+            # Multi resolution failed (e.g. a broad "X or Y" that isn't two specific
+            # products) → fall back to the single-spec parse rather than dropping to RAG,
+            # so a valid category/list answer isn't lost to a buy-choice misfire.
+            if not getattr(spec, "structured", False):
+                return None, []
         return _execute_spec(spec, rows, cfg, max_list, from_router=_from_router)
     except Exception:
         return None, []
@@ -1428,6 +1566,11 @@ def _execute_spec(spec: "Spec", rows: list[Row], cfg: dict | None, max_list: int
             if len(present) > 1:
                 keep = max(present, key=lambda a: _anchor_df(a, rows))
                 _anchors = [a for a in _anchors if a == keep or a not in present]
+
+        # Repair anchors the catalog doesn't contain (typos) against real merchant
+        # vocabulary before matching, so "construccion"->"construction" resolves. Only
+        # touches absent (df 0) tokens, so existing exact matches are untouched.
+        _anchors = _correct_anchors(_anchors, rows)
 
         # Generic type-nouns ("car"/"model") demanded as hard anchors collapse an
         # aggregation set; relax them for matching while the label keeps full anchors.
@@ -1570,7 +1713,7 @@ def _execute_spec(spec: "Spec", rows: list[Row], cfg: dict | None, max_list: int
                 return r.title, st, pr
             if len(sel) == 1:
                 t, st, pr = _stk(sel[0])
-                msg = (f"Yes — {t} is in stock{pr}." if st == "in stock"
+                msg = (f"Yes — {t} is available and in stock{pr}." if st == "in stock"
                        else f"{t} is currently out of stock{pr}.")
                 return msg, _dedup([sel[0].source])[:max_list]
             lines = [f"- {t} — {st}{pr}" for t, st, pr in (_stk(r) for r in sel[:max_list])]
@@ -1588,11 +1731,11 @@ def _execute_spec(spec: "Spec", rows: list[Row], cfg: dict | None, max_list: int
             def _il(r):
                 return f"- {r.title} — {_price_disp(r)}" if r.price is not None else f"- {r.title}"
             parts = [f"Of {n} {label} product{'s' if n != 1 else ''}: "
-                     f"{len(_av)} available, {len(_so)} sold out."]
+                     f"{len(_av)} available, {len(_so)} out of stock (sold out)."]
             if _av:
                 parts.append("**Available:**\n" + "\n".join(_il(r) for r in _av[:max_list]))
             if _so:
-                parts.append("**Sold out / unavailable:**\n" + "\n".join(_il(r) for r in _so[:max_list]))
+                parts.append("**Out of stock / sold out:**\n" + "\n".join(_il(r) for r in _so[:max_list]))
             return "\n\n".join(parts), _dedup(r.source for r in sel)[:max_list]
 
         if spec.agg in ("count", "exists"):
@@ -1650,7 +1793,12 @@ def _execute_spec(spec: "Spec", rows: list[Row], cfg: dict | None, max_list: int
         priced.sort(key=lambda r: (-r.price if spec.agg == "max" else r.price, r.title.lower()))
         n_show = max_list if spec.agg == "list" else 5
         items = priced[:n_show]
-        lines = ["Here are matching products from the catalog:"]
+        # Name what was matched so a category/collection browse echoes the group the
+        # customer asked for ("the Diecast Decor products"), not an anonymous header.
+        head = (f"Here are the matching {label} products:"
+                if spec.agg == "list" and spec.anchors
+                else "Here are matching products from the catalog:")
+        lines = [head]
         for i, r in enumerate(items, 1):
             lines.append(f"{i}. {r.title} - {_price_disp(r)} - {r.availability}")
         return "\n".join(lines), _dedup(r.source for r in items)[:max_list]

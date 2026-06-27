@@ -89,8 +89,10 @@ def _names_from_answer(text: str) -> list[str]:
     for m in re.finditer(r"(?m)^#{0,4}\s*\*\*\s*([A-Z0-9][^*\n]{2,80}?)\s*\*\*", text):
         out.append(m.group(1))
     #  - colon price line ("BMW M8 1:24: Rs.4,950"); leading bold labels start with '*'
-    #    so the [A-Z0-9] anchor skips them.
-    for m in re.finditer(r"(?m)^[\s\-•*]*([A-Z0-9][^:\n]{2,80}?):\s*(?:Rs|PKR|\$|€|£)", text):
+    #    so the [A-Z0-9] anchor skips them. The title may itself contain a colon (a scale
+    #    like "1:24"), so match any non-newline char non-greedily up to the ": Rs" price
+    #    delimiter — NOT [^:\n], which truncated at the scale colon and dropped the name.
+    for m in re.finditer(r"(?m)^[\s\-•*]*([A-Z0-9].{2,80}?):\s*(?:Rs|PKR|\$|€|£)", text):
         out.append(m.group(1))
     #  - bare product line, no bullet ("BMW M8 1:24 - Rs.4,950 - available")
     for m in re.finditer(r"(?m)^([A-Z0-9][^\n]{2,80}?)\s+[-–—]\s*(?:Rs|PKR|\$|€|£)", text):
