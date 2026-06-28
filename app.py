@@ -5525,11 +5525,18 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
 
     messages = [SystemMessage(content=sys_msg)]
 
-    for m in history[-8:]:
+    # History-leak guard (product DBs): coref upstream already rewrote bare follow-ups
+    # into a self-contained `q`, and product FACTS are answered by the deterministic
+    # catalog engine — this LLM step only synthesises prose from THIS query's retrieved
+    # context. Feeding prior product turns here let a fresh product Q the engine couldn't
+    # resolve (router 429/timeout/category-miss) be answered from a STALE earlier product
+    # (the round-7 Ferrari/Kawasaki/Batman leaks). Prose/general DBs keep history.
+    _llm_hist = [] if is_product_db else history[-8:]
+    for m in _llm_hist:
         if m.get('role') == 'user': messages.append(HumanMessage(content=m['content']))
         elif m.get('role') == 'assistant': messages.append(AIMessage(content=m['content']))
     messages.append(HumanMessage(content=q))
-    
+
     # Fast-fail if ALL keys are on cooldown — no point looping through 30
     if not any_key_ready():
         _trace_event(workflow_trace, "guard_exit", guard="no_provider_key_ready")
@@ -6963,7 +6970,11 @@ async def chat(request: Request):
         sys_msg = get_system_prompt(cfg, context, doc_count, user_lang=user_lang,
                                     is_product_db=_is_product_db_local)
         messages = [SystemMessage(content=sys_msg)]
-        for m in hist[-2:]:
+        # History-leak guard (product DBs) — see streaming path: q is already
+        # self-contained post-coref and product facts come from the deterministic
+        # engine, so prior product turns only contaminate this prose fallback.
+        _llm_hist = [] if _is_product_db_local else hist[-2:]
+        for m in _llm_hist:
             if m.get('role') == 'user': messages.append(HumanMessage(content=m['content']))
             elif m.get('role') == 'assistant': messages.append(AIMessage(content=m['content']))
         messages.append(HumanMessage(content=q))
