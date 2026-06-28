@@ -1440,6 +1440,12 @@ def _refine_plan(plan: dict, q: str) -> dict:
             plan["kind"] = "compare"
         if not plan.get("compare_dir"):
             plan["compare_dir"] = "more" if _MORE_MARK.search(ql) else "cheaper"
+        # An availability/buy comparison ("stock kis ka hai", "konsa buy kar sakta hun")
+        # must report each side's status — carry the stock dimension even when no explicit
+        # available/sold-out word was used.
+        if plan.get("kind") == "compare" and not plan.get("stock_query") and re.search(
+                r"\b(stock|available|availab\w*|buy|buyable|kharid|le\s+sakta|kar\s+sakta)\b", ql, re.I):
+            plan["stock_query"] = "in"
     return plan
 
 
