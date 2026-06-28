@@ -103,6 +103,12 @@ def _names_from_answer(text: str) -> list[str]:
     for m in re.finditer(r"(?:^|[.!]\s+|\bthe\b\s+|\band\s+|,\s+)([A-Z0-9][^.!?\n]{3,80}?)\s+is\s+"
                          r"(?:priced|cheaper|costs?|Rs|PKR|\$|€|£)", text):
         out.append(m.group(1))
+    # superlative / min-max answers name the product AFTER the verb: "The cheapest RC
+    # Construction product is 1:64 Scale Mini RC Excavator at Rs.5,450." — capture the
+    # name between "is" and the "at <price>" tail. The [A-Z0-9] anchor skips lowercase
+    # fillers ("is priced/available at ..."); _FIELD_LABEL/_NON_PRODUCT drop any residue.
+    for m in re.finditer(r"\bis\s+([A-Z0-9][^.!?\n]{3,80}?)\s+at\s+(?:Rs|PKR|\$|€|£)", text):
+        out.append(m.group(1))
     # "we carry NAME." (existence affirmations)
     for m in re.finditer(r"we (?:carry|have|stock)\s+([^.!?\n]{3,80}?)[.!?\n]", text, re.I):
         out.append(m.group(1))
@@ -243,7 +249,12 @@ def resolve_followup(q: str, history: list) -> str:
             if len(names) >= 2:
                 direction = "more expensive" if re.search(r"\b(more expensive|pricier|dearer|costs? more|higher|mehng[ai]|zyada)\b", ql) else "cheaper"
                 return f'which is {direction}, "{names[0]}" or "{names[1]}"?'
-            return q
+            # Comparison framing but only ONE prior product — a back-reference to a prior
+            # superlative answer ("sasta wala available hai?" after "the cheapest is X"),
+            # not a real two-item compare. If the turn also carries a stock/price intent,
+            # fall through to bind that single antecedent; otherwise leave q unchanged.
+            if not (is_stock or is_price):
+                return q
         names = _antecedents(history, 1)
         if not names:
             return q

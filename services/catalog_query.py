@@ -637,6 +637,7 @@ def parse(q: str) -> Spec:
         r"\b(?:is|are|r)\b[^?]*\b(?:in[\s-]?stock|in\s+stock|avail\w*|sold\s+out|out\s+of\s+stock)\b"
         r"|\b(?:do|does)\s+(?:you|we|they)\b[^?]*\bin\s+stock\b"
         r"|\bavailabilit\w*\b"
+        r"|\bstock\s+status\b"   # "<product> stock status", "what's the stock status of X"
         r"|\bavail\w*\s*\?\s*$"  # bare "<product> availble?" — a typo'd availability ask
         r"|\bstock\s*\?\s*$"     # bare "<product> stock?" — elliptical "in stock?" ask
         # "can I order/buy/get <named product>?" presupposes the product exists and asks
@@ -1033,8 +1034,8 @@ def _extract_names(q: str) -> list[str]:
     # A trailing interrogative clause introduced by a COMMA ("X or Y, which can I buy
     # today?") would be comma-split into a junk name ("today") and block resolution of
     # the real names; strip it from the segment before the connector split.
-    seg = re.sub(r"(?i),\s*(?:which|what|who|can|should|is|are|do(?:es)?|will|how)\b.*$", "", seg)
-    parts = re.split(r"\s+(?:versus|vs\.?|v\.?|and|or|against|compared\s+(?:to|with))\s+|,\s*", seg)
+    seg = re.sub(r"(?i),\s*(?:which|what|who|can|should|is|are|do(?:es)?|will|how|kis|kon?sa|kaun?sa|kaun)\b.*$", "", seg)
+    parts = re.split(r"\s+(?:versus|vs\.?|v\.?|and|or|aur|ya|against|compared\s+(?:to|with))\s+|,\s*", seg)
     # leading comparison scaffolding the connector-split leaves on the first name
     # ("availability comparison FOR Aston Martin F1 1/18" → "Aston Martin F1 1/18")
     parts = [re.sub(r"(?i)^\s*(?:availability|stock|price|cost)?\s*compar(?:e|ing|ison)\s+(?:for|of|between|with)?\s*", "", p) for p in parts]
@@ -1050,6 +1051,12 @@ def _extract_names(q: str) -> list[str]:
     # trailing question/compare clause a name carries when the tail wasn't split off
     # ("Mini Can RC Drift Cars: which can I buy?", "Iron Man action figure — which costs more")
     parts = [re.sub(r"(?i)\s*[:—–-]\s*(?:which|what|who|can|should|is|are|do(?:es)?|will|how)\b.*$", "", p) for p in parts]
+    # Roman-Urdu trailing interrogative the connector-split leaves on the last name
+    # ("iron man MEIN MEHNGA KONSA HAI?", "X SASTA KAUNSA") → strip from the first
+    # Roman-Urdu locative/compare marker so the bare product resolves. These tokens never
+    # appear inside an English product title, so English names are untouched.
+    parts = [re.sub(r"(?i)\s+(?:mein|konsa|kaunsa|kon?sa|kaun?sa|kis|sasta|sasti|"
+                    r"mehng[ai]|zyada|sab\s+se|dono)\b.*$", "", p) for p in parts]
     parts = [re.sub(r"[?.\"]+$", "", p).strip(" .\"") for p in parts]
     # Keep multi-word names; ALSO a lone distinctive word (a one-word product name like
     # "Deadpool" in "Deadpool vs Iron Man action figure", where the shared type-noun
@@ -1107,7 +1114,7 @@ def _parse_multi(q: str) -> dict | None:
     product names it spans. Returns None for everything else."""
     ql = (q or "").lower()
     is_order = bool(_ORDER_RE.search(ql) and _PRICE_DIM_RE.search(ql))
-    is_cmp = bool(_CMP_RE.search(ql)) or bool(re.search(r"\bwhich\b.*\bbuy\b", ql) and re.search(r"\bor\b|\bvs\b|\bversus\b", ql))
+    is_cmp = bool(_CMP_RE.search(ql)) or bool(_CMP_MARK.search(ql)) or bool(re.search(r"\bwhich\b.*\bbuy\b", ql) and re.search(r"\bor\b|\bvs\b|\bversus\b", ql))
     # Buy-choice: two named products joined by or/vs with an availability/buy cue
     # ("need the available option: X or Y?", "X or Y — which can I get?"). Report each
     # one's stock and recommend the buyable one. Resolves like a stock comparison; if
@@ -1129,7 +1136,7 @@ def _parse_multi(q: str) -> dict | None:
     # Compare direction: "which costs more / more expensive" names the dearer item;
     # default ("cheaper / costs less") names the cheaper. Either way both prices and
     # the exact gap are stated, so the answer carries the fact regardless.
-    cmp_more = bool(re.search(r"\bmore\s+expensive\b|\bcosts?\s+more\b|\bpricier\b|\bdearer\b|\bhigher\s+price", ql))
+    cmp_more = bool(re.search(r"\bmore\s+expensive\b|\bcosts?\s+more\b|\bpricier\b|\bdearer\b|\bhigher\s+price", ql)) or bool(_MORE_MARK.search(ql))
     cmp_stock = bool(re.search(r"\bstock\b|\bavailable\b|\bavailability\b|\bbuy\b", ql)) or is_choice
     return {"op": op, "names": names, "asc": bool(_ASC_RE.search(ql)), "cmp_more": cmp_more,
             "stock": cmp_stock, "buy_choice": is_choice}
