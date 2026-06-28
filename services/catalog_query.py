@@ -1407,6 +1407,42 @@ def _is_code_mixed(q: str) -> bool:
     return any(t in _URDU_MARKERS for t in re.findall(r"[a-z]+", (q or "").lower()))
 
 
+_AVAIL_MARK = re.compile(r"\b(available|in[\s-]?stock|stock\s+mein|mileg[ai]|mil\s+jay\w*|buyable|in\s+stock)\b", re.I)
+_OOS_MARK = re.compile(r"\b(sold[\s-]?out|out\s+of\s+stock|unavailable|stock\s+mein\s+nahi|nahi\s+hai)\b", re.I)
+_BOTH_MARK = re.compile(r"\b(dono|both|available\s+(?:and|aur|or|ya|&|vs)\s+(?:sold|out|unavailable))\b", re.I)
+_CMP_MARK = re.compile(r"\b(which|konsa|kaunsa|kon?sa|kaun?sa|kis|cheaper|sasta|sasti|"
+                       r"mehng[ai]|zyada|expensive|pricier|dearer|better|costs?\s+(?:more|less))\b", re.I)
+_MORE_MARK = re.compile(r"\b(mehng[ai]|zyada|expensive|pricier|dearer|costs?\s+more|higher)\b", re.I)
+
+
+def _refine_plan(plan: dict, q: str) -> dict:
+    """Deterministically correct the dimensions a small LLM most often drops, using
+    language-agnostic markers (English + Roman-Urdu). The LLM still does the hard part
+    (understanding + naming products); this only enforces UNAMBIGUOUS signals it missed,
+    so it's a universal safety net, not per-store config. Only ADDS signal, never erases
+    a product the LLM found."""
+    if not plan:
+        return plan
+    ql = q or ""
+    av, oos = bool(_AVAIL_MARK.search(ql)), bool(_OOS_MARK.search(ql))
+    # stock dimension: both states, or a clear out-only / in-only ask the LLM left null
+    if not plan.get("stock_query"):
+        if bool(_BOTH_MARK.search(ql)) or (av and oos):
+            plan["stock_query"] = "both"
+        elif oos and not av:
+            plan["stock_query"] = "out"
+        elif av and not oos:
+            plan["stock_query"] = "in"
+    # two named products + a comparison cue → it's a comparison, even if the LLM called
+    # it a lookup/filter (Roman-Urdu "X ya Y konsa..." is easy to mis-tag).
+    if len([p for p in (plan.get("products") or []) if p]) >= 2 and _CMP_MARK.search(ql):
+        if plan.get("kind") in ("lookup", "filter", "exists", "browse"):
+            plan["kind"] = "compare"
+        if not plan.get("compare_dir"):
+            plan["compare_dir"] = "more" if _MORE_MARK.search(ql) else "cheaper"
+    return plan
+
+
 def _plan_to_specs(plan: dict) -> tuple[dict | None, "Spec | None"]:
     """Map an LLM-extracted plan onto the engine's existing (mp | Spec) execution.
     Returns (mp, spec) with at most one non-None. None,None = not executable here."""
@@ -1576,7 +1612,7 @@ def answer_catalog_query(q: str, db, cfg: dict | None = None, max_list: int = 12
                         # LLM extractor first; deterministic backstop on LLM outage. Ground
                         # the result in q so a weak model echoing a few-shot product on a
                         # content-free follow-up never becomes a wrong/cross-tenant anchor.
-                        plan = _ground_plan(extract_plan(q) or heuristic_plan(q), q)
+                        plan = _refine_plan(_ground_plan(extract_plan(q) or heuristic_plan(q), q), q)
                     except Exception:
                         plan = None
             # "browse" falls through to RAG unless it carries a price bound.
