@@ -15,6 +15,7 @@ then falls back to ordinary RAG), so it can never produce a wrong answer.
 from __future__ import annotations
 
 import json
+import os
 import re
 
 _KINDS = {"lookup", "exists", "count", "cheapest", "priciest",
@@ -175,10 +176,13 @@ def heuristic_plan(q: str) -> dict | None:
         return None
 
 
-def extract_plan(q: str, llm=None) -> dict | None:
+def extract_plan(q: str, llm=None, model_override=None) -> dict | None:
     """One structured LLM call → normalized plan, or None on any failure.
     `llm` must be a LangChain-style object with .invoke([...]); when omitted we
-    pull a fresh key-rotated LLM. Never raises."""
+    pull a fresh key-rotated LLM. `model_override` (or the ROUTER_MODEL env var)
+    swaps the Groq router model — the failing class is multilingual category
+    understanding, so the router can run a stronger multilingual model (e.g.
+    qwen/qwen3-32b) while synthesis stays on the fast default. Never raises."""
     try:
         q = (q or "").strip()
         if not q or len(q) > 600:
@@ -188,13 +192,14 @@ def extract_plan(q: str, llm=None) -> dict | None:
             msgs.append({"role": "user", "content": ex_q})
             msgs.append({"role": "assistant", "content": json.dumps(ex_a, ensure_ascii=False)})
         msgs.append({"role": "user", "content": q})
+        _mo = str(model_override or os.getenv("ROUTER_MODEL", "") or "").strip() or None
         # Try a couple of key-rotated LLMs so a single cooled-down provider doesn't
         # drop the call; caller still has heuristic_plan as a zero-LLM backstop.
         attempts = [llm] if llm is not None else []
         if not attempts:
             from services.llm_keys import get_fresh_llm
             for _ in range(2):
-                got = get_fresh_llm()
+                got = get_fresh_llm(model_override=_mo)
                 if got is None:
                     break
                 attempts.append(got)

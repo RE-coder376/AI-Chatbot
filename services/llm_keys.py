@@ -312,13 +312,18 @@ def _peek_provider() -> str:
         return 'groq'
 
 
-def get_fresh_llm(avoid_providers=None):
+def get_fresh_llm(avoid_providers=None, model_override=None):
     """Multi-provider key rotation: Groq (llama-3.3-70b) + OpenAI (gpt-4o-mini) fallback.
 
     avoid_providers: providers already failed in THIS request — ranked last so a
     single exhausted provider/org (e.g. one Groq account out of daily quota) is
     skipped on the very next retry instead of burning the budget on its sibling
-    keys. Avoided-but-healthy still outrank cooled-down keys (usable last resort)."""
+    keys. Avoided-but-healthy still outrank cooled-down keys (usable last resort).
+
+    model_override: when the selected key is a Groq key, use this model id instead of
+    the default llama-3.3-70b-versatile (lets the multilingual router A/B onto e.g.
+    qwen/qwen3-32b without touching synthesis). Ignored for non-Groq providers, whose
+    model namespaces differ — they keep their own defaults so fallback still works."""
     avoid = {str(p).lower() for p in (avoid_providers or [])}
     _sync_key_health_from_shared()  # throttled (≤1/45s): pull cooldowns other containers found
     try:
@@ -442,14 +447,15 @@ def get_fresh_llm(avoid_providers=None):
                 request_timeout=8,
             ), "mistral", "mistral-small-latest")
         else:
+            _gm = str(model_override or "").strip() or "llama-3.3-70b-versatile"
             return _tag_llm(ChatGroq(
                 api_key=key_val,
-                model="llama-3.3-70b-versatile",
+                model=_gm,
                 temperature=0,
                 max_retries=0,
                 max_tokens=512,
                 request_timeout=7,
-            ), "groq", "llama-3.3-70b-versatile")
+            ), "groq", _gm)
     except Exception as e:
         logger.error(f"LLM Key Selection Error: {e}")
         return None
