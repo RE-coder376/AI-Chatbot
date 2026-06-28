@@ -73,6 +73,11 @@ def _enter_app_dir():
     timeout=600,
     volumes={"/root/app/databases": vol},
     secrets=SECRETS,
+    # Router model: ROUTER_MODEL env can swap the Groq catalog-router model (plumbing
+    # in extract_plan/get_fresh_llm). qwen/qwen3-32b was A/B'd 2026-06-28 and REJECTED:
+    # offline +13 on code-mixed routing did NOT hold live (baseline's router-None falls
+    # to RAG and recovers ~even, 36/46≈39/50), and qwen3-32b's reasoning think-traces
+    # blew the 7s Groq timeout → 35-48s tail latency. Default (unset) = llama-3.3-70b.
     scaledown_window=120,  # sleep 2 min after the last request — the $30 lever
 )
 @modal.concurrent(max_inputs=20)
