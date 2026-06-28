@@ -83,6 +83,10 @@ _STOP = {
     # "include EVERY EXACT price"). Without these the engine matches rows against
     # 'category'/'contains'/'exact' and finds nothing → false "no such category".
     "category", "categories", "categorized", "categorised", "section", "department",
+    # "collection"/"collections" is storefront-taxonomy scaffolding ("Bikes COLLECTION
+    # cheapest model") — the collection NAME is the anchor, never the literal word, which
+    # matches no title/tag and zeroes an all-anchor _hit.
+    "collection", "collections",
     # availability-split scaffolding — "bike availability SUMMARY", "stock BREAKDOWN",
     # "available VS UNAVAILABLE" must anchor on the category, not these report words.
     "summary", "breakdown", "overview", "unavailable", "vs", "versus", "status",
@@ -555,6 +559,8 @@ def parse(q: str) -> Spec:
     in_stock = bool(re.search(
         r"\b(in[\s-]?stock|in\s+stock|available|buyable|"
         r"ready\s+to\s+(?:buy|order|ship)|can\s+(?:i|we|you)\s+(?:buy|order|get)|"
+        # pronoun-BEFORE-can ("toys that I can buy right now") + bare "buy/order it now"
+        r"(?:i|we|you)\s+can\s+(?:buy|order|get)|(?:buy|order|purchase)\s+(?:it\s+)?(?:right\s+)?now|"
         r"still\s+(?:available|in\s+stock))\b", ql)) and not out_of_stock
 
     # "include unavailable / overall / available OR sold out / whether … sold out" =
@@ -609,10 +615,14 @@ def parse(q: str) -> Spec:
         r"|\bgot\s+(?:any|some)\b", ql))
     cheapest = bool(re.search(
         r"\b(cheapest|lowest[\s-]+priced?|least\s+expensive|most\s+affordable|lowest\s+cost|"
-        r"costs?\s+the\s+least)\b", ql))
+        r"costs?\s+the\s+least|"
+        # Roman-Urdu/Hinglish "cheapest" — "sab se sasta", bare "sasta/sasti"
+        r"sab\s+se\s+sast[aie]|sast[aie])\b", ql))
     priciest = bool(re.search(
         r"\b(most\s+expensive|highest[\s-]+priced?|priciest|costliest|most\s+costly|dearest|"
-        r"highest\s+cost|costs?\s+the\s+most)\b", ql))
+        r"highest\s+cost|costs?\s+the\s+most|"
+        # Roman-Urdu/Hinglish "most expensive" — "sab se mehnga", bare "mehnga/mehngi"
+        r"sab\s+se\s+mehng[aie]|mehng[aie])\b", ql))
     list_q = bool(re.search(r"\b(show|list|which|what'?s?|give|display|products?|items?|sell|have|available|unavailable|sold\s+out|out\s+of\s+stock)\b", ql))
     # Single-product price/availability lookup ("price of X", "how much is X",
     # "is X available"). Routed to the list path so the full-catalog scan (with the
@@ -1016,6 +1026,10 @@ def _extract_names(q: str) -> list[str]:
         after = q[colon.end():]
         if re.search(r"\b(?:versus|vs\.?|and|or|against)\b|,", after):
             seg = after
+    # A trailing interrogative clause introduced by a COMMA ("X or Y, which can I buy
+    # today?") would be comma-split into a junk name ("today") and block resolution of
+    # the real names; strip it from the segment before the connector split.
+    seg = re.sub(r"(?i),\s*(?:which|what|who|can|should|is|are|do(?:es)?|will|how)\b.*$", "", seg)
     parts = re.split(r"\s+(?:versus|vs\.?|v\.?|and|or|against|compared\s+(?:to|with))\s+|,\s*", seg)
     # leading comparison scaffolding the connector-split leaves on the first name
     # ("availability comparison FOR Aston Martin F1 1/18" → "Aston Martin F1 1/18")
@@ -1891,7 +1905,7 @@ def _execute_spec(spec: "Spec", rows: list[Row], cfg: dict | None, max_list: int
             _oos_re = re.compile(r"out\s+of\s+stock|sold\s+out|unavailable|not\s+available")
             def _stk(r):
                 st = "out of stock" if _oos_re.search(r.availability or "") else "in stock"
-                pr = f" ({_price_s(r.price, r.currency)})" if r.price is not None else ""
+                pr = f" ({_price_disp(r)})" if r.price is not None else ""
                 return r.title, st, pr
             if len(sel) == 1:
                 t, st, pr = _stk(sel[0])

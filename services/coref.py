@@ -24,6 +24,10 @@ _CUE = {
     "than", "or", "vs", "versus", "compare", "between", "difference", "about", "tell", "me",
     "still", "yeah", "please", "thanks", "thx", "to", "buy", "get", "want", "wanna",
     "cool", "great", "wow", "also", "too", "aswell", "awesome", "perfect", "good",
+    # bare scaffolding a follow-up wraps the real cue in — never a product subject;
+    # without these the >=2-content-token "self-contained" guard misfires and skips coref
+    "confirm", "status", "can", "could", "would", "should", "then", "check", "need",
+    "looking", "recommend", "suggest", "pick", "go", "order", "purchase", "let",
     # Roman-Urdu/Hinglish cues — function/intent words, never a product subject
     "aur", "ya", "phir", "konsa", "kaunsa", "konsi", "kaunsi", "kaun", "kis", "kya", "kia",
     "hai", "hain", "mein", "mai", "ka", "ki", "ke", "ko", "se", "sasta", "sasti", "mehnga",
@@ -38,6 +42,10 @@ _GLOBAL_AGG = re.compile(r"\b(cheapest|most expensive|least expensive|priciest|c
                          r"dearest|how many|number of|\bcount\b|lowest[\s-]?priced?|highest[\s-]?priced?)\b", re.I)
 _PRICE = re.compile(r"\b(how much|price|cost|costs?|pricing|rate|expensive|cheaper|cheap|"
                     r"kitn[ayie]|kitne|sasta|sasti|mehng[ai])\b", re.I)
+# buy/recommendation intent ("which should I buy?", "which one to get?") — when it
+# dangles off a 2-product comparison, recommend between BOTH, not a cheaper verdict.
+_BUY = re.compile(r"\b(buy|order|purchase|get|recommend|suggest|go for|go with|"
+                  r"pick|choose|which (?:one|should))\b", re.I)
 _STOCK = re.compile(r"\b(in[\s-]?stock|available|availability|stock|got (?:it|any)|have it|"
                     r"mileg[ai]|mil\s+jay\w*|stock\s+mein|sold[\s-]?out)\b", re.I)
 _CMP = re.compile(r"\b(cheaper|more expensive|pricier|dearer|costs? (?:more|less)|"
@@ -94,6 +102,14 @@ def _names_from_answer(text: str) -> list[str]:
         out.append(m.group(1))
     # "we carry NAME." (existence affirmations)
     for m in re.finditer(r"we (?:carry|have|stock)\s+([^.!?\n]{3,80}?)[.!?\n]", text, re.I):
+        out.append(m.group(1))
+    # availability statements with NO price marker ("Ferrari Laferrari is available.",
+    # "Mini RC Pocket Drone is out of stock.") — a stock-only prior answer carries the
+    # product name but none of the price/comparison signals the inline pattern requires.
+    # _NON_PRODUCT below still rejects "our return policy is available at ...".
+    for m in re.finditer(r"(?:^|[.!]\s+)([A-Z0-9][^.!?\n]{3,80}?)\s+is\s+"
+                         r"(?:currently\s+)?(?:available|in[\s-]?stock|out[\s-]?of[\s-]?stock|"
+                         r"sold[\s-]?out|unavailable)\b", text):
         out.append(m.group(1))
     # Verbose / compare formats the structured patterns above miss:
     #  - bold or markdown-heading product label a side-by-side answer uses
@@ -175,6 +191,14 @@ def resolve_followup(q: str, history: list) -> str:
         ql = q.lower()
         # A global aggregate is self-contained — never bind it to a single prior item.
         if _GLOBAL_AGG.search(ql):
+            # ...UNLESS it is qualified by a set-reference ("count THEM", "how many of
+            # THOSE") — then it counts the prior LIST, not the whole catalog → re-issue
+            # the prior subject as the aggregate ("now count them" after an excavator
+            # list → "how many excavator products").
+            if _PLURAL_REF.search(ql) and re.search(r"\b(how many|count|number of)\b", ql):
+                subj = _prior_subject(history)
+                if subj:
+                    return f"how many {subj}"
             return q
         # Already self-contained: names its own product (quoted or 2+ content tokens).
         if _QUOTED.search(q) or len(_content_tokens(q)) >= 2:
@@ -204,6 +228,13 @@ def resolve_followup(q: str, history: list) -> str:
                 rw = _PLURAL_REF.sub(subj, q)
                 return rw if rw != q else f"{subj} {q}"
             return q
+        is_buy = bool(_BUY.search(ql))
+        # "which one should I buy then?" after a 2-product compare → recommend between
+        # BOTH (the engine's buy_choice path favours the in-stock one), not a price verdict.
+        if is_buy and not is_price:
+            names = _antecedents(history, 2)
+            if len(names) >= 2:
+                return f'which should I buy, "{names[0]}" or "{names[1]}"?'
         if is_cmp:
             names = _antecedents(history, 2)
             if len(names) >= 2:
