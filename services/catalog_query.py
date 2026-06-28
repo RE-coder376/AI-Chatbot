@@ -1441,9 +1441,13 @@ def _plan_to_specs(plan: dict) -> tuple[dict | None, "Spec | None"]:
     if kind == "priciest":
         return None, Spec("max", _anchors_from(cat or (names[0] if names else "")), pmin, pmax, in_stock, out_of_stock=out_of_stock)
     if kind == "exists":
-        if not names:
+        # "do you have X?" / Roman-Urdu "X hai?" — report availability, not just yes/no:
+        # the stock reporter confirms it's carried AND states in/out of stock (one product
+        # or a small category), so an OOS item is never answered as a bare "yes we carry".
+        anch = _anchors_from(names[0] if names else cat)
+        if not anch:
             return None, None
-        return None, Spec("exists", _anchors_from(names[0]), pmin, pmax, in_stock, out_of_stock=out_of_stock)
+        return None, Spec("stock", anch, pmin, pmax)
     if kind == "lookup":
         # Single named product: the STOCK reporter answers both "how much" (it prints the
         # price) and "is it available" (it prints status, even when out of stock) — so a
