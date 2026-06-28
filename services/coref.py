@@ -97,7 +97,10 @@ def _names_from_answer(text: str) -> list[str]:
     # comparison), NOT a bare "is available"/"currently": a policy answer ("Our return
     # policy is available at: ...") otherwise gets mis-read as a product and a following
     # "is it in stock?" binds the pronoun to "return policy".
-    for m in re.finditer(r"(?:^|[.!]\s+|\bthe\b\s+)([A-Z0-9][^.!?\n]{3,80}?)\s+is\s+"
+    # prefix admits "and"/comma so a two-product compare answer ("X is Rs.A and Y is
+    # Rs.B") yields BOTH names, not just the first — a cheaper/expensive follow-up needs
+    # both antecedents to re-issue the comparison.
+    for m in re.finditer(r"(?:^|[.!]\s+|\bthe\b\s+|\band\s+|,\s+)([A-Z0-9][^.!?\n]{3,80}?)\s+is\s+"
                          r"(?:priced|cheaper|costs?|Rs|PKR|\$|€|£)", text):
         out.append(m.group(1))
     # "we carry NAME." (existence affirmations)
@@ -222,7 +225,7 @@ def resolve_followup(q: str, history: list) -> str:
         # Plural set-reference → re-issue the prior category with this turn's new filter
         # ("now which of THOSE are unavailable?" after an RC-construction list → "which rc
         # construction are unavailable?"), instead of binding to a single prior product.
-        if _PLURAL_REF.search(ql):
+        if _PLURAL_REF.search(ql) and not is_cmp:
             subj = _prior_subject(history)
             if subj:
                 rw = _PLURAL_REF.sub(subj, q)

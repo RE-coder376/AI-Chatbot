@@ -639,6 +639,10 @@ def parse(q: str) -> Spec:
         r"|\bavailabilit\w*\b"
         r"|\bavail\w*\s*\?\s*$"  # bare "<product> availble?" — a typo'd availability ask
         r"|\bstock\s*\?\s*$"     # bare "<product> stock?" — elliptical "in stock?" ask
+        # "can I order/buy/get <named product>?" presupposes the product exists and asks
+        # whether it's purchasable → report its availability (incl. OOS), never abstain
+        # because an in-stock filter dropped the sold-out row.
+        r"|\bcan\s+(?:i|we|you)\s+(?:still\s+)?(?:order|buy|get|purchase)\b"
         r"|\bstill\s+(?:available|in\s+stock)\b", ql))
 
     if count_q:
@@ -1823,7 +1827,7 @@ def _execute_spec(spec: "Spec", rows: list[Row], cfg: dict | None, max_list: int
         # collection). Fires only for phrasings strict matching couldn't resolve — the
         # cases that today fall to weak title-coverage or empty → near-zero regression.
         if (not _coll_locked and not _strict_hit and spec.anchors and not spec.title_only
-                and spec.agg in ("count", "exists", "list", "count_split")):
+                and spec.agg in ("count", "exists", "list", "count_split", "min", "max")):
             _rmem = _resolve_collection(_anchors, rows)
             if _rmem:
                 _base = _rmem
