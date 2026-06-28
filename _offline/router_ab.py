@@ -31,12 +31,12 @@ def build_db(path):
     return db
 
 def grade_one(q, expect, forbid, db):
-    for _ in range(3):
+    for _ in range(2):
         try:
             ans, _ = cq.answer_catalog_query(q, db, None, 50)
             break
         except Exception:
-            ans = None; time.sleep(1.0)
+            ans = None; time.sleep(0.5)
     ans = ans or ""
     low = ans.lower()
     miss = [e for e in expect if e.lower() not in low]
