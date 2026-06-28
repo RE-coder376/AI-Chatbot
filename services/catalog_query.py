@@ -17,6 +17,7 @@ term is only excluded when the user did not explicitly ask for it.
 """
 from __future__ import annotations
 
+import difflib
 import re
 import time
 
@@ -252,6 +253,63 @@ def _anchor_set(anchors: list[str]) -> set[str]:
     for a in anchors:
         s |= _variants(a)
     return s
+
+
+def _resolve_collection(anchors: list[str], rows: list[Row]) -> list[Row] | None:
+    """UNIVERSAL category resolution — map a customer's category phrasing onto the
+    store's OWN storefront collections (shipped at ingest from /collections.json),
+    instead of a hand-maintained per-store synonym map. This is the durable answer to
+    the synonym treadmill: the merchant's taxonomy + this catalog's token frequency
+    resolve "f1 cars"->"formula one f1", "formula one"->"formula one f1",
+    "rc constraction"(typo)->"rc construction", "bike models"->"bikes" with no code
+    change per store, and new stores work automatically.
+
+    Each collection is scored by how well it covers the query's SELECTIVE (low
+    document-frequency) anchors: a collection-name token match (full weight), a
+    typo-tolerant fuzzy name match (0.8), or a MAJORITY of the collection's members'
+    titles carrying the token (0.5, e.g. "excavator" lives in titles, not the
+    "rc construction" name). Selectivity weighting (inverse-DF) makes the rare anchor
+    decide, so "f1 cars" follows "f1" (rare) not "cars" (generic). At least one
+    *selective* anchor must be covered → a generic phrase ("cheapest car") never locks
+    onto a random collection. Returns the best collection's members, or None."""
+    colls: dict[str, list[Row]] = {}
+    for r in rows:
+        for el in r.colls.split("|"):
+            if el:
+                colls.setdefault(el, []).append(r)
+    if not colls:
+        return None
+    toks = [t for t in dict.fromkeys(anchors) if len(t) >= 2 and t not in _STOP]
+    if not toks:
+        return None
+    # Per-token weight (inverse document-frequency) + selectivity, computed ONCE.
+    tinfo = []
+    for t in toks:
+        df = _anchor_df(t, rows)
+        tinfo.append((t, _variants(t), 1.0 / max(df, 0.02), df <= _GENERIC_DF))
+    # Per-token member-title hit ratio, computed once per (token, collection) lazily.
+    best: tuple[float, list[Row]] | None = None
+    for cnm, mem in colls.items():
+        cwords = re.sub(r"[^a-z0-9]+", " ", cnm.lower()).split()
+        cset = set(cwords)
+        score = 0.0
+        cov_sel = False
+        for t, tv, w, sel in tinfo:
+            if tv & cset:                           # exact/plural token in collection name
+                score += w
+                cov_sel = cov_sel or sel
+            elif any(difflib.SequenceMatcher(None, t, cw).ratio() >= 0.84 for cw in cwords):
+                score += 0.8 * w                    # typo-tolerant ("constraction"~"construction")
+                cov_sel = cov_sel or sel
+            else:                                   # token lives in MEMBER titles, not the name
+                pat = re.compile(rf"\b{re.escape(t)}\b")
+                hits = sum(1 for m in mem if pat.search(m.hay))
+                if hits / len(mem) >= 0.5:
+                    score += 0.5 * w
+                    cov_sel = cov_sel or sel
+        if score > 0 and cov_sel and (best is None or score > best[0]):
+            best = (score, mem)
+    return best[1] if best else None
 
 
 # A token present in a large share of the catalog is a generic TYPE/category word
@@ -1684,6 +1742,7 @@ def _execute_spec(spec: "Spec", rows: list[Row], cfg: dict | None, max_list: int
         _m_anchors = _selective_anchors(_anchors, rows, spec.agg)
 
         _base = [r for r in rows if _hit(r, _m_anchors, spec.title_only)]
+        _strict_hit = bool(_base)  # did strict all-anchor matching resolve anything?
         if not _base and spec.anchors:
             # Strict all-anchor match found nothing — fall back to title-coverage so
             # a fully-named product still resolves. Only triggers when strict yields
@@ -1739,6 +1798,22 @@ def _execute_spec(spec: "Spec", rows: list[Row], cfg: dict | None, max_list: int
                 if _members:
                     _base = _members
                     _coll_locked = True
+        # Fuzzy/subset collection resolution — the universal tier that ends the synonym
+        # treadmill. When the exact same-token-set match above didn't lock (the common
+        # case: "f1 cars" vs collection "formula one f1", "formula one" subset of it, a
+        # typo, or a member-title word), resolve the phrasing onto the store's own
+        # collection vocabulary. The storefront collection is authoritative for a
+        # category query, so its members override title-substring _hit guesses.
+        # Gated to strict-miss only: when strict all-anchor _hit DID resolve products,
+        # that exact match stands (no hijacking "is <Product> available?" into a whole
+        # collection). Fires only for phrasings strict matching couldn't resolve — the
+        # cases that today fall to weak title-coverage or empty → near-zero regression.
+        if (not _coll_locked and not _strict_hit and spec.anchors and not spec.title_only
+                and spec.agg in ("count", "exists", "list", "count_split")):
+            _rmem = _resolve_collection(_anchors, rows)
+            if _rmem:
+                _base = _rmem
+                _coll_locked = True
         sel = []
         _oos = []  # matched the query but excluded only by the in-stock filter
         for r in _base:
