@@ -32,7 +32,18 @@ _SYS = (
     ' "order_dir": "asc" | "desc" | null,'
     ' "price_min": number | null, "price_max": number | null,'
     ' "in_stock": true | false,'
+    ' "stock_query": "in" | "out" | "both" | null,'
     ' "category": string | null}\n\n'
+    "The question may be in English, Roman Urdu/Hindi, or a mix — understand the MEANING "
+    "regardless of language and fill the SAME English JSON. Examples of intent words: "
+    "'kitny/kitna ka hai'=price, 'hai?/mil jayega/milega/stock mein hai'=availability, "
+    "'sasta/kam'=cheaper, 'mehnga/zyada'=more expensive, 'konsa/kaunsa/kis'=which, "
+    "'aur/ya'=and/or, 'se kam'=under, 'dono/available aur sold out'=both states, "
+    "'chahiye/order kar sakta hun'=wants to buy.\n"
+    "stock_query: set 'in' if they ask for IN-STOCK/available only, 'out' if they ask for "
+    "SOLD-OUT/unavailable only, 'both' if they ask for available AND sold out together, "
+    "else null. For a single product's availability question use kind='lookup' with "
+    "stock_query='in' (the engine reports its real status either way).\n"
     "Definitions:\n"
     "- lookup: price/availability of ONE named product.\n"
     "- exists: whether ONE named product is carried.\n"
@@ -50,16 +61,32 @@ _FEWSHOT = [
      'What combined amount should they pay? Include both item prices.',
      {"kind": "basket", "products": ["Baby Piano Fitness Rack Gym Mat", "Kids Foldable Scooty"],
       "compare_dir": None, "order_dir": None, "price_min": None, "price_max": None,
-      "in_stock": False, "category": None}),
+      "in_stock": False, "stock_query": None, "category": None}),
     ('Which is the pricier one, "Ultra Male" or "Sultan Attar", and by how much?',
      {"kind": "compare", "products": ["Ultra Male", "Sultan Attar"], "compare_dir": "more",
-      "order_dir": None, "price_min": None, "price_max": None, "in_stock": False, "category": None}),
-    ('tally these up for me: "Pen A", "Pen B", "Pen C"',
-     {"kind": "basket", "products": ["Pen A", "Pen B", "Pen C"], "compare_dir": None,
-      "order_dir": None, "price_min": None, "price_max": None, "in_stock": False, "category": None}),
+      "order_dir": None, "price_min": None, "price_max": None, "in_stock": False,
+      "stock_query": None, "category": None}),
+    # Roman-Urdu price lookup ("kitny ka hai" = how much is it)
+    ('hey bro bmw m8 1:24 kitny ka hai?',
+     {"kind": "lookup", "products": ["bmw m8 1:24"], "compare_dir": None, "order_dir": None,
+      "price_min": None, "price_max": None, "in_stock": False, "stock_query": None, "category": None}),
+    # Roman-Urdu availability of one product ("hai?/mil jayega" = is it available)
+    ('mini rc pocket drone mil jayega?',
+     {"kind": "lookup", "products": ["mini rc pocket drone"], "compare_dir": None, "order_dir": None,
+      "price_min": None, "price_max": None, "in_stock": False, "stock_query": "in", "category": None}),
+    # Roman-Urdu comparison ("sasta konsa" = which is cheaper)
+    ('bmw m8 aur bmw m4 mein sasta konsa hai?',
+     {"kind": "compare", "products": ["bmw m8", "bmw m4"], "compare_dir": "cheaper", "order_dir": None,
+      "price_min": None, "price_max": None, "in_stock": False, "stock_query": None, "category": None}),
+    # Roman-Urdu both-states summary ("available aur sold out dono" = both)
+    ('action figures mein available aur sold out dono batao',
+     {"kind": "filter", "products": [], "compare_dir": None, "order_dir": None,
+      "price_min": None, "price_max": None, "in_stock": False, "stock_query": "both",
+      "category": "action figures"}),
     ('how much for the "Diecast Kawasaki Ninja H2R"?',
      {"kind": "lookup", "products": ["Diecast Kawasaki Ninja H2R"], "compare_dir": None,
-      "order_dir": None, "price_min": None, "price_max": None, "in_stock": False, "category": None}),
+      "order_dir": None, "price_min": None, "price_max": None, "in_stock": False,
+      "stock_query": None, "category": None}),
 ]
 
 
@@ -84,6 +111,8 @@ def _coerce(obj: dict) -> dict | None:
             return float(v) if v is not None else None
         except (TypeError, ValueError):
             return None
+    sq = obj.get("stock_query")
+    sq = sq if sq in ("in", "out", "both") else None
     return {
         "kind": kind,
         "products": products[:6],
@@ -91,7 +120,8 @@ def _coerce(obj: dict) -> dict | None:
         "order_dir": odir,
         "price_min": _n(obj.get("price_min")),
         "price_max": _n(obj.get("price_max")),
-        "in_stock": bool(obj.get("in_stock")),
+        "in_stock": bool(obj.get("in_stock")) or sq == "in",
+        "stock_query": sq,
         "category": (str(obj.get("category")).strip() or None) if obj.get("category") else None,
     }
 
@@ -108,9 +138,10 @@ def _extract_json(text: str) -> dict | None:
         return None
 
 
-def _plan(kind, names, cdir=None, odir=None, in_stock=False):
+def _plan(kind, names, cdir=None, odir=None, in_stock=False, stock_query=None):
     return {"kind": kind, "products": names[:6], "compare_dir": cdir, "order_dir": odir,
-            "price_min": None, "price_max": None, "in_stock": in_stock, "category": None}
+            "price_min": None, "price_max": None, "in_stock": in_stock,
+            "stock_query": stock_query, "category": None}
 
 
 def heuristic_plan(q: str) -> dict | None:

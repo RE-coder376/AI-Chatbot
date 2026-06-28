@@ -117,6 +117,17 @@ _STOP = {
     "soldout", "outofstock",
     "buyable", "sellable", "purchasable", "orderable", "ready",
     "whether", "not", "cannot", "cant", "bought", "be", "ship", "ships", "shipped",
+    # Roman-Urdu/Hinglish function & intent words — grammatical glue, never a product
+    # name in any catalog, so they must never become anchors ("action figures MEIN AUR
+    # DONO BATAO" must anchor on "action figures"). Universal language knowledge, not
+    # per-store config. (English-ambiguous words like "do"/"me" are deliberately omitted.)
+    "hai", "hain", "kya", "kia", "mein", "mai", "aur", "ya", "phir", "konsa", "kaunsa",
+    "konsi", "kaunsi", "kaun", "kis", "sasta", "sasti", "mehnga", "mehngi", "mehnge",
+    "zyada", "ziada", "chahiye", "chaiye", "chahye", "milega", "milegi", "mil", "jayega",
+    "jaega", "jayegi", "hoga", "hogi", "sakta", "sakti", "sakte", "hun", "kitna", "kitni",
+    "kitny", "kitne", "kitnay", "wala", "wali", "wale", "abhi", "karo", "batao", "bata",
+    "bta", "dedo", "dikhao", "dikha", "dikhaiye", "acha", "achha", "theek", "yaar", "dono",
+    "rakhte", "rakha", "nahi", "nai", "nhi", "ko", "ki", "ka", "ke", "se",
 }
 
 _NUM = r"(?:rs\.?\s*|pkr\s*|[\$£€])?\s*([\d][\d,]*(?:\.\d{1,2})?)"
@@ -1372,33 +1383,80 @@ def _ground_plan(plan: dict | None, q: str) -> dict | None:
     return plan
 
 
+# Common Roman-Urdu / Hinglish function & intent words. Used ONLY to DETECT that a
+# question is code-mixed (not English) so the LLM understanding layer is made primary
+# instead of the English regex mis-routing it. Detection needs just one hit, so spelling
+# variants don't have to be exhaustive — the LLM handles the actual understanding. This
+# is universal language knowledge, not per-store/per-phrasing config.
+# Deliberately EXCLUDES tokens that are also ordinary English ("me", "do", "stock",
+# "kar"~car) so a pure-English question never trips the gate (it stays on the fast,
+# free regex path). Any single hit from this set means the question is code-mixed.
+_URDU_MARKERS = frozenset(
+    "hai hain kya kia mein mai se kam zyada ziada aur ya phir nahi nai nhi "
+    "konsa kaunsa konsi kaunsi kaun kis sasta sasti mehnga mehngi mehnge "
+    "chahiye chaiye chahye milega milegi jayega jaega jayegi hoga hogi sakta sakti "
+    "sakte hun kitna kitni kitny kitne kitnay wala wali wale abhi karo "
+    "batao bata bta dedo dikhao dikha dikhaiye acha achha theek yaar "
+    "dono rakhte rakha".split()
+)
+
+
+def _is_code_mixed(q: str) -> bool:
+    """True when the question carries Roman-Urdu/Hindi markers → route understanding
+    through the LLM (which reads any language) instead of the English-only regex."""
+    return any(t in _URDU_MARKERS for t in re.findall(r"[a-z]+", (q or "").lower()))
+
+
 def _plan_to_specs(plan: dict) -> tuple[dict | None, "Spec | None"]:
     """Map an LLM-extracted plan onto the engine's existing (mp | Spec) execution.
     Returns (mp, spec) with at most one non-None. None,None = not executable here."""
     kind = plan.get("kind")
     names = [n for n in (plan.get("products") or []) if n]
+    sq = plan.get("stock_query")  # "in" | "out" | "both" | None
     if kind in ("compare", "order", "basket"):
         if len(names) < 2:
             return None, None
+        # An availability comparison ("kaunsa available?", "stock kis ka hai") → carry
+        # stock so each side's status shows and the buyable one is recommended.
+        _stockish = sq in ("in", "out", "both")
         return {"op": kind, "names": names[:6],
                 "asc": plan.get("order_dir") == "asc",
-                "cmp_more": plan.get("compare_dir") == "more"}, None
+                "cmp_more": plan.get("compare_dir") == "more",
+                "stock": _stockish, "buy_choice": _stockish and kind == "compare"}, None
     pmin, pmax, in_stock = plan.get("price_min"), plan.get("price_max"), bool(plan.get("in_stock"))
+    out_of_stock = sq == "out"
+    if in_stock and out_of_stock:
+        in_stock = out_of_stock = False
+    cat = plan.get("category") or ""
+    # Both states asked together ("available aur sold out dono") → split count.
+    if sq == "both":
+        anch = _anchors_from(cat or (names[0] if names else ""))
+        if not anch:
+            return None, None
+        return None, Spec("count_split", anch, pmin, pmax, include_oos=True)
     if kind == "count":
-        return None, Spec("count", _anchors_from(plan.get("category") or (names[0] if names else "")), pmin, pmax, in_stock)
+        return None, Spec("count", _anchors_from(cat or (names[0] if names else "")), pmin, pmax, in_stock, out_of_stock=out_of_stock)
     if kind == "cheapest":
-        return None, Spec("min", _anchors_from(plan.get("category") or ""), pmin, pmax, in_stock)
+        return None, Spec("min", _anchors_from(cat or (names[0] if names else "")), pmin, pmax, in_stock, out_of_stock=out_of_stock)
     if kind == "priciest":
-        return None, Spec("max", _anchors_from(plan.get("category") or ""), pmin, pmax, in_stock)
+        return None, Spec("max", _anchors_from(cat or (names[0] if names else "")), pmin, pmax, in_stock, out_of_stock=out_of_stock)
     if kind == "exists":
         if not names:
             return None, None
-        return None, Spec("exists", _anchors_from(names[0]), pmin, pmax, in_stock)
-    if kind in ("lookup", "filter", "browse"):
-        anch = _anchors_from(names[0] if names else (plan.get("category") or ""))
+        return None, Spec("exists", _anchors_from(names[0]), pmin, pmax, in_stock, out_of_stock=out_of_stock)
+    if kind == "lookup":
+        # Single named product: the STOCK reporter answers both "how much" (it prints the
+        # price) and "is it available" (it prints status, even when out of stock) — so a
+        # Roman-Urdu "kitny ka hai"/"mil jayega" both resolve correctly.
+        if not names:
+            anch = _anchors_from(cat)
+            return (None, Spec("list", anch, pmin, pmax, in_stock, out_of_stock=out_of_stock)) if anch or pmin is not None or pmax is not None else (None, None)
+        return None, Spec("stock", _anchors_from(names[0]), pmin, pmax)
+    if kind in ("filter", "browse"):
+        anch = _anchors_from(names[0] if names else cat)
         if not anch and pmin is None and pmax is None:
             return None, None
-        return None, Spec("list", anch, pmin, pmax, in_stock)
+        return None, Spec("list", anch, pmin, pmax, in_stock, out_of_stock=out_of_stock)
     return None, None
 
 
@@ -1491,41 +1549,44 @@ def answer_catalog_query(q: str, db, cfg: dict | None = None, max_list: int = 12
         mp = _parse_multi(q)
         rows = None
         _from_router = False
-        if not spec.structured and not mp:
-            # Deterministic router declined. Fire the LLM extractor on ANY non-trivial
-            # question (not just ones matching a surface product-keyword regex) so
-            # unusual phrasings — SMS-speak, pronoun ranges, paraphrase — are understood
-            # by the LLM instead of needing a new hand-coded regex per phrasing. The
-            # router returns "other" for genuine non-catalog questions (safe → RAG), so
-            # we only skip the obvious greetings/smalltalk to avoid a wasted call.
+        # Make the LLM understanding layer PRIMARY when the question is code-mixed
+        # (Roman-Urdu/Hinglish) — the English regex would mis-route it. Also fire it,
+        # as before, whenever the regex fully declined. English structured questions
+        # skip it entirely → fast, free, unchanged.
+        _force_llm = _is_code_mixed(q)
+        if (not spec.structured and not mp) or _force_llm:
+            # Deterministic router declined (or non-English input). Fire the LLM extractor
+            # on ANY non-trivial question so unusual phrasings — SMS-speak, Roman-Urdu,
+            # pronoun ranges, paraphrase — are understood instead of needing a hand-coded
+            # regex per phrasing. The router returns "other" for genuine non-catalog
+            # questions (safe → RAG); skip only obvious greetings/smalltalk.
             _wc = len((q or "").split())
-            if not _PRODUCTISH.search(q) and (_wc < 2 or _wc > 30 or _ROUTER_SKIP.match(q)):
-                return None, []
-            rows = load_rows(db)
-            if not rows or not is_catalog_db(db, rows, cfg):
-                return None, []
-            try:
-                from services.catalog_router import extract_plan, heuristic_plan
-                # LLM extractor first; deterministic backstop if the LLM is unavailable
-                # so structured product questions answer even during an LLM outage.
-                # Ground the result in q: a weak model can echo a few-shot example
-                # product for a content-free follow-up — drop anything the customer
-                # didn't actually name so it never becomes a wrong/cross-tenant anchor.
-                plan = _ground_plan(extract_plan(q) or heuristic_plan(q), q)
-            except Exception:
-                plan = None
-            # "browse" ("what do you sell") falls through to RAG UNLESS it carries a
-            # price bound ("something under 2000") — then it's a real filter the engine
-            # can answer deterministically, so a price-range phrasing no longer needs a
-            # bespoke regex.
+            _skip = bool(_ROUTER_SKIP.match(q)) or (
+                not _force_llm and not _PRODUCTISH.search(q) and (_wc < 2 or _wc > 30))
+            plan = None
+            if not _skip:
+                rows = load_rows(db)
+                if rows and is_catalog_db(db, rows, cfg):
+                    try:
+                        from services.catalog_router import extract_plan, heuristic_plan
+                        # LLM extractor first; deterministic backstop on LLM outage. Ground
+                        # the result in q so a weak model echoing a few-shot product on a
+                        # content-free follow-up never becomes a wrong/cross-tenant anchor.
+                        plan = _ground_plan(extract_plan(q) or heuristic_plan(q), q)
+                    except Exception:
+                        plan = None
+            # "browse" falls through to RAG unless it carries a price bound.
             _k = plan.get("kind") if plan else None
             _has_bound = bool(plan) and (plan.get("price_min") is not None or plan.get("price_max") is not None)
-            if not plan or _k in (None, "other") or (_k == "browse" and not _has_bound):
+            if plan and _k not in (None, "other") and not (_k == "browse" and not _has_bound):
+                _mp2, _spec2 = _plan_to_specs(plan)
+                if _mp2 is not None or (_spec2 is not None and getattr(_spec2, "structured", False)):
+                    mp, spec = _mp2, _spec2
+                    _from_router = True
+            # If the LLM produced nothing usable, fall back to the regex parse when it
+            # had one (so a partial English structure still answers); else hand to RAG.
+            if not _from_router and not spec.structured and not mp:
                 return None, []
-            mp, spec = _plan_to_specs(plan)
-            if mp is None and (spec is None or not getattr(spec, "structured", False)):
-                return None, []
-            _from_router = True
         if rows is None:
             rows = load_rows(db)
             if not rows:

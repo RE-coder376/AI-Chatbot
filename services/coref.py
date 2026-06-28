@@ -24,6 +24,11 @@ _CUE = {
     "than", "or", "vs", "versus", "compare", "between", "difference", "about", "tell", "me",
     "still", "yeah", "please", "thanks", "thx", "to", "buy", "get", "want", "wanna",
     "cool", "great", "wow", "also", "too", "aswell", "awesome", "perfect", "good",
+    # Roman-Urdu/Hinglish cues — function/intent words, never a product subject
+    "aur", "ya", "phir", "konsa", "kaunsa", "konsi", "kaunsi", "kaun", "kis", "kya", "kia",
+    "hai", "hain", "mein", "mai", "ka", "ki", "ke", "ko", "se", "sasta", "sasti", "mehnga",
+    "mehngi", "wala", "wale", "wali", "dono", "batao", "bata", "bta", "dikhao", "dikha",
+    "kitna", "kitni", "kitny", "kitne", "abhi", "do", "sold", "out", "milega", "milegi",
 }
 
 # global aggregates ("the cheapest", "most expensive one", "how many") are
@@ -31,22 +36,30 @@ _CUE = {
 # onto a single prior product (e.g. "most expensive one" is not "it").
 _GLOBAL_AGG = re.compile(r"\b(cheapest|most expensive|least expensive|priciest|costliest|"
                          r"dearest|how many|number of|\bcount\b|lowest[\s-]?priced?|highest[\s-]?priced?)\b", re.I)
-_PRICE = re.compile(r"\b(how much|price|cost|costs?|pricing|rate|expensive|cheaper|cheap)\b", re.I)
-_STOCK = re.compile(r"\b(in[\s-]?stock|available|availability|stock|got (?:it|any)|have it)\b", re.I)
+_PRICE = re.compile(r"\b(how much|price|cost|costs?|pricing|rate|expensive|cheaper|cheap|"
+                    r"kitn[ayie]|kitne|sasta|sasti|mehng[ai])\b", re.I)
+_STOCK = re.compile(r"\b(in[\s-]?stock|available|availability|stock|got (?:it|any)|have it|"
+                    r"mileg[ai]|mil\s+jay\w*|stock\s+mein|sold[\s-]?out)\b", re.I)
 _CMP = re.compile(r"\b(cheaper|more expensive|pricier|dearer|costs? (?:more|less)|"
                   r"lower[\s-]?priced?|higher[\s-]?priced?|lower price|higher price|"
-                  r"which (?:one|is|costs?)|better|difference|vs\.?|versus|compare)\b", re.I)
-# a referential signal: a pronoun, OR an opener that dangles off a prior turn
-_REFERENTIAL = re.compile(r"\b(it|its|it's|this|that|these|those|them|they|one|ones|the same)\b", re.I)
-# a PLURAL set-reference ("which of THOSE…", "the cheaper ONES") — points at the prior
-# LIST/category as a whole, not one product; re-issue the prior subject with this turn's
-# new filter rather than binding to a single antecedent.
+                  r"which (?:one|is|costs?)|better|difference|vs\.?|versus|compare|"
+                  r"sasta|sasti|mehng[ai]|zyada|kon?sa|kaun?sa|kis\b)\b", re.I)
+# a referential signal: a pronoun (English or Roman-Urdu "wala/wale/wali"), OR an opener
+# that dangles off a prior turn
+_REFERENTIAL = re.compile(r"\b(it|its|it's|this|that|these|those|them|they|one|ones|the same|"
+                          r"wal[aei])\b", re.I)
+# a PLURAL set-reference ("which of THOSE…", "the cheaper ONES", Roman-Urdu "sold out
+# WALE") — points at the prior LIST/category as a whole, not one product; re-issue the
+# prior subject with this turn's new filter rather than binding to a single antecedent.
 _PLURAL_REF = re.compile(r"\b(those|these|them|the (?:available|unavailable|sold[\s-]?out|"
                          r"in[\s-]?stock|cheaper|cheapest|priciest|expensive|remaining) ones?|"
-                         r"the ones)\b", re.I)
+                         r"the ones|wal[aei])\b", re.I)
 # list/availability framing to strip when recovering the prior turn's category subject
 _SUBJ_DROP = {"list", "lists", "listing", "please", "available", "unavailable", "sold",
-              "soldout", "out", "stock", "instock", "status", "whether", "show", "give"}
+              "soldout", "out", "stock", "instock", "status", "whether", "show", "give",
+              # Roman-Urdu framing words to strip when recovering the prior category
+              "aur", "wala", "wale", "wali", "mein", "ka", "ki", "ke", "dono", "batao",
+              "bata", "dikhao", "abhi", "stockmein", "summary", "short"}
 _QUOTED = re.compile(r'["“”]([^"“”]{2,90})["“”]')
 # logistics/policy prose that an answer-name pattern can catch but is NEVER a product
 # the customer's pronoun refers to ("is it in stock?" must not bind to "return policy").
@@ -194,7 +207,7 @@ def resolve_followup(q: str, history: list) -> str:
         if is_cmp:
             names = _antecedents(history, 2)
             if len(names) >= 2:
-                direction = "more expensive" if re.search(r"\b(more expensive|pricier|dearer|costs? more|higher)\b", ql) else "cheaper"
+                direction = "more expensive" if re.search(r"\b(more expensive|pricier|dearer|costs? more|higher|mehng[ai]|zyada)\b", ql) else "cheaper"
                 return f'which is {direction}, "{names[0]}" or "{names[1]}"?'
             return q
         names = _antecedents(history, 1)
