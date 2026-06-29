@@ -37,7 +37,18 @@ _CUE = {
     "hai", "hain", "mein", "mai", "ka", "ki", "ke", "ko", "se", "sasta", "sasti", "mehnga",
     "mehngi", "wala", "wale", "wali", "dono", "batao", "bata", "bta", "dikhao", "dikha",
     "kitna", "kitni", "kitny", "kitne", "abhi", "do", "sold", "out", "milega", "milegi",
+    # aggregate/basket intent + back-reference scaffolding a bare follow-up wraps the
+    # cue in ("total bhi batao", "does it have old price", "uska price range") — never a
+    # product subject; without these the >=2-content-token self-contained guard misfires.
+    "does", "total", "bhi", "sum", "tha", "thi",
+    # Roman-Urdu possessive pronouns ("uska price range") — referential, never a subject
+    "uska", "uski", "unka", "unki", "iska", "iski", "inka", "inki",
 }
+# aggregate words that are the intent of a global-aggregate follow-up, not its subject —
+# used to decide a bare "aur cheapest buyable?" carries NO category of its own and must
+# be re-scoped onto the prior turn's subject.
+_AGG_WORDS = {"count", "cheapest", "priciest", "costliest", "dearest", "lowest", "highest",
+              "expensive", "buyable", "available", "number", "many"}
 
 # global aggregates ("the cheapest", "most expensive one", "how many") are
 # self-contained catalog queries even when short — they must NOT be coref-rewritten
@@ -59,7 +70,7 @@ _CMP = re.compile(r"\b(cheaper|more expensive|pricier|dearer|costs? (?:more|less
 # a referential signal: a pronoun (English or Roman-Urdu "wala/wale/wali"), OR an opener
 # that dangles off a prior turn
 _REFERENTIAL = re.compile(r"\b(it|its|it's|this|that|these|those|them|they|one|ones|the same|"
-                          r"wal[aei])\b", re.I)
+                          r"wal[aei]|uska|uski|unka|unki|iska|iski|inka|inki)\b", re.I)
 # a PLURAL set-reference ("which of THOSE…", "the cheaper ONES", Roman-Urdu "sold out
 # WALE") — points at the prior LIST/category as a whole, not one product; re-issue the
 # prior subject with this turn's new filter rather than binding to a single antecedent.
@@ -69,6 +80,7 @@ _PLURAL_REF = re.compile(r"\b(those|these|them|the (?:available|unavailable|sold
 # list/availability framing to strip when recovering the prior turn's category subject
 _SUBJ_DROP = {"list", "lists", "listing", "please", "available", "unavailable", "sold",
               "soldout", "out", "stock", "instock", "status", "whether", "show", "give",
+              "full", "breakdown", "all", "products", "items", "models", "now", "price",
               # Roman-Urdu framing words to strip when recovering the prior category
               "aur", "wala", "wale", "wali", "mein", "ka", "ki", "ke", "dono", "batao",
               "bata", "dikhao", "abhi", "stockmein", "summary", "short"}
@@ -129,7 +141,9 @@ def _names_from_answer(text: str) -> list[str]:
     # "Mini RC Pocket Drone is out of stock.") — a stock-only prior answer carries the
     # product name but none of the price/comparison signals the inline pattern requires.
     # _NON_PRODUCT below still rejects "our return policy is available at ...".
-    for m in re.finditer(r"(?:^|[.!]\s+|;\s+)([A-Z0-9][^.!?\n]{3,80}?)\s+is\s+"
+    # prefix admits ","/"and" so a two-product compare answer ("X is out of stock,
+    # Y is available") yields BOTH names — a set/stock follow-up needs both antecedents.
+    for m in re.finditer(r"(?:^|[.!]\s+|;\s+|,\s+|\band\s+)([A-Z0-9][^.!?\n]{3,80}?)\s+is\s+"
                          r"(?:currently\s+)?(?:available|in[\s-]?stock|out[\s-]?of[\s-]?stock|"
                          r"sold[\s-]?out|unavailable)\b", text):
         out.append(m.group(1))
@@ -240,6 +254,26 @@ def resolve_followup(q: str, history: list) -> str:
                 subj = _prior_subject(history)
                 if subj:
                     return f"how many {subj}"
+            # A BARE aggregate follow-up — one that carries NO category of its own and
+            # opens with a continuation/back-reference cue ("aur cheapest buyable?",
+            # "sold out count kya tha?") — is the aggregate OVER the prior turn's
+            # subject, not the whole catalog. Re-scope it onto that subject.
+            own = [w for w in _content_tokens(q) if w not in _AGG_WORDS]
+            cont = (re.search(r"^\s*(aur|also|and|plus|then|next|ab)\b", ql)
+                    or re.search(r"\b(kya tha|kya thi|tha|thi|wala|wale|wali)\b", ql)
+                    or _PLURAL_REF.search(ql))
+            if not own and cont:
+                subj = _prior_subject(history)
+                if subj:
+                    avail = "available " if re.search(r"\b(buyable|available|in[\s-]?stock)\b", ql) else ""
+                    if re.search(r"\bsold[\s-]?out\b", ql) or (re.search(r"\b(out of stock|unavailable)\b", ql)):
+                        return f"{subj} stock breakdown"
+                    if re.search(r"\b(how many|count|number of|kitne|kitni)\b", ql):
+                        return f"how many {subj}"
+                    if re.search(r"\b(cheapest|least expensive|lowest|sasta|sasti)\b", ql):
+                        return f"cheapest {avail}{subj}".strip()
+                    if re.search(r"\b(most expensive|priciest|costliest|highest|dearest|mehng)\b", ql):
+                        return f"most expensive {avail}{subj}".strip()
             return q
         # Already self-contained: names its own product (quoted or 2+ content tokens).
         if _QUOTED.search(q) or len(_content_tokens(q)) >= 2:
@@ -256,10 +290,17 @@ def resolve_followup(q: str, history: list) -> str:
         is_cmp = bool(_CMP.search(ql))
         is_price = bool(_PRICE.search(ql))
         is_stock = bool(_STOCK.search(ql))
+        # basket sum follow-up ("total bhi batao", "and the total?") off a multi-product
+        # turn → re-issue as a basket total of the prior products.
+        is_total = bool(re.search(r"\b(total|sum|grand[\s-]?total|altogether|add[\s-]?up|jama)\b", ql))
         # Only act on a genuine dangling follow-up: referential, or a bare price/stock/
-        # comparison ask with no subject of its own.
-        if not (is_ref or is_cmp or is_price or is_stock):
+        # comparison/total ask with no subject of its own.
+        if not (is_ref or is_cmp or is_price or is_stock or is_total):
             return q
+        if is_total:
+            names = _antecedents(history, 4)
+            if len(names) >= 2:
+                return "total price of " + " + ".join(f'"{n}"' for n in names)
         # Plural set-reference → re-issue the prior category with this turn's new filter
         # ("now which of THOSE are unavailable?" after an RC-construction list → "which rc
         # construction are unavailable?"), instead of binding to a single prior product.
@@ -279,7 +320,8 @@ def resolve_followup(q: str, history: list) -> str:
         # set-reference to BOTH prior products with a STOCK (not price) intent → report
         # the stock of both. Fires before the cheaper/pricier compare block so a stock
         # "which" ("kis", "which one") isn't answered as a price verdict.
-        is_both = bool(re.search(r"\b(both|dono|those two|these two)\b", ql))
+        is_both = bool(re.search(r"\b(both|dono|those two|these two|that set|the set|that lot)\b", ql)
+                       or re.search(r"\bones?\s+from\b", ql))
         if is_stock and not is_price and (is_both or is_cmp):
             names = _antecedents(history, 2)
             if len(names) >= 2:
