@@ -455,6 +455,22 @@ def _normalize_numwords(ql: str) -> str:
     return re.sub(r"\b([a-z])\s+(\d)", r"\1\2", s)
 
 
+# Shipping / delivery / returns / refund / warranty / payment / order-status questions
+# are POLICY prose, not catalog lookups. Used both to make parse() decline AND to
+# short-circuit answer_catalog_query BEFORE the LLM router (which would otherwise
+# fabricate a product plan for "used opened PRODUCT return" and answer with a catalog
+# non-answer instead of handing to the policy/RAG path). "return" alone is excluded so
+# the catalog verb "return every available item under 500" is never read as policy.
+_POLICY_Q_RE = re.compile(
+    r"\b(shipping|delivery|deliver(?:ed|ing)?|postage|courier|dispatch|"
+    r"returns\b|return\s+polic(?:y|ies)|return\s+(?:an?\s+)?(?:item|product|order|purchase)s?\b|"
+    r"(?:item|product|order|purchase)s?\s+(?:ko\s+|wapas\s+)?returns?\b|"
+    r"returns?\s+(?:ho|kar|kr|kiya|kiye)\w*\b|wapas\s+(?:kar|ho)\w*|"
+    r"refunds?|warranty|guarantee|"
+    r"payment\s+method|cod|cash\s+on\s+delivery|installments?|"
+    r"track(?:ing)?\s+(?:my\s+)?order|order\s+status|cancel(?:lation|\s+(?:my\s+)?order)?)\b", re.I)
+
+
 def parse(q: str) -> Spec:
     """Extract orthogonal dimensions (aggregation + price bounds + stock + anchors)
     from the question. Each dimension is detected independently, so any
@@ -544,18 +560,7 @@ def parse(q: str) -> Spec:
     # NB: "return" alone is excluded — the catalog verb ("return every available
     # item under 500") must not read as a returns-policy question; only plural
     # "returns", "return policy", or "return an item/order" count as policy.
-    if re.search(r"\b(shipping|delivery|deliver(?:ed|ing)?|postage|courier|dispatch|"
-                 r"returns\b|return\s+polic(?:y|ies)|return\s+(?:an?\s+)?(?:item|product|order|purchase)s?\b|"
-                 # reverse word order ("used opened PRODUCT RETURN", "item return") and
-                 # Roman-Urdu return-intent ("return HO/KAR sakta hai" = can it be
-                 # returned) — a returns-policy ask, NOT the catalog verb "return every
-                 # available item under 500" (that has no product+return adjacency nor
-                 # the Urdu ho/kar auxiliary).
-                 r"(?:item|product|order|purchase)s?\s+(?:ko\s+|wapas\s+)?returns?\b|"
-                 r"returns?\s+(?:ho|kar|kr|kiya|kiye)\w*\b|wapas\s+(?:kar|ho)\w*|"
-                 r"refunds?|warranty|guarantee|"
-                 r"payment\s+method|cod|cash\s+on\s+delivery|installments?|"
-                 r"track(?:ing)?\s+(?:my\s+)?order|order\s+status|cancel(?:lation|\s+(?:my\s+)?order)?)\b", ql):
+    if _POLICY_Q_RE.search(ql):
         return Spec("none", structured=False)
 
     # Variant questions — "what COLOURS/SIZES/OPTIONS does X come in", "what sizes are
@@ -1745,6 +1750,13 @@ def answer_catalog_query(q: str, db, cfg: dict | None = None, max_list: int = 12
         # chunk's Options/Variants. Must return BEFORE the LLM router, which would
         # otherwise re-resolve to a bare catalog listing without the colours/sizes.
         if _is_variant_q(q):
+            return None, []
+        # Policy intent (shipping/returns/refund/warranty/payment/order-status) → hand
+        # straight to RAG/policy BEFORE the LLM router. parse() already declines these,
+        # but a code-mixed policy query ("used opened product return ho sakta hai?")
+        # sets _force_llm, and the router would fabricate a product plan and answer with
+        # a catalog non-answer instead of letting the policy page text answer.
+        if _POLICY_Q_RE.search((q or "").lower()):
             return None, []
         # Reverse lookup — "which section/category is X in", "where do I find X".
         # The mirror of category listing: name a product, get the storefront
