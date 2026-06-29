@@ -1035,7 +1035,10 @@ def _extract_names(q: str) -> list[str]:
     # today?") would be comma-split into a junk name ("today") and block resolution of
     # the real names; strip it from the segment before the connector split.
     seg = re.sub(r"(?i),\s*(?:which|what|who|can|should|is|are|do(?:es)?|will|how|kis|kon?sa|kaun?sa|kaun)\b.*$", "", seg)
-    parts = re.split(r"\s+(?:versus|vs\.?|v\.?|and|or|aur|ya|against|compared\s+(?:to|with))\s+|,\s*", seg)
+    parts = re.split(r"\s+(?:versus|vs\.?|v\.?|and|or|aur|ya|plus|against|compared\s+(?:to|with))\s+|\s*\+\s*|,\s*", seg)
+    # leading ordering verb ("Sort Mini Can, ...", "rank these A, B by price") the
+    # connector-split leaves on the first name — drop it so the bare product resolves.
+    parts = [re.sub(r"(?i)^\s*(?:sort|order|rank|arrange)\s+(?:these\s+|the\s+)?", "", p) for p in parts]
     # leading comparison scaffolding the connector-split leaves on the first name
     # ("availability comparison FOR Aston Martin F1 1/18" → "Aston Martin F1 1/18")
     parts = [re.sub(r"(?i)^\s*(?:availability|stock|price|cost)?\s*compar(?:e|ing|ison)\s+(?:for|of|between|with)?\s*", "", p) for p in parts]
@@ -1057,6 +1060,16 @@ def _extract_names(q: str) -> list[str]:
     # appear inside an English product title, so English names are untouched.
     parts = [re.sub(r"(?i)\s+(?:mein|konsa|kaunsa|kon?sa|kaun?sa|kis|sasta|sasti|"
                     r"mehng[ai]|zyada|sab\s+se|dono)\b.*$", "", p) for p in parts]
+    # trailing ordering/dimension clause the connector-split couldn't separate from the
+    # LAST name ("BMW 760li CHEAPEST TO EXPENSIVE SORT KARO", "1:64 Micro Drift BY PRICE
+    # LOW TO HIGH", "Ferrari Laferrari TOTAL PRICE") — strip the ranking/basket axis so
+    # the bare product resolves. The "X to Y" range and "by price" phrasings never occur
+    # inside a real product title, so genuine names are untouched.
+    parts = [re.sub(r"(?i)\s+(?:cheap\w*|low\w*|least|most|high\w*|expensive|priciest|dearest)\s+to\s+\w+.*$", "", p) for p in parts]
+    parts = [re.sub(r"(?i)\s+by\s+(?:price|prices|cost|costs|stock|availability)\b.*$", "", p) for p in parts]
+    parts = [re.sub(r"(?i)\s+(?:ascending|descending|increasing|decreasing)\b.*$", "", p) for p in parts]
+    parts = [re.sub(r"(?i)\s+(?:sort|order|rank|arrange)(?:\s+(?:kar\w*|kr\w*|kren|karen|do))?\s*[?.!]*$", "", p) for p in parts]
+    parts = [re.sub(r"(?i)\s+(?:total|combined|altogether|together|sum)(?:\s+(?:price|prices|cost|costs))?\s*[?.!]*$", "", p) for p in parts]
     parts = [re.sub(r"[?.\"]+$", "", p).strip(" .\"") for p in parts]
     # Keep multi-word names; ALSO a lone distinctive word (a one-word product name like
     # "Deadpool" in "Deadpool vs Iron Man action figure", where the shared type-noun
@@ -1370,7 +1383,10 @@ def _answer_multi(mp: dict, rows: list[Row]) -> tuple[str, list[str]] | None:
         lines.append(f"\nTotal cost: {_price_s(total, cur)}")
         return "\n".join(lines), srcs
     if op == "order":
-        ordered = sorted(found, key=lambda r: (r.price if mp["asc"] else -r.price, r.title.lower()))
+        # stable sort by price ALONE keeps equal-priced items in the order the customer
+        # named them ("BMW M8, BMW M4, BMW 760li" → M8 before 760li at the same Rs.4,950),
+        # which is the natural reading; an alphabetical tiebreak would reorder them.
+        ordered = sorted(found, key=lambda r: r.price if mp["asc"] else -r.price)
         head = "From least to most expensive:" if mp["asc"] else "From most to least expensive:"
         lines = [head] + [f"{i}. {r.title} — {_price_s(r.price, r.currency)}" for i, r in enumerate(ordered, 1)]
         return "\n".join(lines), _dedup(r.source for r in ordered)
