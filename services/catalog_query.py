@@ -1758,6 +1758,12 @@ def answer_catalog_query(q: str, db, cfg: dict | None = None, max_list: int = 12
                     return _ans
         spec = parse(q)
         mp = _parse_multi(q)
+        # A confident deterministic multi-product parse (explicit "X or/ya/vs Y" choice,
+        # compare, basket with >=2 named products) is high-precision — the LLM router
+        # below must not be allowed to downgrade it to a single product. Without this,
+        # code-mixed "BMW S1000RR ya Kawasaki H2R available kaunsi?" set _force_llm and
+        # the non-deterministic router sometimes replaced both names with one → flake.
+        _det_mp = mp if (isinstance(mp, dict) and len(mp.get("names") or []) >= 2) else None
         rows = None
         _from_router = False
         # Make the LLM understanding layer PRIMARY when the question is code-mixed
@@ -1792,7 +1798,9 @@ def answer_catalog_query(q: str, db, cfg: dict | None = None, max_list: int = 12
             if plan and _k not in (None, "other") and not (_k == "browse" and not _has_bound):
                 _mp2, _spec2 = _plan_to_specs(plan)
                 if _mp2 is not None or (_spec2 is not None and getattr(_spec2, "structured", False)):
-                    mp, spec = _mp2, _spec2
+                    # Keep the confident deterministic multi-product parse if present;
+                    # only take the router's mp when the deterministic one was absent.
+                    mp, spec = (_det_mp if _det_mp is not None else _mp2), _spec2
                     _from_router = True
             # If the LLM produced nothing usable, fall back to the regex parse when it
             # had one (so a partial English structure still answers); else hand to RAG.
