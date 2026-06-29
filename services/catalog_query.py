@@ -496,6 +496,16 @@ def parse(q: str) -> Spec:
         r"|\bsplit\b[^.?!]{0,25}\b(?:summary|breakdown|count|batao|bata\w*|bta\w*)\b"
         r"|\b(?:availability|stock)\s+(?:split|breakdown|summary)\b", ql))
     both_states = both_states or split_report
+    # Roman-Urdu / English "how many available, how many sold" — a count word repeated
+    # before each stock state ("kitne available kitne sold", "how many in stock how many
+    # out") asks for BOTH sides as counts, but carries no and/or/vs connector so the
+    # patterns above miss it. Detect a count cue plus BOTH an available- and a sold-state
+    # token → split count, routed deterministically (was relying on the LLM router).
+    kitne_split = bool(
+        re.search(r"\b(?:kitne|kitni|kitny|kitna|how\s+many)\b", ql)
+        and re.search(r"\b(?:available|in\s+stock|buyable)\b", ql)
+        and re.search(r"\b(?:sold|sold[\s-]?out|out\s+of\s+stock|unavailable)\b", ql))
+    both_states = both_states or kitne_split
 
     # Comparisons ("compare A and B", "X vs Y") are NOT a single structured
     # aggregation — they need the retrieval fan-out (which matches each named
@@ -536,6 +546,13 @@ def parse(q: str) -> Spec:
     # "returns", "return policy", or "return an item/order" count as policy.
     if re.search(r"\b(shipping|delivery|deliver(?:ed|ing)?|postage|courier|dispatch|"
                  r"returns\b|return\s+polic(?:y|ies)|return\s+(?:an?\s+)?(?:item|product|order|purchase)s?\b|"
+                 # reverse word order ("used opened PRODUCT RETURN", "item return") and
+                 # Roman-Urdu return-intent ("return HO/KAR sakta hai" = can it be
+                 # returned) — a returns-policy ask, NOT the catalog verb "return every
+                 # available item under 500" (that has no product+return adjacency nor
+                 # the Urdu ho/kar auxiliary).
+                 r"(?:item|product|order|purchase)s?\s+(?:ko\s+|wapas\s+)?returns?\b|"
+                 r"returns?\s+(?:ho|kar|kr|kiya|kiye)\w*\b|wapas\s+(?:kar|ho)\w*|"
                  r"refunds?|warranty|guarantee|"
                  r"payment\s+method|cod|cash\s+on\s+delivery|installments?|"
                  r"track(?:ing)?\s+(?:my\s+)?order|order\s+status|cancel(?:lation|\s+(?:my\s+)?order)?)\b", ql):
@@ -611,6 +628,14 @@ def parse(q: str) -> Spec:
     if include_oos:
         out_of_stock = False
         in_stock = False
+
+    # Double negative: "available … NOT sold out" / "not out of stock" is an IN-stock
+    # filter, not OOS — but the out_of_stock regex above matched the bare "sold out"
+    # inside "not sold out" and inverted the answer. Override to in-stock.
+    if not both_states and not include_oos and re.search(
+            r"\b(?:not|n'?t|never)\s+(?:sold[\s-]?out|out\s+of\s+stock)\b", ql):
+        out_of_stock = False
+        in_stock = True
 
     # both_states (computed up front) wants BOTH stock sides → don't filter to one.
     if both_states:
@@ -1099,8 +1124,8 @@ def _extract_names(q: str) -> list[str]:
     # ("iron man MEIN MEHNGA KONSA HAI?", "X SASTA KAUNSA") → strip from the first
     # Roman-Urdu locative/compare marker so the bare product resolves. These tokens never
     # appear inside an English product title, so English names are untouched.
-    parts = [re.sub(r"(?i)\s+(?:mein|konsa|kaunsa|kon?sa|kaun?sa|kis|sasta|sasti|"
-                    r"mehng[ai]|zyada|sab\s+se|dono)\b.*$", "", p) for p in parts]
+    parts = [re.sub(r"(?i)\s+(?:mein|konsa|konsi|kaunsa|kaunsi|kon?s[ai]|kaun?s[ai]|kis|sasta|sasti|"
+                    r"mehng[ai]|zyada|sab\s+se|dono|available|availab\w*|buyable)\b.*$", "", p) for p in parts]
     # trailing ordering/dimension clause the connector-split couldn't separate from the
     # LAST name ("BMW 760li CHEAPEST TO EXPENSIVE SORT KARO", "1:64 Micro Drift BY PRICE
     # LOW TO HIGH", "Ferrari Laferrari TOTAL PRICE") — strip the ranking/basket axis so
@@ -1174,8 +1199,8 @@ def _parse_multi(q: str) -> dict | None:
     # one's stock and recommend the buyable one. Resolves like a stock comparison; if
     # the names don't resolve to specific products the caller falls back to the list
     # spec, so a category "or" query is never hijacked.
-    is_choice = bool(re.search(r"\b(?:or|vs\.?|versus)\b", ql)
-                     and re.search(r"\b(available|availab\w*|in[\s-]?stock|buy|buyable|purchase|order|get)\b", ql))
+    is_choice = bool(re.search(r"\b(?:or|vs\.?|versus|ya)\b", ql)
+                     and re.search(r"\b(available|availab\w*|in[\s-]?stock|buy|buyable|purchase|order|get|kaunsi|kaunsa|konsi|konsa)\b", ql))
     is_cmp = is_cmp or is_choice
     is_basket = bool(_BASKET_RE.search(ql)) and not bool(re.search(r"\bwhich\b|\bcompare\b|\bin[\s-]?stock\b|\bavailable\b", ql))
     if not (is_order or is_cmp or is_basket):
