@@ -283,7 +283,11 @@ def resolve_followup(q: str, history: list) -> str:
         if is_stock and not is_price and (is_both or is_cmp):
             names = _antecedents(history, 2)
             if len(names) >= 2:
-                return f'are "{names[0]}" and "{names[1]}" in stock?'
+                # "which of X OR Y is in stock?" (not "X AND Y") so the engine's
+                # _parse_multi recognises a two-product choice and reports BOTH via the
+                # deterministic buy_choice path; an "and" phrasing falls to single-product
+                # stock and abstains to (non-deterministic) RAG for abbreviated names.
+                return f'which of "{names[0]}" or "{names[1]}" is in stock?'
         is_buy = bool(_BUY.search(ql))
         # "which one should I buy then?" after a 2-product compare → recommend between
         # BOTH (the engine's buy_choice path favours the in-stock one), not a price verdict.
