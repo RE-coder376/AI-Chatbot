@@ -28,6 +28,10 @@ _CUE = {
     # without these the >=2-content-token "self-contained" guard misfires and skips coref
     "confirm", "status", "can", "could", "would", "should", "then", "check", "need",
     "looking", "recommend", "suggest", "pick", "go", "order", "purchase", "let",
+    # filter/list scaffolding a follow-up wraps the cue in ("show only buyable from
+    # those") — never a product subject; without these the >=2-content-token guard
+    # treats the filter words as a subject and skips coref entirely.
+    "show", "only", "buyable", "from", "display", "give",
     # Roman-Urdu/Hinglish cues — function/intent words, never a product subject
     "aur", "ya", "phir", "konsa", "kaunsa", "konsi", "kaunsi", "kaun", "kis", "kya", "kia",
     "hai", "hain", "mein", "mai", "ka", "ki", "ke", "ko", "se", "sasta", "sasti", "mehnga",
@@ -46,7 +50,7 @@ _PRICE = re.compile(r"\b(how much|price|cost|costs?|pricing|rate|expensive|cheap
 # dangles off a 2-product comparison, recommend between BOTH, not a cheaper verdict.
 _BUY = re.compile(r"\b(buy|order|purchase|get|recommend|suggest|go for|go with|"
                   r"pick|choose|which (?:one|should))\b", re.I)
-_STOCK = re.compile(r"\b(in[\s-]?stock|available|availability|stock|got (?:it|any)|have it|"
+_STOCK = re.compile(r"\b(in[\s-]?stock|available|availability|stock|buyable|got (?:it|any)|have it|"
                     r"mileg[ai]|mil\s+jay\w*|stock\s+mein|sold[\s-]?out)\b", re.I)
 _CMP = re.compile(r"\b(cheaper|more expensive|pricier|dearer|costs? (?:more|less)|"
                   r"lower[\s-]?priced?|higher[\s-]?priced?|lower price|higher price|"
@@ -100,8 +104,17 @@ def _names_from_answer(text: str) -> list[str]:
     # prefix admits "and"/comma so a two-product compare answer ("X is Rs.A and Y is
     # Rs.B") yields BOTH names, not just the first — a cheaper/expensive follow-up needs
     # both antecedents to re-issue the comparison.
-    for m in re.finditer(r"(?:^|[.!]\s+|\bthe\b\s+|\band\s+|,\s+)([A-Z0-9][^.!?\n]{3,80}?)\s+is\s+"
+    # prefix admits ";" so a semicolon-joined compare answer ("X is Rs.A; Y is Rs.B")
+    # yields BOTH names — a stock/buy follow-up over the two needs both antecedents.
+    for m in re.finditer(r"(?:^|[.!]\s+|\bthe\b\s+|\band\s+|,\s+|;\s+)([A-Z0-9][^.!?\n]{3,80}?)\s+is\s+"
                          r"(?:priced|cheaper|costs?|Rs|PKR|\$|€|£)", text):
+        out.append(m.group(1))
+    # superlative stated BEFORE the verb ("1:64 Scale Mini RC Excavator is cheapest in
+    # RC Construction.") — the inline price pattern above requires a price/"cheaper"
+    # token and misses a bare "is cheapest/priciest"; capture the name before the verb.
+    for m in re.finditer(r"(?:^|[.!]\s+|\bthe\b\s+|\band\s+|,\s+|;\s+)([A-Z0-9][^.!?\n]{3,80}?)\s+is\s+"
+                         r"(?:the\s+)?(?:cheapest|priciest|costliest|dearest|most expensive|"
+                         r"least expensive|lowest[\s-]?priced?|highest[\s-]?priced?)\b", text):
         out.append(m.group(1))
     # superlative / min-max answers name the product AFTER the verb: "The cheapest RC
     # Construction product is 1:64 Scale Mini RC Excavator at Rs.5,450." — capture the
@@ -116,7 +129,7 @@ def _names_from_answer(text: str) -> list[str]:
     # "Mini RC Pocket Drone is out of stock.") — a stock-only prior answer carries the
     # product name but none of the price/comparison signals the inline pattern requires.
     # _NON_PRODUCT below still rejects "our return policy is available at ...".
-    for m in re.finditer(r"(?:^|[.!]\s+)([A-Z0-9][^.!?\n]{3,80}?)\s+is\s+"
+    for m in re.finditer(r"(?:^|[.!]\s+|;\s+)([A-Z0-9][^.!?\n]{3,80}?)\s+is\s+"
                          r"(?:currently\s+)?(?:available|in[\s-]?stock|out[\s-]?of[\s-]?stock|"
                          r"sold[\s-]?out|unavailable)\b", text):
         out.append(m.group(1))
@@ -179,6 +192,25 @@ def _antecedents(history: list, want: int) -> list[str]:
     return names[:want]
 
 
+def _compare_pair(history: list) -> list[str]:
+    """If the most-recent prior USER turn was an explicit "A vs B" comparison, return
+    the two named products [A, B]. A later "those" points at exactly these two, so they
+    can be bound directly — more reliable than re-extracting from a bot answer that may
+    phrase one product as "has an available variant" rather than "is available"."""
+    for m in reversed(history or []):
+        if m.get("role") == "user":
+            c = str(m.get("content", "") or "")
+            parts = re.split(r"\s+(?:vs\.?|versus)\s+", c, flags=re.I)
+            if len(parts) != 2:
+                return []
+            a = parts[0].strip(" ?.!")
+            # drop a trailing intent word the second name may carry ("... F1 stock?")
+            b = re.split(r"\b(?:stock|price|prices|availability|available|compare|discount)\b",
+                         parts[1], flags=re.I)[0].strip(" ?.!")
+            return [a, b] if a and b else []
+    return []
+
+
 def _prior_subject(history: list) -> str:
     """The category/subject phrase of the most recent prior USER turn, stripped of cue
     and availability/list framing — used to re-expand a plural set-reference ("those")
@@ -232,11 +264,26 @@ def resolve_followup(q: str, history: list) -> str:
         # ("now which of THOSE are unavailable?" after an RC-construction list → "which rc
         # construction are unavailable?"), instead of binding to a single prior product.
         if _PLURAL_REF.search(ql) and not is_cmp:
+            # "show only buyable from those" after a 2-item compare → bind the two named
+            # products, not the loose category tokens (which over-list every BMW/etc.).
+            pair = _compare_pair(history)
+            if len(pair) >= 2:
+                rest = _PLURAL_REF.sub("", q).strip(" ?.!")
+                return f'{rest} "{pair[0]}" and "{pair[1]}"'
             subj = _prior_subject(history)
             if subj:
                 rw = _PLURAL_REF.sub(subj, q)
                 return rw if rw != q else f"{subj} {q}"
             return q
+        # "un dono mein stock kis ka?" / "which of those two is available?" — a
+        # set-reference to BOTH prior products with a STOCK (not price) intent → report
+        # the stock of both. Fires before the cheaper/pricier compare block so a stock
+        # "which" ("kis", "which one") isn't answered as a price verdict.
+        is_both = bool(re.search(r"\b(both|dono|those two|these two)\b", ql))
+        if is_stock and not is_price and (is_both or is_cmp):
+            names = _antecedents(history, 2)
+            if len(names) >= 2:
+                return f'are "{names[0]}" and "{names[1]}" in stock?'
         is_buy = bool(_BUY.search(ql))
         # "which one should I buy then?" after a 2-product compare → recommend between
         # BOTH (the engine's buy_choice path favours the in-stock one), not a price verdict.
