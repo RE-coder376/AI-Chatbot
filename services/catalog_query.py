@@ -108,6 +108,11 @@ _STOP = {
     # stock/list filler — "which RC construction toys are still in stock" must
     # anchor on "rc construction", not "still/toys" which are presentation words.
     "still", "toy", "toys",
+    # advisory persona words — express who-it's-for, never a product type, and never
+    # appear in a real title ("BEGINNER ke liye cheap car", "for a NEWBIE"). (Purpose
+    # words like "gift" are NOT globally stopped — they ARE real giftable-set titles in
+    # other tenants; they're dropped conditionally in _selective_anchors instead.)
+    "beginner", "beginners", "newbie", "liye", "lye",
     # texting abbreviations of stop-words — "do u HV mgahribi" must not keep "hv" as a
     # junk anchor (it dragged query-coverage below the floor and sank the real match).
     "hv", "hav", "ur", "pls", "plz", "thru", "abt", "coz", "cuz", "wanna", "gimme", "lemme",
@@ -333,6 +338,9 @@ def _anchor_df(tok: str, rows: list[Row]) -> float:
     return n / len(rows)
 
 
+_PURPOSE = {"gift", "gifts", "present", "presents"}
+
+
 def _selective_anchors(anchors: list[str], rows: list[Row], agg: str | None = None) -> list[str]:
     """Drop generic catalog-wide type-nouns from the MATCHING anchor set so they no
     longer over-constrain count/min/max/list — but only when a more specific (low
@@ -343,6 +351,16 @@ def _selective_anchors(anchors: list[str], rows: list[Row], agg: str | None = No
     THIS catalog's own distribution → no per-store word lists."""
     if len(anchors) <= 1 or not rows:
         return anchors
+    # Purpose words ("gift", "present") name the OCCASION, not a product type, yet some
+    # stores tag random items "gift" → a 2-anchor strict hit collapses to that one
+    # coincidental row (a Suzuki bike tagged "gift") instead of the asked-for category.
+    # Drop them when a real (non-purpose) anchor remains ("decor gift" → "decor"); a lone
+    # "gift" browse keeps it. Done here (not _STOP) so "Kuromi Gift Set" titles still match.
+    _nonpurpose = [a for a in anchors if a not in _PURPOSE]
+    if _nonpurpose and len(_nonpurpose) < len(anchors):
+        anchors = _nonpurpose
+        if len(anchors) <= 1:
+            return anchors
     df = {a: _anchor_df(a, rows) for a in anchors if a != "rc"}
     # A token NO product contains (df == 0) can only zero-out an all-anchor match — a
     # descriptor the catalog doesn't use ("SUPERHERO action figures" where they're
@@ -614,7 +632,7 @@ def parse(q: str) -> Spec:
         r"|\b(?:have\s+(?:you|we)|(?:you|we)\s+have)\s+got\b"
         r"|\bgot\s+(?:any|some)\b", ql))
     cheapest = bool(re.search(
-        r"\b(cheapest|lowest[\s-]+priced?|least\s+expensive|most\s+affordable|lowest\s+cost|"
+        r"\b(cheap|cheapest|lowest[\s-]+priced?|least\s+expensive|most\s+affordable|lowest\s+cost|"
         r"costs?\s+the\s+least|"
         # Roman-Urdu/Hinglish "cheapest" — "sab se sasta", bare "sasta/sasti"
         r"sab\s+se\s+sast[aie]|sast[aie])\b", ql))
