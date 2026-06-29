@@ -81,6 +81,10 @@ _PLURAL_REF = re.compile(r"\b(those|these|them|the (?:available|unavailable|sold
 _SUBJ_DROP = {"list", "lists", "listing", "please", "available", "unavailable", "sold",
               "soldout", "out", "stock", "instock", "status", "whether", "show", "give",
               "full", "breakdown", "all", "products", "items", "models", "now", "price",
+              # aggregate-request scaffolding ("give total plus in-stock numbers", "count
+              # both sides") — never part of the category subject being recovered.
+              "total", "plus", "numbers", "number", "count", "split", "health", "both",
+              "side", "sides", "again", "each", "combined", "minus",
               # Roman-Urdu framing words to strip when recovering the prior category
               "aur", "wala", "wale", "wali", "mein", "ka", "ki", "ke", "dono", "batao",
               "bata", "dikhao", "abhi", "stockmein", "summary", "short"}
@@ -244,6 +248,37 @@ def resolve_followup(q: str, history: list) -> str:
         if not q or not history:
             return q
         ql = q.lower()
+        # "count available side again", "sold out side again", "the available side?" — a
+        # bare reference to ONE side (or a repeat) of the prior turn's stock split. It has
+        # no product subject of its own, so re-issue the prior category's full stock
+        # breakdown (both side counts) rather than binding to one product or counting the
+        # whole catalog. Runs before the global-aggregate branch so "count … side" lands here.
+        if (re.search(r"\bsides?\b", ql) or re.search(r"\bagain\b", ql)) and re.search(
+                r"\b(available|in[\s-]?stock|sold[\s-]?out|out of stock|unavailable|oos|count|breakdown|split)\b", ql):
+            own = [w for w in _content_tokens(q) if w not in _AGG_WORDS and w not in
+                   {"side", "sides", "again", "sold", "out", "stock", "oos", "breakdown",
+                    "split", "unavailable"}]
+            if not own:
+                subj = _prior_subject(history)
+                if subj:
+                    return f"{subj} stock breakdown"
+        # "unavailable ones from that category", "available in this collection", "those in
+        # the range" — a back-reference to the prior turn's category as a whole. Re-issue
+        # the prior subject with this turn's stock/price filter instead of treating the bare
+        # filter word ("unavailable") as a self-contained subject (which over-lists junk).
+        if re.search(r"\b(?:that|this|the|those|these)\s+"
+                     r"(?:categor(?:y|ies)|collection|range|lineup|group|set|list)\b", ql):
+            subj = _prior_subject(history)
+            if subj:
+                if re.search(r"\b(unavailable|sold[\s-]?out|out of stock|not available)\b", ql):
+                    return f"unavailable {subj}"
+                if re.search(r"\b(available|in[\s-]?stock|buyable)\b", ql):
+                    return f"available {subj}"
+                if re.search(r"\b(cheapest|sasta|sasti|lowest|least expensive)\b", ql):
+                    return f"cheapest {subj}"
+                if re.search(r"\b(priciest|most expensive|mehng|highest|dearest)\b", ql):
+                    return f"most expensive {subj}"
+                return subj
         # A global aggregate is self-contained — never bind it to a single prior item.
         if _GLOBAL_AGG.search(ql):
             # ...UNLESS it is qualified by a set-reference ("count THEM", "how many of

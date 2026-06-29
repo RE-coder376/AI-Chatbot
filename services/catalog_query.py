@@ -497,11 +497,14 @@ def parse(q: str) -> Spec:
     # sides reported side-by-side — a split count, not one filtered subset. Computed
     # up front because "available vs unavailable" must NOT read as a product
     # comparison (the "vs") nor as a single-product stock lookup.
+    # in[\s-]?stock accepts the hyphen form ("in-stock and sold-out"); connectors admit
+    # "/" so a slash-joined "total/in-stock/OOS" reads as both sides; "oos" is a sold-out
+    # token customers abbreviate to.
     both_states = bool(re.search(
-        r"\b(?:available|in\s+stock)\b[^.?!]{0,40}\b(?:and|or|vs\.?|versus|&|aur|ya)\b[^.?!]{0,40}"
-        r"\b(?:sold[\s-]?out|out\s+of\s+stock|unavailable)\b"
-        r"|\b(?:sold[\s-]?out|out\s+of\s+stock|unavailable)\b[^.?!]{0,40}\b(?:and|or|vs\.?|versus|&|aur|ya)\b"
-        r"[^.?!]{0,40}\b(?:available|in\s+stock)\b", ql))
+        r"\b(?:available|in[\s-]?stock)\b[^.?!]{0,40}(?:\b(?:and|or|vs\.?|versus|aur|ya)\b|[&/])[^.?!]{0,40}"
+        r"\b(?:sold[\s-]?out|out\s+of\s+stock|unavailable|oos)\b"
+        r"|\b(?:sold[\s-]?out|out\s+of\s+stock|unavailable|oos)\b[^.?!]{0,40}(?:\b(?:and|or|vs\.?|versus|aur|ya)\b|[&/])"
+        r"[^.?!]{0,40}\b(?:available|in[\s-]?stock)\b", ql))
     # A "split" / "stock split" / "availability breakdown|summary" request asks for BOTH
     # stock sides reported together, even when neither state is spelled out ("Action
     # figures stock split summary", Roman-Urdu "bikes available aur unavailable split
@@ -510,8 +513,15 @@ def parse(q: str) -> Spec:
     split_report = bool(re.search(
         r"\b(?:stock|availability|available)\b[^.?!]{0,25}\bsplit\b"
         r"|\bsplit\b[^.?!]{0,25}\b(?:summary|breakdown|count|batao|bata\w*|bta\w*)\b"
-        r"|\b(?:availability|stock)\s+(?:split|breakdown|summary)\b", ql))
-    both_states = both_states or split_report
+        # "stock health"/"availability breakdown"/"stock status breakdown" = report BOTH
+        # stock sides for the category, even with neither state token spelled out.
+        r"|\b(?:availability|stock)\s+(?:split|breakdown|summary|health|status\s+breakdown)\b", ql))
+    # "both sides"/"each side"/"dono side" beside an availability/count/stock cue is the
+    # idiom for the two stock states together ("availability count both sides") — no
+    # explicit available+sold tokens needed.
+    both_sides = bool(re.search(r"\b(?:both|each|dono)\s+sides?\b", ql)
+                      and re.search(r"\b(?:availab\w*|stock|count|sold)\b", ql))
+    both_states = both_states or split_report or both_sides
     # Roman-Urdu / English "how many available, how many sold" — a count word repeated
     # before each stock state ("kitne available kitne sold", "how many in stock how many
     # out") asks for BOTH sides as counts, but carries no and/or/vs connector so the
@@ -1122,6 +1132,10 @@ def _extract_names(q: str) -> list[str]:
     parts = [re.sub(r"(?i)\s+(?:price|prices|cost|costs|stock|stock\s+status|availability)"
                     r"(?:\s+(?:and|&|,|or)\s+(?:price|prices|cost|costs|stock|availability|difference))*"
                     r"(?:\s+difference)?\s*$", "", p) for p in parts]
+    # trailing "stock compare"/"comparison"/"compared" the connector-split leaves on the
+    # last name ("Lamborghini URUS stock compare") — the dimension strip above stops at
+    # "stock" because "compare" follows it, so the verb survives and breaks resolution.
+    parts = [re.sub(r"(?i)\s+(?:stock|price|cost|availability)?\s*(?:compare|comparison|compared)\s*[?.!]*$", "", p) for p in parts]
     # trailing question/compare clause a name carries when the tail wasn't split off
     # ("Mini Can RC Drift Cars: which can I buy?", "Iron Man action figure — which costs more")
     parts = [re.sub(r"(?i)\s*[:—–-]\s*(?:which|what|who|can|should|is|are|do(?:es)?|will|how)\b.*$", "", p) for p in parts]
@@ -1137,6 +1151,11 @@ def _extract_names(q: str) -> list[str]:
     # the bare product resolves. The "X to Y" range and "by price" phrasings never occur
     # inside a real product title, so genuine names are untouched.
     parts = [re.sub(r"(?i)\s+(?:cheap\w*|low\w*|least|most|high\w*|expensive|priciest|dearest)\s+to\s+\w+.*$", "", p) for p in parts]
+    # trailing "<pole> first/last" the connector-split leaves on the LAST name
+    # ("Ferrari Laferrari CHEAPEST FIRST", "M8 PRICIEST LAST") — strip the ranking
+    # direction so the bare product resolves. Pole words never occur in a real title.
+    parts = [re.sub(r"(?i)\s+(?:cheap\w*|low\w*|least|most\s+expensive|priciest|dearest|"
+                    r"high\w*|expensive|pric\w*|costl\w*)\s+(?:priced\s+)?(?:first|last)\b.*$", "", p) for p in parts]
     parts = [re.sub(r"(?i)\s+by\s+(?:price|prices|cost|costs|stock|availability)\b.*$", "", p) for p in parts]
     parts = [re.sub(r"(?i)\s+(?:ascending|descending|increasing|decreasing)\b.*$", "", p) for p in parts]
     parts = [re.sub(r"(?i)\s+(?:sort|order|rank|arrange)(?:\s+(?:kar\w*|kr\w*|kren|karen|do))?\s*[?.!]*$", "", p) for p in parts]
