@@ -1423,6 +1423,72 @@ async def _live_site_query_rescue_context(q: str, cfg: dict, max_urls: int = 3, 
     except Exception:
         return ("", [])
 
+
+# Shipping/delivery/returns intent that the canonical store policy pages answer. Fired
+# even when retrieval found *some* loosely-matching chunk (a refund chunk mentions the
+# word "delivery", so _context_addresses_query passes and the generic rescue is skipped —
+# yet the actual delivery/shipping terms live on a separate /policies/ page the crawl
+# may have missed). Shopify always serves these at fixed slugs, so the fetch is universal.
+_POLICY_INTENT_RE = re.compile(
+    r"\b(deliver(?:y|ed|ing)?|shipping|ship|dispatch|courier|postage|how\s+long|"
+    r"kitna\s+(?:time|din)|kab\s+tak|return|returns|refund|exchang\w*|warranty|guarantee|"
+    r"replace\w*|cancel\w*)\b", re.I)
+_SHOPIFY_POLICY_SLUGS = {
+    "shipping": ["shipping-policy", "terms-of-service"],
+    "returns": ["refund-policy", "terms-of-service"],
+}
+
+
+async def _live_policy_pages_context(q: str, cfg: dict, max_chars: int = 4000) -> tuple[str, list[str]]:
+    """Fetch the store's canonical Shopify /policies/* pages for a policy-intent query.
+    Universal (every Shopify store uses these slugs); returns clean prose so the LLM can
+    state the real shipping/delivery/return terms instead of abstaining."""
+    try:
+        base = str((cfg or {}).get("crawl_url") or "").strip().rstrip("/")
+        ql = str(q or "").lower()
+        if not base or not _POLICY_INTENT_RE.search(ql):
+            return ("", [])
+        wants_ship = bool(re.search(r"\b(deliver\w*|shipping|ship|dispatch|courier|postage|how\s+long|kitna|kab\s+tak)\b", ql))
+        wants_ret = bool(re.search(r"\b(return|returns|refund|exchang\w*|warranty|guarantee|replace\w*|cancel\w*)\b", ql))
+        slugs = []
+        if wants_ship:
+            slugs += _SHOPIFY_POLICY_SLUGS["shipping"]
+        if wants_ret:
+            slugs += _SHOPIFY_POLICY_SLUGS["returns"]
+        slugs = list(dict.fromkeys(slugs)) or ["terms-of-service", "refund-policy"]
+        import httpx
+        chunks, picked = [], []
+        async with httpx.AsyncClient(timeout=8, follow_redirects=True, headers={"User-Agent": "Mozilla/5.0"}) as client:
+            for slug in slugs[:3]:
+                u = f"{base}/policies/{slug}"
+                try:
+                    r = await client.get(u)
+                    if r.status_code != 200:
+                        continue
+                    from services.page_extract import extract_page_text as _ept_pol
+                    txt = str((_ept_pol(r.text or "", u) or {}).get("text") or "")
+                    if len(txt) < 80:
+                        from bs4 import BeautifulSoup as _BS
+                        soup = _BS(r.text or "", "html.parser")
+                        for bad in soup(["script", "style", "noscript", "nav", "header", "footer"]):
+                            bad.decompose()
+                        m = soup.find("main") or soup.body or soup
+                        txt = m.get_text("\n", strip=True) if m else ""
+                    # Drop chrome lines (currency menu, cart, collection nav) — keep prose.
+                    lines = [ln.strip() for ln in re.split(r"\n+", txt) if len(ln.strip()) >= 30
+                             and not re.search(r"(?i)shopping cart|add to cart|us dollar|free shipping on all", ln)]
+                    body = "\n".join(lines)[:1800]
+                    if len(body) >= 80:
+                        chunks.append(f"[Store policy — {slug.replace('-', ' ')}]\n{body}")
+                        picked.append(u)
+                except Exception:
+                    continue
+        if not chunks:
+            return ("", [])
+        return ("\n\n".join(chunks)[:max_chars], picked)
+    except Exception:
+        return ("", [])
+
 FEEDBACK_FILE = FEEDBACK_FILE_GLOBAL  # alias — use _feedback_file() for per-DB access
 
 def _topics_phrase(cfg, default: str = "our products and services") -> str:
@@ -1575,6 +1641,17 @@ ANSWER TIER FRAMEWORK — EXECUTE THIS DECISION LOGIC BEFORE EVERY RESPONSE:
   ✗ The fact is an estimate, average, or varies significantly by product
   ✗ Less than 70% confidence
   ✗ The question could be answered very differently for {biz_name} specifically
+
+▸ POLICY RULE — when the KB context above contains a stated store policy (returns,
+  refunds, exchanges, shipping, delivery, payment, warranty) that addresses the
+  question, you MUST answer from that policy text (Tier 1) — do NOT fall to Tier 3.
+  Map the customer's wording onto the policy: e.g. "used / opened item" → the policy's
+  "only new, unused items" / "non-returnable used items" clause; "how long to deliver"
+  → the stated delivery/shipping terms. State the actual rule (conditions, time window,
+  eligibility) verbatim from KB. If the policy text genuinely does not state the
+  specific detail asked (e.g. no exact delivery time is published), say so plainly and
+  relay what the policy DOES say (e.g. "delivery times may vary by location") — never
+  invent an unstated timeframe, and never abstain when the policy already answers it.
 
 ▸ TIER 3 — POLITE IDK (use when Tier 1 and Tier 2 both fail):
   Action: "I don't have specific details about [exact topic] in my knowledge base right now. I can help with [related in-scope topic] — would that be useful?"
@@ -5114,6 +5191,25 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
                 _trace_event(workflow_trace, "retrieval_live_rescue", rescued=True, source_count=len(_resc_src or []), context_chars=len(_resc_ctx or ""))
                 _trace_decision(workflow_debug, "live_rescue_used", True)
                 _trace_decision(workflow_debug, "context_addresses_query_after_live_rescue", bool(context_addresses_query))
+        except Exception:
+            pass
+
+    # Policy-intent (delivery/shipping/returns/refund) prepend: the real terms often
+    # live on a /policies/ page the crawl missed, while a different chunk (a refund
+    # snippet, a product mentioning "delivery") makes context_addresses_query pass —
+    # so the generic rescue above is skipped and the LLM abstains on the specifics.
+    # Fetch the canonical Shopify policy pages and PREPEND them so the answer states
+    # the real rule. Fires only on policy intent → negligible latency elsewhere.
+    if not _is_api_only and _POLICY_INTENT_RE.search(str(q or "").lower()):
+        try:
+            _pol_ctx, _pol_src = await _live_policy_pages_context(q, cfg)
+            if _pol_ctx and _pol_ctx[:120] not in (context or ""):
+                context = _pol_ctx + "\n\n" + (context or "")
+                doc_count = max(int(doc_count or 0), 1)
+                if _pol_src:
+                    sources = list(dict.fromkeys((sources or []) + _pol_src))[:8]
+                context_addresses_query = True
+                _trace_decision(workflow_debug, "policy_pages_injected", True)
         except Exception:
             pass
 

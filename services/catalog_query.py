@@ -482,10 +482,20 @@ def parse(q: str) -> Spec:
     # up front because "available vs unavailable" must NOT read as a product
     # comparison (the "vs") nor as a single-product stock lookup.
     both_states = bool(re.search(
-        r"\b(?:available|in\s+stock)\b[^.?!]{0,40}\b(?:and|or|vs\.?|versus|&)\b[^.?!]{0,40}"
+        r"\b(?:available|in\s+stock)\b[^.?!]{0,40}\b(?:and|or|vs\.?|versus|&|aur|ya)\b[^.?!]{0,40}"
         r"\b(?:sold[\s-]?out|out\s+of\s+stock|unavailable)\b"
-        r"|\b(?:sold[\s-]?out|out\s+of\s+stock|unavailable)\b[^.?!]{0,40}\b(?:and|or|vs\.?|versus|&)\b"
+        r"|\b(?:sold[\s-]?out|out\s+of\s+stock|unavailable)\b[^.?!]{0,40}\b(?:and|or|vs\.?|versus|&|aur|ya)\b"
         r"[^.?!]{0,40}\b(?:available|in\s+stock)\b", ql))
+    # A "split" / "stock split" / "availability breakdown|summary" request asks for BOTH
+    # stock sides reported together, even when neither state is spelled out ("Action
+    # figures stock split summary", Roman-Urdu "bikes available aur unavailable split
+    # batao"). Treat as a split count so it routes deterministically to count_split
+    # instead of leaking "split" as a product anchor and dumping a one-sided list.
+    split_report = bool(re.search(
+        r"\b(?:stock|availability|available)\b[^.?!]{0,25}\bsplit\b"
+        r"|\bsplit\b[^.?!]{0,25}\b(?:summary|breakdown|count|batao|bata\w*|bta\w*)\b"
+        r"|\b(?:availability|stock)\s+(?:split|breakdown|summary)\b", ql))
+    both_states = both_states or split_report
 
     # Comparisons ("compare A and B", "X vs Y") are NOT a single structured
     # aggregation — they need the retrieval fan-out (which matches each named
@@ -689,6 +699,11 @@ def parse(q: str) -> Spec:
         agg = "list"
     elif priceof_q:
         agg = "list"
+    elif both_states:
+        # A split request with no list/count verb ("Action figures stock split
+        # summary?") still wants the both-sides count — route it here rather than
+        # falling through to RAG (which dumped a one-sided list).
+        agg = "count_split"
     else:
         return Spec("none", structured=False)
 
@@ -726,6 +741,14 @@ def parse(q: str) -> Spec:
     else:
         anchors = [w for w in re.findall(r"[a-z0-9]{2,}", ql)
                    if w not in _STOP and w not in _price_tokens][:8]
+    # In a split count the only anchor is the CATEGORY; the stock-state/report words
+    # that voice the split ("split", "stock", "available", Roman-Urdu "aur"/"mein"/
+    # "batao") must not survive as product anchors or they zero the all-anchor _hit.
+    if agg == "count_split":
+        _split_report_words = {"split", "stock", "available", "availability", "unavailable",
+                               "summary", "breakdown", "overview", "status", "aur", "ya",
+                               "mein", "main", "batao", "bata", "btao", "bta", "dono", "vs", "versus"}
+        anchors = [a for a in anchors if a not in _split_report_words]
 
     # A bare "list / what products do you sell" with no category and no price
     # bound is an open-ended browse — leave that to normal RAG, don't dump a
