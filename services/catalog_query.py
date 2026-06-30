@@ -530,7 +530,7 @@ def parse(q: str) -> Spec:
              r"khatam|khtm|ghayab|ghaib)\b")
     _CONN = r"(?:\b(?:and|or|vs\.?|versus|aur|ya)\b|[&/])"
     _CNT = r"\b(?:count|counts|how\s+many|number\s+of|numbers?|tally|total|kitne|kitni|kitny|kitna)\b"
-    _SPLITW = r"\b(?:split|divided|breakdown|ratio|report)\b"
+    _SPLITW = r"\b(?:split|divided|breakdown|break[\s-]?up|breakup|ratio|report)\b"
     _two_conn = bool(re.search(_AVAIL + r"[^.?!]{0,40}" + _CONN + r"[^.?!]{0,40}" + _SOLD, ql)
                      or re.search(_SOLD + r"[^.?!]{0,40}" + _CONN + r"[^.?!]{0,40}" + _AVAIL, ql))
     _two_adj = bool(re.search(_AVAIL + r"[^.?!]{0,40}" + _SOLD, ql)
@@ -836,7 +836,16 @@ def parse(q: str) -> Spec:
                                "kaise", "kaisa", "kaisi", "hua", "hui", "bata", "btao", "bata",
                                # Roman-Urdu stock-state synonyms now admitted to the detector
                                "haazir", "hazir", "ghayab", "ghaib", "mojood", "maujood",
-                               "khatam", "khtm", "finish", "finished", "headcount", "ready"}
+                               "khatam", "khtm", "finish", "finished", "headcount", "ready",
+                               # english-creative + Roman-Urdu availability idioms the detector
+                               # now admits — strip every token so only the CATEGORY survives:
+                               # "up for grabs", "ready to ship", "in/on hand", "back-ordered",
+                               # "out the door", "done", "dead", "sellable headcount", inventory,
+                               # "mil sakte / milega", "nahi".
+                               "up", "for", "grabs", "ship", "hand", "on", "to", "the", "door",
+                               "back", "order", "ordered", "done", "dead", "inventory", "breakup",
+                               "mil", "milt", "milta", "milte", "milti", "mileg", "milega",
+                               "milegi", "milenge", "sakta", "sakte", "sakti", "nahi", "nai"}
         anchors = [a for a in anchors if a not in _split_report_words]
 
     # A bare "list / what products do you sell" with no category and no price
