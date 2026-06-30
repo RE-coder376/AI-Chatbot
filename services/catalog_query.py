@@ -1608,7 +1608,9 @@ def _is_code_mixed(q: str) -> bool:
 
 _AVAIL_MARK = re.compile(r"\b(available|in[\s-]?stock|stock\s+mein|mileg[ai]|mil\s+jay\w*|buyable|in\s+stock)\b", re.I)
 _OOS_MARK = re.compile(r"\b(sold[\s-]?out|out\s+of\s+stock|unavailable|stock\s+mein\s+nahi|nahi\s+hai)\b", re.I)
-_BOTH_MARK = re.compile(r"\b(dono|both|available\s+(?:and|aur|or|ya|&|vs)\s+(?:sold|out|unavailable))\b", re.I)
+_BOTH_MARK = re.compile(r"\b(dono|both|available\s+(?:and|aur|or|ya|&|vs)\s+(?:sold|out|unavailable))\b"
+                        # Roman-Urdu "kitne bik gaye … kitne bache" = sold vs remaining split
+                        r"|bik\w*[^.?!]{0,30}bach\w*|bach\w*[^.?!]{0,30}bik\w*", re.I)
 _CMP_MARK = re.compile(r"\b(which|konsa|kaunsa|kon?sa|kaun?sa|kis|cheaper|sasta|sasti|"
                        r"mehng[ai]|zyada|expensive|pricier|dearer|better|costs?\s+(?:more|less))\b", re.I)
 _MORE_MARK = re.compile(r"\b(mehng[ai]|zyada|expensive|pricier|dearer|costs?\s+more|higher)\b", re.I)
@@ -1805,6 +1807,12 @@ def answer_catalog_query(q: str, db, cfg: dict | None = None, max_list: int = 12
         # code-mixed "BMW S1000RR ya Kawasaki H2R available kaunsi?" set _force_llm and
         # the non-deterministic router sometimes replaced both names with one → flake.
         _det_mp = mp if (isinstance(mp, dict) and len(mp.get("names") or []) >= 2) else None
+        # Same principle for a confident deterministic count_split (a category +
+        # both-stock-states ask, incl. Roman-Urdu "kitne bik gaye kitne bache"):
+        # the small router routinely drops the both-states dimension on code-mixed
+        # input → keep the regex spec rather than let the router downgrade it.
+        _det_split = spec if (getattr(spec, "structured", False)
+                              and spec.agg == "count_split" and spec.anchors) else None
         rows = None
         _from_router = False
         # Make the LLM understanding layer PRIMARY when the question is code-mixed
@@ -1839,9 +1847,10 @@ def answer_catalog_query(q: str, db, cfg: dict | None = None, max_list: int = 12
             if plan and _k not in (None, "other") and not (_k == "browse" and not _has_bound):
                 _mp2, _spec2 = _plan_to_specs(plan)
                 if _mp2 is not None or (_spec2 is not None and getattr(_spec2, "structured", False)):
-                    # Keep the confident deterministic multi-product parse if present;
-                    # only take the router's mp when the deterministic one was absent.
-                    mp, spec = (_det_mp if _det_mp is not None else _mp2), _spec2
+                    # Keep the confident deterministic multi-product parse / count_split
+                    # if present; only take the router's when the deterministic one was absent.
+                    mp = _det_mp if _det_mp is not None else _mp2
+                    spec = _det_split if _det_split is not None else _spec2
                     _from_router = True
             # If the LLM produced nothing usable, fall back to the regex parse when it
             # had one (so a partial English structure still answers); else hand to RAG.
