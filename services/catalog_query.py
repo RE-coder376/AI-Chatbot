@@ -608,7 +608,7 @@ def parse(q: str) -> Spec:
     # stock", "can't be bought") — without these "which figures are NOT available"
     # read as an IN-stock filter and returned the available ones (inverted answer).
     out_of_stock = bool(re.search(
-        r"\b(out\s*of\s*stock|sold\s*out|unavailable|"
+        r"\b(out[\s-]*of[\s-]*stock|sold[\s-]*out|unavailable|"
         r"not\s+(?:available|in\s+stock)|n'?t\s+(?:available|in\s+stock)|"
         r"no\s+longer\s+(?:available|in\s+stock|sold)|"
         r"can'?t\s+be\s+(?:bought|purchased|ordered)|cannot\s+be\s+(?:bought|purchased|ordered)|"
