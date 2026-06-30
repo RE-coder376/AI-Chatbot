@@ -85,9 +85,32 @@ _SUBJ_DROP = {"list", "lists", "listing", "please", "available", "unavailable", 
               # both sides") — never part of the category subject being recovered.
               "total", "plus", "numbers", "number", "count", "split", "health", "both",
               "side", "sides", "again", "each", "combined", "minus",
+              # stock-state / projection vocabulary a re-projection follow-up wraps the
+              # category in ("live vs gone tally", "in/out tally") — never the subject.
+              "live", "gone", "tally", "collection", "bucket", "repeat", "sellable",
+              "names", "name", "lineup", "range", "versus", "overview", "summary", "ratio",
               # Roman-Urdu framing words to strip when recovering the prior category
               "aur", "wala", "wale", "wali", "mein", "ka", "ki", "ke", "dono", "batao",
-              "bata", "dikhao", "abhi", "stockmein", "summary", "short"}
+              "bata", "dikhao", "abhi", "stockmein", "short"}
+# projection vocabulary: stock-state + count + continuation words that, when they are the
+# ONLY content tokens of a follow-up, mean "re-project the prior turn's subject through
+# this stock/count lens" rather than naming a new product ("gone bucket names", "repeat
+# live count only", "sold out count").
+_PROJ = {"gone", "live", "sellable", "buyable", "available", "unavailable", "sold",
+         "soldout", "oos", "instock", "stock", "bucket", "side", "sides", "repeat",
+         "names", "name", "count", "counts", "total", "tally", "numbers", "number",
+         "list", "listing", "only", "again", "sort", "breakdown", "split", "both",
+         "ratio", "status", "summary", "overview"}
+# explicit set-reference ("those two", "that trio", "same three") → operate on the prior
+# turn's RESULT SET, not a single antecedent.
+_SETREF_RE = re.compile(r"\b(?:those|these|that|the|same|both)\s+"
+                        r"(two|three|four|five|2|3|4|5|trio|pair|duo|set|lot|group)\b"
+                        r"|\b(trio|pair|duo)\b", re.I)
+_NUMWORD = {"two": 2, "three": 3, "four": 4, "five": 5, "2": 2, "3": 3, "4": 4, "5": 5,
+            "pair": 2, "duo": 2, "trio": 3, "both": 2}
+_SUPER_LO = re.compile(r"\b(cheapest|lowest|sasta|sasti|least\s+expensive)\b", re.I)
+_SUPER_HI = re.compile(r"\b(highest|priciest|costliest|dearest|most\s+expensive|mehng[ai])\b"
+                       r"|\bhighest\s+price\b", re.I)
 _QUOTED = re.compile(r'["“”]([^"“”]{2,90})["“”]')
 # logistics/policy prose that an answer-name pattern can catch but is NEVER a product
 # the customer's pronoun refers to ("is it in stock?" must not bind to "return policy").
@@ -241,6 +264,44 @@ def _prior_subject(history: list) -> str:
     return ""
 
 
+def _history_products(history: list) -> list[dict]:
+    """Parse the most-recent assistant turn into [{name, price, oos}] records so a
+    follow-up that operates on the prior RESULT SET ("the cheaper one", "those two",
+    "the available product") can bind/select directly. Handles the answer shapes the
+    bot (and the eval's synthetic history) produce: 'Name Rs.X', 'Name is Rs.X',
+    'Name at Rs.X', bare 'Name 3650', and 'Both A and B are out of stock'."""
+    for m in reversed(history or []):
+        if m.get("role") != "assistant":
+            continue
+        text = str(m.get("content") or "")
+        mb = re.match(r"\s*both\s+(.+?)\s+and\s+(.+?)\s+(?:are|is)\s+(.+)", text, re.I)
+        if mb:
+            tail = mb.group(3)
+            oos = bool(re.search(r"out\s+of\s+stock|sold[\s-]?out|unavailable", tail, re.I))
+            av = bool(re.search(r"available|in[\s-]?stock", tail, re.I))
+            st = True if oos else (False if av else None)
+            return [{"name": mb.group(1).strip(" .?"), "price": None, "oos": st},
+                    {"name": mb.group(2).strip(" .?"), "price": None, "oos": st}]
+        prods: list[dict] = []
+        for frag in re.split(r"(?<=[A-Za-z0-9])[.;,]\s|\s+and\s+", text):
+            frag = frag.strip()
+            nm = re.match(r"([A-Z][A-Za-z0-9][A-Za-z0-9 :/\-]*?)\s+(?:is\b|are\b|at\b|—|-\s|Rs|PKR|[$€£]|\d)", frag)
+            if not nm:
+                continue
+            name = re.sub(r"(?i)^(?:only|both|the|a|an)\s+", "", nm.group(1)).strip(" -:")
+            if len(name) < 2 or name.lower() in ("the", "both", "only"):
+                continue
+            pm = re.search(r"(?:Rs\.?|PKR|[$€£])\s*([\d,]{3,})|\b(\d{3,6})\b", frag)
+            price = int((pm.group(1) or pm.group(2)).replace(",", "")) if pm else None
+            oos = bool(re.search(r"out\s+of\s+stock|sold[\s-]?out|unavailable", frag, re.I))
+            av = bool(re.search(r"\bavailable\b|in[\s-]?stock", frag, re.I))
+            prods.append({"name": name, "price": price,
+                          "oos": True if oos else (False if av else None)})
+        if prods:
+            return prods
+    return []
+
+
 def resolve_followup(q: str, history: list) -> str:
     """Return a self-contained version of q when it's a bare follow-up referencing a
     prior product; otherwise return q unchanged."""
@@ -279,6 +340,76 @@ def resolve_followup(q: str, history: list) -> str:
                 if re.search(r"\b(priciest|most expensive|mehng|highest|dearest)\b", ql):
                     return f"most expensive {subj}"
                 return subj
+        # SET-REFERENCE: "those two / that trio / same three" operates on the prior
+        # turn's RESULT SET — bind the N named antecedents and apply this turn's intent
+        # (order / superlative / stock-filter). Runs before _GLOBAL_AGG so "highest price
+        # in that trio" binds the trio instead of ranking the whole catalog.
+        sm = _SETREF_RE.search(ql)
+        if sm:
+            prods = _history_products(history)
+            if len(prods) >= 2:
+                nword = next((g for g in sm.groups() if g and g.lower() in _NUMWORD), None)
+                n = _NUMWORD.get((nword or "").lower())
+                names = [p["name"] for p in (prods[:n] if n else prods)]
+                if len(names) >= 2:
+                    joined_and = " and ".join(f'"{x}"' for x in names)
+                    joined_or = " or ".join(f'"{x}"' for x in names)
+                    if _SUPER_HI.search(ql) or re.search(r"\bhighest\b|\bmost\b", ql):
+                        return f"sort {joined_and} by price descending"
+                    if _SUPER_LO.search(ql):
+                        return f"sort {joined_and} by price ascending"
+                    if re.search(r"\b(buyable|available|in[\s-]?stock|sold[\s-]?out|unavailable|stock)\b", ql):
+                        return f"which of {joined_or} is in stock?"
+                    if re.search(r"\b(sort|order|rank|arrange|again|same|list)\b", ql):
+                        return f"sort {joined_and} by price ascending"
+                    if _PRICE.search(ql):
+                        return f"total price of {' + '.join(chr(34)+x+chr(34) for x in names)}"
+        # SELECT-WITHIN-SET: "the one that is available", "the cheaper option — in stock?"
+        # picks ONE product from the prior set by a stock/price qualifier, then asks this
+        # turn's dimension (price or stock) about it.
+        _sel_av = bool(re.search(r"\b(available|in[\s-]?stock|buyable|sellable)\b", ql))
+        _sel_oos = bool(re.search(r"\b(sold[\s-]?out|out\s+of\s+stock|unavailable|gone)\b", ql))
+        _sel_lo = bool(re.search(r"\b(cheaper|cheapest|lowest|sasta|sasti|least\s+expensive)\b", ql))
+        _sel_hi = bool(re.search(r"\b(pricier|priciest|most\s+expensive|highest|dearest|mehng[ai])\b", ql))
+        if re.search(r"\b(option|one|product|item|model|wala|wali)\b", ql) \
+                and (_sel_av or _sel_oos or _sel_lo or _sel_hi) and not sm:
+            prods = _history_products(history)
+            priced = [p for p in prods if p["price"] is not None]
+            chosen = None
+            if _sel_lo and priced:
+                chosen = min(priced, key=lambda p: p["price"])
+            elif _sel_hi and priced:
+                chosen = max(priced, key=lambda p: p["price"])
+            elif _sel_av:
+                chosen = next((p for p in prods if p["oos"] is False), None)
+            elif _sel_oos:
+                chosen = next((p for p in prods if p["oos"] is True), None)
+            if chosen:
+                if re.search(r"\b(price|cost|how\s+much|kitn\w*|rate)\b", ql):
+                    return f'how much is "{chosen["name"]}"?'
+                return f'is "{chosen["name"]}" in stock?'
+        # PROJECTION-ONLY: every content token is stock-state/count/continuation vocab
+        # ("gone bucket names", "repeat live count only", "sold out count") → it carries
+        # NO product of its own; re-project the prior turn's subject through this lens.
+        # Skipped when an explicit superlative is present (let _GLOBAL_AGG own those).
+        if not re.search(r"\b(cheapest|priciest|costliest|dearest|most\s+expensive|"
+                         r"least\s+expensive|lowest[\s-]?priced?|highest[\s-]?priced?)\b", ql):
+            _ctoks = _content_tokens(q)
+            if _ctoks and all(t in _PROJ for t in _ctoks):
+                subj = _prior_subject(history)
+                if subj:
+                    _oos = re.search(r"\b(gone|sold|soldout|out|unavailable|oos)\b", ql)
+                    _av = (re.search(r"\b(live|sellable|available|buyable|instock)\b", ql)
+                           or re.search(r"in[\s-]?stock", ql))
+                    _named = re.search(r"\b(name|names|which|list|show)\b", ql)
+                    _cnt = re.search(r"\b(count|tally|number|numbers|how\s+many|kitne|kitni)\b", ql)
+                    if _oos and _named:
+                        return f"unavailable {subj}"
+                    if _av and _named:
+                        return f"available {subj}"
+                    if _oos or _av or _cnt:
+                        return f"{subj} stock breakdown"
+                    return subj
         # A global aggregate is self-contained — never bind it to a single prior item.
         if _GLOBAL_AGG.search(ql):
             # ...UNLESS it is qualified by a set-reference ("count THEM", "how many of
