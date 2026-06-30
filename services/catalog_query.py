@@ -138,6 +138,9 @@ _STOP = {
     "kitny", "kitne", "kitnay", "wala", "wali", "wale", "abhi", "karo", "batao", "bata",
     "bta", "dedo", "dikhao", "dikha", "dikhaiye", "acha", "achha", "theek", "yaar", "dono",
     "rakhte", "rakha", "nahi", "nai", "nhi", "ko", "ki", "ka", "ke", "se",
+    # Roman-Urdu "including / combined with" connectives — "unavailable MILA KAR highest
+    # price" = "highest price INCLUDING unavailable"; glue, never a product name.
+    "mila", "kar", "milakar", "milakr", "samet", "sameth", "saath", "sath",
 }
 
 _NUM = r"(?:rs\.?\s*|pkr\s*|[\$£€])?\s*([\d][\d,]*(?:\.\d{1,2})?)"
@@ -635,6 +638,10 @@ def parse(q: str) -> Spec:
         # "full availability list", "stock status (list)", "availability breakdown/
         # rundown/status" = report the WHOLE category with each item's status, not an
         # in/out filter (these read "available" yet want the sold-out ones shown too).
+        # Roman-Urdu "including unavailable": "unavailable mila kar / samet" or
+        # "mila kar … sold out" = rank/list ACROSS the sold-out ones, not filter to them.
+        r"|\b(?:unavailable|sold[\s-]?out|out\s+of\s+stock|oos)\b[^.?!]{0,12}\b(?:bhi\s+)?(?:mila\s*kar|milakr|samet|sameth)\b"
+        r"|\b(?:mila\s*kar|milakr|samet|sameth)\b[^.?!]{0,12}\b(?:unavailable|sold[\s-]?out|out\s+of\s+stock)\b"
         r"|\bfull\s+availabilit\w*"
         r"|\bstock\s+status\b"
         r"|\bavailabilit\w*\s+(?:list|status|breakdown|overview|rundown)\b"
