@@ -1814,12 +1814,16 @@ def answer_catalog_query(q: str, db, cfg: dict | None = None, max_list: int = 12
         # code-mixed "BMW S1000RR ya Kawasaki H2R available kaunsi?" set _force_llm and
         # the non-deterministic router sometimes replaced both names with one → flake.
         _det_mp = mp if (isinstance(mp, dict) and len(mp.get("names") or []) >= 2) else None
-        # Same principle for a confident deterministic count_split (a category +
-        # both-stock-states ask, incl. Roman-Urdu "kitne bik gaye kitne bache"):
-        # the small router routinely drops the both-states dimension on code-mixed
-        # input → keep the regex spec rather than let the router downgrade it.
-        _det_split = spec if (getattr(spec, "structured", False)
-                              and spec.agg == "count_split" and spec.anchors) else None
+        # Same principle for a confident deterministic structured spec the small router
+        # routinely degrades on code-mixed input: a count_split (both-stock-states, incl.
+        # Roman-Urdu "kitne bik gaye kitne bache"), OR a min/max that carries a STOCK
+        # dimension (include_oos / out_of_stock — e.g. "clearance mein unavailable mila
+        # kar highest price"). The router drops that dimension and re-ranks the whole
+        # catalog, so keep the regex spec when it confidently resolved one.
+        _det_split = spec if (getattr(spec, "structured", False) and spec.anchors and (
+            spec.agg == "count_split"
+            or (spec.agg in ("min", "max")
+                and (getattr(spec, "include_oos", False) or spec.out_of_stock)))) else None
         rows = None
         _from_router = False
         # Make the LLM understanding layer PRIMARY when the question is code-mixed
