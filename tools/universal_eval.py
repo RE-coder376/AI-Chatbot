@@ -245,6 +245,16 @@ def main():
     scored = [r for r in results if r.get("ok") is not None]
     passed = sum(1 for r in scored if r["ok"])
     pct = round(passed / len(scored) * 100, 2) if scored else 0
+    # Freshness verdict: a high abstention rate ("we don't carry X") on count/list
+    # questions means the ingested catalog is STALE/UNDER-INGESTED vs the live store —
+    # a re-ingest problem, NOT a bot-logic failure. Flag it so 0% isn't misread.
+    _abstain = re.compile(r"don'?t (currently )?carry|couldn'?t find|no .* in our catalog", re.I)
+    abst = sum(1 for r in scored if _abstain.search(str(r.get("answer", ""))))
+    stale = scored and abst / len(scored) >= 0.5
+    if stale:
+        print(f"\n⚠ DB LIKELY STALE / UNDER-INGESTED: {abst}/{len(scored)} answers abstained "
+              f"('we don't carry…'). The ingested catalog doesn't match the live store — "
+              f"RE-INGEST this tenant before trusting the score.")
     by_cls = {}
     for r in scored:
         d = by_cls.setdefault(r["cls"], [0, 0])
@@ -252,7 +262,8 @@ def main():
         d[0] += 1 if r["ok"] else 0
     out = f"UNIVERSAL_EVAL_{DB}.json"
     json.dump({"db": DB, "store": STORE, "scored": len(scored), "passed": passed,
-               "score_pct": pct, "by_class": by_cls, "results": results},
+               "score_pct": pct, "stale_db": bool(stale), "abstained": abst,
+               "by_class": by_cls, "results": results},
               open(out, "w", encoding="utf-8"), ensure_ascii=False, indent=2)
     print(f"\n=== {DB}: {passed}/{len(scored)} = {pct}% ===")
     for cls, (p, t) in sorted(by_cls.items()):
