@@ -347,7 +347,13 @@ def _anchor_df(tok: str, rows: list[Row]) -> float:
     return n / len(rows)
 
 
-_PURPOSE = {"gift", "gifts", "present", "presents"}
+# Occasion + recipient-persona words: they name WHO/WHAT-FOR, never a product type.
+# Dropped from a multi-anchor match when a real product-type anchor remains, so
+# "gift car for kids" resolves on "car" (not a coincidental "gift"/"kids"-tagged row).
+_PURPOSE = {"gift", "gifts", "present", "presents",
+            "kid", "kids", "child", "children", "toddler", "toddlers", "baby", "babies",
+            "boy", "boys", "girl", "girls", "teen", "teens",
+            "bacha", "bache", "bachay", "bachi", "bachon", "bache"}
 
 
 def _selective_anchors(anchors: list[str], rows: list[Row], agg: str | None = None) -> list[str]:
@@ -516,8 +522,12 @@ def parse(q: str) -> Spec:
     # gate in (b) keeps a casual "available … sold" (no counting intent) from triggering,
     # and a "not sold out" double-negative (handled below) carries neither a connector
     # nor a count cue, so it stays an in-stock filter.
-    _AVAIL = r"\b(?:available|in[\s-]?stock|purchasable|buyable|sellable|live|mojood|maujood|haazir|hazir)\b"
-    _SOLD = r"\b(?:sold[\s-]?out|sold|out\s+of\s+stock|unavailable|oos|gone|khatam|khtm|ghayab|ghaib)\b"
+    _AVAIL = (r"\b(?:available|in[\s-]?stock|purchasable|buyable|sellable|live|"
+              r"up\s+for\s+grabs|ready[\s-]?to[\s-]?ship|in[\s-]?hand|on[\s-]?hand|"
+              r"mojood|maujood|haazir|hazir|mil\s+sakt\w*|milt\w*|mileg\w*)\b")
+    _SOLD = (r"\b(?:sold[\s-]?out|sold|out\s+of\s+stock|unavailable|oos|gone|done|finished|"
+             r"back[\s-]?order(?:ed|s)?|backorder\w*|out[\s-]?the[\s-]?door|"
+             r"khatam|khtm|ghayab|ghaib)\b")
     _CONN = r"(?:\b(?:and|or|vs\.?|versus|aur|ya)\b|[&/])"
     _CNT = r"\b(?:count|counts|how\s+many|number\s+of|numbers?|tally|total|kitne|kitni|kitny|kitna)\b"
     _SPLITW = r"\b(?:split|divided|breakdown|ratio|report)\b"
@@ -535,11 +545,19 @@ def parse(q: str) -> Spec:
     # Requires BOTH the sold root (bik-) and the remaining root (bach-) so the bare
     # "bachon ke liye" (= for children) never reads as a stock split.
     _urdu_split = bool(re.search(r"\bbik\w*\b", ql) and re.search(r"\bbach\w*\b", ql))
+    # Roman-Urdu PARALLEL count "kitne X kitne Y" (= how many ... how many ...) — two
+    # kitne/kitni clauses is itself a two-way count split ("kitne mil sakte kitne nahi"
+    # = how many available vs how many not). Gated on a get/stock/availability verb so a
+    # non-stock "kitne red kitne blue" doesn't fire.
+    _kitne_split = bool(len(re.findall(r"\bkitn[aeiouy]\w*\b", ql)) >= 2
+                        and re.search(r"\b(?:mil|milt\w*|mileg\w*|sakt\w*|stock|availab\w*"
+                                      r"|bik\w*|bach\w*|nahi|nai|khatam|order\w*)\b", ql))
     # "in/out" (or "in vs out") slash/connector dichotomy carrying a count cue —
     # "RC cars in/out tally", "stock in vs out count" — wants the both-sides split.
     _inout = bool(re.search(r"\bin\s*/\s*out\b|\bin\s+(?:vs\.?|versus|and|or)\s+out\b", ql)
                   and re.search(r"\b(?:tally|count|counts|numbers?|stock|status|breakdown)\b", ql))
-    both_states = _two_conn or (_has_cnt and _two_adj) or split_report or both_sides or _urdu_split or _inout
+    both_states = (_two_conn or (_has_cnt and _two_adj) or split_report or both_sides
+                   or _urdu_split or _inout or _kitne_split)
 
     # Comparisons ("compare A and B", "X vs Y") are NOT a single structured
     # aggregation — they need the retrieval fan-out (which matches each named
@@ -1668,6 +1686,14 @@ def _refine_plan(plan: dict, q: str) -> dict:
         if plan.get("kind") == "compare" and not plan.get("stock_query") and re.search(
                 r"\b(stock|available|availab\w*|buy|buyable|kharid|le\s+sakta|kar\s+sakta)\b", ql, re.I):
             plan["stock_query"] = "in"
+    # Advisory / gift-recommendation intent ("recommend a gift under 4000", "bachay ke
+    # liye koi acha gift suggest karo") = the customer wants something they can BUY now —
+    # never surface a sold-out item as a recommendation. Force the in-stock filter unless
+    # they explicitly asked for out/both stock states.
+    if (not plan.get("stock_query") and not plan.get("in_stock")
+            and re.search(r"\b(recommend\w*|suggest\w*|advise|advice|gift|gifts|present|presents"
+                          r"|tohfa|tuhfa|acha|accha|achi|acchi|behtar|behtreen)\b", ql, re.I)):
+        plan["in_stock"] = True
     return plan
 
 
