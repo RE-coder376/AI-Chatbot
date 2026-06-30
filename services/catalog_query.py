@@ -492,46 +492,37 @@ def parse(q: str) -> Spec:
     # or scale typed in words matches its numeric title form. Done before anchoring.
     ql = _normalize_numwords(ql)
 
-    # Two DIFFERENT stock states named together ("available AND/OR/VS sold out",
-    # "availability summary … available … unavailable") = the customer wants BOTH
-    # sides reported side-by-side — a split count, not one filtered subset. Computed
-    # up front because "available vs unavailable" must NOT read as a product
-    # comparison (the "vs") nor as a single-product stock lookup.
-    # in[\s-]?stock accepts the hyphen form ("in-stock and sold-out"); connectors admit
-    # "/" so a slash-joined "total/in-stock/OOS" reads as both sides; "oos" is a sold-out
-    # token customers abbreviate to.
-    both_states = bool(re.search(
-        r"\b(?:available|in[\s-]?stock)\b[^.?!]{0,40}(?:\b(?:and|or|vs\.?|versus|aur|ya)\b|[&/])[^.?!]{0,40}"
-        r"\b(?:sold[\s-]?out|out\s+of\s+stock|unavailable|oos)\b"
-        r"|\b(?:sold[\s-]?out|out\s+of\s+stock|unavailable|oos)\b[^.?!]{0,40}(?:\b(?:and|or|vs\.?|versus|aur|ya)\b|[&/])"
-        r"[^.?!]{0,40}\b(?:available|in[\s-]?stock)\b", ql))
-    # A "split" / "stock split" / "availability breakdown|summary" request asks for BOTH
-    # stock sides reported together, even when neither state is spelled out ("Action
-    # figures stock split summary", Roman-Urdu "bikes available aur unavailable split
-    # batao"). Treat as a split count so it routes deterministically to count_split
-    # instead of leaking "split" as a product anchor and dumping a one-sided list.
-    split_report = bool(re.search(
-        r"\b(?:stock|availability|available)\b[^.?!]{0,25}\bsplit\b"
-        r"|\bsplit\b[^.?!]{0,25}\b(?:summary|breakdown|count|batao|bata\w*|bta\w*)\b"
-        # "stock health"/"availability breakdown"/"stock status breakdown" = report BOTH
-        # stock sides for the category, even with neither state token spelled out.
-        r"|\b(?:availability|stock)\s+(?:split|breakdown|summary|health|status\s+breakdown)\b", ql))
-    # "both sides"/"each side"/"dono side" beside an availability/count/stock cue is the
-    # idiom for the two stock states together ("availability count both sides") — no
-    # explicit available+sold tokens needed.
+    # --- Split-count detection (report BOTH stock sides together) --------------------
+    # Customers ask for "the available vs sold-out counts" in unbounded ways ("stock
+    # divided: total, purchasable, unavailable", "count split karo", "stock ratio with
+    # counts", "total available sold count", "availability breakdown"). Enumerating each
+    # phrasing is the recurring brittleness — detect the SEMANTIC class instead:
+    #   (a) two OPPOSITE stock states joined by a connector ("available aur sold out",
+    #       slash-joined "total/in-stock/OOS"), OR
+    #   (b) the two opposite states present together under an explicit COUNTING intent
+    #       (count/total/how many/kitne) — covers comma/adjacent phrasings with no
+    #       connector ("total available sold count"), OR
+    #   (c) a split/breakdown/ratio/divided/report word in a stock/count context.
+    # Any → count_split, so the engine reports total + available + sold-out. The count
+    # gate in (b) keeps a casual "available … sold" (no counting intent) from triggering,
+    # and a "not sold out" double-negative (handled below) carries neither a connector
+    # nor a count cue, so it stays an in-stock filter.
+    _AVAIL = r"\b(?:available|in[\s-]?stock|purchasable|buyable|live)\b"
+    _SOLD = r"\b(?:sold[\s-]?out|sold|out\s+of\s+stock|unavailable|oos)\b"
+    _CONN = r"(?:\b(?:and|or|vs\.?|versus|aur|ya)\b|[&/])"
+    _CNT = r"\b(?:count|counts|how\s+many|number\s+of|total|kitne|kitni|kitny|kitna)\b"
+    _SPLITW = r"\b(?:split|divided|breakdown|ratio|report)\b"
+    _two_conn = bool(re.search(_AVAIL + r"[^.?!]{0,40}" + _CONN + r"[^.?!]{0,40}" + _SOLD, ql)
+                     or re.search(_SOLD + r"[^.?!]{0,40}" + _CONN + r"[^.?!]{0,40}" + _AVAIL, ql))
+    _two_adj = bool(re.search(_AVAIL + r"[^.?!]{0,40}" + _SOLD, ql)
+                    or re.search(_SOLD + r"[^.?!]{0,40}" + _AVAIL, ql))
+    _has_cnt = bool(re.search(_CNT, ql))
+    split_report = bool(re.search(_SPLITW, ql) and re.search(
+        r"\b(?:stock|count|counts|availab\w*|collection|inventory|status|numbers?)\b", ql))
+    # "both sides"/"each side"/"dono side" idiom for the two stock states together.
     both_sides = bool(re.search(r"\b(?:both|each|dono)\s+sides?\b", ql)
                       and re.search(r"\b(?:availab\w*|stock|count|sold)\b", ql))
-    both_states = both_states or split_report or both_sides
-    # Roman-Urdu / English "how many available, how many sold" — a count word repeated
-    # before each stock state ("kitne available kitne sold", "how many in stock how many
-    # out") asks for BOTH sides as counts, but carries no and/or/vs connector so the
-    # patterns above miss it. Detect a count cue plus BOTH an available- and a sold-state
-    # token → split count, routed deterministically (was relying on the LLM router).
-    kitne_split = bool(
-        re.search(r"\b(?:kitne|kitni|kitny|kitna|how\s+many)\b", ql)
-        and re.search(r"\b(?:available|in\s+stock|buyable)\b", ql)
-        and re.search(r"\b(?:sold|sold[\s-]?out|out\s+of\s+stock|unavailable)\b", ql))
-    both_states = both_states or kitne_split
+    both_states = _two_conn or (_has_cnt and _two_adj) or split_report or both_sides
 
     # Comparisons ("compare A and B", "X vs Y") are NOT a single structured
     # aggregation — they need the retrieval fan-out (which matches each named
@@ -787,7 +778,12 @@ def parse(q: str) -> Spec:
     if agg == "count_split":
         _split_report_words = {"split", "stock", "available", "availability", "unavailable",
                                "summary", "breakdown", "overview", "status", "aur", "ya",
-                               "mein", "main", "batao", "bata", "btao", "bta", "dono", "vs", "versus"}
+                               "mein", "main", "batao", "bata", "btao", "bta", "dono", "vs", "versus",
+                               # breakdown/count vocabulary the semantic detector now admits —
+                               # strip so only the CATEGORY anchor survives for membership lookup.
+                               "ratio", "count", "counts", "report", "divided", "numbers", "number",
+                               "form", "purchasable", "sold", "soldout", "oos", "total", "live",
+                               "kitne", "kitni", "kitny", "kitna", "karo", "chahiye", "do"}
         anchors = [a for a in anchors if a not in _split_report_words]
 
     # A bare "list / what products do you sell" with no category and no price
@@ -1927,7 +1923,7 @@ def _execute_spec(spec: "Spec", rows: list[Row], cfg: dict | None, max_list: int
         # is 2 cameras; "fujifilm" as a brand tag is on every film. Exact membership
         # returns the real group the customer is browsing, not coincidental name hits.
         _coll_locked = False
-        if spec.anchors and spec.agg in ("count", "exists", "list"):
+        if spec.anchors and spec.agg in ("count", "exists", "list", "count_split"):
             def _sig(toks):
                 return frozenset(t for t in toks if len(t) >= 2 and t not in _STOP)
             _A = _sig(re.sub(r"[^a-z0-9]+", " ", " ".join(spec.anchors).lower()).split())
