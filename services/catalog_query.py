@@ -644,9 +644,11 @@ def parse(q: str) -> Spec:
     # "buyable") that customers use instead of the literal "in stock".
     in_stock = bool(re.search(
         r"\b(in[\s-]?stock|in\s+stock|available|buyable|"
-        r"ready\s+to\s+(?:buy|order|ship)|can\s+(?:i|we|you)\s+(?:buy|order|get)|"
-        # pronoun-BEFORE-can ("toys that I can buy right now") + bare "buy/order it now"
-        r"(?:i|we|you)\s+can\s+(?:buy|order|get)|(?:buy|order|purchase)\s+(?:it\s+)?(?:right\s+)?now|"
+        r"ready\s+to\s+(?:buy|order|ship)|can\s+(?:i|we|you)\s+(?:\w+ly\s+)?(?:buy|order|get)|"
+        # pronoun-BEFORE-can, allowing an adverb the customer drops in ("toys I can
+        # ACTUALLY buy", "ones you can REALLY get") + bare "buy/order it now"
+        r"(?:i|we|you)\s+can\s+(?:actually|really|even|still|just|also|now|finally|\w+ly\s+)?\s*(?:buy|order|get)|"
+        r"(?:buy|order|purchase)\s+(?:it\s+)?(?:right\s+)?now|"
         r"still\s+(?:available|in\s+stock))\b", ql)) and not out_of_stock
 
     # "include unavailable / overall / available OR sold out / whether … sold out" =
