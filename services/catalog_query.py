@@ -507,10 +507,10 @@ def parse(q: str) -> Spec:
     # gate in (b) keeps a casual "available … sold" (no counting intent) from triggering,
     # and a "not sold out" double-negative (handled below) carries neither a connector
     # nor a count cue, so it stays an in-stock filter.
-    _AVAIL = r"\b(?:available|in[\s-]?stock|purchasable|buyable|live)\b"
-    _SOLD = r"\b(?:sold[\s-]?out|sold|out\s+of\s+stock|unavailable|oos)\b"
+    _AVAIL = r"\b(?:available|in[\s-]?stock|purchasable|buyable|sellable|live)\b"
+    _SOLD = r"\b(?:sold[\s-]?out|sold|out\s+of\s+stock|unavailable|oos|gone)\b"
     _CONN = r"(?:\b(?:and|or|vs\.?|versus|aur|ya)\b|[&/])"
-    _CNT = r"\b(?:count|counts|how\s+many|number\s+of|total|kitne|kitni|kitny|kitna)\b"
+    _CNT = r"\b(?:count|counts|how\s+many|number\s+of|numbers?|tally|total|kitne|kitni|kitny|kitna)\b"
     _SPLITW = r"\b(?:split|divided|breakdown|ratio|report)\b"
     _two_conn = bool(re.search(_AVAIL + r"[^.?!]{0,40}" + _CONN + r"[^.?!]{0,40}" + _SOLD, ql)
                      or re.search(_SOLD + r"[^.?!]{0,40}" + _CONN + r"[^.?!]{0,40}" + _AVAIL, ql))
@@ -522,7 +522,15 @@ def parse(q: str) -> Spec:
     # "both sides"/"each side"/"dono side" idiom for the two stock states together.
     both_sides = bool(re.search(r"\b(?:both|each|dono)\s+sides?\b", ql)
                       and re.search(r"\b(?:availab\w*|stock|count|sold)\b", ql))
-    both_states = _two_conn or (_has_cnt and _two_adj) or split_report or both_sides
+    # Roman-Urdu "kitne bik gaye, kitne bache" idiom = how many SOLD vs how many LEFT.
+    # Requires BOTH the sold root (bik-) and the remaining root (bach-) so the bare
+    # "bachon ke liye" (= for children) never reads as a stock split.
+    _urdu_split = bool(re.search(r"\bbik\w*\b", ql) and re.search(r"\bbach\w*\b", ql))
+    # "in/out" (or "in vs out") slash/connector dichotomy carrying a count cue —
+    # "RC cars in/out tally", "stock in vs out count" — wants the both-sides split.
+    _inout = bool(re.search(r"\bin\s*/\s*out\b|\bin\s+(?:vs\.?|versus|and|or)\s+out\b", ql)
+                  and re.search(r"\b(?:tally|count|counts|numbers?|stock|status|breakdown)\b", ql))
+    both_states = _two_conn or (_has_cnt and _two_adj) or split_report or both_sides or _urdu_split or _inout
 
     # Comparisons ("compare A and B", "X vs Y") are NOT a single structured
     # aggregation — they need the retrieval fan-out (which matches each named
@@ -783,7 +791,13 @@ def parse(q: str) -> Spec:
                                # strip so only the CATEGORY anchor survives for membership lookup.
                                "ratio", "count", "counts", "report", "divided", "numbers", "number",
                                "form", "purchasable", "sold", "soldout", "oos", "total", "live",
-                               "kitne", "kitni", "kitny", "kitna", "karo", "chahiye", "do"}
+                               "kitne", "kitni", "kitny", "kitna", "karo", "chahiye", "do",
+                               # broadened stock-state / count synonyms + Roman-Urdu fillers —
+                               # strip so only the CATEGORY anchor survives membership lookup.
+                               "gone", "sellable", "tally", "buyable", "style", "in", "out",
+                               "frame", "frames", "item", "items", "piece", "pieces",
+                               "bik", "bika", "bikay", "gaye", "gaya", "bache", "bachay", "bacha",
+                               "kaise", "kaisa", "kaisi", "hua", "hui", "bata", "btao", "bata"}
         anchors = [a for a in anchors if a not in _split_report_words]
 
     # A bare "list / what products do you sell" with no category and no price
