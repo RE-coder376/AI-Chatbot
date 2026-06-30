@@ -2168,14 +2168,21 @@ def _execute_spec(spec: "Spec", rows: list[Row], cfg: dict | None, max_list: int
                 return (f"No — we don't currently carry any {label}. Is there something else "
                         f"I can help you find?"), []
             # Show the price alongside each item when known — answers the common
-            # "do you have X and its price" multi-intent in one shot.
+            # "do you have X and its price" multi-intent in one shot. When the query
+            # explicitly FILTERED by stock ("count the sold-out bikes", "how many
+            # available X"), state each item's status so an OOS-only / in-stock-only
+            # list never reads like a neutral catalog dump.
+            _stk_suffix = (" - out of stock" if spec.out_of_stock
+                           else " - available" if spec.in_stock else "")
             def _il(r):
-                return f"- {r.title} — {_price_disp(r)}" if r.price is not None else f"- {r.title}"
+                base = f"- {r.title} — {_price_disp(r)}" if r.price is not None else f"- {r.title}"
+                return base + _stk_suffix
             body = "\n".join(_il(r) for r in sel[:max_list])
             more = f"\n…and {n - max_list} more." if n > max_list else ""
             if spec.agg == "count":
-                head = (f"We have {n} {label} product{'s' if n != 1 else ''} in our catalog:"
-                        if spec.anchors else f"We have {n} products in our catalog:")
+                _kind = ("sold-out " if spec.out_of_stock else "available " if spec.in_stock else "")
+                head = (f"We have {n} {_kind}{label} product{'s' if n != 1 else ''}:"
+                        if spec.anchors else f"We have {n} {_kind}products in our catalog:")
             else:
                 head = f"Yes — we carry {label}. We have {n} option{'s' if n != 1 else ''}:"
             return f"{head}\n{body}{more}", _dedup(r.source for r in sel)[:max_list]
