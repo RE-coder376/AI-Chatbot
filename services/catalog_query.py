@@ -2035,8 +2035,17 @@ def _execute_spec(spec: "Spec", rows: list[Row], cfg: dict | None, max_list: int
         # that exact match stands (no hijacking "is <Product> available?" into a whole
         # collection). Fires only for phrasings strict matching couldn't resolve — the
         # cases that today fall to weak title-coverage or empty → near-zero regression.
-        if (not _coll_locked and not _strict_hit and spec.anchors and not spec.title_only
-                and spec.agg in ("count", "exists", "list", "count_split", "min", "max")):
+        # A COUNT question ("how many X", "X stock breakdown") is inherently a
+        # CATEGORY-MEMBERSHIP question — the storefront collection is authoritative,
+        # so resolve it via the taxonomy even when a title strict-hit also matched
+        # (otherwise "formula" counts a coincidental "Aston Martin F1 RC" car instead
+        # of the Formula One collection). For exists/list/min/max we keep the
+        # conservative strict-miss-only gate so "is <Product> available?" / a title
+        # browse is never hijacked into a whole collection.
+        _count_agg = spec.agg in ("count", "count_split")
+        if (not _coll_locked and spec.anchors and not spec.title_only
+                and spec.agg in ("count", "exists", "list", "count_split", "min", "max")
+                and (_count_agg or not _strict_hit)):
             _rmem = _resolve_collection(_anchors, rows)
             if _rmem:
                 _base = _rmem
