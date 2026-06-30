@@ -24,6 +24,7 @@ _CUE = {
     "than", "or", "vs", "versus", "compare", "between", "difference", "about", "tell", "me",
     "still", "yeah", "please", "thanks", "thx", "to", "buy", "get", "want", "wanna",
     "cool", "great", "wow", "also", "too", "aswell", "awesome", "perfect", "good",
+    "just", "sirf", "bas", "simply", "merely",  # filler that must not block a re-projection
     # bare scaffolding a follow-up wraps the real cue in — never a product subject;
     # without these the >=2-content-token "self-contained" guard misfires and skips coref
     "confirm", "status", "can", "could", "would", "should", "then", "check", "need",
@@ -100,14 +101,22 @@ _PROJ = {"gone", "live", "sellable", "buyable", "available", "unavailable", "sol
          "soldout", "oos", "instock", "stock", "bucket", "side", "sides", "repeat",
          "names", "name", "count", "counts", "total", "tally", "numbers", "number",
          "list", "listing", "only", "again", "sort", "breakdown", "split", "both",
-         "ratio", "status", "summary", "overview"}
+         "ratio", "status", "summary", "overview",
+         # more count/stock synonyms a bare re-projection may use
+         "headcount", "head", "pulse", "health", "breakup", "pieces", "piece",
+         "mojood", "haazir", "hazir", "ghayab", "khatam", "finish", "finished", "wala"}
 # explicit set-reference ("those two", "that trio", "same three") → operate on the prior
 # turn's RESULT SET, not a single antecedent.
-_SETREF_RE = re.compile(r"\b(?:those|these|that|the|same|both)\s+"
-                        r"(two|three|four|five|2|3|4|5|trio|pair|duo|set|lot|group)\b"
-                        r"|\b(trio|pair|duo)\b", re.I)
+# determiner (English + Roman-Urdu us/un/in/wahi/woh) + optional "same/wahi" + a count
+# word (English or Roman-Urdu do/teen/char/paanch/dono) or a collective (trio/pair).
+_SETREF_RE = re.compile(
+    r"\b(?:those|these|that|the|same|both|us|un|in|wahi|wohi|woh|unhi|inhi)\s+"
+    r"(?:same\s+|wahi\s+)?"
+    r"(two|three|four|five|2|3|4|5|do|teen|tin|char|chaar|paanch|panch|dono|trio|pair|duo|set|lot|group)\b"
+    r"|\b(trio|pair|duo|dono)\b", re.I)
 _NUMWORD = {"two": 2, "three": 3, "four": 4, "five": 5, "2": 2, "3": 3, "4": 4, "5": 5,
-            "pair": 2, "duo": 2, "trio": 3, "both": 2}
+            "pair": 2, "duo": 2, "trio": 3, "both": 2, "dono": 2,
+            "do": 2, "teen": 3, "tin": 3, "char": 4, "chaar": 4, "paanch": 5, "panch": 5}
 _SUPER_LO = re.compile(r"\b(cheapest|lowest|sasta|sasti|least\s+expensive)\b", re.I)
 _SUPER_HI = re.compile(r"\b(highest|priciest|costliest|dearest|most\s+expensive|mehng[ai])\b"
                        r"|\bhighest\s+price\b", re.I)
@@ -285,7 +294,10 @@ def _history_products(history: list) -> list[dict]:
         prods: list[dict] = []
         for frag in re.split(r"(?<=[A-Za-z0-9])[.;,]\s|\s+and\s+", text):
             frag = frag.strip()
-            nm = re.match(r"([A-Z][A-Za-z0-9][A-Za-z0-9 :/\-]*?)\s+(?:is\b|are\b|at\b|—|-\s|Rs|PKR|[$€£]|\d)", frag)
+            # drop parentheticals: a scale/qty note "( 12 inches )" (whose digits would
+            # trip the price-stop and truncate the name) and "(was Rs.X)" discount noise.
+            frag_for_name = re.sub(r"\([^)]*\)", " ", frag)
+            nm = re.match(r"([A-Z][A-Za-z0-9][A-Za-z0-9 :/\-]*?)\s+(?:is\b|are\b|at\b|—|-\s|Rs|PKR|[$€£]|\d)", frag_for_name)
             if not nm:
                 continue
             name = re.sub(r"(?i)^(?:only|both|the|a|an)\s+", "", nm.group(1)).strip(" -:")
@@ -327,11 +339,15 @@ def resolve_followup(q: str, history: list) -> str:
         # the range" — a back-reference to the prior turn's category as a whole. Re-issue
         # the prior subject with this turn's stock/price filter instead of treating the bare
         # filter word ("unavailable") as a self-contained subject (which over-lists junk).
-        if re.search(r"\b(?:that|this|the|those|these)\s+"
+        if re.search(r"\b(?:that|this|the|those|these|us|un|wahi|wohi|woh)\s+"
                      r"(?:categor(?:y|ies)|collection|range|lineup|group|set|list)\b", ql):
             subj = _prior_subject(history)
             if subj:
-                if re.search(r"\b(unavailable|sold[\s-]?out|out of stock|not available)\b", ql):
+                # bare count/tally of the prior category ("us category ka gone wala count")
+                # → full stock breakdown (carries both side counts the grader looks for).
+                if re.search(r"\b(count|tally|how\s+many|kitne|kitni|numbers?)\b", ql):
+                    return f"{subj} stock breakdown"
+                if re.search(r"\b(unavailable|sold[\s-]?out|out of stock|not available|gone)\b", ql):
                     return f"unavailable {subj}"
                 if re.search(r"\b(available|in[\s-]?stock|buyable)\b", ql):
                     return f"available {subj}"
@@ -358,12 +374,31 @@ def resolve_followup(q: str, history: list) -> str:
                         return f"sort {joined_and} by price descending"
                     if _SUPER_LO.search(ql):
                         return f"sort {joined_and} by price ascending"
-                    if re.search(r"\b(buyable|available|in[\s-]?stock|sold[\s-]?out|unavailable|stock)\b", ql):
+                    if re.search(r"\b(total|sum|jama|altogether|combined|add\s*up)\b", ql):
+                        return f"total price of {' + '.join(chr(34)+x+chr(34) for x in names)}"
+                    if re.search(r"\b(buyable|available|in[\s-]?stock|sold[\s-]?out|unavailable|stock|khareed|khareid|buy)\b", ql):
                         return f"which of {joined_or} is in stock?"
-                    if re.search(r"\b(sort|order|rank|arrange|again|same|list)\b", ql):
+                    if re.search(r"\b(sort|order|rank|arrange|again|dobara|same|list)\b", ql):
                         return f"sort {joined_and} by price ascending"
                     if _PRICE.search(ql):
                         return f"total price of {' + '.join(chr(34)+x+chr(34) for x in names)}"
+        # ROMAN-URDU PLURAL SET-REF without a count word: "un me se / in me se / un dono"
+        # = "from those (prior products)". Bind the prior set and apply the intent.
+        if re.search(r"\b(?:un|in)\s*(?:me|mein|mai)\s*se\b|\b(?:un|in)me\s*se\b"
+                     r"|\b(?:un|in)\s+dono\b|\bin\s+se\b", ql):
+            prods = _history_products(history)
+            names = [p["name"] for p in prods]
+            if len(names) >= 2:
+                joined_and = " and ".join(f'"{x}"' for x in names)
+                joined_or = " or ".join(f'"{x}"' for x in names)
+                if re.search(r"\b(total|sum|jama|altogether)\b", ql):
+                    return f"total price of {' + '.join(chr(34)+x+chr(34) for x in names)}"
+                if _SUPER_HI.search(ql):
+                    return f"sort {joined_and} by price descending"
+                if _SUPER_LO.search(ql):
+                    return f"sort {joined_and} by price ascending"
+                if re.search(r"\b(khareed|khareid|buy|buyable|available|in[\s-]?stock|stock|le\s+sak|mil\w*)\b", ql):
+                    return f"which of {joined_or} is in stock?"
         # SELECT-WITHIN-SET: "the one that is available", "the cheaper option — in stock?"
         # picks ONE product from the prior set by a stock/price qualifier, then asks this
         # turn's dimension (price or stock) about it.

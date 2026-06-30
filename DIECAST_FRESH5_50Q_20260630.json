@@ -1,0 +1,1001 @@
+[
+ {
+  "id": 1,
+  "turn": 1,
+  "history": [],
+  "question": "Action Figures ka stock kaise divided hai - ready aur khatam",
+  "lang": "ur",
+  "category": "count_split",
+  "expect": [],
+  "forbid": [],
+  "gt_rule": {
+   "type": "count_split",
+   "collection": "Action Figures"
+  },
+  "gt_collection": "Action Figures"
+ },
+ {
+  "id": 2,
+  "turn": 1,
+  "history": [],
+  "question": "RC Cars me kitne haazir kitne ghayab",
+  "lang": "ur",
+  "category": "count_split",
+  "expect": [],
+  "forbid": [],
+  "gt_rule": {
+   "type": "count_split",
+   "collection": "RC Cars"
+  },
+  "gt_collection": "RC Cars"
+ },
+ {
+  "id": 3,
+  "turn": 1,
+  "history": [],
+  "question": "Bikes: how many up for grabs vs how many done",
+  "lang": "en",
+  "category": "count_split",
+  "expect": [],
+  "forbid": [],
+  "gt_rule": {
+   "type": "count_split",
+   "collection": "Bikes"
+  },
+  "gt_collection": "Bikes"
+ },
+ {
+  "id": 4,
+  "turn": 1,
+  "history": [],
+  "question": "SUVs stock me kitne mojood kitne nahi",
+  "lang": "ur",
+  "category": "count_split",
+  "expect": [],
+  "forbid": [],
+  "gt_rule": {
+   "type": "count_split",
+   "collection": "SUVs"
+  },
+  "gt_collection": "SUVs"
+ },
+ {
+  "id": 5,
+  "turn": 1,
+  "history": [],
+  "question": "Rolls Royce inventory - sellable headcount and dead headcount",
+  "lang": "en",
+  "category": "count_split",
+  "expect": [],
+  "forbid": [],
+  "gt_rule": {
+   "type": "count_split",
+   "collection": "Rolls Royce"
+  },
+  "gt_collection": "Rolls Royce"
+ },
+ {
+  "id": 6,
+  "turn": 1,
+  "history": [],
+  "question": "Formula One kitne mil sakte kitne nahi",
+  "lang": "ur",
+  "category": "count_split",
+  "expect": [],
+  "forbid": [],
+  "gt_rule": {
+   "type": "count_split",
+   "collection": "Formula One (F1)"
+  },
+  "gt_collection": "Formula One (F1)"
+ },
+ {
+  "id": 7,
+  "turn": 1,
+  "history": [],
+  "question": "Diecast Decor ka ready-to-ship vs back-ordered count",
+  "lang": "en",
+  "category": "count_split",
+  "expect": [],
+  "forbid": [],
+  "gt_rule": {
+   "type": "count_split",
+   "collection": "Diecast Decor"
+  },
+  "gt_collection": "Diecast Decor"
+ },
+ {
+  "id": 8,
+  "turn": 1,
+  "history": [],
+  "question": "Racing Track Set stock ka breakup do",
+  "lang": "ur",
+  "category": "count_split",
+  "expect": [],
+  "forbid": [],
+  "gt_rule": {
+   "type": "count_split",
+   "collection": "Racing Track Set"
+  },
+  "gt_collection": "Racing Track Set"
+ },
+ {
+  "id": 9,
+  "turn": 1,
+  "history": [],
+  "question": "RC Drift Cars: in-hand vs out-the-door numbers",
+  "lang": "en",
+  "category": "count_split",
+  "expect": [],
+  "forbid": [],
+  "gt_rule": {
+   "type": "count_split",
+   "collection": "RC Drift Cars"
+  },
+  "gt_collection": "RC Drift Cars"
+ },
+ {
+  "id": 10,
+  "turn": 1,
+  "history": [],
+  "question": "RC Construction kitne available kitne finish ho gaye",
+  "lang": "ur",
+  "category": "count_split",
+  "expect": [],
+  "forbid": [],
+  "gt_rule": {
+   "type": "count_split",
+   "collection": "RC Construction"
+  },
+  "gt_collection": "RC Construction"
+ },
+ {
+  "id": 11,
+  "turn": 1,
+  "history": [],
+  "question": "Iron Man Action Figure ( 12 inches ) ka rate kya hai",
+  "lang": "ur",
+  "category": "price",
+  "expect": [],
+  "forbid": [],
+  "gt_rule": {
+   "type": "price",
+   "products": [
+    "Iron Man Action Figure ( 12 inches )"
+   ]
+  }
+ },
+ {
+  "id": 12,
+  "turn": 1,
+  "history": [],
+  "question": "how much do you want for the BMW M8 1:24",
+  "lang": "en",
+  "category": "price",
+  "expect": [],
+  "forbid": [],
+  "gt_rule": {
+   "type": "price",
+   "products": [
+    "BMW M8 1:24"
+   ]
+  }
+ },
+ {
+  "id": 13,
+  "turn": 1,
+  "history": [],
+  "question": "Suzuki GS125 1:12 Scale price btao",
+  "lang": "ur",
+  "category": "price",
+  "expect": [],
+  "forbid": [],
+  "gt_rule": {
+   "type": "price",
+   "products": [
+    "Suzuki GS125 1:12 Scale"
+   ]
+  }
+ },
+ {
+  "id": 14,
+  "turn": 1,
+  "history": [],
+  "question": "what's the damage on Lamborghini Aventador SVJ63 1:18",
+  "lang": "en",
+  "category": "price",
+  "expect": [],
+  "forbid": [],
+  "gt_rule": {
+   "type": "price",
+   "products": [
+    "Lamborghini Aventador SVJ63 1:18"
+   ]
+  }
+ },
+ {
+  "id": 15,
+  "turn": 1,
+  "history": [],
+  "question": "Mercedes Benz G550 4X4 1 : 24 Scale kitne ka",
+  "lang": "ur",
+  "category": "price",
+  "expect": [],
+  "forbid": [],
+  "gt_rule": {
+   "type": "price",
+   "products": [
+    "Mercedes Benz G550 4X4 1 : 24 Scale"
+   ]
+  }
+ },
+ {
+  "id": 16,
+  "turn": 1,
+  "history": [],
+  "question": "BMW S1000RR Model haath me hai abhi",
+  "lang": "ur",
+  "category": "stock",
+  "expect": [],
+  "forbid": [],
+  "gt_rule": {
+   "type": "stock",
+   "products": [
+    "BMW S1000RR Model"
+   ]
+  }
+ },
+ {
+  "id": 17,
+  "turn": 1,
+  "history": [],
+  "question": "can I grab the Lamborghini URUS 1/24 right now",
+  "lang": "en",
+  "category": "stock",
+  "expect": [],
+  "forbid": [],
+  "gt_rule": {
+   "type": "stock",
+   "products": [
+    "Lamborghini URUS 1/24"
+   ]
+  }
+ },
+ {
+  "id": 18,
+  "turn": 1,
+  "history": [],
+  "question": "Kawasaki Ninja H2R 1/12 Model milega",
+  "lang": "ur",
+  "category": "stock",
+  "expect": [],
+  "forbid": [],
+  "gt_rule": {
+   "type": "stock",
+   "products": [
+    "Kawasaki Ninja H2R 1/12 Model"
+   ]
+  }
+ },
+ {
+  "id": 19,
+  "turn": 1,
+  "history": [],
+  "question": "is the Aston Martin F1 Model 1/18 on the shelf",
+  "lang": "en",
+  "category": "stock",
+  "expect": [],
+  "forbid": [],
+  "gt_rule": {
+   "type": "stock",
+   "products": [
+    "Aston Martin F1 Model 1/18"
+   ]
+  }
+ },
+ {
+  "id": 20,
+  "turn": 1,
+  "history": [],
+  "question": "Toyota Land Cruiser 300 1/24 stock me aya kya",
+  "lang": "ur",
+  "category": "stock",
+  "expect": [],
+  "forbid": [],
+  "gt_rule": {
+   "type": "stock",
+   "products": [
+    "Toyota Land Cruiser 300 1/24"
+   ]
+  }
+ },
+ {
+  "id": 21,
+  "turn": 1,
+  "history": [],
+  "question": "SUVs me sabse mehnga konsa chahe khatam ho chuka ho",
+  "lang": "ur",
+  "category": "minmax",
+  "expect": [],
+  "forbid": [],
+  "gt_rule": {
+   "type": "minmax",
+   "collection": "SUVs",
+   "mode": "max",
+   "availability": null
+  },
+  "gt_collection": "SUVs"
+ },
+ {
+  "id": 22,
+  "turn": 1,
+  "history": [],
+  "question": "priciest Formula One piece counting the sold ones too",
+  "lang": "en",
+  "category": "minmax",
+  "expect": [],
+  "forbid": [],
+  "gt_rule": {
+   "type": "minmax",
+   "collection": "Formula One (F1)",
+   "mode": "max",
+   "availability": null
+  },
+  "gt_collection": "Formula One (F1)"
+ },
+ {
+  "id": 23,
+  "turn": 1,
+  "history": [],
+  "question": "Bikes ka sabse sasta jo abhi khareed sakun",
+  "lang": "ur",
+  "category": "minmax",
+  "expect": [],
+  "forbid": [],
+  "gt_rule": {
+   "type": "minmax",
+   "collection": "Bikes",
+   "mode": "min",
+   "availability": true
+  },
+  "gt_collection": "Bikes"
+ },
+ {
+  "id": 24,
+  "turn": 1,
+  "history": [],
+  "question": "cheapest Rolls Royce ignoring whether it's sold out",
+  "lang": "en",
+  "category": "minmax",
+  "expect": [],
+  "forbid": [],
+  "gt_rule": {
+   "type": "minmax",
+   "collection": "Rolls Royce",
+   "mode": "min",
+   "availability": null
+  },
+  "gt_collection": "Rolls Royce"
+ },
+ {
+  "id": 25,
+  "turn": 1,
+  "history": [],
+  "question": "Bikes jo bik chuke sirf wahi gin do",
+  "lang": "ur",
+  "category": "list",
+  "expect": [],
+  "forbid": [],
+  "gt_rule": {
+   "type": "list",
+   "collection": "Bikes",
+   "availability": false,
+   "limit": 4
+  },
+  "gt_collection": "Bikes"
+ },
+ {
+  "id": 26,
+  "turn": 1,
+  "history": [],
+  "question": "show me only the RC Cars I can actually buy",
+  "lang": "en",
+  "category": "list",
+  "expect": [],
+  "forbid": [],
+  "gt_rule": {
+   "type": "list",
+   "collection": "RC Cars",
+   "availability": true,
+   "limit": 4
+  },
+  "gt_collection": "RC Cars"
+ },
+ {
+  "id": 27,
+  "turn": 1,
+  "history": [],
+  "question": "Rolls Royce me konse out of stock pade hain",
+  "lang": "ur",
+  "category": "list",
+  "expect": [],
+  "forbid": [],
+  "gt_rule": {
+   "type": "list",
+   "collection": "Rolls Royce",
+   "availability": false,
+   "limit": 3
+  },
+  "gt_collection": "Rolls Royce"
+ },
+ {
+  "id": 28,
+  "turn": 1,
+  "history": [],
+  "question": "which SUVs are sitting in stock",
+  "lang": "en",
+  "category": "list",
+  "expect": [],
+  "forbid": [],
+  "gt_rule": {
+   "type": "list",
+   "collection": "SUVs",
+   "availability": true,
+   "limit": 4
+  },
+  "gt_collection": "SUVs"
+ },
+ {
+  "id": 29,
+  "turn": 1,
+  "history": [],
+  "question": "BMW M8 1:24 aur BMW 760li 1:24 me konsa sasta",
+  "lang": "ur",
+  "category": "compare",
+  "expect": [],
+  "forbid": [],
+  "gt_rule": {
+   "type": "compare",
+   "products": [
+    "BMW M8 1:24",
+    "BMW 760li 1:24"
+   ],
+   "mode": "cheaper"
+  }
+ },
+ {
+  "id": 30,
+  "turn": 1,
+  "history": [],
+  "question": "between Lexus LX570 1/24 and Land Cruiser 80 Off Road 1/24 which costs more",
+  "lang": "en",
+  "category": "compare",
+  "expect": [],
+  "forbid": [],
+  "gt_rule": {
+   "type": "compare",
+   "products": [
+    "Lexus LX570 1/24",
+    "Land Cruiser 80 Off Road 1/24"
+   ],
+   "mode": "expensive"
+  }
+ },
+ {
+  "id": 31,
+  "turn": 1,
+  "history": [],
+  "question": "Harley Sportster S Diecast Model ya Kawasaki Ninja H2R 1/12 Model - konsa stock me",
+  "lang": "ur",
+  "category": "compare",
+  "expect": [],
+  "forbid": [],
+  "gt_rule": {
+   "type": "compare",
+   "products": [
+    "Harley Sportster S Diecast Model",
+    "Kawasaki Ninja H2R 1/12 Model"
+   ],
+   "mode": "stock"
+  }
+ },
+ {
+  "id": 32,
+  "turn": 1,
+  "history": [],
+  "question": "Flash Action Figure ( 12 inches ) vs Venom Action Figure ( 12 inches ) which is cheaper",
+  "lang": "en",
+  "category": "compare",
+  "expect": [],
+  "forbid": [],
+  "gt_rule": {
+   "type": "compare",
+   "products": [
+    "Flash Action Figure ( 12 inches )",
+    "Venom Action Figure ( 12 inches )"
+   ],
+   "mode": "cheaper"
+  }
+ },
+ {
+  "id": 33,
+  "turn": 1,
+  "history": [],
+  "question": "agar BMW M8 1:24 aur Iron Man Action Figure ( 12 inches ) dono lun to total",
+  "lang": "ur",
+  "category": "basket",
+  "expect": [],
+  "forbid": [],
+  "gt_rule": {
+   "type": "basket",
+   "products": [
+    "BMW M8 1:24",
+    "Iron Man Action Figure ( 12 inches )"
+   ]
+  }
+ },
+ {
+  "id": 34,
+  "turn": 1,
+  "history": [],
+  "question": "combined bill for Suzuki GS125 1:12 Scale plus Kawasaki Ninja H2R 1/12 Model",
+  "lang": "en",
+  "category": "basket",
+  "expect": [],
+  "forbid": [],
+  "gt_rule": {
+   "type": "basket",
+   "products": [
+    "Suzuki GS125 1:12 Scale",
+    "Kawasaki Ninja H2R 1/12 Model"
+   ]
+  }
+ },
+ {
+  "id": 35,
+  "turn": 1,
+  "history": [],
+  "question": "Rolls Royce Phantom 1/24, Rolls Royce Spectre 1/24, Rolls Royce SUV Cullinan 1:20 Big Scale ko saste se mehnge tak lagao",
+  "lang": "ur",
+  "category": "ordering",
+  "expect": [],
+  "forbid": [],
+  "gt_rule": {
+   "type": "ordering",
+   "products": [
+    "Rolls Royce Phantom 1/24",
+    "Rolls Royce Spectre 1/24",
+    "Rolls Royce SUV Cullinan 1:20 Big Scale"
+   ]
+  }
+ },
+ {
+  "id": 36,
+  "turn": 1,
+  "history": [],
+  "question": "rank Iron Man Action Figure ( 12 inches ), Flash Action Figure ( 12 inches ), Dragon Ball Z Son Goku Action Figure by price",
+  "lang": "en",
+  "category": "ordering",
+  "expect": [],
+  "forbid": [],
+  "gt_rule": {
+   "type": "ordering",
+   "products": [
+    "Iron Man Action Figure ( 12 inches )",
+    "Flash Action Figure ( 12 inches )",
+    "Dragon Ball Z Son Goku Action Figure"
+   ]
+  }
+ },
+ {
+  "id": 37,
+  "turn": 1,
+  "history": [],
+  "question": "koi SUV jo 4500 se kam ho aur available ho",
+  "lang": "ur",
+  "category": "budget",
+  "expect": [],
+  "forbid": [],
+  "gt_rule": {
+   "type": "budget",
+   "collection": "SUVs",
+   "max": 4500,
+   "availability": true,
+   "limit": 3
+  },
+  "gt_collection": "SUVs"
+ },
+ {
+  "id": 38,
+  "turn": 1,
+  "history": [],
+  "question": "action figure under 4000 that I can buy",
+  "lang": "en",
+  "category": "budget",
+  "expect": [],
+  "forbid": [],
+  "gt_rule": {
+   "type": "budget",
+   "collection": "Action Figures",
+   "max": 4000,
+   "availability": true,
+   "limit": 3
+  },
+  "gt_collection": "Action Figures"
+ },
+ {
+  "id": 39,
+  "turn": 2,
+  "history": [
+   {
+    "role": "user",
+    "content": "BMW M8 1:24 vs BMW 760li 1:24 price"
+   },
+   {
+    "role": "assistant",
+    "content": "BMW M8 1:24 is Rs.4,950 and BMW 760li 1:24 is Rs.4,950."
+   }
+  ],
+  "question": "in dono me jo sasta hai wo stock me hai",
+  "lang": "ur",
+  "category": "followup",
+  "expect": [],
+  "forbid": [],
+  "gt_rule": {
+   "type": "compare",
+   "products": [
+    "BMW M8 1:24",
+    "BMW 760li 1:24"
+   ],
+   "mode": "cheaper"
+  }
+ },
+ {
+  "id": 40,
+  "turn": 2,
+  "history": [
+   {
+    "role": "user",
+    "content": "Rolls Phantom Spectre Cullinan dikhao"
+   },
+   {
+    "role": "assistant",
+    "content": "Rolls Royce Phantom 1/24 Rs.4,330, Rolls Royce Spectre 1/24 Rs.4,420, Rolls Royce SUV Cullinan 1:20 Big Scale Rs.4,780."
+   }
+  ],
+  "question": "us teen me sabse mehnga konsa",
+  "lang": "ur",
+  "category": "followup",
+  "expect": [],
+  "forbid": [],
+  "gt_rule": {
+   "type": "compare",
+   "products": [
+    "Rolls Royce Phantom 1/24",
+    "Rolls Royce Spectre 1/24",
+    "Rolls Royce SUV Cullinan 1:20 Big Scale"
+   ],
+   "mode": "expensive"
+  }
+ },
+ {
+  "id": 41,
+  "turn": 2,
+  "history": [
+   {
+    "role": "user",
+    "content": "BMW XM vs Lamborghini URUS 1/24 stock"
+   },
+   {
+    "role": "assistant",
+    "content": "BMW XM SUV 1:24 is out of stock. Lamborghini URUS 1/24 is available at Rs.4,250."
+   }
+  ],
+  "question": "jo available wala tha uska price",
+  "lang": "ur",
+  "category": "followup",
+  "expect": [],
+  "forbid": [],
+  "gt_rule": {
+   "type": "price",
+   "products": [
+    "Lamborghini URUS 1/24"
+   ]
+  }
+ },
+ {
+  "id": 42,
+  "turn": 2,
+  "history": [
+   {
+    "role": "user",
+    "content": "RC Cars in/out tally"
+   },
+   {
+    "role": "assistant",
+    "content": "RC Cars has 19 total, 9 available, 10 out of stock."
+   }
+  ],
+  "question": "repeat just the sold-out tally",
+  "lang": "en",
+  "category": "followup",
+  "expect": [],
+  "forbid": [],
+  "gt_rule": {
+   "type": "count_split",
+   "collection": "RC Cars"
+  },
+  "gt_collection": "RC Cars"
+ },
+ {
+  "id": 43,
+  "turn": 2,
+  "history": [
+   {
+    "role": "user",
+    "content": "Harley Sportster S Diecast Model vs Kawasaki Ninja H2R 1/12 Model"
+   },
+   {
+    "role": "assistant",
+    "content": "Harley Sportster S Diecast Model is out of stock; Kawasaki Ninja H2R 1/12 Model is available at Rs.3,650."
+   }
+  ],
+  "question": "un me se sirf jo abhi khareed sakta hun",
+  "lang": "ur",
+  "category": "followup",
+  "expect": [],
+  "forbid": [],
+  "gt_rule": {
+   "type": "compare",
+   "products": [
+    "Harley Sportster S Diecast Model",
+    "Kawasaki Ninja H2R 1/12 Model"
+   ],
+   "mode": "stock"
+  }
+ },
+ {
+  "id": 44,
+  "turn": 2,
+  "history": [
+   {
+    "role": "user",
+    "content": "Suzuki GS125 1:12 Scale and Kawasaki Ninja H2R 1/12 Model price"
+   },
+   {
+    "role": "assistant",
+    "content": "Suzuki GS125 1:12 Scale is Rs.3,250 and Kawasaki Ninja H2R 1/12 Model is Rs.3,650."
+   }
+  ],
+  "question": "wahi do dobara total karke batao",
+  "lang": "ur",
+  "category": "followup",
+  "expect": [],
+  "forbid": [],
+  "gt_rule": {
+   "type": "basket",
+   "products": [
+    "Suzuki GS125 1:12 Scale",
+    "Kawasaki Ninja H2R 1/12 Model"
+   ]
+  }
+ },
+ {
+  "id": 45,
+  "turn": 2,
+  "history": [
+   {
+    "role": "user",
+    "content": "SUVs availability split"
+   },
+   {
+    "role": "assistant",
+    "content": "SUVs has 7 total, 5 available, 2 out of stock."
+   }
+  ],
+  "question": "now just give the live headcount",
+  "lang": "en",
+  "category": "followup",
+  "expect": [],
+  "forbid": [],
+  "gt_rule": {
+   "type": "count_split",
+   "collection": "SUVs"
+  },
+  "gt_collection": "SUVs"
+ },
+ {
+  "id": 46,
+  "turn": 2,
+  "history": [
+   {
+    "role": "user",
+    "content": "Iron Man Flash Goku figures prices"
+   },
+   {
+    "role": "assistant",
+    "content": "Iron Man Action Figure ( 12 inches ) Rs.3,650, Flash Action Figure ( 12 inches ) Rs.3,950, Dragon Ball Z Son Goku Action Figure Rs.4,500."
+   }
+  ],
+  "question": "sort those same three cheapest first",
+  "lang": "en",
+  "category": "followup",
+  "expect": [],
+  "forbid": [],
+  "gt_rule": {
+   "type": "ordering",
+   "products": [
+    "Iron Man Action Figure ( 12 inches )",
+    "Flash Action Figure ( 12 inches )",
+    "Dragon Ball Z Son Goku Action Figure"
+   ]
+  }
+ },
+ {
+  "id": 47,
+  "turn": 2,
+  "history": [
+   {
+    "role": "user",
+    "content": "Bikes available vs sold out"
+   },
+   {
+    "role": "assistant",
+    "content": "Bikes has 10 total, 4 available, 6 out of stock."
+   }
+  ],
+  "question": "us category ka gone wala count",
+  "lang": "ur",
+  "category": "followup",
+  "expect": [],
+  "forbid": [],
+  "gt_rule": {
+   "type": "count_split",
+   "collection": "Bikes"
+  },
+  "gt_collection": "Bikes"
+ },
+ {
+  "id": 48,
+  "turn": 2,
+  "history": [
+   {
+    "role": "user",
+    "content": "Lexus LX570 1/24 aur Land Cruiser 80 Off Road 1/24"
+   },
+   {
+    "role": "assistant",
+    "content": "Lexus LX570 1/24 is Rs.4,470 and Land Cruiser 80 Off Road 1/24 is Rs.4,990."
+   }
+  ],
+  "question": "which of the two is pricier",
+  "lang": "en",
+  "category": "followup",
+  "expect": [],
+  "forbid": [],
+  "gt_rule": {
+   "type": "compare",
+   "products": [
+    "Lexus LX570 1/24",
+    "Land Cruiser 80 Off Road 1/24"
+   ],
+   "mode": "expensive"
+  }
+ },
+ {
+  "id": 49,
+  "turn": 2,
+  "history": [
+   {
+    "role": "user",
+    "content": "Mercedes AMG ONE 1:24 available?"
+   },
+   {
+    "role": "assistant",
+    "content": "Mercedes AMG ONE 1:24 is available."
+   }
+  ],
+  "question": "uska rate kya tha",
+  "lang": "ur",
+  "category": "followup",
+  "expect": [],
+  "forbid": [],
+  "gt_rule": {
+   "type": "price",
+   "products": [
+    "Mercedes AMG ONE 1:24"
+   ]
+  }
+ },
+ {
+  "id": 50,
+  "turn": 2,
+  "history": [
+   {
+    "role": "user",
+    "content": "BMW M4 IM Diecast Model 1/24 and BMW M3 E30 1/24"
+   },
+   {
+    "role": "assistant",
+    "content": "BMW M4 IM Diecast Model 1/24 is Rs.5,950 and BMW M3 E30 1/24 is Rs.5,150."
+   }
+  ],
+  "question": "first one - is it buyable",
+  "lang": "en",
+  "category": "followup",
+  "expect": [],
+  "forbid": [],
+  "gt_rule": {
+   "type": "stock",
+   "products": [
+    "BMW M4 IM Diecast Model 1/24"
+   ]
+  }
+ },
+ {
+  "id": 51,
+  "turn": 1,
+  "history": [],
+  "question": "bachay ke liye koi acha gift car suggest karo 5000 ke andar",
+  "lang": "ur",
+  "category": "advisory",
+  "expect": [],
+  "forbid": [],
+  "gt_rule": {
+   "type": "budget",
+   "collection": "Diecast Models",
+   "max": 5000,
+   "availability": true,
+   "limit": 3
+  },
+  "gt_collection": "Diecast Models",
+  "llm_judge": true
+ },
+ {
+  "id": 52,
+  "turn": 1,
+  "history": [],
+  "question": "what would you recommend as a gift under 4000",
+  "lang": "en",
+  "category": "advisory",
+  "expect": [],
+  "forbid": [],
+  "gt_rule": {
+   "type": "budget",
+   "collection": "Diecast Models",
+   "max": 4000,
+   "availability": true,
+   "limit": 3
+  },
+  "gt_collection": "Diecast Models",
+  "llm_judge": true
+ },
+ {
+  "id": 53,
+  "turn": 1,
+  "history": [],
+  "question": "delivery kitne din me hoti hai",
+  "lang": "ur",
+  "category": "policy",
+  "expect": [],
+  "forbid": [],
+  "gt_rule": {
+   "type": "none"
+  },
+  "llm_judge": true
+ },
+ {
+  "id": 54,
+  "turn": 1,
+  "history": [],
+  "question": "what's your return policy",
+  "lang": "en",
+  "category": "policy",
+  "expect": [],
+  "forbid": [],
+  "gt_rule": {
+   "type": "none"
+  },
+  "llm_judge": true
+ }
+]

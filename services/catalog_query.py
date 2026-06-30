@@ -510,8 +510,8 @@ def parse(q: str) -> Spec:
     # gate in (b) keeps a casual "available … sold" (no counting intent) from triggering,
     # and a "not sold out" double-negative (handled below) carries neither a connector
     # nor a count cue, so it stays an in-stock filter.
-    _AVAIL = r"\b(?:available|in[\s-]?stock|purchasable|buyable|sellable|live)\b"
-    _SOLD = r"\b(?:sold[\s-]?out|sold|out\s+of\s+stock|unavailable|oos|gone)\b"
+    _AVAIL = r"\b(?:available|in[\s-]?stock|purchasable|buyable|sellable|live|mojood|maujood|haazir|hazir)\b"
+    _SOLD = r"\b(?:sold[\s-]?out|sold|out\s+of\s+stock|unavailable|oos|gone|khatam|khtm|ghayab|ghaib)\b"
     _CONN = r"(?:\b(?:and|or|vs\.?|versus|aur|ya)\b|[&/])"
     _CNT = r"\b(?:count|counts|how\s+many|number\s+of|numbers?|tally|total|kitne|kitni|kitny|kitna)\b"
     _SPLITW = r"\b(?:split|divided|breakdown|ratio|report)\b"
