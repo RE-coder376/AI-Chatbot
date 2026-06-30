@@ -297,7 +297,12 @@ def _history_products(history: list) -> list[dict]:
             # drop parentheticals: a scale/qty note "( 12 inches )" (whose digits would
             # trip the price-stop and truncate the name) and "(was Rs.X)" discount noise.
             frag_for_name = re.sub(r"\([^)]*\)", " ", frag)
-            nm = re.match(r"([A-Z][A-Za-z0-9][A-Za-z0-9 :/\-]*?)\s+(?:is\b|are\b|at\b|—|-\s|Rs|PKR|[$€£]|\d)", frag_for_name)
+            # Stop the name at a price/verb delimiter — NOT at a bare digit, which would
+            # truncate a model/scale number that is part of the identity ("BMW 760li 1:24"
+            # -> "BMW"). Fall back to a trailing bare price ("Iron Man 3650") only when no
+            # delimiter is present.
+            nm = re.match(r"([A-Z][A-Za-z0-9][A-Za-z0-9 :/\-]*?)\s+(?:is\b|are\b|at\b|—|-\s|Rs|PKR|[$€£])", frag_for_name) \
+                or re.match(r"([A-Z][A-Za-z0-9][A-Za-z0-9 :/\-]*?)\s+\d{3,6}\b", frag_for_name)
             if not nm:
                 continue
             name = re.sub(r"(?i)^(?:only|both|the|a|an)\s+", "", nm.group(1)).strip(" -:")

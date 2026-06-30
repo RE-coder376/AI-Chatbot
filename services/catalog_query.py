@@ -141,6 +141,12 @@ _STOP = {
     # Roman-Urdu "including / combined with" connectives — "unavailable MILA KAR highest
     # price" = "highest price INCLUDING unavailable"; glue, never a product name.
     "mila", "kar", "milakar", "milakr", "samet", "sameth", "saath", "sath",
+    # Roman-Urdu superlative/comparative & "even if" framing — "SABSE mehnga CHAHE
+    # khatam HO CHUKA ho" (= priciest even if sold out); function words, never a name.
+    "sabse", "sab", "chahe", "chahy", "chuka", "chuki", "ho", "counting", "even",
+    # Roman-Urdu stock-state words — captured as in/out-of-stock signals elsewhere,
+    # never product names ("kitne HAAZIR kitne GHAYAB", "KHATAM ho chuka").
+    "haazir", "hazir", "ghayab", "ghaib", "mojood", "maujood", "khatam", "khtm",
 }
 
 _NUM = r"(?:rs\.?\s*|pkr\s*|[\$£€])?\s*([\d][\d,]*(?:\.\d{1,2})?)"
@@ -642,6 +648,11 @@ def parse(q: str) -> Spec:
         # "mila kar … sold out" = rank/list ACROSS the sold-out ones, not filter to them.
         r"|\b(?:unavailable|sold[\s-]?out|out\s+of\s+stock|oos)\b[^.?!]{0,12}\b(?:bhi\s+)?(?:mila\s*kar|milakr|samet|sameth)\b"
         r"|\b(?:mila\s*kar|milakr|samet|sameth)\b[^.?!]{0,12}\b(?:unavailable|sold[\s-]?out|out\s+of\s+stock)\b"
+        # "even if sold out", "chahe khatam/sold ho", "counting the sold ones too" =
+        # rank ACROSS the sold-out ones.
+        r"|\b(?:even\s+if|chahe)\b[^.?!]{0,20}\b(?:khatam|sold|out\s+of\s+stock|unavailable|bik\w*)\b"
+        r"|\bcounting\b[^.?!]{0,20}\b(?:sold|unavailable|out\s+of\s+stock|gone)\b"
+        r"|\b(?:sold\s+ones?|sold[\s-]?out\s+ones?)\b[^.?!]{0,8}\btoo\b"
         r"|\bfull\s+availabilit\w*"
         r"|\bstock\s+status\b"
         r"|\bavailabilit\w*\s+(?:list|status|breakdown|overview|rundown)\b"
@@ -804,7 +815,10 @@ def parse(q: str) -> Spec:
                                "gone", "sellable", "tally", "buyable", "style", "in", "out",
                                "frame", "frames", "item", "items", "piece", "pieces",
                                "bik", "bika", "bikay", "gaye", "gaya", "bache", "bachay", "bacha",
-                               "kaise", "kaisa", "kaisi", "hua", "hui", "bata", "btao", "bata"}
+                               "kaise", "kaisa", "kaisi", "hua", "hui", "bata", "btao", "bata",
+                               # Roman-Urdu stock-state synonyms now admitted to the detector
+                               "haazir", "hazir", "ghayab", "ghaib", "mojood", "maujood",
+                               "khatam", "khtm", "finish", "finished", "headcount", "ready"}
         anchors = [a for a in anchors if a not in _split_report_words]
 
     # A bare "list / what products do you sell" with no category and no price
