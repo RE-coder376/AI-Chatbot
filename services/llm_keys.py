@@ -58,6 +58,7 @@ _KEY_RPM_SOFT_LIMIT: Dict[str, int] = {
     "sambanova": 25,
     "mistral": 25,
     "openai": 25,
+    "nvidia": 25,      # NIM free tier ~40 RPM
 }
 
 def _cooldown_provider(provider: str, seconds: int = 90):
@@ -351,7 +352,7 @@ def get_fresh_llm(avoid_providers=None, model_override=None):
         # fast → next; gemini works but is multi-second → high-quota fallback only;
         # cerebras/sambanova are currently dead (404 invalid key / 402 no balance) so
         # they sit last and self-disable on first failure (see _mark_key_failed).
-        _PROV_TIER = {'groq': 5, 'mistral': 4, 'gemini': 3, 'openai': 3, 'sambanova': 1, 'cerebras': 1}
+        _PROV_TIER = {'groq': 5, 'mistral': 4, 'nvidia': 4, 'gemini': 3, 'openai': 3, 'sambanova': 1, 'cerebras': 1}
 
         def key_health_score(k):
             s = _key_status.get(k['key'], {})
@@ -436,6 +437,17 @@ def get_fresh_llm(avoid_providers=None, model_override=None):
                 max_tokens=512,
                 request_timeout=8,
             ), "sambanova", "Meta-Llama-3.3-70B-Instruct")
+        elif provider == 'nvidia':
+            # NVIDIA NIM — free, OpenAI-compatible; keys.json entries use "provider": "nvidia".
+            return _tag_llm(_CompatChatOpenAI(
+                api_key=key_val,
+                model="meta/llama-3.3-70b-instruct",
+                base_url="https://integrate.api.nvidia.com/v1",
+                temperature=0,
+                max_retries=0,
+                max_tokens=512,
+                request_timeout=10,
+            ), "nvidia", "meta/llama-3.3-70b-instruct")
         elif provider == 'mistral':
             return _tag_llm(_CompatChatOpenAI(
                 api_key=key_val,

@@ -591,6 +591,17 @@
     </div>
   </div>
 
+  <!-- 6b. Customer Leads -->
+  <div class="card" id="card-leads">
+    <div class="card-header" onclick="toggle('leads')"><h2>📥 Customer Leads</h2><div class="card-arrow">▼</div></div>
+    <div class="card-body">
+      <p style="color:var(--text-muted);font-size:13px;margin-bottom:12px;">Contact details visitors left in the chat. Newest first — also sent to your contact email.</p>
+      <button onclick="loadLeads()">🔄 Load Leads</button>
+      <div id="leads-status" class="status-msg" style="margin:8px 0;"></div>
+      <div id="leads-list" style="max-height:420px;overflow-y:auto;"></div>
+    </div>
+  </div>
+
   <!-- 7. Behavioral Suite -->
   <div class="card" id="card-tests">
     <div class="card-header" onclick="toggle('tests')"><h2>🛡️ Production Behavioral Suite</h2><div class="card-arrow">▼</div></div>
@@ -1861,6 +1872,25 @@
     document.getElementById("prev-input").textContent = placeholder || "Type here...";
   }
   document.addEventListener("input", (e) => { if (e.target.id && e.target.type !== "password") updatePreview(); });
+
+  // --- CUSTOMER LEADS ---
+  async function loadLeads() {
+    showStatus('leads', 'Loading...', 'loading');
+    const d = await fetch(`/admin/leads`, { headers: authHeaders() }).then(r=>r.json()).catch(()=>null);
+    const list = document.getElementById('leads-list');
+    if (!d || !Array.isArray(d.leads)) { showStatus('leads', 'Could not load leads.', 'error'); return; }
+    showStatus('leads', `${d.count} lead${d.count===1?'':'s'} total (showing latest ${d.leads.length}).`, 'success');
+    if (d.leads.length === 0) { list.innerHTML = '<p style="color:var(--text-muted);font-size:13px;">No leads yet.</p>'; return; }
+    list.innerHTML = d.leads.map(l => `
+      <div style="background:#f8fafc;border:1px solid var(--border);border-radius:10px;padding:12px;margin-bottom:8px;font-size:13px;">
+        <div style="display:flex;justify-content:space-between;gap:10px;">
+          <strong>${escapeHtml(l.name || '(no name)')}</strong>
+          <span style="color:var(--text-muted);font-size:11px;">${escapeHtml((l.timestamp||'').slice(0,16).replace('T',' '))}</span>
+        </div>
+        <div style="margin-top:4px;">${escapeHtml(l.email || '')}${l.whatsapp ? ' · ' + escapeHtml(l.whatsapp) : ''}</div>
+        ${l.message ? `<div style="margin-top:6px;color:var(--text-muted);">${escapeHtml(l.message)}</div>` : ''}
+      </div>`).join('');
+  }
 
   // --- FAQ MANAGER ---
   async function loadFaqs() {
