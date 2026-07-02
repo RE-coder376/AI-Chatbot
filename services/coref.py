@@ -319,12 +319,111 @@ def _history_products(history: list) -> list[dict]:
     return []
 
 
+_FOLLOWUP_CUE = re.compile(
+    r"\b(it|its|it'?s|them|they|those|these|that|this|the\s+other|other\s+one|the\s+(?:cheaper|"
+    r"pricier|available|first|second|last|third)|same|again|now|then|phir|dobara|dubara|un|us|"
+    r"in\s+me|un\s+me|wahi|wohi|woh|dono|uska|uski|unka|unki|inka|inki)\b", re.I)
+
+
+# Intent/scaffolding words that are NEVER a product subject — beyond _CUE, the sort/
+# select/projection vocabulary a bare follow-up is built from. If a query has a content
+# token outside this set, it names its OWN subject → self-contained → the LLM rewrite is
+# skipped (so "cheapest BMW" is never contaminated with the prior turn's "bike").
+_SUBJECTLESS = (_CUE | _AGG_WORDS | _SUBJ_DROP | {
+    "sort", "order", "rank", "arrange", "arranged", "sorting", "descending", "ascending",
+    "desc", "asc", "high", "low", "htl", "lth", "reverse", "flip", "opposite", "other",
+    "repeat", "again", "dobara", "dubara", "jo", "names", "name", "named", "bucket",
+    "cheapest", "priciest", "costliest", "dearest", "lowest", "highest", "expensive"})
+
+
+def _has_own_subject(q: str) -> bool:
+    """True when the query names its own product/category (a content token that isn't pure
+    intent/reference vocab or a number) → it's self-contained and must NOT be LLM-rewritten
+    against unrelated history."""
+    toks = [t for t in _content_tokens(q) if not t.isdigit() and t not in _NUMWORD]
+    return any(t not in _SUBJECTLESS for t in toks)
+
+
+def _is_followup(q: str, history: list) -> bool:
+    """A SUBJECTLESS turn that leans on the conversation: has assistant history, carries a
+    referential/continuation cue (or is very short), and names no subject of its own. Gates
+    the LLM rewrite so self-contained catalog questions never pay the call OR get contaminated."""
+    if not q or not history:
+        return False
+    if not any(isinstance(m, dict) and m.get("role") == "assistant" for m in history):
+        return False
+    if _has_own_subject(q):
+        return False
+    return len(q.split()) <= 12 or bool(_FOLLOWUP_CUE.search(q.lower()))
+
+
+_LLM_FU_SYS = (
+    "You rewrite a customer's LATEST follow-up in a product-catalog chat into ONE standalone "
+    "question a search engine can answer, resolving EVERY reference (it/them/those three/the "
+    "other one/the available one/the cheaper one/phir/dobara/un/us/wahi/same/again/now) using "
+    "the conversation.\n"
+    "Rules:\n"
+    "- Preserve the EXACT intent: sort direction (ascending / descending / high-to-low / "
+    "low-to-high), WHICH item is meant, and price vs stock vs count vs total.\n"
+    "- When the follow-up operates on the prior RESULT SET (sort/rank those, the available "
+    "one, the other one, total of them), name EACH product from the conversation VERBATIM.\n"
+    "- Copy product & category names exactly as written. NEVER invent a product.\n"
+    "- If the latest message is already a complete standalone question, return it unchanged.\n"
+    "- Reply in the SAME language as the follow-up. Output ONLY the rewritten question."
+)
+
+
+def _llm_followup_rewrite(q: str, history: list) -> str | None:
+    """LLM rewrite of a bare follow-up into a self-contained question, using the last turns.
+    The universal answer to the coref regex treadmill: any language/phrasing that references
+    the prior turn resolves by UNDERSTANDING, not a surface rule. Grounded downstream — the
+    catalog engine resolves the rewrite against real products, so an invented name simply
+    abstains (never a wrong answer). Returns the rewrite, or None to fall back to the regex."""
+    try:
+        turns = [m for m in history if isinstance(m, dict) and m.get("role") in ("user", "assistant")][-4:]
+        if not turns:
+            return None
+        convo = "\n".join(f"{m['role'].upper()}: {str(m.get('content', ''))[:600]}" for m in turns)
+        msgs = [{"role": "system", "content": _LLM_FU_SYS},
+                {"role": "user", "content": f"Conversation:\n{convo}\n\nLATEST follow-up: {q}\n\nRewritten standalone question:"}]
+        from services.llm_keys import get_fresh_llm
+        tried = []
+        for _ in range(3):
+            llm = get_fresh_llm(avoid_providers=tried)
+            if llm is None:
+                break
+            p = getattr(llm, "_provider_name", None)
+            if p:
+                tried.append(p)
+            try:
+                resp = llm.invoke(msgs)
+                out = getattr(resp, "content", None) or (resp if isinstance(resp, str) else "")
+                out = str(out).strip().strip('"').strip()
+                out = out.splitlines()[0].strip() if out else ""
+                # Sanity: a plausible one-line question, not a refusal or an essay.
+                if out and 3 <= len(out) <= 300 and not re.match(r"(?i)^(i\b|sorry|as an|i'?m|here)", out):
+                    return out
+            except Exception:
+                continue
+        return None
+    except Exception:
+        return None
+
+
 def resolve_followup(q: str, history: list) -> str:
     """Return a self-contained version of q when it's a bare follow-up referencing a
     prior product; otherwise return q unchanged."""
     try:
         if not q or not history:
             return q
+        # LLM understanding is PRIMARY for genuine follow-ups — it resolves any language /
+        # phrasing referencing the prior turn (sort those, the other one, jo available hai,
+        # phir high-to-low) without a per-phrasing regex. The deterministic cascade below is
+        # the fallback when the (free) model is unavailable or returns nothing usable.
+        if _is_followup(q, history):
+            _rw = _llm_followup_rewrite(q, history)
+            if _rw and _rw.strip().lower() != q.strip().lower():
+                return _rw
         ql = q.lower()
         # "count available side again", "sold out side again", "the available side?" — a
         # bare reference to ONE side (or a repeat) of the prior turn's stock split. It has
