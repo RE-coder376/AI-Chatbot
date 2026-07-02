@@ -6325,8 +6325,13 @@ async def chat(request: Request):
             if wk_status == "expired":
                 return JSONResponse({"error": "Widget key expired"}, status_code=401)
             return JSONResponse({"error": "Invalid widget key"}, status_code=401)
-        # If widget key resolves to the active DB, reuse pre-loaded global (avoid reloading BGE)
-        if tenant_db_name == _get_active_db() and local_db is not None:
+        # If widget key resolves to the active DB, reuse pre-loaded global (avoid reloading BGE).
+        # MUST also verify the loaded instance was built FOR that DB: set-active nulls local_db
+        # only in the container that served the POST — other warm containers still hold the
+        # PREVIOUS tenant's instance while _get_active_db() (shared volume) already returns the
+        # new name, which served cross-tenant answers under a valid widget key.
+        if (tenant_db_name == _get_active_db() and local_db is not None
+                and getattr(local_db, "_db_name", None) == tenant_db_name):
             tenant_db_instance = local_db
         else:
             # Surface any commit another container made (re-ingest/crawl), then resolve
@@ -6423,7 +6428,8 @@ async def chat(request: Request):
                 _scoped_db = ""
         if _scoped_db:
             tenant_db_name = _scoped_db
-            if _scoped_db == _get_active_db() and local_db is not None:
+            if (_scoped_db == _get_active_db() and local_db is not None
+                    and getattr(local_db, "_db_name", None) == _scoped_db):
                 tenant_db_instance = local_db
             else:
                 _maybe_reload_volume()
@@ -6435,8 +6441,14 @@ async def chat(request: Request):
                     status_code=503)
         else:
             # No widget key, no admin scope — use pre-loaded global active DB.
+            # Same identity guard: right after set-active, local_db may still be the
+            # PREVIOUS tenant's instance on this container — resolve by name instead.
             tenant_db_name = _get_active_db()
-            tenant_db_instance = local_db
+            if local_db is not None and getattr(local_db, "_db_name", None) == tenant_db_name:
+                tenant_db_instance = local_db
+            else:
+                _maybe_reload_volume()
+                tenant_db_instance = _get_db_instance(tenant_db_name) if tenant_db_name else local_db
     tenant_cfg = get_config(tenant_db_name)
     asyncio.get_running_loop().run_in_executor(None, log_interaction, q, visitor_id, tenant_db_name)
 
