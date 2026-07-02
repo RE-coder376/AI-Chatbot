@@ -133,8 +133,24 @@ def _extract_json(text: str) -> dict | None:
     m = re.search(r"\{.*\}", text, re.S)
     if not m:
         return None
+    raw = m.group(0)
     try:
-        return json.loads(m.group(0))
+        return json.loads(raw)
+    except Exception:
+        pass
+    # Tolerant repair for the JSON free models routinely emit malformed: Python
+    # literals (True/False/None), trailing commas, and single-quoted strings/keys.
+    # This recovers ~otherwise-lost plans instead of dropping to a regex misroute.
+    try:
+        rep = re.sub(r"\bTrue\b", "true", raw)
+        rep = re.sub(r"\bFalse\b", "false", rep)
+        rep = re.sub(r"\b(None|null)\b", "null", rep)
+        rep = re.sub(r",\s*([}\]])", r"\1", rep)  # trailing commas
+        return json.loads(rep)
+    except Exception:
+        pass
+    try:
+        return json.loads(rep.replace("'", '"'))  # last resort: single→double quotes
     except Exception:
         return None
 
@@ -198,11 +214,21 @@ def extract_plan(q: str, llm=None, model_override=None) -> dict | None:
         attempts = [llm] if llm is not None else []
         if not attempts:
             from services.llm_keys import get_fresh_llm
-            for _ in range(2):
-                got = get_fresh_llm(model_override=_mo)
+            # Router reliability is the single biggest free-stack lever: a code-mixed
+            # question that fails extraction falls back to the English regex, which
+            # mis-routes the SEMANTICS (e.g. drops an in-stock filter). More key-rotated
+            # tries (Groq-tiered first) turn a transient provider/JSON failure — measured
+            # at ~20-80% None on hard Roman-Urdu — into a resolved plan. Each try prefers
+            # a not-yet-failed provider so one fumbling model doesn't eat every attempt.
+            _tried_provs = []
+            for _ in range(4):
+                got = get_fresh_llm(model_override=_mo, avoid_providers=_tried_provs)
                 if got is None:
                     break
                 attempts.append(got)
+                _p = getattr(got, "_provider_name", None)
+                if _p:
+                    _tried_provs.append(_p)
         for cand in attempts:
             try:
                 resp = cand.invoke(msgs)

@@ -1664,6 +1664,15 @@ _BOTH_MARK = re.compile(r"\b(dono|both|available\s+(?:and|aur|or|ya|&|vs)\s+(?:s
 _CMP_MARK = re.compile(r"\b(which|konsa|kaunsa|kon?sa|kaun?sa|kis|cheaper|sasta|sasti|"
                        r"mehng[ai]|zyada|expensive|pricier|dearer|better|costs?\s+(?:more|less))\b", re.I)
 _MORE_MARK = re.compile(r"\b(mehng[ai]|zyada|expensive|pricier|dearer|costs?\s+more|higher)\b", re.I)
+# "Buyable / advisory" intent — the customer wants something they can PURCHASE now
+# (a gift, a recommendation, "one I can get", "jo mil jaye / buy ho sake"). Mirrors
+# the advisory rule in _refine_plan but is applied to the deterministic REGEX spec too,
+# so a sold-out item never leaks into a budget/recommendation list when the LLM router
+# didn't fire. Language-agnostic markers; universal across stores, no per-phrasing config.
+_BUYABLE_INTENT = re.compile(
+    r"\b(available|in[\s-]?stock|buyable|mileg[ai]|mil\s+jay\w*|mil\s+sak\w*|"
+    r"buy\s+(?:ho|kar)\s+sak\w*|khareed\w*|kharid\w*|le\s+sak\w*|order\s+kar\s+sak\w*|"
+    r"jo\s+(?:mil|buy|le)\b|recommend\w*|suggest\w*|gift|gifts|present|presents|tohfa|tuhfa)\b", re.I)
 
 
 def _refine_plan(plan: dict, q: str) -> dict:
@@ -1926,6 +1935,17 @@ def answer_catalog_query(q: str, db, cfg: dict | None = None, max_list: int = 12
             # text/docs corpus (with stray priced rows) falls through to RAG/LLM.
             if not is_catalog_db(db, rows, cfg):
                 return None, []
+        # Deterministic "buyable/advisory" refinement — apply the in-stock filter to a
+        # budget/list/min/max spec when the customer signalled they want something
+        # PURCHASABLE ("X gift under N", "under N jo mil jaye / buy ho sake", "available
+        # …"). This mirrors _refine_plan for the REGEX path so a sold-out item never
+        # leaks when the LLM router didn't fire. Only ADDS the filter (never overrides an
+        # explicit out/both/include-oos request). Universal, language-agnostic.
+        if (getattr(spec, "structured", False) and spec.agg in ("list", "min", "max")
+                and not spec.in_stock and not spec.out_of_stock
+                and not getattr(spec, "include_oos", False)
+                and _BUYABLE_INTENT.search(q or "")):
+            spec.in_stock = True
         # Multi-product reasoning (compare / order / basket): fan out to resolve each
         # named product, then compute. Owns the question outright — a correct answer
         # or hand to RAG; never a single-product dump masquerading as a comparison.
