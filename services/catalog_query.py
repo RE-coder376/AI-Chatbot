@@ -2162,6 +2162,8 @@ def _execute_spec(spec: "Spec", rows: list[Row], cfg: dict | None, max_list: int
                        else f"{t} is currently out of stock{pr}.")
                 return msg, _dedup([sel[0].source])[:max_list]
             lines = [f"- {t} — {st}{pr}" for t, st, pr in (_stk(r) for r in sel[:max_list])]
+            if len(sel) > max_list:
+                lines.append(f"…and {len(sel) - max_list} more — narrow it down (e.g. \"only in-stock\").")
             return "Here's the current availability:\n" + "\n".join(lines), _dedup(r.source for r in sel)[:max_list]
 
         if spec.agg == "count_split":
@@ -2230,6 +2232,8 @@ def _execute_spec(spec: "Spec", rows: list[Row], cfg: dict | None, max_list: int
         if not priced:
             if spec.agg == "list" and sel:
                 body = "\n".join(f"- {r.title}" for r in sel[:max_list])
+                if len(sel) > max_list:
+                    body += f"\n…and {len(sel) - max_list} more — narrow it down (e.g. \"only in-stock\")."
                 return f"Here are matching products from the catalog:\n{body}", _dedup(r.source for r in sel)[:max_list]
             return None, []
         # Extremes (cheapest / most expensive) should name something a customer can
@@ -2253,6 +2257,10 @@ def _execute_spec(spec: "Spec", rows: list[Row], cfg: dict | None, max_list: int
         lines = [head]
         for i, r in enumerate(items, 1):
             lines.append(f"{i}. {r.title} - {_price_disp(r)} - {r.availability}")
+        # Never truncate silently: a "show me all X" answer that drops items reads
+        # as the full catalog — say how many more exist so the customer can ask on.
+        if len(priced) > n_show:
+            lines.append(f"…and {len(priced) - n_show} more — narrow it down (e.g. \"only in-stock\" or \"under Rs.5000\").")
         return "\n".join(lines), _dedup(r.source for r in items)[:max_list]
     except Exception:
         return None, []
