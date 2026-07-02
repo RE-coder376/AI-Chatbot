@@ -1958,13 +1958,13 @@ def answer_catalog_query(q: str, db, cfg: dict | None = None, max_list: int = 12
             # so a valid category/list answer isn't lost to a buy-choice misfire.
             if not getattr(spec, "structured", False):
                 return None, []
-        return _execute_spec(spec, rows, cfg, max_list, from_router=_from_router)
+        return _execute_spec(spec, rows, cfg, max_list, from_router=_from_router, raw_q=q)
     except Exception:
         return None, []
 
 
 def _execute_spec(spec: "Spec", rows: list[Row], cfg: dict | None, max_list: int,
-                  from_router: bool = False) -> tuple[str | None, list[str]]:
+                  from_router: bool = False, raw_q: str = "") -> tuple[str | None, list[str]]:
     """Deterministic execution of a (filter + aggregation) spec against the rows."""
     try:
         excl = _excl_re(cfg, spec.anchors)
@@ -1990,6 +1990,22 @@ def _execute_spec(spec: "Spec", rows: list[Row], cfg: dict | None, max_list: int
 
         _base = [r for r in rows if _hit(r, _m_anchors, spec.title_only)]
         _strict_hit = bool(_base)  # did strict all-anchor matching resolve anything?
+        # LOST-CATEGORY RECOVERY: when the matching anchors are empty, the _hit above
+        # matched the WHOLE catalog. For a PRICE-BOUNDED aggregation this would dump every
+        # cheap item — the failure mode when the LLM router drops the category or returns
+        # None under load ("F1 …under 9000" → empty spec + price bound). If the RAW query
+        # actually names a category resolvable to a storefront collection, answer THAT set
+        # instead of the catalog. Additive + universal: fires only on empty anchors, so a
+        # real category query (has anchors) and a genuine price-only browse (no resolvable
+        # category) are both untouched; needs a price bound so open min/max stay catalog-wide.
+        _recovered_lock = False
+        if (not _m_anchors and raw_q and spec.agg in ("list", "min", "max", "count", "count_split")
+                and (spec.price_min is not None or spec.price_max is not None)):
+            _rec = _resolve_collection(_anchors_from(raw_q), rows)
+            if _rec:
+                _base = _rec
+                _strict_hit = True
+                _recovered_lock = True
         if not _base and spec.anchors:
             # Strict all-anchor match found nothing — fall back to title-coverage so
             # a fully-named product still resolves. Only triggers when strict yields
@@ -2027,7 +2043,7 @@ def _execute_spec(spec: "Spec", rows: list[Row], cfg: dict | None, max_list: int
         # collection — never title/tag substring matches. "Fujifilm" the collection
         # is 2 cameras; "fujifilm" as a brand tag is on every film. Exact membership
         # returns the real group the customer is browsing, not coincidental name hits.
-        _coll_locked = False
+        _coll_locked = _recovered_lock  # recovered collection is authoritative → skip tag-narrowing
         if spec.anchors and spec.agg in ("count", "exists", "list", "count_split"):
             def _sig(toks):
                 return frozenset(t for t in toks if len(t) >= 2 and t not in _STOP)
