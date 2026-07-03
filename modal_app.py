@@ -430,7 +430,15 @@ def scrub(db_name: str):
     #    cookie walls) fail every future ingest gate because re-ingest clears
     #    products only, never prose. Deleted via the chroma client so vector +
     #    fulltext indexes stay consistent (raw sqlite DELETE would orphan them).
+    # 5) (same sweep) drop crawler-chrome junk chunks the gate layer-1 flags but
+    #    steps 1-3 can't repair — whole-page widget captures (cart sidebar, nav
+    #    shell, Rs.0 subtotal). Repair classes (HTML entity/mojibake) stay with
+    #    step 1; only page-chrome classes are drop-safe.
+    from pipeline_check import JUNK_PATTERNS
+    _DROP_JUNK = {"cart widget", "nav boilerplate", "zero subtotal"}
+    _junk_res = [(pat, label) for pat, label in JUNK_PATTERNS if label in _DROP_JUNK]
     unprintable_drops = 0
+    junk_drops = 0
     try:
         import chromadb
         client = chromadb.PersistentClient(path="/root/app/databases/" + db_name)
@@ -443,17 +451,22 @@ def scrub(db_name: str):
                 printable = sum(1 for x in head if x.isprintable() or x.isspace())
                 if head and printable / max(1, len(head)) < 0.95:
                     bad_ids.append(cid)
+                    unprintable_drops += 1
+                elif any(pat.search(head) for pat, _ in _junk_res):
+                    bad_ids.append(cid)
+                    junk_drops += 1
             if bad_ids:
                 coll.delete(ids=bad_ids)
-                unprintable_drops += len(bad_ids)
     except Exception as _e:
-        print(f"[SCRUB] unprintable-drop skipped: {_e}")
+        print(f"[SCRUB] unprintable/junk-drop skipped: {_e}")
 
     vol.commit()
     print(f"[SCRUB] {db_name}: {doc_fixes} entity docs, {title_fixes} short titles, "
-          f"{chrome_fixes} chrome strips, {unprintable_drops} unprintable chunks dropped")
+          f"{chrome_fixes} chrome strips, {unprintable_drops} unprintable chunks dropped, "
+          f"{junk_drops} chrome-junk chunks dropped")
     return {"entity_docs": doc_fixes, "short_titles": title_fixes,
-            "chrome_strips": chrome_fixes, "unprintable_drops": unprintable_drops}
+            "chrome_strips": chrome_fixes, "unprintable_drops": unprintable_drops,
+            "junk_drops": junk_drops}
 
 
 # Default product-catalog DBs (mal=API-only, agentfactory=docs, book=structureless
