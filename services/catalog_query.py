@@ -406,7 +406,14 @@ def _selective_anchors(anchors: list[str], rows: list[Row], agg: str | None = No
         # down to a lone generic ("rc") and dump the whole type; it stays unmatched →
         # graceful fuzzy/RAG instead of a confidently-wrong list.
         _surv_selective = any(0.0 < df.get(a, 0.0) < _GENERIC_DF for a in positive)
-        if positive and len(positive) < len(anchors) and _surv_selective:
+        # Majority rule (mirrors _resolve_collection's a78d0ef gate): the survivors
+        # must be MOST of the query. A fully-named FOREIGN product ("Land Rover
+        # Defender 1:24" at a skin store) is all zero-DF except one incidental
+        # token ("24" ~ "24 patches") — dropping 3 of 4 anchors and listing the
+        # residue hijacks an honest absent answer. Typo repair keeps majority
+        # ("SUPERHERO action figures" 2/3, "hulk action FIGER" 2/3).
+        if positive and len(positive) < len(anchors) and _surv_selective \
+                and 2 * len(positive) >= len(anchors):
             anchors = positive
             df = {a: v for a, v in df.items() if v > 0.0}
             if len(anchors) <= 1:

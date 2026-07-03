@@ -424,9 +424,36 @@ def scrub(db_name: str):
     except Exception:
         pass
     con.close()
+
+    # 4) drop binary/unprintable chunks (same <95%-printable check as crawl_gate
+    #    layer-1) — crawler-captured consent/interstitial pages (e.g. Google
+    #    cookie walls) fail every future ingest gate because re-ingest clears
+    #    products only, never prose. Deleted via the chroma client so vector +
+    #    fulltext indexes stay consistent (raw sqlite DELETE would orphan them).
+    unprintable_drops = 0
+    try:
+        import chromadb
+        client = chromadb.PersistentClient(path="/root/app/databases/" + db_name)
+        for col in client.list_collections():
+            coll = client.get_collection(col.name)
+            got = coll.get(include=["documents"])
+            bad_ids = []
+            for cid, doc in zip(got.get("ids") or [], got.get("documents") or []):
+                head = str(doc or "")[:2000]
+                printable = sum(1 for x in head if x.isprintable() or x.isspace())
+                if head and printable / max(1, len(head)) < 0.95:
+                    bad_ids.append(cid)
+            if bad_ids:
+                coll.delete(ids=bad_ids)
+                unprintable_drops += len(bad_ids)
+    except Exception as _e:
+        print(f"[SCRUB] unprintable-drop skipped: {_e}")
+
     vol.commit()
-    print(f"[SCRUB] {db_name}: {doc_fixes} entity docs, {title_fixes} short titles, {chrome_fixes} chrome strips fixed")
-    return {"entity_docs": doc_fixes, "short_titles": title_fixes, "chrome_strips": chrome_fixes}
+    print(f"[SCRUB] {db_name}: {doc_fixes} entity docs, {title_fixes} short titles, "
+          f"{chrome_fixes} chrome strips, {unprintable_drops} unprintable chunks dropped")
+    return {"entity_docs": doc_fixes, "short_titles": title_fixes,
+            "chrome_strips": chrome_fixes, "unprintable_drops": unprintable_drops}
 
 
 # Default product-catalog DBs (mal=API-only, agentfactory=docs, book=structureless
