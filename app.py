@@ -3296,6 +3296,11 @@ async def _auto_scheduler():
         try:
             global _scheduler_last_tick_ts
             _scheduler_last_tick_ts = time.time()
+            # Refresh the volume view: the scheduler reads sidecar timestamps from the
+            # mounted volume, which is otherwise frozen at container start (reload was
+            # only wired into /chat paths) — a warm container's scheduler never saw
+            # commits from other containers (ingests, manual timestamp edits).
+            _maybe_reload_volume()
             if _github_sync_result.get("status") == "running":
                 await asyncio.sleep(60)
                 continue
