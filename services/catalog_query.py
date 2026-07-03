@@ -306,26 +306,36 @@ def _resolve_collection(anchors: list[str], rows: list[Row]) -> list[Row] | None
         df = _anchor_df(t, rows)
         tinfo.append((t, _variants(t), 1.0 / max(df, 0.02), df <= _GENERIC_DF))
     # Per-token member-title hit ratio, computed once per (token, collection) lazily.
+    n_sel = sum(1 for _t, _tv, _w, _sel in tinfo if _sel)
     best: tuple[float, list[Row]] | None = None
     for cnm, mem in colls.items():
-        cwords = re.sub(r"[^a-z0-9]+", " ", cnm.lower()).split()
+        # Scaffolding words in a collection NAME ("Collars Harness AND Leashes") are
+        # never what a customer means — and they fuzzy-collide with real words
+        # ("land"~"and" = 0.857), letting a foreign-product query lock a random
+        # collection. Anchors are already _STOP-filtered, so dropping them here
+        # cannot lose a legitimate exact match.
+        cwords = [w for w in re.sub(r"[^a-z0-9]+", " ", cnm.lower()).split() if w not in _STOP]
         cset = set(cwords)
         score = 0.0
-        cov_sel = False
+        cov_sel = 0
         for t, tv, w, sel in tinfo:
             if tv & cset:                           # exact/plural token in collection name
                 score += w
-                cov_sel = cov_sel or sel
+                cov_sel += sel
             elif any(difflib.SequenceMatcher(None, t, cw).ratio() >= 0.84 for cw in cwords):
                 score += 0.8 * w                    # typo-tolerant ("constraction"~"construction")
-                cov_sel = cov_sel or sel
+                cov_sel += sel
             else:                                   # token lives in MEMBER titles, not the name
                 pat = re.compile(rf"\b{re.escape(t)}\b")
                 hits = sum(1 for m in mem if pat.search(m.hay))
                 if hits / len(mem) >= 0.5:
                     score += 0.5 * w
-                    cov_sel = cov_sel or sel
-        if score > 0 and cov_sel and (best is None or score > best[0]):
+                    cov_sel += sel
+        # A lock must cover a MAJORITY of the selective anchors, not just one: a typo
+        # query is fully covered ("rc constraction" 2/2) while a fully-named FOREIGN
+        # product ("land rover defender 24" in a pet store) at best grazes one word —
+        # locking on that single hit is how customers got collars for a Land Rover.
+        if score > 0 and cov_sel and 2 * cov_sel >= n_sel and (best is None or score > best[0]):
             best = (score, mem)
     return best[1] if best else None
 
