@@ -2753,18 +2753,28 @@ async def _auto_crawl_db(db_name: str, url: str, max_pages: int = 0, clear: bool
         except Exception as _nav_e:
             logger.warning(f"[AUTO-CRAWL] nav discovery failed for {db_name}: {_nav_e}")
         # Hidden-page discovery: rendered sidebars / hydration / route hints omitted from sitemap.
-        try:
-            _rendered_links = await _rendered_discovery(crawl_urls or [url])
-            if _rendered_links:
-                crawl_urls = list(dict.fromkeys((crawl_urls or []) + _rendered_links))
-                discovery_rendered_added = len(_rendered_links)
-                for u in _rendered_links: _url_layer.setdefault(u, []).append("rendered")
-                logger.info(f"[AUTO-CRAWL] '{db_name}': rendered discovery added {discovery_rendered_added} URLs")
-        except Exception as _rd_e:
-            logger.warning(f"[AUTO-CRAWL] rendered discovery failed for {db_name}: {_rd_e}")
+        # Skipped in auto-ingest mode (products come from the structured feed; rendering
+        # the storefront is the flaky, expensive step this mode exists to avoid).
+        if not _ac_auto_ingest:
+            try:
+                _rendered_links = await _rendered_discovery(crawl_urls or [url])
+                if _rendered_links:
+                    crawl_urls = list(dict.fromkeys((crawl_urls or []) + _rendered_links))
+                    discovery_rendered_added = len(_rendered_links)
+                    for u in _rendered_links: _url_layer.setdefault(u, []).append("rendered")
+                    logger.info(f"[AUTO-CRAWL] '{db_name}': rendered discovery added {discovery_rendered_added} URLs")
+            except Exception as _rd_e:
+                logger.warning(f"[AUTO-CRAWL] rendered discovery failed for {db_name}: {_rd_e}")
         if not crawl_urls:
-            logger.info(f"[AUTO-CRAWL] '{db_name}': no URLs found — skipping")
-            raise RuntimeError(f"No URLs found for auto-crawl from {url}")
+            # Auto-ingest mode NEVER discovers prose URLs (sitemap/BFS skipped by design) —
+            # an empty list is the normal state, and the catalog ingest below is the whole
+            # point of the run. Raising here starved auto-ingest DBs of their daily catalog
+            # refresh ("No URLs found" fail loop on diecaststation).
+            if _ac_auto_ingest:
+                logger.info(f"[AUTO-CRAWL] '{db_name}': auto-ingest mode, no prose URLs — proceeding to catalog ingest")
+            else:
+                logger.info(f"[AUTO-CRAWL] '{db_name}': no URLs found — skipping")
+                raise RuntimeError(f"No URLs found for auto-crawl from {url}")
 
         # Step 1c: rendered nav discovery — finds pages only accessible via JS sidebar/hydration.
         # Runs AFTER sitemap/BFS so we only spend Playwright time on genuinely missing URLs.
