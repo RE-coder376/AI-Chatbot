@@ -3494,14 +3494,18 @@ def _init_crawl_timestamps():
         except Exception:
             ct = {}
         last_str = ct.get("last_crawl_time") or db_cfg.get("last_crawl_time", "")
-        # If timestamp is missing or older than 24h, reset to now so countdown starts fresh
-        is_stale = True
+        # Only initialize a MISSING/unparseable timestamp. Never rewind an old one to
+        # "now": the scheduler's due-check reads this same field, so resetting an
+        # overdue DB postpones its refresh 24h — and Modal containers restart often
+        # enough that a daily auto-ingest can be starved indefinitely (diecaststation
+        # was; every cold start pushed 'due' another day out).
+        is_missing = True
         if last_str:
             try:
-                age_h = (datetime.now() - datetime.fromisoformat(last_str)).total_seconds() / 3600
-                is_stale = age_h > 24
+                datetime.fromisoformat(last_str)
+                is_missing = False
             except Exception: pass
-        if is_stale:
+        if is_missing:
             ct["last_crawl_time"] = now_iso
             try:
                 sidecar.write_text(json.dumps(ct, indent=2), encoding="utf-8")
