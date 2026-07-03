@@ -1915,6 +1915,7 @@ def _extract_admin_db(request: Request, fallback: str = "") -> str:
     This is the primary isolation mechanism — every admin operation is scoped to this DB."""
     db = (request.headers.get("X-Admin-DB", "")
           or request.query_params.get("db_name", "")
+          or request.query_params.get("db", "")
           or fallback)
     db = db.strip() or _get_active_db()
     return _canonical_db_name(db) if db else ""
