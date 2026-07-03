@@ -733,14 +733,18 @@
         <button onclick="previewBot()" style="margin:0; width:auto; background:#10b981;">🤖 Preview Your Bot</button>
       </div>
       <div style="margin-top:16px; display:flex; gap:10px; flex-wrap:wrap;">
-        <select id="widget-ttl" style="width:auto; min-width:160px; margin:0;">
+        <select id="widget-ttl" style="width:auto; min-width:160px; margin:0;"
+                onchange="document.getElementById('widget-ttl-days').style.display = this.value==='custom' ? 'inline-block' : 'none';">
           <option value="">Select key lifetime</option>
           <option value="30d">30 days</option>
           <option value="7d">7 days</option>
           <option value="1d">1 day</option>
+          <option value="custom">Custom (days)…</option>
           <option value="lifetime">Lifetime</option>
           <option value="1m">1 minute (test)</option>
         </select>
+        <input id="widget-ttl-days" type="number" min="1" max="3650" placeholder="days e.g. 12"
+               style="display:none; width:120px; margin:0;">
         <button onclick="createWidgetKey()" style="margin:0; width:auto; background:#2563eb;">🔑 Create Widget Key</button>
       </div>
       <div id="widget-key-meta" style="margin-top:10px; font-size:12px; color:var(--text-muted);"></div>
@@ -2011,8 +2015,13 @@
   async function createWidgetKey() {
     const pass = document.getElementById('master-pass').value;
     if (!pass) return showStatus('embed', 'Enter admin password first.', 'error');
-    const ttl = (document.getElementById('widget-ttl')?.value || '').trim();
+    let ttl = (document.getElementById('widget-ttl')?.value || '').trim();
     if (!ttl) return showStatus('embed', 'Select key lifetime first.', 'error');
+    if (ttl === 'custom') {
+      const days = parseInt(document.getElementById('widget-ttl-days')?.value || '', 10);
+      if (!days || days < 1 || days > 3650) return showStatus('embed', 'Enter a number of days (1-3650).', 'error');
+      ttl = `${days}d`;
+    }
     try {
       const res = await fetch(`${API}/admin/embed-code?rotate=1&ttl=${encodeURIComponent(ttl)}`, { headers: authHeaders() });
       const data = await res.json();

@@ -11808,20 +11808,27 @@ def get_embed_code(request: Request, password: str = ""):
     admin_auth(password, cfg)
     if not db_name:
         return JSONResponse({"detail": "db_name required"}, status_code=400)
+    # A key minted for a NONEXISTENT db is a dead widget the moment it's embedded
+    # (typo'd 'diecartstation' 503'd on a client and even triggered a volume
+    # restore attempt). Refuse at mint time — every real db has a directory.
+    if not (DATABASES_DIR / db_name).is_dir():
+        return JSONResponse({"detail": f"Unknown db '{db_name}' — check the database name"}, status_code=404)
     host = str(request.base_url).rstrip("/").replace("http://", "https://")
     ttl_opt = (request.query_params.get("ttl", "") or "").strip().lower()
     rotate = (request.query_params.get("rotate", "") or "").strip().lower() in {"1", "true", "yes"}
-    ttl_map_days = {"1d": 1, "7d": 7, "30d": 30, "lifetime": 0}
     ttl_minutes = 0
     ttl_days = None
     if ttl_opt:
+        _m_days = re.fullmatch(r"(\d{1,4})d?", ttl_opt)
         if ttl_opt == "1m":
             ttl_minutes = 1
             ttl_days = 0
-        elif ttl_opt in ttl_map_days:
-            ttl_days = ttl_map_days[ttl_opt]
+        elif ttl_opt == "lifetime":
+            ttl_days = 0
+        elif _m_days and 0 < int(_m_days.group(1)) <= 3650:
+            ttl_days = int(_m_days.group(1))
         else:
-            return JSONResponse({"detail": "Invalid ttl; use 1d, 7d, 30d, lifetime"}, status_code=400)
+            return JSONResponse({"detail": "Invalid ttl; use <days>d (e.g. 10d), lifetime, or 1m"}, status_code=400)
 
     widget_key = str(cfg.get("widget_key", "") or "")
     expires_at = str(cfg.get("widget_key_expires_at", "") or "")
