@@ -3744,8 +3744,47 @@ def serve_ui():
 def serve_admin():
     return FileResponse("admin.html", headers={"Cache-Control": "no-cache, no-store, must-revalidate"})
 
+# ── Outreach engagement tracking ──────────────────────────────────────────────
+# Two signals, both best-effort and non-blocking:
+#   email_opens  — /px?t=<tag> 1x1 GIF embedded in outreach HTML emails
+#   widget_loads — demo-link clicks (per-db, keys are store-unique)
+_TRACKING_FILE = DATABASES_DIR / "_outreach_tracking.json"
+_tracking_lock = threading.Lock()
+_PIXEL_GIF = base64.b64decode("R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7")
+
+def _track_event(kind: str, tag: str, extra: dict | None = None):
+    try:
+        with _tracking_lock:
+            data = {}
+            if _TRACKING_FILE.exists():
+                data = json.loads(_TRACKING_FILE.read_text(encoding="utf-8"))
+            evs = data.setdefault(kind, [])
+            ev = {"tag": tag, "ts": datetime.now(timezone.utc).isoformat()}
+            if extra:
+                ev.update(extra)
+            evs.append(ev)
+            if len(evs) > 5000:
+                del evs[:len(evs) - 5000]
+            _TRACKING_FILE.write_text(json.dumps(data, indent=1), encoding="utf-8")
+    except Exception:
+        pass
+
+@app.get("/px")
+def tracking_pixel(t: str = ""):
+    if t:
+        _run_in_bg(_track_event, "email_opens", str(t)[:80])
+    return Response(content=_PIXEL_GIF, media_type="image/gif",
+                    headers={"Cache-Control": "no-cache, no-store, must-revalidate"})
+
 @app.get("/widget-chat")
-def serve_widget():
+def serve_widget(key: str = ""):
+    if key:
+        try:
+            _db, _status = _resolve_widget_key(key)
+            if _db:
+                _run_in_bg(_track_event, "widget_loads", _db, {"status": _status})
+        except Exception:
+            pass
     return FileResponse("widget_chat.html", headers={"Cache-Control": "no-cache, no-store, must-revalidate"})
 
 @app.get("/widget.js")
