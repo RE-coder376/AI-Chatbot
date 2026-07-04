@@ -200,7 +200,7 @@ def crawl(db_name: str, url: str, max_pages: int = 0, clear: bool = False):
     image=image,
     cpu=1.0,
     memory=4096,
-    timeout=1200,
+    timeout=3600,  # 1200 died on 4k-chunk DBs (allurebeauty) before layer-3 finished
     volumes={"/root/app/databases": vol},
     secrets=SECRETS,
 )
