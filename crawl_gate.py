@@ -437,7 +437,11 @@ def run_gate(db_name: str, sqlite_path: str, crawl_url: str = "",
         fails.append("0 chunks in DB")
     if l1["junk"]:
         fails.append(f"junk in chunks: {l1['junk']}")
-    if l1["bad_title_count"]:
+    # Tolerance scales with corpus: a broken extractor yields dozens of bad titles,
+    # while 1-2 in thousands are store-authored quirks (allurebeauty's own
+    # "…Face Wash 100G..." title). Kept in the report either way.
+    _bad_tol = max(2, l1["chunks"] // 1000)
+    if l1["bad_title_count"] > _bad_tol:
         fails.append(f"{l1['bad_title_count']} garbage titles (e.g. {l1['bad_titles'][:2]})")
     if l1["nonpositive_count"]:
         fails.append(f"{l1['nonpositive_count']} non-positive prices")
