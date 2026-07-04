@@ -248,30 +248,34 @@ def _add_documents_deterministic(db, docs) -> None:
         _seen_ids.add(_i)
         _u_docs.append(_d)
         _u_ids.append(_i)
-    try:
-        db.add_documents(_u_docs, ids=_u_ids)
-    except TypeError:
-        # Compatibility fallback for wrappers that don't expose ids kwarg.
-        db.add_documents(_u_docs)
-    except Exception:
-        # Cross-batch duplicates: some IDs already exist in the collection (e.g. a
-        # page re-crawled by the retry queue). Chroma rejects the whole add, which
-        # would drop the genuinely-new docs riding in the same batch. Re-add only
-        # the new IDs so the batch never fails and nothing is lost or re-embedded.
+    # Chroma hard-rejects adds above its max batch (5461): a >5461-product catalog
+    # (toycompany: 7249 docs) failed the ENTIRE in-place ingest. Slice under the cap.
+    for _s in range(0, len(_u_docs), 5000):
+        _b_docs, _b_ids = _u_docs[_s:_s + 5000], _u_ids[_s:_s + 5000]
         try:
-            _existing: set = set()
+            db.add_documents(_b_docs, ids=_b_ids)
+        except TypeError:
+            # Compatibility fallback for wrappers that don't expose ids kwarg.
+            db.add_documents(_b_docs)
+        except Exception:
+            # Cross-batch duplicates: some IDs already exist in the collection (e.g. a
+            # page re-crawled by the retry queue). Chroma rejects the whole add, which
+            # would drop the genuinely-new docs riding in the same batch. Re-add only
+            # the new IDs so the batch never fails and nothing is lost or re-embedded.
             try:
-                _got = db._collection.get(ids=_u_ids, include=[])
-                _existing = set(_got.get("ids") or [])
-            except Exception:
-                _existing = set()
-            _new_docs = [d for d, i in zip(_u_docs, _u_ids) if i not in _existing]
-            _new_ids = [i for i in _u_ids if i not in _existing]
-            if _new_docs:
-                db.add_documents(_new_docs, ids=_new_ids)
-        except Exception as _e2:
-            logger.error(f"[ADD] deterministic add failed after existing-id filter: {_e2}")
-            raise RuntimeError(f"Chroma write failed: {_e2}") from _e2
+                _existing: set = set()
+                try:
+                    _got = db._collection.get(ids=_b_ids, include=[])
+                    _existing = set(_got.get("ids") or [])
+                except Exception:
+                    _existing = set()
+                _new_docs = [d for d, i in zip(_b_docs, _b_ids) if i not in _existing]
+                _new_ids = [i for i in _b_ids if i not in _existing]
+                if _new_docs:
+                    db.add_documents(_new_docs, ids=_new_ids)
+            except Exception as _e2:
+                logger.error(f"[ADD] deterministic add failed after existing-id filter: {_e2}")
+                raise RuntimeError(f"Chroma write failed: {_e2}") from _e2
 
 
 def catalog_reingest_products(db_name: str, url: str, clear_products: bool = True) -> dict:
