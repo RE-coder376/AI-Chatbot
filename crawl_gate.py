@@ -109,7 +109,8 @@ def layer1(chunks: list[dict]) -> dict:
                 break
         t = str(ch.get("product_title") or "")
         if t:
-            if len(t.strip()) < 4:
+            # <3 (not <4): real 3-char product names exist ("ABD" — toycompany).
+            if len(t.strip()) < 3:
                 bad_titles.append(("short title", t))
             else:
                 _hit = False
