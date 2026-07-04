@@ -4755,6 +4755,17 @@ _SCOPE_DECLINE_SIGS = (
     "the assistant for", "my identity can only be changed",
 )
 
+# Shopping-intent shapes. On a PRODUCT DB a question with buy/price/stock intent is ALWAYS
+# in-scope — when the catalog engine abstained (foreign/absent product) and the LLM then
+# scope-declined it ("I'd suggest a general search engine"), the honest answer is a catalog
+# miss, not a redirect. Class-level: any named thing + these intents, any store vertical.
+_PRODUCT_SHAPED_RE = re.compile(
+    r"(?i)\b(?:price|cost|how much|kitn[ae]|rate|available|availability|in stock|stock|"
+    r"do you (?:have|sell|carry|stock|offer)|any|can i (?:buy|order|get)|looking for|"
+    r"where can i (?:buy|find|get)|sell|carry)\b")
+_PRODUCT_SCOPE_MISS_ANSWER = ("I couldn't find that in our catalog — it doesn't look like "
+                              "something we carry. Is there something else I can help you find?")
+
 
 async def _regenerate_grounded(q: str, context: str, cfg: dict) -> str:
     """Universal scope/IDK rescue (any docs/RAG DB): re-ask the LLM with a minimal grounded-QA
@@ -5854,6 +5865,15 @@ async def chat_stream_generator(q: str, history: List[dict], visitor_id: str = "
         # e.g. finance/banking/people). When the answer is a scope-decline (or a short early IDK)
         # BUT the context addresses the query, regenerate once with a grounded, scope-free prompt.
         # Gated by _context_addresses_query so genuinely out-of-scope questions are NOT rescued.
+        # Product-DB leg: a scope-declined shopping question = catalog miss, answer honestly.
+        if is_product_db:
+            _cl_pd = cleaned.lower()
+            if (any(s in _cl_pd for s in _SCOPE_DECLINE_SIGS)
+                    and _PRODUCT_SHAPED_RE.search(q or "")):
+                logger.info("[Validator] product_scope_miss → honest catalog-miss answer")
+                _trace_event(workflow_trace, "validator_rewrite", reason="product_scope_miss")
+                _trace_decision(workflow_debug, "product_scope_miss", True)
+                cleaned = _PRODUCT_SCOPE_MISS_ANSWER
         if context and not is_product_db:
             _cl_pp = cleaned.lower()
             _is_scope_decline = any(s in _cl_pp for s in _SCOPE_DECLINE_SIGS)
@@ -7213,6 +7233,18 @@ async def chat(request: Request):
                 # Universal scope/IDK rescue (parity with streaming path): if the answer is a
                 # scope-decline or a soft/short IDK but the KB context addresses the query,
                 # regenerate once with a grounded, scope-free prompt.
+                # Product-DB leg (parity with streaming path): scope-declined shopping
+                # question = catalog miss, answer honestly.
+                if _is_product_db_local:
+                    _cl_pd_ns = str(_ans or "").lower()
+                    if (any(s in _cl_pd_ns for s in _SCOPE_DECLINE_SIGS)
+                            and _PRODUCT_SHAPED_RE.search(q or "")):
+                        _ans = _PRODUCT_SCOPE_MISS_ANSWER
+                        try:
+                            workflow_debug["guard_decisions"]["product_scope_miss"] = True
+                            _trace_event(workflow_trace, "validator_rewrite", reason="product_scope_miss")
+                        except Exception:
+                            pass
                 if context and (not _is_product_db_local):
                     _cl_ns = str(_ans or "").lower()
                     _dec_ns = any(s in _cl_ns for s in _SCOPE_DECLINE_SIGS)
