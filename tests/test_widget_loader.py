@@ -35,6 +35,8 @@ def test_stable_widget_route_redirects_to_current_key(client, two_tenants):
 
     assert response.status_code == 302, response.text
     assert response.headers["location"] == "/widget-chat?key=wk_a"
+    assert response.headers["content-security-policy"] == "frame-ancestors *"
+    assert "x-frame-options" not in response.headers
 
 
 def test_stable_widget_route_rejects_missing_database(client):

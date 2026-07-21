@@ -3762,7 +3762,7 @@ async def security_and_logging_middleware(request: Request, call_next):
     # Allow widget pages to be embedded in client sites; restrict everything else.
     # `X-Frame-Options: ALLOWALL` is non-standard (silently ignored by browsers),
     # so framing is controlled by CSP frame-ancestors — the modern, honored header.
-    if request.url.path.startswith("/widget"):
+    if request.url.path.startswith("/widget") or request.url.path.startswith("/w/"):
         response.headers["Content-Security-Policy"] = "frame-ancestors *"
     else:
         response.headers["X-Frame-Options"] = "SAMEORIGIN"
