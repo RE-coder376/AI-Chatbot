@@ -712,7 +712,7 @@
   <div class="card" id="card-embed">
     <div class="card-header" onclick="toggle('embed')"><h2>📦 Embed on Your Website</h2><div class="card-arrow">▼</div></div>
     <div class="card-body">
-      <p style="font-size:13px; color:var(--text-muted); margin-bottom:20px;">Add this bot to <strong>any website</strong> with a single line of code. Paste the snippet before <code style="background:#f1f5f9;padding:2px 6px;border-radius:4px;">&lt;/body&gt;</code> on any page.</p>
+      <p style="font-size:13px; color:var(--text-muted); margin-bottom:20px;">Add this bot to <strong>Shopify, WooCommerce, WordPress or any HTML website</strong> with one stable line. Key rotation is handled automatically.</p>
 
       <label>Your Embed Snippet</label>
       <div style="position:relative;">
@@ -732,7 +732,7 @@
         <button onclick="loadEmbedCode()" class="secondary" style="margin:0; width:auto;">🔄 Refresh Snippet</button>
         <button onclick="previewBot()" style="margin:0; width:auto; background:#10b981;">🤖 Preview Your Bot</button>
       </div>
-      <div style="margin-top:16px; display:flex; gap:10px; flex-wrap:wrap;">
+      <div style="display:none;">
         <select id="widget-ttl" style="width:auto; min-width:160px; margin:0;"
                 onchange="document.getElementById('widget-ttl-days').style.display = this.value==='custom' ? 'inline-block' : 'none';">
           <option value="">Select key lifetime</option>
@@ -1048,7 +1048,7 @@
     if (!db)   return showStatus('auth', 'DB name required.', 'error');
     showStatus('auth', 'Authenticating...', 'loading');
     fetch(`${API}/admin/branding`, { headers: { 'Authorization': `Bearer ${pass}`, 'X-Admin-DB': db } }).then(async r => {
-      if (!r.ok) { sessionStorage.removeItem('adminPass'); sessionStorage.removeItem('csrfToken'); localStorage.removeItem('adminDb'); showStatus('auth', 'Denied. Wrong password or DB name.', 'error'); return; }
+      if (!r.ok) { sessionStorage.removeItem('adminPass'); sessionStorage.removeItem('csrfToken'); localStorage.removeItem('adminDb'); const eb = await r.json().catch(() => ({})); showStatus('auth', (r.status === 404 && eb.detail) ? eb.detail : 'Denied. Wrong password or DB name.', 'error'); return; }
       const data = await r.json();
       sessionStorage.setItem('adminPass', pass);
       localStorage.setItem('adminDb', db);
@@ -1999,45 +1999,25 @@
 
   async function loadEmbedCode() {
     const pass = document.getElementById('master-pass').value;
-    if (!pass) return;
-    // Security UX: do not reveal an existing key automatically.
+    if (!pass) return showStatus('embed', 'Enter admin password first.', 'error');
     const el = document.getElementById('embed-snippet');
     const meta = document.getElementById('widget-key-meta');
-    if (!window._widgetKeyReady) {
-      if (el) el.value = '';
-      if (meta) meta.textContent = '';
-      showStatus('embed', 'Select lifetime and click Create Widget Key.', 'loading');
-      return;
+    showStatus('embed', 'Generating stable installation snippet...', 'loading');
+    try {
+      const res = await fetch(`${API}/admin/embed-code`, { headers: authHeaders() });
+      const data = await res.json();
+      if (!res.ok) return showStatus('embed', data.detail || 'Failed to generate snippet.', 'error');
+      if (el) el.value = data.snippet || '';
+      if (meta) meta.textContent = 'Stable installation: keys renew automatically; no website code update is required.';
+      window._widgetKeyReady = true;
+      showStatus('embed', 'Universal snippet ready.', 'success');
+    } catch (e) {
+      showStatus('embed', 'Failed to generate snippet.', 'error');
     }
-    showStatus('embed', 'Snippet ready.', 'success');
   }
 
   async function createWidgetKey() {
-    const pass = document.getElementById('master-pass').value;
-    if (!pass) return showStatus('embed', 'Enter admin password first.', 'error');
-    let ttl = (document.getElementById('widget-ttl')?.value || '').trim();
-    if (!ttl) return showStatus('embed', 'Select key lifetime first.', 'error');
-    if (ttl === 'custom') {
-      const days = parseInt(document.getElementById('widget-ttl-days')?.value || '', 10);
-      if (!days || days < 1 || days > 3650) return showStatus('embed', 'Enter a number of days (1-3650).', 'error');
-      ttl = `${days}d`;
-    }
-    try {
-      const res = await fetch(`${API}/admin/embed-code?rotate=1&ttl=${encodeURIComponent(ttl)}`, { headers: authHeaders() });
-      const data = await res.json();
-      if (!res.ok) return showStatus('embed', data.detail || 'Failed to create widget key', 'error');
-      if (data.snippet) {
-        document.getElementById('embed-snippet').value = data.snippet;
-        window._widgetKeyReady = true;
-      }
-      const meta = document.getElementById('widget-key-meta');
-      const exp = data.widget_key_expires_at || '';
-      const ttlLabel = data.widget_key_ttl || ttl;
-      meta.textContent = exp ? `Key TTL: ${ttlLabel} | Expires: ${exp}` : `Key TTL: ${ttlLabel} | Expires: lifetime`;
-      showStatus('embed', `Widget key created (${ttlLabel}).`, 'success');
-    } catch (e) {
-      showStatus('embed', 'Failed to create widget key.', 'error');
-    }
+    return loadEmbedCode();
   }
 
   async function previewBot() {
@@ -2048,12 +2028,7 @@
     if (!db) return showStatus('embed', 'Log in first.', 'error');
     showStatus('embed', `Opening ${db} bot…`, 'loading');
     try {
-      const res = await fetch(`${API}/admin/embed-code`, { headers: authHeaders() });
-      const data = await res.json();
-      if (!res.ok) return showStatus('embed', data.detail || 'Could not open bot.', 'error');
-      const m = (data.snippet || '').match(/key=([^'\"&\s>]+)/);
-      if (!m) return showStatus('embed', 'No widget key returned.', 'error');
-      window.open(`${API}/widget-chat?key=${m[1]}`, '_blank');
+      window.open(`${API}/w/${encodeURIComponent(db)}`, '_blank');
       showStatus('embed', `Opened ${db} bot.`, 'success');
     } catch (e) {
       showStatus('embed', 'Failed to open bot.', 'error');

@@ -70,6 +70,31 @@ verify_security.py
 test_rag.py
 test_case.py
 
+# Local sales/demo credentials and generated outreach artifacts
+*_creds.json
+*_demokey*.json
+*_demo_key*.txt
+*_client_key*.json
+*_keys.json
+*_products.json
+*_analytics_backup*.json
+*_analytics_snapshot*.json
+*_demo.mp4
+*_demo.gif
+
+# Generated evaluation/report output (keep reusable test sources explicit)
+evals/state/
+UNIVERSAL_EVAL_*.json
+*_RESULTS_*.json
+*_RESULTS_*.jsonl
+*_REPORT_*.md
+*_DEMO_PACKAGE_*.md
+_offline/*_out.json
+_offline/*_out.jsonl
+_offline/*_out.txt
+_offline/regress_*.txt
+!_offline/regress_base.txt
+
 # Raw Data
 data/
 data_crawl_*/

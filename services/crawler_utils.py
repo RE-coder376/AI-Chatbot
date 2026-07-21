@@ -1163,8 +1163,13 @@ def _smart_chunk_page(text: str, url: str, chunk_size: int = 400, chunk_step: in
     raw_text = re.sub(r"\n{3,}", "\n\n", raw_text)
     clean = _clean_text(raw_text)
     # Cart-drawer widgets survive tag-stripping on many Shopify themes and inject
-    # "Subtotal: Rs.0.00" next to real products — scrub before chunking.
-    clean = re.sub(r'(?is)(?:cart\s*[×x]?\s*)?your cart is currently empty\.?.{0,100}?(?:checkout|view cart)', ' ', clean)
+    # "Subtotal: Rs.0.00" next to real products — scrub before chunking. Drawer
+    # tails vary by theme ("Check Out" spaced, "GO TO OUR COLLECTION", "Continue
+    # shopping" — danytech matched none of the old tails), so after the tailed
+    # strip also drop the bare sentence: it is pure chrome on every theme.
+    clean = re.sub(r'(?is)(?:(?:your\s+)?cart\s*[×x]?\s*)?your cart is currently empty\.?'
+                   r'.{0,160}?(?:check\s*out|view cart|continue shopping|go to (?:our )?collections?)', ' ', clean)
+    clean = re.sub(r'(?i)(?:your\s+cart\s*[×x]?\s*)?your cart is currently empty\.?', ' ', clean)
     clean = re.sub(r'(?i)subtotal:?\s*(?:rs\.?|pkr|\$|£|€)\s*0(?:\.00)?\b', ' ', clean)
     docs = []
     page_meta = page_meta or {}

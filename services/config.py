@@ -30,6 +30,28 @@ DB_SECRET_KEYS = {
     "api_sources",
 }
 
+# Fields that identify ONE tenant's business/contact/branding. When serving a
+# specific tenant these must come ONLY from that tenant's own config — never be
+# inherited from the root config.json (the owner's own store), or every client
+# that hasn't set a field leaks the OWNER's contact_email/whatsapp/branding into
+# both their admin panel and their customer-facing bot answers. Infra/secret
+# fields (smtp_password, sendgrid_keys, judge_api_key, super admin_password) are
+# deliberately NOT here — they are shared platform infra and still inherit.
+TENANT_IDENTITY_FIELDS = {
+    "business_name",
+    "business_description",
+    "topics",
+    "branding",
+    "secondary_prompt",
+    "quick_replies",
+    "contact_email",
+    "whatsapp_number",
+    "async_contact_url",
+    "sender_email",
+    "hours",
+    "always_open",
+}
+
 
 def _atomic_write_json(path: Path, data) -> None:
     """Write JSON atomically — crash during write leaves original intact."""
@@ -131,6 +153,15 @@ def get_config(db_name: str = "") -> dict:
     active = db_name or (ACTIVE_DB_FILE.read_text(encoding="utf-8").strip() if ACTIVE_DB_FILE.exists() else "")
     db_cfg_loaded = False
     if active:
+        # Never let one tenant inherit another's (or the owner's) identity/contact.
+        # Strip identity fields from the root baseline, then re-seed only display-safe
+        # generic defaults, so a tenant that hasn't set a field gets a blank/neutral
+        # value instead of the owner's real business name/email/branding.
+        for _f in TENANT_IDENTITY_FIELDS:
+            root.pop(_f, None)
+        root.setdefault("bot_name", "AI Assistant")
+        root["business_name"] = active
+        root["branding"] = {}
         db_cfg_file = DATABASES_DIR / active / "config.json"
         if db_cfg_file.exists():
             try:
@@ -152,16 +183,12 @@ def get_config(db_name: str = "") -> dict:
             if v != "" and v is not None:
                 root[k] = v
         root["db_name"] = active
-        if db_name and not db_cfg_loaded:
-            # When a specific tenant is requested but has no readable config.json,
-            # avoid leaking the root tenant's business identity/topics into eval
-            # scoping and prompt shaping. Keep only generic defaults plus secrets.
-            root["business_name"] = active
-            root["topics"] = root.get("topics") if isinstance(root.get("topics"), list) else []
-            root["business_description"] = ""
-            branding = root.get("branding")
-            if isinstance(branding, dict):
-                root["branding"] = dict(branding)
+        # Identity fields were already stripped from the root baseline above, so a
+        # tenant with a partial (or missing) config.json can no longer inherit the
+        # owner's identity. Just guarantee list/str types the callers expect.
+        if not isinstance(root.get("topics"), list):
+            root["topics"] = []
+        root.setdefault("business_description", "")
     # NOTE: ADMIN_PASSWORD env var is intentionally NOT overlaid here — it's the super-admin
     # password checked separately in admin_auth(). Overlaying it would break per-DB client auth.
     env_smtp = os.getenv("SMTP_PASSWORD")

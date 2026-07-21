@@ -9,7 +9,7 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 GROQ_BASE_URL = "https://api.groq.com/openai/v1"
-JUDGE_MODEL = "llama-3.3-70b-versatile"
+JUDGE_MODEL = "openai/gpt-oss-120b"  # llama-3.3-70b-versatile deprecated Aug 2026
 CACHE_TTL_SECONDS = 7 * 24 * 60 * 60
 ALLOWED_FAILURE_SOURCES = {
     "none",

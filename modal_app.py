@@ -42,6 +42,11 @@ image = (
             ".git", "__pycache__", "databases", "*.zip", "*.log", "*.bin",
             ".playwright-mcp", "evals/results", "evals/state", "*.sqlite3",
             "quiz_*.json", "server_out.log", "server_err.log",
+            ".env", ".env.*", "keys.json", "keys.json.bak", "config.json",
+            "active_db.txt", "visitor_history", "data", "data_crawl_*", "db",
+            "db_backup_*", "*_creds.json", "*_demokey*.json", "*_demo_key*.txt",
+            "*_client_key*.json", "*_keys.json", "*_products.json",
+            "*_analytics*.json", "*_demo.mp4", "*_demo.gif",
             # NOTE: "evals" (bare) must NOT be ignored — evals/ is the eval
             # CODE package (eval_v1.py, llm_judge.py); excluding it 500s
             # every /admin/evals/* endpoint with "No module named 'evals'".
@@ -79,6 +84,12 @@ def _enter_app_dir():
     # to RAG and recovers ~even, 36/46≈39/50), and qwen3-32b's reasoning think-traces
     # blew the 7s Groq timeout → 35-48s tail latency. Default (unset) = llama-3.3-70b.
     scaledown_window=120,  # sleep 2 min after the last request — the $30 lever
+    # ONE container only: analytics.json is read-modify-write per request with an
+    # in-process lock. A second warm container keeps its own copy and last-write-wins
+    # on the volume — that clobber is how diecast's dashboard showed 93 then snapped
+    # back to 83 (the losing container's ~10 increments were silently discarded).
+    # @modal.concurrent still gives 20 parallel requests inside the single container.
+    max_containers=1,
 )
 @modal.concurrent(max_inputs=20)
 @modal.asgi_app()
@@ -337,6 +348,28 @@ def catalog_ingest(db_name: str, url: str = "", clear_products: bool = True):
     image=image,
     cpu=1.0,
     memory=2048,
+    timeout=300,
+    volumes={"/root/app/databases": vol},
+    secrets=SECRETS,
+)
+def reset_analytics(db_name: str):
+    """Wipe a store's analytics to a clean slate (removes test/QA traffic before
+    handing the dashboard to the owner). modal run modal_app.py::reset_analytics --db-name diecaststation"""
+    _enter_app_dir()
+    from pathlib import Path
+    p = Path("databases") / db_name / "analytics.json"
+    existed = p.exists()
+    if existed:
+        p.unlink()
+    vol.commit()
+    print(f"[ANALYTICS-RESET] {db_name}: cleared (existed={existed})")
+    return {"db": db_name, "cleared": existed}
+
+
+@app.function(
+    image=image,
+    cpu=1.0,
+    memory=2048,
     timeout=600,
     volumes={"/root/app/databases": vol},
     secrets=SECRETS,
@@ -418,6 +451,27 @@ def scrub(db_name: str):
             c.execute("UPDATE embedding_metadata SET string_value=? WHERE id=? AND key=?", (new, _id, key))
             chrome_fixes += 1
 
+    # 3b) cart-drawer strip in documents (mirrors the crawler_utils pre-chunk
+    #     scrub, incl. its spaced-"Check Out"/"GO TO OUR COLLECTION" tails) —
+    #     REPAIR, not drop: on themes that render the drawer into every page
+    #     (danytech: 113/916 chunks) the flagged chunks are the store's real
+    #     content pages, and the step-5 junk sweep would delete them wholesale.
+    _CART_RE1 = _re.compile(r'(?is)(?:(?:your\s+)?cart\s*[×x]?\s*)?your cart is currently empty\.?'
+                            r'.{0,160}?(?:check\s*out|view cart|continue shopping|go to (?:our )?collections?)')
+    _CART_RE2 = _re.compile(r'(?i)(?:your\s+cart\s*[×x]?\s*)?your cart is currently empty\.?')
+    c.execute("SELECT id, string_value FROM embedding_metadata "
+              "WHERE key='chroma:document' AND string_value LIKE '%currently empty%'")
+    cart_fixes = 0
+    for _id, sv in c.fetchall():
+        if not sv:
+            continue
+        new = _CART_RE2.sub(" ", _CART_RE1.sub(" ", sv))
+        new = _re.sub(r"[ \t]{2,}", " ", new)
+        if new != sv and new.strip():
+            c.execute("UPDATE embedding_metadata SET string_value=? "
+                      "WHERE id=? AND key='chroma:document'", (new, _id))
+            cart_fixes += 1
+
     con.commit()
     try:
         c.execute("PRAGMA wal_checkpoint(TRUNCATE)")  # fold WAL into the main file
@@ -462,11 +516,12 @@ def scrub(db_name: str):
 
     vol.commit()
     print(f"[SCRUB] {db_name}: {doc_fixes} entity docs, {title_fixes} short titles, "
-          f"{chrome_fixes} chrome strips, {unprintable_drops} unprintable chunks dropped, "
+          f"{chrome_fixes} chrome strips, {cart_fixes} cart-drawer strips, "
+          f"{unprintable_drops} unprintable chunks dropped, "
           f"{junk_drops} chrome-junk chunks dropped")
     return {"entity_docs": doc_fixes, "short_titles": title_fixes,
-            "chrome_strips": chrome_fixes, "unprintable_drops": unprintable_drops,
-            "junk_drops": junk_drops}
+            "chrome_strips": chrome_fixes, "cart_strips": cart_fixes,
+            "unprintable_drops": unprintable_drops, "junk_drops": junk_drops}
 
 
 # Default product-catalog DBs (mal=API-only, agentfactory=docs, book=structureless

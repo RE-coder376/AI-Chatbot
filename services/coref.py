@@ -134,6 +134,20 @@ _FIELD_LABEL = {
 }
 
 
+# Generic descriptor / format noise that dilutes a product-name SEARCH when carried into
+# a follow-up ("1:32 Toyota AE86 Diecast" over-matches every diecast/1:32 item). Stripped
+# ONLY from a bound antecedent name for the follow-up rewrite — the distinctive brand+model
+# core ("Toyota AE86") is what the catalog engine should anchor on.
+_NOISE_RE = re.compile(r"\b\d+\s*[:/]\s*\d+\b|\b(?:diecast|die-cast|alloy|scale|"
+                       r"model|series|edition|collectible|replica)\b", re.I)
+
+
+def _strip_noise(name: str) -> str:
+    cleaned = re.sub(r"\s+", " ", _NOISE_RE.sub(" ", name or "")).strip(" -:/|—–")
+    # keep the original if stripping left too little to identify a product
+    return cleaned if len(re.sub(r"[^a-z0-9]", "", cleaned.lower())) >= 3 else (name or "").strip()
+
+
 def _content_tokens(q: str) -> list[str]:
     return [w for w in re.findall(r"[a-z0-9]{3,}", (q or "").lower()) if w not in _CUE]
 
@@ -207,7 +221,7 @@ def _names_from_answer(text: str) -> list[str]:
         # alongside non-product policy prose.
         if n and n.lower() not in ("yes", "no") and n.lower() not in _FIELD_LABEL \
                 and re.search(r"[a-z]{3,}", n.lower()) and not _NON_PRODUCT.search(n):
-            cleaned.append(n)
+            cleaned.append(_strip_noise(n))
     return cleaned
 
 
@@ -367,7 +381,11 @@ _LLM_FU_SYS = (
     "low-to-high), WHICH item is meant, and price vs stock vs count vs total.\n"
     "- When the follow-up operates on the prior RESULT SET (sort/rank those, the available "
     "one, the other one, total of them), name EACH product from the conversation VERBATIM.\n"
-    "- Copy product & category names exactly as written. NEVER invent a product.\n"
+    "- Use the SHORTEST DISTINCTIVE product name from the conversation: drop noise tokens "
+    "(scale like '1:32' / '1/24', and generic words like 'diecast' / 'model' / 'alloy' / "
+    "'scale' / 'series') that dilute a search — e.g. '1:32 Toyota AE86 Diecast' -> 'Toyota "
+    "AE86', 'Maisto Toyota Hilux 1:27 scale' -> 'Toyota Hilux'. Keep the brand + the "
+    "identifying model words. NEVER invent a product.\n"
     "- If the latest message is already a complete standalone question, return it unchanged.\n"
     "- Reply in the SAME language as the follow-up. Output ONLY the rewritten question."
 )
@@ -402,6 +420,10 @@ def _llm_followup_rewrite(q: str, history: list) -> str | None:
                 out = out.splitlines()[0].strip() if out else ""
                 # Sanity: a plausible one-line question, not a refusal or an essay.
                 if out and 3 <= len(out) <= 300 and not re.match(r"(?i)^(i\b|sorry|as an|i'?m|here)", out):
+                    # Drop scale/format/generic-descriptor noise the model may copy from a
+                    # listing title ("1:32 Toyota AE86 Diecast" → "Toyota AE86") so the
+                    # rewrite anchors on the distinctive core, not a catalog-wide word.
+                    out = re.sub(r"\s+", " ", _NOISE_RE.sub(" ", out)).strip()
                     return out
             except Exception:
                 continue
@@ -510,7 +532,12 @@ def resolve_followup(q: str, history: list) -> str:
         _sel_oos = bool(re.search(r"\b(sold[\s-]?out|out\s+of\s+stock|unavailable|gone)\b", ql))
         _sel_lo = bool(re.search(r"\b(cheaper|cheapest|lowest|sasta|sasti|least\s+expensive)\b", ql))
         _sel_hi = bool(re.search(r"\b(pricier|priciest|most\s+expensive|highest|dearest|mehng[ai])\b", ql))
-        if re.search(r"\b(option|one|product|item|model|wala|wali)\b", ql) \
+        # NOTE: only genuinely SET-REFERENTIAL nouns ("one/option/wala/wali") — NOT the
+        # generic catalog nouns "product/item/model", which name the WHOLE catalog. A bare
+        # "what's your cheapest product?" is a global aggregate, not a pick-from-the-prior-
+        # set, and must fall through to the self-contained _GLOBAL_AGG branch below rather
+        # than binding to a stray phrase in the previous answer ("We have 11 options").
+        if re.search(r"\b(option|one|wala|wali)\b", ql) \
                 and (_sel_av or _sel_oos or _sel_lo or _sel_hi) and not sm:
             prods = _history_products(history)
             priced = [p for p in prods if p["price"] is not None]

@@ -381,7 +381,7 @@ def call_llm(messages, key, provider):
             r = requests.post(
                 "https://api.groq.com/openai/v1/chat/completions",
                 headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
-                json={"model": "llama-3.3-70b-versatile", "messages": messages,
+                json={"model": "openai/gpt-oss-120b", "reasoning_effort": "low", "messages": messages,
                       "temperature": 0, "max_tokens": 800, "response_format": {"type": "json_object"}},
                 timeout=20
             )

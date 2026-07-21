@@ -107,7 +107,9 @@ _STOP = {
     "also", "too", "aswell", "additionally", "again", "cool", "nice", "great", "wow",
     # stock/list filler — "which RC construction toys are still in stock" must
     # anchor on "rc construction", not "still/toys" which are presentation words.
-    "still", "toy", "toys",
+    "still",
+    # "toy/toys" intentionally remain anchors for bare category requests such as
+    # "show toys"; _selective_anchors drops generic terms when stronger ones exist.
     # advisory persona words — express who-it's-for, never a product type, and never
     # appear in a real title ("BEGINNER ke liye cheap car", "for a NEWBIE"). (Purpose
     # words like "gift" are NOT globally stopped — they ARE real giftable-set titles in
@@ -187,6 +189,8 @@ class Spec:
     out_of_stock: bool = False
     include_oos: bool = False  # "list X incl. unavailable / overall / available OR sold out" → no stock filter, show status, true extremes
     alt_groups: list = field(default_factory=list)  # slash-joined synonyms ("motorcycle/bike") → match EITHER, not both
+    lock_only: bool = False  # anchors emptied to stop-words but raw query may verbatim-name a collection ("All Products"); answer ONLY via collection lock, else RAG
+    price_intent: bool = False  # query explicitly asked a price ("price of X", "how much"); if resolved rows carry NO price, defer to RAG/LLM instead of listing bare names
 
 
 # Universal ENGLISH category synonyms — a customer's everyday word for a product
@@ -668,6 +672,15 @@ def parse(q: str) -> Spec:
         r"(?:buy|order|purchase)\s+(?:it\s+)?(?:right\s+)?now|"
         r"still\s+(?:available|in\s+stock))\b", ql)) and not out_of_stock
 
+    # Exclusion phrasing reverses the literal sold-out token: "ignoring sold-out
+    # items" and "without unavailable products" mean available-only, not OOS-only.
+    if re.search(
+            r"\b(?:ignore|ignoring|exclude|excluding|except|without)\b"
+            r"[^.?!]{0,24}\b(?:sold[\s-]?out|out[\s-]?of[\s-]?stock|unavailable|oos)\b",
+            ql):
+        out_of_stock = False
+        in_stock = True
+
     # "include unavailable / overall / available OR sold out / whether … sold out" =
     # the customer wants the WHOLE set with its status, or the true extreme across all
     # stock — not an in/out filter. Overrides the stock flags so a "list X including
@@ -869,20 +882,32 @@ def parse(q: str) -> Spec:
 
     # A bare "list / what products do you sell" with no category and no price
     # bound is an open-ended browse — leave that to normal RAG, don't dump a
-    # price-sorted slice of the whole catalog.
+    # price-sorted slice of the whole catalog. EXCEPT: anchors can empty out on a
+    # stop-word-only collection name ("All Products stock breakdown") while the
+    # raw query still verbatim-names a storefront collection. parse can't see the
+    # catalog, so stay structured with lock_only=True — _execute_spec answers ONLY
+    # if its verbatim-collection lock fires, else returns None (→ RAG, unchanged).
     if agg == "list" and not anchors and pmin is None and pmax is None:
-        return Spec("none", structured=False)
+        return Spec("list", [], in_stock=in_stock, out_of_stock=out_of_stock,
+                    include_oos=include_oos, lock_only=True)
     # Likewise a bare existence question with no subject is not answerable here.
     if agg == "exists" and not anchors:
         return Spec("none", structured=False)
     # A split count needs a category to split — without one it's an open browse → RAG.
     if agg == "count_split" and not anchors:
-        return Spec("none", structured=False)
+        return Spec("count_split", [], in_stock=in_stock, out_of_stock=out_of_stock,
+                    include_oos=include_oos, lock_only=True)
     # A stock-status question needs a named product; "what's available" with no
     # subject is an open browse → RAG. The status report must NOT filter by stock
     # (it has to surface an OOS product to report it), so clear the in_stock filter.
     if agg == "stock":
         if not anchors:
+            # Same stop-word-collection escape as list/count_split above: a "show
+            # …in stock" phrasing whose subject normalized away ("All Products")
+            # may still verbatim-name a collection — try the lock as a list.
+            if re.search(r"\b(which|what'?s?|list|show|give|display)\b", ql):
+                return Spec("list", [], in_stock=not (out_of_stock or include_oos),
+                            out_of_stock=out_of_stock, include_oos=include_oos, lock_only=True)
             return Spec("none", structured=False)
         if re.search(r"\b(which|what'?s?|list|show|give|display)\b", ql):
             agg = "list"
@@ -908,7 +933,8 @@ def parse(q: str) -> Spec:
 
     return Spec(agg, anchors, pmin, pmax, in_stock,
                 strict_min=strict_min, strict_max=strict_max, title_only=title_only,
-                out_of_stock=out_of_stock, include_oos=include_oos, alt_groups=alt_groups)
+                out_of_stock=out_of_stock, include_oos=include_oos, alt_groups=alt_groups,
+                price_intent=priceof_q)
 
 
 def load_rows(db, limit: int = 12000) -> list[Row]:
@@ -972,11 +998,26 @@ def load_rows(db, limit: int = 12000) -> list[Row]:
         if not title or len(title) < 4:
             continue
         tl = title.lower()
-        if tl in {"fun", "home", "shop", "catalog", "catalogue", "products", "collection", "page"}:
-            continue
-        if len(re.findall(r"[a-zA-Z0-9]+", title)) <= 1 and not re.search(r"\d", title):
-            continue
+        # Junk-title guards apply only to chunks WITHOUT a /products/ handle: a
+        # product URL is stronger evidence than the title's shape (candlecompany
+        # sells candles literally named "Home", "Motia", "Bakhoor", "Mulberry",
+        # "Memories" — one-word titles the shape check read as nav junk, making
+        # 8 of 78 products invisible to counts/lists/min).
+        if "/products/" not in src_l:
+            if tl in {"fun", "home", "shop", "catalog", "catalogue", "products", "collection", "page"}:
+                continue
+            if len(re.findall(r"[a-zA-Z0-9]+", title)) <= 1 and not re.search(r"\d", title):
+                continue
         key = re.sub(r"[^a-z0-9]+", " ", tl).strip()
+        # DISTINCT products can share a title (theduskstore has two "Gift Bag"
+        # products, Rs.1400 and Rs.1650) — title-only dedup silently dropped one,
+        # so "cheapest gift" answered with the wrong (pricier) product. Scope the
+        # key by the product handle from the source URL: the SAME product's
+        # crawl-chunk + ingest-chunk share a handle (the intended merge still
+        # happens); different products have different handles and both survive.
+        _hm = re.search(r"/products/([^/?#]+)", src)
+        if _hm:
+            key = f"{key}#{_hm.group(1)}"
         if not key:
             continue
         price = None
@@ -1083,6 +1124,16 @@ def _excl_re(cfg: dict | None, anchors: list[str]):
 
 def _dedup(xs):
     return list(dict.fromkeys(x for x in xs if x))
+
+
+_QUOTED_RE = re.compile(r'["“”]([^"“”]{4,80})["“”]')
+
+
+def _extract_quoted(q: str) -> str | None:
+    """Pull a quoted span out of the query — customers (and this eval) often
+    paste/quote the exact product title verbatim: 'what is the price of "X"?'."""
+    m = _QUOTED_RE.search(q or "")
+    return m.group(1).strip() if m else None
 
 
 def _price_s(p: float, cur: str = "Rs.") -> str:
@@ -1476,7 +1527,14 @@ def _resolve_detail(name: str, rows: list[Row]) -> tuple[Row | None, list[Row]]:
         qcover = sum(1 for t in qtoks if t in rset or _fuzzy_in(t, rtoks)) / len(qtoks)   # query named by stored title
         if not (cover >= 0.85 or qcover >= 0.85) or (cover + qcover) / 2 < 0.5:
             continue
-        sk = (max(cover, qcover), min(cover, qcover), -abs(len(rtoks) - len(qtoks)))
+        # Rank by the WEAKER direction first, not the stronger one. A short generic
+        # sibling ("Maybelline Lash Sensational Mascara") trivially scores cover=1.0
+        # against a long specific query ("...Sky Tubes(TM) Tubing Mascara...") since
+        # every one of its few words appears in the query — but it only explains a
+        # fraction of what the query actually named (low qcover). Requiring both
+        # directions to be strong before the strong one counts stops a generic title
+        # from outranking the real, more specific match.
+        sk = (min(cover, qcover), max(cover, qcover), -abs(len(rtoks) - len(qtoks)))
         if sk > best_key:
             best_key, best, tied = sk, r, [r]
         elif sk == best_key:
@@ -1866,6 +1924,26 @@ def answer_catalog_query(q: str, db, cfg: dict | None = None, max_list: int = 12
         # otherwise re-resolve to a bare catalog listing without the colours/sizes.
         if _is_variant_q(q):
             return None, []
+        # Freebie / giveaway ask ("what can I get for free?", "any freebies?", "koi cheez
+        # free milegi?") — NEVER let fuzzy matching list PRICED products as if they were
+        # free (reads as broken/misleading to the merchant). Answer honestly + pivot to
+        # deals. Does NOT fire on free-SHIPPING / return-policy asks (those → RAG/policy).
+        _fq = (q or "").lower()
+        _is_freebie = bool(re.search(r"\b(freebie|freebies|giveaway|give\s*away)\b", _fq)
+                           or (("free" in _fq or "muft" in _fq or "mufat" in _fq)
+                               and re.search(r"\b(product|products|item|items|thing|things|stuff|"
+                                             r"anything|something|gift|gifts|get|got|receive|grab|"
+                                             r"claim|cheez|cheezein|koi)\b", _fq)))
+        if _is_freebie and not re.search(r"\b(shipping|delivery|deliver|ship|postage|courier|"
+                                         r"return|returns|exchange|order|orders)\b", _fq):
+            _biz = (cfg or {}).get("business_name", "") or "our store"
+            if re.search(r"\b(muft|mufat|cheez|cheezein|koi|milegi|milega|kya|hai)\b", _fq):
+                return (f"Filhaal hum koi free products ya giveaways offer nahi karte — {_biz} ka "
+                        f"saara catalog sale ke liye hai. Lekin main aap ko sab se kam price wale "
+                        f"items aur koi current discount/deals dikha sakta hoon. Dikhaoon?"), []
+            return (f"We don't currently offer free products or giveaways — everything at {_biz} "
+                    f"is for sale. But I can show you our best-priced items and any current "
+                    f"discounts or deals. Would you like that?"), []
         # Policy intent (shipping/returns/refund/warranty/payment/order-status) → hand
         # straight to RAG/policy BEFORE the LLM router. parse() already declines these,
         # but a code-mixed policy query ("used opened product return ho sakta hai?")
@@ -1883,6 +1961,21 @@ def answer_catalog_query(q: str, db, cfg: dict | None = None, max_list: int = 12
                 _ans = _answer_locate(_loc, _lrows)
                 if _ans:
                     return _ans
+        # Exact quoted product name ("what is the exact price of \"X\"?") — a long,
+        # specific title tokenizes into many anchor words, and the anchor/list machinery
+        # below OR-matches on those anchors and can surface unrelated products instead
+        # of the one actually named. Resolve the quoted span directly against the
+        # deterministic title matcher first; only a confident, unambiguous single row
+        # short-circuits to an answer, so this never overrides a genuine listing query.
+        _quoted = _extract_quoted(q)
+        if _quoted and re.search(r"\b(price|cost|how much)\b", q, re.I):
+            _qrows = load_rows(db)
+            if _qrows and is_catalog_db(db, _qrows, cfg):
+                _qbest, _qcands = _resolve_detail(_quoted, _qrows)
+                if _qbest is not None and len(_ambiguous_alts(_quoted, _qrows)) <= 1:
+                    if _qbest.price is not None:
+                        return (f"{_qbest.title} — {_price_disp(_qbest)} — {_qbest.availability}",
+                                [_qbest.source] if _qbest.source else [])
         spec = parse(q)
         mp = _parse_multi(q)
         # A confident deterministic multi-product parse (explicit "X or/ya/vs Y" choice,
@@ -2061,7 +2154,47 @@ def _execute_spec(spec: "Spec", rows: list[Row], cfg: dict | None, max_list: int
         # is 2 cameras; "fujifilm" as a brand tag is on every film. Exact membership
         # returns the real group the customer is browsing, not coincidental name hits.
         _coll_locked = _recovered_lock  # recovered collection is authoritative → skip tag-narrowing
-        if spec.anchors and spec.agg in ("count", "exists", "list", "count_split"):
+        # VERBATIM-COLLECTION LOCK: when the customer's words contain a storefront
+        # collection's FULL name (normalized: case/punctuation-free, digits KEPT —
+        # "2-3 Years" → "2 3 years", "Age 3+" → "age 3"), that collection is the
+        # authoritative answer set. The signature tier below drops 1-char digit
+        # tokens, so every "0-1/1-2/2-3 Years" collection collides into {years} and
+        # counts merge across ranges; contiguous-phrase matching on the normalized
+        # raw query keeps ranges distinct and also survives all-stop-word names
+        # ("All Cat Products" → anchors reduce to the generic "cat" and never lock).
+        # Longest matching name wins. Fires only on a verbatim naming; otherwise
+        # every existing tier runs unchanged.
+        if not _coll_locked and raw_q and spec.agg in ("count", "exists", "list", "count_split", "min", "max"):
+            _qn = " " + " ".join(re.findall(r"[a-z0-9]+", raw_q.lower())) + " "
+            _cmap: dict[str, list[Row]] = {}
+            for _r in rows:
+                for _el in _r.colls.split("|"):
+                    _el = _el.strip()
+                    if _el:
+                        _cmap.setdefault(_el, []).append(_r)
+            _bestc = None
+            # The locked name must cover EVERY significant anchor token: "quilted
+            # tote bags" contains the collection name "Tote bags" verbatim, but
+            # locking to it would silently DROP the 'quilted' anchor and answer
+            # with non-quilted totes. A partial-phrase name never locks; the
+            # specific query falls through to strict title matching instead.
+            _lksig = frozenset(t for t in re.findall(r"[a-z0-9]{2,}", " ".join(spec.anchors).lower()) if t not in _STOP)
+            for _cnm, _mem in _cmap.items():
+                _cn = " ".join(re.findall(r"[a-z0-9]+", _cnm.lower()))
+                if _cn and f" {_cn} " in _qn and (_bestc is None or len(_cn) > _bestc[0]):
+                    if _lksig and not _lksig <= frozenset(t for t in re.findall(r"[a-z0-9]{2,}", _cn) if t not in _STOP):
+                        continue
+                    _bestc = (len(_cn), _mem)
+            if _bestc:
+                _base = _bestc[1]
+                _strict_hit = True
+                _coll_locked = True
+        # lock_only spec (anchors emptied to stop-words): the verbatim lock was its
+        # only permitted resolution — without it, answering would dump the whole
+        # catalog for an open browse. Hand to RAG exactly as the old guard did.
+        if getattr(spec, "lock_only", False) and not _coll_locked:
+            return None, []
+        if not _coll_locked and spec.anchors and spec.agg in ("count", "exists", "list", "count_split"):
             def _sig(toks):
                 return frozenset(t for t in toks if len(t) >= 2 and t not in _STOP)
             _A = _sig(re.sub(r"[^a-z0-9]+", " ", " ".join(spec.anchors).lower()).split())
@@ -2078,6 +2211,32 @@ def _execute_spec(spec: "Spec", rows: list[Row], cfg: dict | None, max_list: int
                 if _members:
                     _base = _members
                     _coll_locked = True
+        # TYPE-WORD COLLECTION UNION: a verbatim/sig lock on "Tote bags" (8 members)
+        # is the wrong set when the store's own taxonomy uses the term as a TYPE
+        # word — rtwcreation files ~150 totes across 40+ collections named
+        # "<style> tote bags" PLUS a micro-collection literally named "Tote bags".
+        # When >=3 collection names token-contain the anchor term, the term is a
+        # shared type, not one browseable group (unlike brand locks: "Fujifilm"
+        # names exactly ONE collection, so its 2 cameras stay authoritative) —
+        # answer the union of all type-matching collections' members instead.
+        if _coll_locked and not _recovered_lock and spec.anchors:
+            _tsig = frozenset(t for t in re.findall(r"[a-z0-9]{2,}", " ".join(spec.anchors).lower()) if t not in _STOP)
+            if _tsig:
+                _tnames, _tmem, _tseen = set(), [], set()
+                for _r in rows:
+                    _match = False
+                    for _el in _r.colls.split("|"):
+                        _el = _el.strip()
+                        if not _el:
+                            continue
+                        if _tsig <= frozenset(t for t in re.findall(r"[a-z0-9]{2,}", _el.lower()) if t not in _STOP):
+                            _tnames.add(_el)
+                            _match = True
+                    if _match and id(_r) not in _tseen:
+                        _tseen.add(id(_r))
+                        _tmem.append(_r)
+                if len(_tnames) >= 3 and len(_tmem) > len(_base):
+                    _base = _tmem
         # Fuzzy/subset collection resolution — the universal tier that ends the synonym
         # treadmill. When the exact same-token-set match above didn't lock (the common
         # case: "f1 cars" vs collection "formula one f1", "formula one" subset of it, a
@@ -2135,9 +2294,20 @@ def _execute_spec(spec: "Spec", rows: list[Row], cfg: dict | None, max_list: int
         if not _coll_locked and spec.anchors and not spec.title_only and spec.agg in ("count", "min", "max", "list", "count_split"):
             _tagged = sum(1 for r in rows if r.cats.strip())
             if rows and (_tagged / len(rows)) >= 0.5:
-                _tag_sel = [r for r in sel if _cats_hit(r, _m_anchors)]
-                if _tag_sel:
-                    sel = _tag_sel
+                # Tags only override titles for a term the store ITSELF uses as a
+                # category label (same significant-token set as some category name,
+                # order-free — the collection lock's equality). Otherwise tag hits are
+                # coincidental and narrowing undercounts: rtwcreation's "tote bags"
+                # (156 title matches, tags say "totes"/"belted tote bag", never
+                # "tote bag") collapsed to the 5 coincidentally-tagged ones.
+                _asig = frozenset(t for t in re.findall(r"[a-z0-9]{2,}", " ".join(spec.anchors).lower()) if t not in _STOP)
+                _vocab = _asig and any(
+                    frozenset(t for t in re.findall(r"[a-z0-9]{2,}", c.lower()) if t not in _STOP) == _asig
+                    for r in rows for c in r.cats.split(",") if c.strip())
+                if _vocab:
+                    _tag_sel = [r for r in sel if _cats_hit(r, _m_anchors)]
+                    if _tag_sel:
+                        sel = _tag_sel
 
         # Single named-product precision: when the query FULLY NAMES a specific
         # product (every significant word of a matched title is in the anchor set),
@@ -2148,8 +2318,12 @@ def _execute_spec(spec: "Spec", rows: list[Row], cfg: dict | None, max_list: int
         # "bikes" must never collapse to a coincidental exact title) and is skipped
         # for name-substring (title_only) and price-bounded browses where the whole
         # matched set is the point.
+        # Skipped when a collection lock resolved the set: the storefront collection
+        # is authoritative membership, and members whose titles happen to be covered
+        # by the anchors ("Set 1" ⊂ {cookware, sets}) must not shrink it — pakmitti's
+        # "Cookware Sets" (27 members) collapsed to the 10 title-matching "Set N"s.
         _real_anchors = [a for a in spec.anchors if a not in _STOP]
-        if (sel and not spec.title_only and len(_real_anchors) >= 2
+        if (sel and not _coll_locked and not spec.title_only and len(_real_anchors) >= 2
                 and spec.price_min is None and spec.price_max is None):
             _aset_fn = _anchor_set(spec.anchors)
             def _fully_named(r):
@@ -2247,7 +2421,12 @@ def _execute_spec(spec: "Spec", rows: list[Row], cfg: dict | None, max_list: int
         # min / max / list — all need a price.
         priced = [r for r in sel if r.price is not None]
         if not priced:
-            if spec.agg == "list" and sel:
+            # A PRICE intent that resolved only to price-less rows (e.g. a listing/
+            # collection chunk shadowing the product-detail chunk) must NOT answer with
+            # bare names — that silently drops the price the customer asked for. Defer to
+            # RAG/LLM, which reads the price from the product page text. A plain browse
+            # ("list your X", no price word) still gets the name list.
+            if not spec.price_intent and spec.agg == "list" and sel:
                 body = "\n".join(f"- {r.title}" for r in sel[:max_list])
                 if len(sel) > max_list:
                     body += f"\n…and {len(sel) - max_list} more — narrow it down (e.g. \"only in-stock\")."

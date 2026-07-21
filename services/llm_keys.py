@@ -459,7 +459,14 @@ def get_fresh_llm(avoid_providers=None, model_override=None):
                 request_timeout=8,
             ), "mistral", "mistral-small-latest")
         else:
-            _gm = str(model_override or "").strip() or "llama-3.3-70b-versatile"
+            # llama-3.3-70b-versatile deprecated by Groq (dead Aug 2026); official
+            # replacement openai/gpt-oss-120b — better benches, same speed class,
+            # reasoning arrives in a separate field so streamed content stays clean.
+            _gm = str(model_override or "").strip() or "openai/gpt-oss-120b"
+            # langchain-groq 1.1.2 rejects reasoning_effort inside model_kwargs
+            # (ValidationError -> get_fresh_llm None -> total LLM outage); it must
+            # be an explicit constructor param.
+            _kw = {"reasoning_effort": "low"} if "gpt-oss" in _gm else {}
             return _tag_llm(ChatGroq(
                 api_key=key_val,
                 model=_gm,
@@ -467,6 +474,7 @@ def get_fresh_llm(avoid_providers=None, model_override=None):
                 max_retries=0,
                 max_tokens=512,
                 request_timeout=7,
+                **_kw,
             ), "groq", _gm)
     except Exception as e:
         logger.error(f"LLM Key Selection Error: {e}")

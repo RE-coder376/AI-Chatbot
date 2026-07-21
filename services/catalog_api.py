@@ -719,16 +719,26 @@ def _fetch_all_products_generic_impl(base_url: str, cap: int = 6000, workers: in
     return sorted(best.values(), key=lambda x: x["source"]) or None
 
 
-def build_catalog_docs(base_url: str, canonicalize=None, currency: str = "Rs.") -> list[Document]:
+def build_catalog_docs(base_url: str, canonicalize=None, currency: str = "Rs.",
+                       products: list[dict] | None = None,
+                       woo_products: list[dict] | None = None) -> list[Document]:
     """Deterministic product Documents from the store's own catalog API — Shopify
     /products.json first, else the WooCommerce Store API. Same chunk format +
     metadata for both; sorted for byte-stable re-ingest. `canonicalize` is an
-    optional title-normalizer (app._canonical_product_title)."""
+    optional title-normalizer (app._canonical_product_title).
+    `products`: pre-fetched Shopify product list, for stores whose anti-bot wall
+    blocks Modal's outbound IP even though the site is reachable from elsewhere —
+    fetch locally, pass the raw list in, still get properly-tagged catalog Documents
+    (not a generic text dump that the deterministic resolver can't see)."""
     base = base_url.rstrip("/")
     docs: list[Document] = []
-    products = fetch_all_products(base_url)
+    if products is None:
+        products = fetch_all_products(base_url)
     if products:
-        col_map = fetch_collection_map(base_url)
+        try:
+            col_map = fetch_collection_map(base_url) if base_url else {}
+        except Exception:
+            col_map = {}
         for p in sorted(products, key=lambda x: str(x.get("handle") or "")):
             handle = str(p.get("handle") or "").strip()
             title = re.sub(r"\s+", " ", str(p.get("title") or "")).strip()
@@ -789,7 +799,9 @@ def build_catalog_docs(base_url: str, canonicalize=None, currency: str = "Rs.") 
                 canonicalize=canonicalize, currency=currency))
         return docs
     # WooCommerce fallback — the store's WC Store API (full, authoritative catalog).
-    woo = fetch_all_products_woo(base_url)
+    # `woo_products`: same pre-fetched bypass as `products` above, for a WC store
+    # whose IP-blocking or scheduler timing keeps failing a live fetch.
+    woo = woo_products if woo_products is not None else fetch_all_products_woo(base_url)
     if woo:
         for p in sorted(woo, key=lambda x: str(x.get("slug") or x.get("id") or "")):
             title = re.sub(r"\s+", " ", str(p.get("name") or "")).strip()
