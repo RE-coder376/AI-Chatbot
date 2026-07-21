@@ -74,13 +74,22 @@ test_case.py
 *_creds.json
 *_demokey*.json
 *_demo_key*.txt
+*_key.txt
+*_keys.txt
+*_key.json
 *_client_key*.json
 *_keys.json
+keys.json.bak
 *_products.json
 *_analytics_backup*.json
 *_analytics_snapshot*.json
 *_demo.mp4
 *_demo.gif
+*_snippet*.txt
+*_snippet*.html
+*.out
+*.err
+*.db
 
 # Generated evaluation/report output (keep reusable test sources explicit)
 evals/state/
