@@ -14,6 +14,7 @@ transform; the ingestion sink (embeddings, Chroma write) lives in app.py.
 from __future__ import annotations
 
 import html as _html
+import json
 import logging
 import os
 import re
