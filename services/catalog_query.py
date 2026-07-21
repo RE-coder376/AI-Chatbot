@@ -18,6 +18,7 @@ term is only excluded when the user did not explicitly ask for it.
 from __future__ import annotations
 
 import difflib
+import json
 import re
 import time
 
@@ -878,6 +879,11 @@ def parse(q: str) -> Spec:
                                "back", "order", "ordered", "done", "dead", "inventory", "breakup",
                                "mil", "milt", "milta", "milte", "milti", "mileg", "milega",
                                "milegi", "milenge", "sakta", "sakte", "sakti", "nahi", "nai"}
+        # "hand" is report noise only inside stock idioms such as "in-hand" or
+        # "on hand". It is a real category token in storefront names like
+        # "Hand Bags", so never strip it merely because the query is a split count.
+        if not re.search(r"\b(?:in|on)[\s-]+hand\b", ql):
+            _split_report_words.discard("hand")
         anchors = [a for a in anchors if a not in _split_report_words]
 
     # A bare "list / what products do you sell" with no category and no price
@@ -1078,13 +1084,23 @@ def load_rows(db, limit: int = 12000) -> list[Row]:
         # names often collide with title/tag words ("Scissors", "Fujifilm").
         _colls_raw = str(meta.get("collections") or "")
         colls_l = ""
+        _coll_parts = []
         if _colls_raw:
-            _parts = [re.sub(r"[^a-z0-9]+", " ", p.lower()).strip() for p in _colls_raw.split("|")]
+            if _colls_raw.lstrip().startswith("["):
+                try:
+                    parsed_collections = json.loads(_colls_raw)
+                    if isinstance(parsed_collections, list):
+                        _coll_parts = [str(part).strip() for part in parsed_collections if str(part).strip()]
+                except Exception:
+                    _coll_parts = []
+            if not _coll_parts:
+                _coll_parts = [part.strip() for part in _colls_raw.split(" | ") if part.strip()]
+            _parts = [re.sub(r"[^a-z0-9]+", " ", p.lower()).strip() for p in _coll_parts]
             _parts = [p for p in _parts if p]
             if _parts:
                 colls_l = "|" + "|".join(_parts) + "|"
         hay = " ".join([tl, cats_l])
-        _colls_disp = " | ".join(p.strip() for p in _colls_raw.split("|") if p.strip())
+        _colls_disp = " | ".join(_coll_parts)
         row = Row(title, price, avail, src, hay, cur, cats_l, colls_l, _colls_disp, orig_p)
         # Dedup by normalized title, but PREFER the priced chunk: a catalog that was
         # both crawled and catalog-ingested has two chunks per product (a crawl chunk
@@ -2154,6 +2170,7 @@ def _execute_spec(spec: "Spec", rows: list[Row], cfg: dict | None, max_list: int
         # is 2 cameras; "fujifilm" as a brand tag is on every film. Exact membership
         # returns the real group the customer is browsing, not coincidental name hits.
         _coll_locked = _recovered_lock  # recovered collection is authoritative → skip tag-narrowing
+        _locked_collection_name = ""
         # VERBATIM-COLLECTION LOCK: when the customer's words contain a storefront
         # collection's FULL name (normalized: case/punctuation-free, digits KEPT —
         # "2-3 Years" → "2 3 years", "Age 3+" → "age 3"), that collection is the
@@ -2184,9 +2201,10 @@ def _execute_spec(spec: "Spec", rows: list[Row], cfg: dict | None, max_list: int
                 if _cn and f" {_cn} " in _qn and (_bestc is None or len(_cn) > _bestc[0]):
                     if _lksig and not _lksig <= frozenset(t for t in re.findall(r"[a-z0-9]{2,}", _cn) if t not in _STOP):
                         continue
-                    _bestc = (len(_cn), _mem)
+                    _bestc = (len(_cn), _mem, _cnm)
             if _bestc:
                 _base = _bestc[1]
+                _locked_collection_name = _bestc[2]
                 _strict_hit = True
                 _coll_locked = True
         # lock_only spec (anchors emptied to stop-words): the verbatim lock was its
@@ -2269,7 +2287,19 @@ def _execute_spec(spec: "Spec", rows: list[Row], cfg: dict | None, max_list: int
             sel.append(r)
         # Price bounds apply to every aggregation when present (count of X under Y,
         # cheapest X over Y, …) and require a known price.
-        if spec.price_min is not None or spec.price_max is not None:
+        _collection_title_supplies_bound = False
+        if _locked_collection_name and re.search(
+                r"\b(?:under|below|less|over|above|more|between|up\s+to|rs|pkr)\b",
+                _locked_collection_name,
+                re.I):
+            _title_amounts = [float(re.sub(r"[,\s]", "", value)) for value in re.findall(
+                r"\d(?:[\d,\s]*\d)?", _locked_collection_name
+            )]
+            _collection_title_supplies_bound = any(
+                bound is not None and any(abs(bound - amount) < 0.001 for amount in _title_amounts)
+                for bound in (spec.price_min, spec.price_max)
+            )
+        if (spec.price_min is not None or spec.price_max is not None) and not _collection_title_supplies_bound:
             def _in_bounds(p):
                 if p is None:
                     return False

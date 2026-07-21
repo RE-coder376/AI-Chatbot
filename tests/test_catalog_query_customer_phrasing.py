@@ -1,3 +1,4 @@
+import re
 from types import SimpleNamespace
 
 import pytest
@@ -13,6 +14,14 @@ def _row(title, price, availability="available"):
         source=f"https://example.test/{title.lower().replace(' ', '-')}",
         hay=title.lower(),
     )
+
+
+def _collection_row(title, price, collection, availability="available"):
+    row = _row(title, price, availability)
+    normalized = re.sub(r"[^a-z0-9]+", " ", collection.lower()).strip()
+    row.colls = f"|{normalized}|"
+    row.colls_disp = collection
+    return row
 
 
 class _FakeCollection:
@@ -54,6 +63,33 @@ def test_load_rows_cache_is_tenant_isolated_for_same_collection_name_and_count()
     assert rows_b[0].title == "Tenant B Product"
 
 
+def test_load_rows_preserves_collection_names_containing_pipe():
+    class Collection:
+        name = "langchain"
+        id = "pipe-collection"
+
+        def count(self):
+            return 1
+
+        def get(self, limit, include):
+            return {
+                "documents": ["Product: Clearance Bag\nPrice: Rs.1,750\nAvailability: InStock"],
+                "metadatas": [{
+                    "source": "https://example.test/products/clearance-bag",
+                    "chunk_kind": "product",
+                    "product_title": "Clearance Bag",
+                    "price": 1750,
+                    "availability": "available",
+                    "collections": '["Under Rs. 1,750 | Clearance Sale", "Bags for Women"]',
+                }],
+            }
+
+    _ROW_CACHE.clear()
+    rows = load_rows(SimpleNamespace(_db_name="pipe_tenant", _collection=Collection()))
+
+    assert rows[0].colls == "|under rs 1 750 clearance sale|bags for women|"
+
+
 @pytest.mark.parametrize(
     ("question", "aggregation", "expected"),
     [
@@ -77,6 +113,40 @@ def test_customer_extreme_phrasings_use_full_available_catalog(question, aggrega
     assert spec.anchors == []
     assert expected in answer
     assert "Sold Out" not in answer
+
+
+def test_count_split_preserves_hand_in_hand_bags_collection():
+    rows = [
+        _collection_row("Black Handbag", 2500, "Hand Bags"),
+        _collection_row("Tan Handbag", 2200, "Hand Bags", "sold out"),
+        _collection_row("Canvas Tote", 1800, "Bags for Women"),
+    ]
+
+    spec = parse("Hand Bags mein kitne mojood kitne nahi")
+    answer, _ = _execute_spec(spec, rows, None, 10)
+
+    assert spec.agg == "count_split"
+    assert spec.anchors == ["hand", "bags"]
+    assert "Of 2 hand bags products: 1 available, 1 out of stock" in answer
+
+
+def test_price_named_collection_is_not_filtered_by_its_own_title():
+    collection = "Under Rs. 1,750 | Clearance Sale"
+    rows = [
+        _collection_row("Mustard Bag", 1499, collection),
+        _collection_row("Tan Bag", 1499, collection),
+        _collection_row("Beige Bag", 1750, collection),
+        _collection_row("Pink Bag", 1750, collection),
+        _collection_row("Blue Bag", 1499, collection, "sold out"),
+        _collection_row("Silver Bag", 1750, collection, "sold out"),
+    ]
+
+    question = "how many Under Rs. 1,750 | Clearance Sale do you have?"
+    spec = parse(question)
+    answer, _ = _execute_spec(spec, rows, None, 10, raw_q=question)
+
+    assert spec.agg == "count"
+    assert "We have 6" in answer
 
 
 @pytest.mark.parametrize(
