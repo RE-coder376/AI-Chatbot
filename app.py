@@ -284,7 +284,7 @@ def catalog_reingest_products(db_name: str, url: str, clear_products: bool = Tru
     constant across re-ingests (BFS crawl-discovery captures a fluctuating subset).
     Non-product pages (policies/FAQ/about) are untouched — add those via crawl."""
     from services.catalog_api import build_catalog_docs
-    db = _get_db_instance(db_name)
+    db = _get_or_create_db(db_name)
     if db is None:
         return {"error": f"db '{db_name}' not loadable"}
     docs = build_catalog_docs(url, canonicalize=_canonical_product_title)
