@@ -482,6 +482,40 @@ def test_admin_analytics_repairs_dropped_total_from_visitor_history(app_module, 
     assert repaired["total_sessions"] == 2
 
 
+def test_owner_can_raise_analytics_floor_without_lowering_it(app_module, client, two_tenants):
+    db_dir = app_module.DATABASES_DIR / "a"
+    (db_dir / "analytics.json").write_text(
+        app_module.json.dumps(
+            {"total_queries": 5, "total_sessions": 2, "history": [], "questions": {}, "sessions": ["s1", "s2"]}
+        ),
+        encoding="utf-8",
+    )
+    csrf = client.get("/admin/csrf-token", headers={"Authorization": "Bearer ownerpw", "X-Admin-DB": "a"}).json()["csrf_token"]
+
+    r = client.post(
+        "/admin/analytics/repair-floor",
+        headers={"Authorization": "Bearer ownerpw", "X-Admin-DB": "a", "X-CSRF-Token": csrf},
+        json={"password": "ownerpw", "db_name": "a", "min_total_queries": 9, "min_total_sessions": 3},
+    )
+
+    assert r.status_code == 200, r.text
+    data = r.json()
+    assert data["changed"] is True
+    assert data["total_queries"] == 9
+    assert data["total_sessions"] == 3
+
+    r2 = client.post(
+        "/admin/analytics/repair-floor",
+        headers={"Authorization": "Bearer ownerpw", "X-Admin-DB": "a", "X-CSRF-Token": csrf},
+        json={"password": "ownerpw", "db_name": "a", "min_total_queries": 4, "min_total_sessions": 1},
+    )
+    assert r2.status_code == 200, r2.text
+    data2 = r2.json()
+    assert data2["changed"] is False
+    assert data2["total_queries"] == 9
+    assert data2["total_sessions"] == 3
+
+
 def test_admin_analytics_charts_uses_csat_and_feedback_on_same_scale(app_module, client, two_tenants):
     today = app_module.datetime.now().date().isoformat()
     (app_module.DATABASES_DIR / "a" / "analytics.json").write_text(

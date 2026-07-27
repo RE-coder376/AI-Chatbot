@@ -12028,6 +12028,63 @@ def analytics_charts(request: Request, password: str = ""):
         "gap_counts": [c for _, c in gap_counter.most_common(10)],
     }
 
+
+@app.post("/admin/analytics/repair-floor")
+async def repair_analytics_floor(request: Request, data: dict):
+    """Owner-only manual repair for a known dropped analytics total.
+
+    This is intentionally a floor, not an arbitrary overwrite: it only raises the
+    stored total/session counts when an admin has externally verified that a refresh
+    surfaced an older snapshot."""
+    try:
+        token = request.headers.get("X-CSRF-Token", "")
+        if not token or token not in _csrf_tokens or time.time() > _csrf_tokens.get(token, 0):
+            return JSONResponse({"detail": "CSRF token missing or invalid"}, status_code=403)
+        password = _extract_password(request, str(data.get("password") or ""))
+        root_pw = _get_root_password()
+        if not _password_matches(password, root_pw):
+            return JSONResponse({"detail": "Unauthorized"}, status_code=401)
+        db_name = _extract_admin_db(request, str(data.get("db_name") or ""))
+        if not db_name:
+            return JSONResponse({"detail": "Missing db_name"}, status_code=400)
+        try:
+            min_total = int(data.get("min_total_queries"))
+        except Exception:
+            return JSONResponse({"detail": "Invalid min_total_queries"}, status_code=400)
+        min_sessions_raw = data.get("min_total_sessions", None)
+        min_sessions = None
+        if min_sessions_raw not in (None, "", False):
+            try:
+                min_sessions = int(min_sessions_raw)
+            except Exception:
+                return JSONResponse({"detail": "Invalid min_total_sessions"}, status_code=400)
+
+        with _analytics_lock:
+            _maybe_reload_volume()
+            current = _load_analytics_data(db_name)
+            changed = False
+            if min_total > int(current.get("total_queries") or 0):
+                current["total_queries"] = min_total
+                changed = True
+            if min_sessions is not None and min_sessions > int(current.get("total_sessions") or 0):
+                current["total_sessions"] = min_sessions
+                changed = True
+            if changed:
+                _atomic_write_json(_analytics_file(db_name), current)
+                _maybe_commit_volume()
+        return {
+            "success": True,
+            "db_name": db_name,
+            "total_queries": int(current.get("total_queries") or 0),
+            "total_sessions": int(current.get("total_sessions") or 0),
+            "changed": changed,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"repair_analytics_floor failed: {e}")
+        return JSONResponse({"detail": str(e)}, status_code=500)
+
 # --- BEHAVIORAL AUDIT ENGINE (Production Suite v2.0) ---
 
 # Endpoints
