@@ -434,6 +434,54 @@ def test_admin_analytics_is_tenant_scoped_and_handles_legacy_shape(app_module, c
     assert "B question" not in app_module.json.dumps(data)
 
 
+def test_admin_analytics_repairs_dropped_total_from_visitor_history(app_module, client, two_tenants):
+    db_dir = app_module.DATABASES_DIR / "a"
+    (db_dir / "analytics.json").write_text(
+        app_module.json.dumps(
+            {
+                "total_queries": 2,
+                "total_sessions": 1,
+                "history": [{"q": "older", "t": "2026-07-27T10:00:00"}],
+                "questions": {"older": 2},
+                "sessions": ["s1"],
+            }
+        ),
+        encoding="utf-8",
+    )
+    vh_dir = db_dir / "visitor_history"
+    vh_dir.mkdir(parents=True, exist_ok=True)
+    (vh_dir / "s1.json").write_text(
+        app_module.json.dumps(
+            [
+                {"role": "user", "content": "first", "t": "2026-07-27T10:00:00"},
+                {"role": "assistant", "content": "reply", "t": "2026-07-27T10:00:01"},
+            ]
+        ),
+        encoding="utf-8",
+    )
+    (vh_dir / "s2.json").write_text(
+        app_module.json.dumps(
+            [
+                {"role": "user", "content": "second", "t": "2026-07-27T10:01:00"},
+                {"role": "assistant", "content": "reply", "t": "2026-07-27T10:01:01"},
+                {"role": "user", "content": "third", "t": "2026-07-27T10:02:00"},
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    r = client.get("/admin/analytics", headers={"Authorization": "Bearer clientA", "X-Admin-DB": "a"})
+
+    assert r.status_code == 200, r.text
+    data = r.json()
+    assert data["total_queries"] == 3
+    assert data["total_sessions"] == 2
+
+    repaired = app_module.json.loads((db_dir / "analytics.json").read_text(encoding="utf-8"))
+    assert repaired["total_queries"] == 3
+    assert repaired["total_sessions"] == 2
+
+
 def test_admin_analytics_charts_uses_csat_and_feedback_on_same_scale(app_module, client, two_tenants):
     today = app_module.datetime.now().date().isoformat()
     (app_module.DATABASES_DIR / "a" / "analytics.json").write_text(

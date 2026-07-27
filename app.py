@@ -1027,6 +1027,9 @@ def _global_daily_dict():
 _vol_handle = None            # cached modal.Volume handle for the DB volume
 _last_vol_reload = 0.0        # monotonic ts of this container's last volume reload
 _VOL_RELOAD_TTL = 20.0        # seconds — bound on how long a commit can stay invisible
+_last_vol_commit = 0.0        # monotonic ts of this container's last volume commit
+_VOL_COMMIT_TTL = 2.0         # seconds — debounce high-frequency analytics/history writes
+_vol_commit_lock = threading.Lock()
 
 def _maybe_reload_volume():
     """Refresh this container's view of the shared DB volume.
@@ -1058,6 +1061,34 @@ def _maybe_reload_volume():
         _vol_handle.reload()
     except Exception as e:
         logger.debug(f"[VOL] reload skipped: {e}")
+
+
+def _maybe_commit_volume():
+    """Commit this container's recent writes to the shared Modal volume.
+
+    Analytics, feedback, CSAT and visitor-history writes happen on the mounted
+    volume. Without an explicit commit window, another warm container can read an
+    older committed snapshot and the dashboard appears to "lose" interactions on
+    refresh. Debounced so bursty chat traffic does not pay a commit round-trip on
+    every single turn. No-op off Modal/local/HF."""
+    global _vol_handle, _last_vol_commit
+    if not os.environ.get("MODAL_TASK_ID"):
+        return
+    now = time.monotonic()
+    if now - _last_vol_commit < _VOL_COMMIT_TTL:
+        return
+    with _vol_commit_lock:
+        now = time.monotonic()
+        if now - _last_vol_commit < _VOL_COMMIT_TTL:
+            return
+        _last_vol_commit = now
+        try:
+            import modal
+            if _vol_handle is None:
+                _vol_handle = modal.Volume.from_name("ai-chatbot-databases")
+            _vol_handle.commit()
+        except Exception as e:
+            logger.debug(f"[VOL] commit skipped: {e}")
 
 
 def check_daily_budget(db_name: str) -> bool:
@@ -1934,9 +1965,61 @@ def _load_analytics_data(db_name: str) -> dict:
         return _normalise_analytics_data({})
 
 
+def _visitor_history_totals(db_name: str) -> tuple[int, int]:
+    """Count user turns and sessions from per-visitor history files.
+
+    This is the safest recovery source when analytics.json undercounts due to a
+    stale warm container or a cross-container last-write-wins race. Visitor files
+    are sharded per visitor, so they are far less collision-prone than one shared
+    analytics.json counter."""
+    if not db_name:
+        return 0, 0
+    vh_dir = _visitor_dir(db_name)
+    if not vh_dir.exists():
+        return 0, 0
+    total_queries = 0
+    total_sessions = 0
+    try:
+        for vf in vh_dir.glob("*.json"):
+            total_sessions += 1
+            try:
+                turns = json.loads(vf.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            if not isinstance(turns, list):
+                continue
+            for turn in turns:
+                if isinstance(turn, dict) and str(turn.get("role") or "") == "user":
+                    total_queries += 1
+    except Exception as e:
+        logger.debug(f"[ANALYTICS] visitor-history reconciliation skipped ({db_name}): {e}")
+    return total_queries, total_sessions
+
+
+def _repair_analytics_totals(db_name: str, data: dict) -> dict:
+    """Make analytics totals monotonic by reconciling with visitor_history."""
+    data = _normalise_analytics_data(data)
+    vh_queries, vh_sessions = _visitor_history_totals(db_name)
+    repaired = False
+    if vh_queries > int(data.get("total_queries") or 0):
+        data["total_queries"] = vh_queries
+        repaired = True
+    if vh_sessions > int(data.get("total_sessions") or 0):
+        data["total_sessions"] = vh_sessions
+        repaired = True
+    if repaired:
+        try:
+            _atomic_write_json(_analytics_file(db_name), data)
+            _maybe_commit_volume()
+        except Exception as e:
+            logger.debug(f"[ANALYTICS] repair write skipped ({db_name}): {e}")
+    return data
+
+
 def log_interaction(q: str, session_id: str = "", db_name: str = ""):
     with _analytics_lock:
         try:
+            _maybe_reload_volume()
             af = _analytics_file(db_name or _get_active_db())
             data = _load_analytics_data(db_name or _get_active_db())
 
@@ -1957,6 +2040,7 @@ def log_interaction(q: str, session_id: str = "", db_name: str = ""):
                 data["total_sessions"] = len(data["sessions"])
 
             _atomic_write_json(af, data)
+            _maybe_commit_volume()
         except Exception as e:
             logger.error(f"Analytics Error: {e}")
 
@@ -1998,6 +2082,7 @@ def save_visitor_turn(visitor_id: str, role: str, content: str, db_name: str = "
                 except Exception as e: logger.warning(f"Visitor history corrupt ({visitor_id[:8]}): {e}")
             turns.append({"role": role, "content": content, "t": datetime.now().isoformat()})
             _atomic_write_json(f, turns[-40:])
+            _maybe_commit_volume()
     except Exception as e:
         logger.error(f"save_visitor_turn failed: {e}")
 
@@ -11836,7 +11921,7 @@ def get_analytics(request: Request, password: str = ""):
     # ANOTHER container wrote (the /chat container) stay invisible until this one reloads.
     # Without this, a client dashboard on a stale container shows 0 forever. Throttled.
     _maybe_reload_volume()
-    data = _load_analytics_data(db_name)
+    data = _repair_analytics_totals(db_name, _load_analytics_data(db_name))
 
     # Sort questions by frequency
     sorted_q = sorted(data["questions"].items(), key=lambda x: x[1], reverse=True)[:5]
@@ -15731,6 +15816,7 @@ async def submit_csat(request: Request, data: dict):
             except: pass
         data_list.append(entry)
         _atomic_write_json(cf, data_list[-1000:])
+        _maybe_commit_volume()
     return {"ok": True}
 
 @app.post("/feedback")
@@ -15758,6 +15844,7 @@ async def feedback(request: Request, data: dict):
                 except: pass
             existing.append(entry)
             _atomic_write_json(ff, existing)
+            _maybe_commit_volume()
         return {"success": True}
     except Exception as e:
         return JSONResponse({"detail": str(e)}, status_code=500)
@@ -15885,6 +15972,7 @@ async def submit_lead(request: Request, data: dict):
         with _analytics_lock:
             existing.append(entry)
             _atomic_write_json(LEADS_FILE, existing[-5000:])
+            _maybe_commit_volume()
         # Trigger Email Notification
         asyncio.create_task(send_lead_email(entry, cfg))
         
