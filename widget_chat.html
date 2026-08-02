@@ -232,6 +232,14 @@
   let contactWhatsApp = '';
   let widgetReady = Boolean(widgetKey);
 
+  function enableWidgetInput() {
+    if (!widgetKey) return;
+    widgetReady = true;
+    inputEl.disabled = false;
+    sendBtn.disabled = false;
+    inputEl.placeholder = 'Message...';
+  }
+
   function showWidgetSetupError(message) {
     widgetReady = false;
     sendBtn.disabled = true;
@@ -252,6 +260,7 @@
       showWidgetSetupError('This chat widget key is invalid or expired. Please ask the site owner to refresh the embed code.');
       return;
     }
+    enableWidgetInput();
     contactEmail    = cfg.contact_email    || '';
     contactWhatsApp = cfg.whatsapp_number  || '';
     const b = cfg.branding || {};
@@ -276,7 +285,9 @@
       }, 1200);
     }
   }).catch(() => {
-    if (widgetKey) showWidgetSetupError('This chat widget could not load its configuration. Please try again shortly.');
+    // Branding/config is nice-to-have; /chat validates the signed widget key.
+    // Do not lock visitors out for a transient public-config failure.
+    enableWidgetInput();
   });
 
   inputEl.addEventListener('keypress', e => { if (e.key === 'Enter') sendMessage(); });
